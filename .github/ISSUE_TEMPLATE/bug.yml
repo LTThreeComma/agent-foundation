@@ -1,0 +1,69 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Agent Foundation
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not include credentials, private prompts, model output, or sensitive logs.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - agent-harness
+        - foundation-service
+        - logging
+        - agent-envd
+        - sandbox or container image
+        - CI, release, or repository tooling
+        - documentation or specification
+        - other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I reproduced this on a supported release or the current main branch.
+          required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual and expected behavior
+      description: Describe what happened and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest code, configuration, or command sequence that reproduces the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - Agent Foundation package or image version / commit:
+        - Python version:
+        - Rust version, if relevant:
+        - Operating system and architecture:
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs, traces, screenshots, or links that help explain the problem.

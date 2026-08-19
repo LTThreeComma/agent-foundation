@@ -6,8 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Environment daemon for Agent Foundation"
-publish = false
+description = "Environment daemon and protocol provider for Agent Foundation"
+readme = "README.md"
+keywords = ["agents", "ai", "cloud", "daemon", "sandbox"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "agent-envd"

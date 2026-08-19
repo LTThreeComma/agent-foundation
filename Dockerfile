@@ -11,20 +11,24 @@ COPY packages/agent-harness/pyproject.toml packages/agent-harness/pyproject.toml
 COPY packages/logging/pyproject.toml packages/logging/pyproject.toml
 COPY packages/foundation-service/pyproject.toml packages/foundation-service/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package converge-foundation-service --no-install-workspace
+    uv sync --locked --no-dev --package converge-foundation-service --no-install-workspace
 
 COPY packages/logging packages/logging
 COPY packages/foundation-service packages/foundation-service
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package converge-foundation-service \
+    uv sync --locked --no-dev --package converge-foundation-service \
     && rm -rf packages/logging/tests packages/foundation-service/tests
 
 FROM python:3.13-slim-bookworm AS runtime
 
-ARG BUILD_VERSION=unknown
-LABEL org.opencontainers.image.title="converge-foundation-service" \
+ARG BUILD_VERSION=dev
+ARG BUILD_REVISION=unknown
+LABEL org.opencontainers.image.title="agent-foundation-service" \
+      org.opencontainers.image.description="Hosted agents and control services for Agent Foundation" \
       org.opencontainers.image.source="https://github.com/converge-ai-labs/agent-foundation" \
-      org.opencontainers.image.version="${BUILD_VERSION}"
+      org.opencontainers.image.revision="${BUILD_REVISION}" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini \

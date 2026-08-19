@@ -18,12 +18,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Quality checks
+  python:
+    name: Python quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Cache pre-commit environments
         uses: actions/cache@v5
@@ -39,11 +41,44 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
-          version: "0.11.14"
           enable-cache: true
 
       - name: Install dependencies
         run: uv sync --locked --all-packages
 
-      - name: Run repository checks
-        run: make check
+      - name: Run Python and documentation checks
+        run: make python-check
+
+  rust:
+    name: Rust quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust checks
+        run: make rust-check
+
+  containers:
+    name: Container images
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build and smoke-check images
+        run: make image-check

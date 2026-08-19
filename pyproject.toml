@@ -1,8 +1,9 @@
 [project]
 name = "converge-agent-foundation"
 version = "0.0.0"
-description = "Open-source foundation for building and operating AI agents"
+description = "Cloud foundation with an agent harness, hosted agents, and observability"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.13"
 dependencies = []
 
@@ -46,6 +47,7 @@ include = [
     "packages/agent-harness/converge_agent_harness",
     "packages/logging/converge_logging",
     "packages/foundation-service/converge_foundation_service",
+    "scripts/check-release-version.py",
 ]
 exclude = ["**/tests", "**/node_modules", "**/__pycache__", "**/.*", ".venv"]
 pythonVersion = "3.13"

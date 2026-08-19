@@ -12,5 +12,6 @@ site
 dist
 build
 target
+.wrangler
 local-reference
 discussion

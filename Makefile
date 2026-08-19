@@ -1,5 +1,8 @@
 .DEFAULT_GOAL := help
 
+FOUNDATION_SERVICE_IMAGE ?= agent-foundation-service:local
+SANDBOX_IMAGE ?= agent-foundation-sandbox:local
+
 .PHONY: install
 install: ## Install locked dependencies and Git hooks
 	@command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/"; exit 1; }
@@ -26,9 +29,10 @@ dev-down: ## Stop local infrastructure and remove its data volumes
 	@docker compose -f dev/compose.yaml down --volumes --remove-orphans
 
 .PHONY: format
-format: sync ## Format repository files
+format: sync ## Format Python, Markdown, configuration, and Rust files
 	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files || true
 	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files
+	@cargo fmt --all
 
 .PHONY: deps-check
 deps-check: sync ## Check Python package dependency declarations
@@ -44,8 +48,8 @@ lint: sync deps-check ## Run non-mutating repository lint checks
 			xargs -0 uv run --locked pre-commit run "$$hook" --files || exit $$?; \
 	done
 	@git ls-files --cached --others --exclude-standard -z -- '*.md' | xargs -0 uv run --locked mdformat --check --number
-	@uv run --locked ruff check --no-fix packages
-	@uv run --locked ruff format --check packages
+	@uv run --locked ruff check --no-fix packages scripts
+	@uv run --locked ruff format --check packages scripts
 
 .PHONY: typecheck
 typecheck: sync ## Type-check Python package sources
@@ -68,9 +72,36 @@ docs-build: sync docs-check ## Build the documentation site in strict mode
 test: sync ## Run Python workspace tests
 	@uv run --locked python -m pytest
 
-.PHONY: build
-build: sync ## Build all Python workspace packages
+.PHONY: python-build
+python-build: sync ## Build all Python workspace distributions
+	@rm -rf dist
 	@uv build --all-packages
+
+.PHONY: rust-format-check
+rust-format-check: ## Check Rust formatting
+	@cargo fmt --all -- --check
+
+.PHONY: rust-lint
+rust-lint: ## Run Clippy with warnings denied
+	@cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+.PHONY: rust-test
+rust-test: ## Run Rust workspace tests
+	@cargo test --workspace --all-features --locked
+
+.PHONY: rust-build
+rust-build: ## Build the Rust workspace
+	@cargo build --workspace --all-features --locked
+
+.PHONY: rust-package
+rust-package: ## Verify the agent-envd crates.io package
+	@cargo package --locked --allow-dirty --package converge-agent-envd
+
+.PHONY: rust-check
+rust-check: rust-format-check rust-lint rust-test rust-build rust-package ## Run the complete Rust merge gate
+
+.PHONY: build
+build: python-build rust-build ## Build all Python distributions and Rust binaries
 
 .PHONY: db-migrate
 db-migrate: sync ## Generate a migration (usage: make db-migrate msg="description")
@@ -96,13 +127,34 @@ db-check: sync ## Fail unless the foundation-service database is at all heads
 db-history: sync ## Show foundation-service migration history
 	@uv run --locked foundation-service db history
 
+.PHONY: release-check
+release-check: ## Validate release versions (component=foundation|agent-envd version=X.Y.Z)
+	@test -n "$(component)" || { echo "component is required"; exit 2; }
+	@test -n "$(version)" || { echo "version is required"; exit 2; }
+	@uv run --locked python scripts/check-release-version.py "$(component)" "$(version)"
+
 .PHONY: image-foundation-service
 image-foundation-service: ## Build the local foundation-service container image
-	@docker build -f Dockerfile \
-		-t "$${FOUNDATION_SERVICE_IMAGE:-converge-foundation-service:local}" .
+	@docker build -f Dockerfile -t "$(FOUNDATION_SERVICE_IMAGE)" .
+
+.PHONY: image-sandbox
+image-sandbox: ## Build the local sandbox image with agent-envd
+	@docker build -f Dockerfile.sandbox -t "$(SANDBOX_IMAGE)" .
+
+.PHONY: images
+images: image-foundation-service image-sandbox ## Build all local container images
+
+.PHONY: image-check
+image-check: images ## Build and smoke-check all container images
+	@test "$$(docker image inspect --format '{{.Config.User}}' "$(FOUNDATION_SERVICE_IMAGE)")" = "app"
+	@test "$$(docker image inspect --format '{{.Config.User}}' "$(SANDBOX_IMAGE)")" = "sandbox"
+	@docker run --rm --entrypoint agent-envd "$(SANDBOX_IMAGE)"
+
+.PHONY: python-check
+python-check: lint typecheck test python-build docs-build ## Run the Python and documentation merge gate
 
 .PHONY: check
-check: lint typecheck test build docs-build ## Run the complete Python and documentation merge gate
+check: python-check rust-check ## Run the complete repository merge gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
@@ -112,4 +164,4 @@ clean: ## Remove generated local artifacts
 help: ## Show available commands
 	@echo "Usage: make [target]"
 	@echo "Targets:"
-	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-26s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

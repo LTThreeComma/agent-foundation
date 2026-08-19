@@ -3,6 +3,8 @@ name = "converge-foundation-service"
 version = "0.0.0"
 description = "Hosted control and execution service for Agent Foundation"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "alembic>=1.17.1,<2",

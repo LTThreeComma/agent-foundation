@@ -1,0 +1,195 @@
+name: Release agent-envd
+
+on:
+  push:
+    tags:
+      - "release/agent-envd-v*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  SANDBOX_IMAGE: ghcr.io/converge-ai-labs/agent-foundation-sandbox
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate agent-envd release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/agent-envd-v}"
+          python3 scripts/check-release-version.py agent-envd "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run Rust checks
+        run: make rust-check
+
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cross_linux: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross_linux: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            cross_linux: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            cross_linux: false
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Linux cross compiler
+        if: matrix.cross_linux
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-agent-envd-${{ matrix.target }}
+
+      - name: Build binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cargo build --release --locked --package converge-agent-envd --target "$TARGET"
+          mkdir -p staging
+          cp "target/$TARGET/release/agent-envd" staging/agent-envd
+          cp LICENSE staging/LICENSE
+          archive="agent-envd-${VERSION}-${TARGET}.tar.gz"
+          tar -czf "$archive" -C staging agent-envd LICENSE
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-envd-${{ matrix.target }}
+          path: agent-envd-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-crate:
+    name: Publish crate
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --package converge-agent-envd
+
+  publish-image:
+    name: Publish sandbox image
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sandbox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.SANDBOX_IMAGE }}:${{ needs.prepare.outputs.version }}
+          build-args: |
+            BUILD_VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=release-sandbox
+          cache-to: type=gha,mode=max,scope=release-sandbox
+
+  create-release:
+    name: Create GitHub Release
+    needs: [prepare, build-binaries, publish-crate, publish-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: agent-envd-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: cd dist && sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "agent-envd $VERSION"

@@ -20,7 +20,8 @@ Requirements:
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - Make
-- Docker when generating PostgreSQL migrations, running container-backed integration tests, or validating service images
+- A stable Rust toolchain with `rustfmt` and Clippy
+- Docker when generating PostgreSQL migrations, running container-backed integration tests, or validating images
 
 Clone your fork and install the locked development environment and Git hooks:
 
@@ -30,7 +31,7 @@ cd agent-foundation
 make install
 ```
 
-The repository selects Python 3.13 through `.python-version`. Python packages are uv workspace members under `packages/`; the Rust workspace under `crates/` is currently validated separately from the Python merge gate.
+The repository selects Python 3.13 through `.python-version`. Python packages are uv workspace members under `packages/`; Rust crates under `crates/` are validated by the same top-level merge gate.
 
 ## Engineering Standards
 
@@ -49,22 +50,25 @@ Keep transport handling, application orchestration, domain behavior, and infrast
 
 Use the Makefile as the stable development interface:
 
-| Command           | Purpose                                                                |
-| ----------------- | ---------------------------------------------------------------------- |
-| `make help`       | List available commands                                                |
-| `make install`    | Synchronize the locked Python environment and install pre-commit hooks |
-| `make setup`      | Start local PostgreSQL and Redis                                       |
-| `make dev`        | Upgrade the local schema and run foundation-service                    |
-| `make dev-down`   | Stop local infrastructure and remove its data volumes                  |
-| `make format`     | Apply repository formatting hooks                                      |
-| `make lint`       | Run non-mutating repository lint checks                                |
-| `make deps-check` | Check each Python package's dependency declarations with deptry        |
-| `make typecheck`  | Type-check Python package sources with Pyright                         |
-| `make docs-serve` | Start the local MkDocs development server                              |
-| `make docs-build` | Build the documentation site in strict mode                            |
-| `make test`       | Run Python workspace tests                                             |
-| `make build`      | Build every Python workspace package                                   |
-| `make check`      | Run the complete Python and documentation merge gate                   |
+| Command            | Purpose                                                                |
+| ------------------ | ---------------------------------------------------------------------- |
+| `make help`        | List available commands                                                |
+| `make install`     | Synchronize the locked Python environment and install pre-commit hooks |
+| `make setup`       | Start local PostgreSQL and Redis                                       |
+| `make dev`         | Upgrade the local schema and run foundation-service                    |
+| `make dev-down`    | Stop local infrastructure and remove its data volumes                  |
+| `make format`      | Apply repository formatting hooks                                      |
+| `make lint`        | Run non-mutating repository lint checks                                |
+| `make deps-check`  | Check each Python package's dependency declarations with deptry        |
+| `make typecheck`   | Type-check Python package sources with Pyright                         |
+| `make docs-serve`  | Start the local MkDocs development server                              |
+| `make docs-build`  | Build the documentation site in strict mode                            |
+| `make test`        | Run Python workspace tests                                             |
+| `make rust-check`  | Run Rust format, Clippy, test, and build checks                        |
+| `make build`       | Build all Python distributions and Rust binaries                       |
+| `make images`      | Build the foundation-service and sandbox images                        |
+| `make image-check` | Build and smoke-check both container images                            |
+| `make check`       | Run the complete Python, documentation, and Rust merge gate            |
 
 Run the full gate before opening or updating a broad pull request:
 
@@ -73,6 +77,21 @@ make check
 ```
 
 `foundation-service` integration tests use fixture-owned Testcontainers. Application `FOUNDATION_*` variables never select test infrastructure.
+
+## Releases
+
+Releases are created by pushing an explicit, versioned tag after the matching manifests have been updated and merged. Validate the version before tagging:
+
+```bash
+make release-check component=foundation version=0.1.0
+make release-check component=agent-envd version=0.1.0
+```
+
+Foundation releases use `release/foundation-vX.Y.Z`. The root project and every Python workspace package must carry the same version. The workflow builds and checks all wheels and source distributions, publishes them to PyPI using the `PYPI_TOKEN` secret in the `pypi` environment, publishes `ghcr.io/converge-ai-labs/agent-foundation-service:X.Y.Z`, and attaches the distributions to one GitHub Release.
+
+agent-envd releases use `release/agent-envd-vX.Y.Z`. The Cargo workspace version must match. After validation, the workflow concurrently builds Linux GNU and macOS archives, publishes `converge-agent-envd` to crates.io with `CARGO_REGISTRY_TOKEN` from the `crates-io` environment, and publishes `ghcr.io/converge-ai-labs/agent-foundation-sandbox:X.Y.Z`. The GitHub Release waits for all three paths, generates checksums, and attaches the binary archives. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
+
+Every push to `main` also publishes both images with the mutable `dev` tag and an immutable `sha-*` tag. Release tags publish only the exact `X.Y.Z` image tag. The GitHub `pypi` environment must provide `PYPI_TOKEN`, and the `crates-io` environment must provide `CARGO_REGISTRY_TOKEN`.
 
 ## Database Changes
 

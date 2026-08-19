@@ -2,6 +2,8 @@
 name = "converge-agent-harness"
 version = "0.0.0"
 description = "Process-local agent harness built on Pydantic AI"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "converge-logging",

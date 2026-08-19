@@ -1,6 +1,6 @@
 # Repository Guide
 
-Agent Foundation is a Python-first open-source foundation for building agent products and operating agents as internal services. The repository is currently in its architecture and specification phase.
+Agent Foundation is a Python-first open-source cloud foundation for building agents and multi-agent systems. Its core surfaces are the embeddable Agent Harness, hosted agent services, and built-in observability. The repository is currently in its architecture and specification phase.
 
 ## Sources of Truth
 
@@ -31,7 +31,7 @@ Read [spec/repository-model.md](spec/repository-model.md) before changing reposi
 
 ## Development
 
-The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`; Rust checks are not yet part of the repository merge gate.
+The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`; formatting, Clippy, tests, and builds are part of the repository merge gate.
 
 Follow these service invariants; the complete contract and rationale live in [DEVELOPMENT.md](DEVELOPMENT.md):
 
@@ -53,8 +53,11 @@ make lint
 make deps-check
 make typecheck
 make test
+make rust-check
 make build
 make image-foundation-service
+make image-sandbox
+make image-check
 make check
 ```
 
