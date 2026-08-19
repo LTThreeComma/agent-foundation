@@ -1,0 +1,57 @@
+# Local reference and discussion material
+discussion/
+local-reference/
+
+# Python bytecode and native extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# Python environments
+.env
+.env.*
+!.env.example
+.venv/
+env/
+venv/
+
+# Tests, coverage, and static analysis
+.coverage
+.coverage.*
+.cache/
+.hypothesis/
+.mypy_cache/
+.nox/
+.pyright/
+.pytest_cache/
+.ruff_cache/
+.tox/
+coverage.xml
+htmlcov/
+
+# Documentation output
+site/
+
+# Rust
+target/
+**/*.rs.bk
+
+# Frontend tooling
+node_modules/
+*.tsbuildinfo
+
+# Editors and operating systems
+.DS_Store
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp

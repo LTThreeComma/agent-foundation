@@ -1,0 +1,25 @@
+site_name: Agent Foundation
+site_description: Documentation for the Agent Foundation project
+repo_name: converge-ai-labs/agent-foundation
+repo_url: https://github.com/converge-ai-labs/agent-foundation
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+strict: true
+
+nav:
+  - Home: index.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences

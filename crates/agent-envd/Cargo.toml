@@ -1,0 +1,14 @@
+[package]
+name = "converge-agent-envd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Environment daemon for Agent Foundation"
+publish = false
+
+[[bin]]
+name = "agent-envd"
+path = "src/main.rs"
