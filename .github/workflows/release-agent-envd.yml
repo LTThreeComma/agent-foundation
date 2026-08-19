@@ -13,8 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-agent-envd
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -44,7 +45,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Run Rust checks
-        run: make rust-check
+        run: make rust-check-all
 
   build-binaries:
     name: Build ${{ matrix.target }}
@@ -111,7 +112,7 @@ jobs:
     name: Publish crate
     needs: prepare
     runs-on: ubuntu-latest
-    environment: crates-io
+    environment: agent-envd-crates-io
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6

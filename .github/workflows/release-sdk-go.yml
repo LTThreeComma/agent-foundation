@@ -1,0 +1,90 @@
+name: Release Go SDK
+
+on:
+  push:
+    tags:
+      - "release/sdk/go/*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sdk-go
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    name: Validate Go SDK
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: sdk/go/go.mod
+          cache: false
+
+      - name: Validate release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/sdk/go/}"
+          python3 scripts/check-release-version.py sdk-go "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run Go SDK checks
+        run: make sdk-go-check-all
+
+  publish-tag:
+    name: Publish Go module tag
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: sdk-go-github
+    permissions:
+      contents: write
+    steps:
+      - name: Create canonical Go module tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          tag="sdk/go/v${VERSION}"
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$GITHUB_SHA" || {
+              echo "Tag $tag already points to $existing, expected $GITHUB_SHA" >&2
+              exit 1
+            }
+            echo "Tag $tag already points to the release commit"
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$tag" \
+            -f sha="$GITHUB_SHA"
+
+  create-release:
+    name: Create GitHub Release
+    needs: [validate, publish-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Foundation SDK for Go $VERSION"

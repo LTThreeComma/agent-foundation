@@ -50,30 +50,32 @@ Keep transport handling, application orchestration, domain behavior, and infrast
 
 Use the Makefile as the stable development interface:
 
-| Command            | Purpose                                                                |
-| ------------------ | ---------------------------------------------------------------------- |
-| `make help`        | List available commands                                                |
-| `make install`     | Synchronize the locked Python environment and install pre-commit hooks |
-| `make setup`       | Start local PostgreSQL and Redis                                       |
-| `make dev`         | Upgrade the local schema and run foundation-service                    |
-| `make dev-down`    | Stop local infrastructure and remove its data volumes                  |
-| `make format`      | Apply repository formatting hooks                                      |
-| `make lint`        | Run non-mutating repository lint checks                                |
-| `make deps-check`  | Check each Python package's dependency declarations with deptry        |
-| `make typecheck`   | Type-check Python package sources with Pyright                         |
-| `make docs-serve`  | Start the local MkDocs development server                              |
-| `make docs-build`  | Build the documentation site in strict mode                            |
-| `make test`        | Run Python workspace tests                                             |
-| `make rust-check`  | Run Rust format, Clippy, test, and build checks                        |
-| `make build`       | Build all Python distributions and Rust binaries                       |
-| `make images`      | Build the foundation-service and sandbox images                        |
-| `make image-check` | Build and smoke-check both container images                            |
-| `make check`       | Run the complete Python, documentation, and Rust merge gate            |
+| Command            | Purpose                                                         |
+| ------------------ | --------------------------------------------------------------- |
+| `make help`        | List available commands                                         |
+| `make install`     | Synchronize locked workspace and standalone SDK dependencies    |
+| `make setup`       | Start local PostgreSQL and Redis                                |
+| `make dev`         | Upgrade the local schema and run foundation-service             |
+| `make dev-down`    | Stop local infrastructure and remove its data volumes           |
+| `make format`      | Apply repository formatting hooks                               |
+| `make lint`        | Run non-mutating repository lint checks                         |
+| `make deps-check`  | Check each Python package's dependency declarations with deptry |
+| `make typecheck`   | Type-check Python package sources with Pyright                  |
+| `make docs-serve`  | Start the local MkDocs development server                       |
+| `make docs-build`  | Build the documentation site in strict mode                     |
+| `make test`        | Run Python workspace tests                                      |
+| `make rust-check`  | Run the fast root Rust workspace gate                           |
+| `make sdk-check`   | Run the fast Python, Go, Rust, and TypeScript SDK gates         |
+| `make build`       | Build all workspace packages and standalone SDKs                |
+| `make images`      | Build the foundation-service and sandbox images                 |
+| `make image-check` | Build and smoke-check both container images                     |
+| `make check`       | Run the fast repository and standalone SDK feedback gate        |
+| `make check-all`   | Run every build, package, documentation, and SDK release check  |
 
-Run the full gate before opening or updating a broad pull request:
+Use `make check` while iterating. Run the full local gate before opening or updating a broad pull request:
 
 ```bash
-make check
+make check-all
 ```
 
 `foundation-service` integration tests use fixture-owned Testcontainers. Application `FOUNDATION_*` variables never select test infrastructure.
@@ -85,13 +87,19 @@ Releases are created by pushing an explicit, versioned tag after the matching ma
 ```bash
 make release-check component=foundation version=0.1.0
 make release-check component=agent-envd version=0.1.0
+make release-check component=sdk-python version=0.1.0
+make release-check component=sdk-go version=0.1.0
+make release-check component=sdk-rust version=0.1.0
+make release-check component=sdk-typescript version=0.1.0
 ```
 
-Foundation releases use `release/foundation-vX.Y.Z`. The root project and every Python workspace package must carry the same version. The workflow builds and checks all wheels and source distributions, publishes them to PyPI using the `PYPI_TOKEN` secret in the `pypi` environment, publishes `ghcr.io/converge-ai-labs/agent-foundation-service:X.Y.Z`, and attaches the distributions to one GitHub Release.
+Foundation releases use `release/foundation-vX.Y.Z`. The root project and every Python workspace package must carry the same version. The workflow builds and checks all wheels and source distributions, publishes them to PyPI using the `PYPI_TOKEN` secret in the `foundation-pypi` environment, publishes `ghcr.io/converge-ai-labs/agent-foundation-service:X.Y.Z`, and attaches the distributions to one GitHub Release.
 
-agent-envd releases use `release/agent-envd-vX.Y.Z`. The Cargo workspace version must match. After validation, the workflow concurrently builds Linux GNU and macOS archives, publishes `converge-agent-envd` to crates.io with `CARGO_REGISTRY_TOKEN` from the `crates-io` environment, and publishes `ghcr.io/converge-ai-labs/agent-foundation-sandbox:X.Y.Z`. The GitHub Release waits for all three paths, generates checksums, and attaches the binary archives. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
+agent-envd releases use `release/agent-envd-vX.Y.Z`. The Cargo workspace version must match. After validation, the workflow concurrently builds Linux GNU and macOS archives, publishes `converge-agent-envd` to crates.io with `CARGO_REGISTRY_TOKEN` from the `agent-envd-crates-io` environment, and publishes `ghcr.io/converge-ai-labs/agent-foundation-sandbox:X.Y.Z`. The GitHub Release waits for all three paths, generates checksums, and attaches the binary archives. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
 
-Every push to `main` also publishes both images with the mutable `dev` tag and an immutable `sha-*` tag. Release tags publish only the exact `X.Y.Z` image tag. The GitHub `pypi` environment must provide `PYPI_TOKEN`, and the `crates-io` environment must provide `CARGO_REGISTRY_TOKEN`.
+SDK languages version and release independently from the standalone `sdk/` directory. Push `release/sdk/<language>/X.Y.Z` after updating that language's manifest and lock file. Python publishes through `sdk-python-pypi`, Rust through `sdk-rust-crates-io`, and TypeScript through npm Trusted Publishing bound to `release-sdk-typescript.yml` and `sdk-typescript-npm`. The Go workflow creates the canonical `sdk/go/vX.Y.Z` module tag through `sdk-go-github`.
+
+Every push to `main` also publishes both images with the mutable `dev` tag and an immutable `sha-*` tag. Release tags publish only the exact `X.Y.Z` image tag. Replace each placeholder registry secret in its scoped GitHub Environment before the corresponding release.
 
 ## Database Changes
 

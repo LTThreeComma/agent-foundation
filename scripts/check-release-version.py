@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -11,6 +12,13 @@ FOUNDATION_MANIFESTS = (
     Path("packages/logging/pyproject.toml"),
     Path("packages/foundation-service/pyproject.toml"),
 )
+SDK_PYTHON_MANIFEST = Path("sdk/python/pyproject.toml")
+SDK_RUST_MANIFEST = Path("sdk/rust/Cargo.toml")
+SDK_TYPESCRIPT_MANIFESTS = (
+    Path("sdk/typescript/package.json"),
+    Path("sdk/typescript/package-lock.json"),
+)
+RELEASE_VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 
 
 def project_version(path: Path) -> str:
@@ -21,6 +29,28 @@ def project_version(path: Path) -> str:
     version = project.get("version")
     if not isinstance(version, str):
         raise SystemExit(f"Missing project.version in {path}")
+    return version
+
+
+def cargo_package_version(path: Path) -> str:
+    with path.open("rb") as file:
+        package = tomllib.load(file).get("package")
+    if not isinstance(package, dict):
+        raise SystemExit(f"Missing package.version in {path}")
+    version = package.get("version")
+    if not isinstance(version, str):
+        raise SystemExit(f"Missing package.version in {path}")
+    return version
+
+
+def npm_package_version(path: Path) -> str:
+    with path.open(encoding="utf-8") as file:
+        manifest = json.load(file)
+    if not isinstance(manifest, dict):
+        raise SystemExit(f"Missing version in {path}")
+    version = manifest.get("version")
+    if not isinstance(version, str):
+        raise SystemExit(f"Missing version in {path}")
     return version
 
 
@@ -41,18 +71,28 @@ def agent_envd_version() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check release manifest versions.")
-    parser.add_argument("component", choices=("foundation", "agent-envd"))
+    parser.add_argument(
+        "component",
+        choices=("foundation", "agent-envd", "sdk-python", "sdk-go", "sdk-rust", "sdk-typescript"),
+    )
     parser.add_argument("version")
     args = parser.parse_args()
 
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version) is None:
+    if RELEASE_VERSION_PATTERN.fullmatch(args.version) is None:
         raise SystemExit(f"Release version must use X.Y.Z syntax: {args.version}")
 
-    versions = (
-        {path: project_version(path) for path in FOUNDATION_MANIFESTS}
-        if args.component == "foundation"
-        else {Path("Cargo.toml"): agent_envd_version()}
-    )
+    if args.component == "foundation":
+        versions = {path: project_version(path) for path in FOUNDATION_MANIFESTS}
+    elif args.component == "agent-envd":
+        versions = {Path("Cargo.toml"): agent_envd_version()}
+    elif args.component == "sdk-python":
+        versions = {SDK_PYTHON_MANIFEST: project_version(SDK_PYTHON_MANIFEST)}
+    elif args.component == "sdk-rust":
+        versions = {SDK_RUST_MANIFEST: cargo_package_version(SDK_RUST_MANIFEST)}
+    elif args.component == "sdk-typescript":
+        versions = {path: npm_package_version(path) for path in SDK_TYPESCRIPT_MANIFESTS}
+    else:
+        versions = {}
     mismatches = {path: version for path, version in versions.items() if version != args.version}
     if mismatches:
         details = "\n".join(f"- {path}: {version}" for path, version in mismatches.items())

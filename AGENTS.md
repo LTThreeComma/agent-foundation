@@ -12,7 +12,7 @@ Agent Foundation is a Python-first open-source cloud foundation for building age
 - `DEVELOPMENT.md` defines repository-wide engineering standards for deployable services.
 - `MAINTAINERS.md` defines semantic reviewer routing.
 
-Read [spec/repository-model.md](spec/repository-model.md) before changing repository structure or workflow. Read [DEVELOPMENT.md](DEVELOPMENT.md) before changing service code, persistence, migrations, streaming endpoints, workers, logging, or container behavior.
+Read [spec/repository-model.md](spec/repository-model.md) before changing repository structure or workflow. **Before starting implementation work, read [DEVELOPMENT.md](DEVELOPMENT.md).** Its applicable engineering rules are mandatory, especially for service code, persistence, migrations, streaming endpoints, workers, logging, and container behavior.
 
 ## Workflow
 
@@ -31,7 +31,9 @@ Read [spec/repository-model.md](spec/repository-model.md) before changing reposi
 
 ## Development
 
-The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`; formatting, Clippy, tests, and builds are part of the repository merge gate.
+Do not implement from this summary alone. Read [DEVELOPMENT.md](DEVELOPMENT.md) first and follow the applicable standards throughout design, implementation, and review.
+
+The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`. Foundation Service SDKs live independently under `sdk/{python,go,rust,typescript}` and do not join the root Python or Rust workspaces.
 
 Follow these service invariants; the complete contract and rationale live in [DEVELOPMENT.md](DEVELOPMENT.md):
 
@@ -59,6 +61,7 @@ make image-foundation-service
 make image-sandbox
 make image-check
 make check
+make check-all
 ```
 
-Use narrower commands while iterating, but run `make check` before finalizing a broad change. Add implementation-specific checks behind the existing Make targets as packages are introduced.
+Use `make check` for fast feedback while iterating, and run `make check-all` before finalizing a broad change. Add implementation-specific checks behind the existing Make targets as packages are introduced.

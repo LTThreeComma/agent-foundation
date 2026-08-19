@@ -1,0 +1,102 @@
+name: Release Python SDK
+
+on:
+  push:
+    tags:
+      - "release/sdk/python/*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sdk-python
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    name: Build Python SDK
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Validate release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/sdk/python/}"
+          python3 scripts/check-release-version.py sdk-python "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run checks and build distributions
+        run: make sdk-python-check-all
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundation-sdk-python-dist
+          path: sdk/python/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Python SDK to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: sdk-python-pypi
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: foundation-sdk-python-dist
+          path: dist
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish package
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: foundation-sdk-python-dist
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Foundation SDK for Python $VERSION"

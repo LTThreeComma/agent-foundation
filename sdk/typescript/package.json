@@ -1,0 +1,49 @@
+{
+  "name": "@converge.ai/foundation-sdk",
+  "version": "0.0.0",
+  "description": "TypeScript SDK for Agent Foundation Service",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.14"
+  },
+  "packageManager": "npm@11.9.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/converge-ai-labs/agent-foundation.git",
+    "directory": "sdk/typescript"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run format:check && npm run typecheck && npm test",
+    "check:all": "npm run check && npm run pack:check",
+    "clean": "rm -rf dist *.tgz",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "pack:check": "npm pack --dry-run",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
+  }
+}

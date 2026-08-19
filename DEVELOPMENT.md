@@ -12,6 +12,16 @@ This file explains the engineering choices shared by deployable Python services.
 
 A role is a process ownership and scaling boundary, not a separate product, schema, tenant, or authorization boundary. Every background loop must have one explicit owning role, and overlap during rolling deployment must be safe through durable leases, fencing, or idempotency.
 
+## Application Structure
+
+Organize business code by feature and add layers only for a real capability; do not prebuild global `controllers`, `dto`, `managers`, generic repositories, or abstract unit-of-work frameworks.
+
+- FastAPI routers are thin transport adapters. Keep Pydantic request and response DTOs beside the owning feature API; routers validate, authorize, call one application use case, and map its typed result or error.
+- Application services own use-case orchestration and short transaction boundaries. They do not import FastAPI or encode HTTP status.
+- Repositories own SQLAlchemy queries, may flush, and never commit. ORM objects stay inside the persistence boundary and are not API responses or Harness contracts.
+- Durable asynchronous lifecycles use idempotent reconcilers and fenced workers. Model, tool, queue, and stream waits happen outside database transactions.
+- Process-role wiring selects routers, reconcilers, and workers; `control` and `execution` do not duplicate feature or domain models.
+
 ## Async and Process Lifespan
 
 Service I/O is async-first. Use async database, `httpx2`, Redis, queue, object-store, and subprocess clients. Do not introduce `httpx` or another general HTTP client alongside `httpx2`. Isolate unavoidable bounded blocking work with `anyio.to_thread.run_sync`; never block the event loop or call `asyncio.run()` from an active async path.
@@ -37,8 +47,6 @@ Read durable state in one short session, close it, perform external work, then o
 FastAPI yield-dependency cleanup timing has changed across releases. A streaming route must therefore never receive a yielded database session, including indirectly through authentication.
 
 Complete authentication, authorization, and initial reads in a short session that closes before constructing the response. Pass immutable values into the generator. If the stream needs database state, open a fresh short session for each bounded operation. Background tasks also create their own session from the factory. Release subscriptions and tasks in `finally`, and test that an open stream does not retain a pool connection.
-
-Routers validate transport input and map results; application services own use cases and transactions; repositories own queries. Domain and application modules do not import FastAPI.
 
 ## Migrations
 

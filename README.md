@@ -12,6 +12,7 @@ The project is currently in its architecture and specification phase. Public API
 - `logging`: shared pretty and structured logging, distributed as `converge-logging`
 - `agent-envd`: an Environment Interaction Protocol provider distributed as the `converge-agent-envd` Rust package
 - [`foundation-service`](packages/foundation-service/README.md): an optional hosted control and execution service distributed as `converge-foundation-service`
+- [Foundation Service SDKs](sdk/README.md): standalone Python, Go, Rust, and TypeScript packages that will expose the hosted service API after its contract stabilizes
 
 Applications will be able to embed the harness directly, use the hosted service, or replace providers through documented capability and protocol boundaries.
 
@@ -19,6 +20,7 @@ Applications will be able to embed the harness directly, use the hosted service,
 
 - Foundation releases publish the Agent Harness, logging, and hosted service Python packages together, plus the versioned foundation-service image.
 - agent-envd releases publish the `converge-agent-envd` crate, platform binaries, and the matching versioned sandbox image.
+- SDK releases are independent per language under `release/sdk/<language>/X.Y.Z` tags.
 - Every `main` revision publishes `dev` service and sandbox images to GHCR.
 
 ## Documentation

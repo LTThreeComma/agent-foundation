@@ -13,8 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-foundation
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build-python:
@@ -49,7 +50,7 @@ jobs:
         run: uv sync --locked --all-packages
 
       - name: Run Foundation checks and build distributions
-        run: make python-check
+        run: make python-check-all
 
       - name: Upload Python distributions
         uses: actions/upload-artifact@v4
@@ -63,7 +64,7 @@ jobs:
     name: Publish Python distributions
     needs: build-python
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: foundation-pypi
     steps:
       - name: Download Python distributions
         uses: actions/download-artifact@v4

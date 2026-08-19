@@ -12,14 +12,85 @@ env:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  python:
-    name: Python quality
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      automation: ${{ steps.filter.outputs.automation }}
+      containers: ${{ steps.filter.outputs.containers }}
+      python: ${{ steps.filter.outputs.python }}
+      rust: ${{ steps.filter.outputs.rust }}
+      sdk_go: ${{ steps.filter.outputs.sdk_go }}
+      sdk_python: ${{ steps.filter.outputs.sdk_python }}
+      sdk_rust: ${{ steps.filter.outputs.sdk_rust }}
+      sdk_typescript: ${{ steps.filter.outputs.sdk_typescript }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            automation:
+              - '.github/**'
+              - 'scripts/check-release-version.py'
+            containers:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'Dockerfile'
+              - 'Dockerfile.sandbox'
+              - 'scripts/docker-entrypoint.sh'
+              - 'packages/**'
+              - 'crates/agent-envd/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            python:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'packages/**'
+              - 'scripts/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            rust:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            sdk_go:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'sdk/go/**'
+            sdk_python:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'pyproject.toml'
+              - 'sdk/python/**'
+            sdk_rust:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'Cargo.toml'
+              - 'sdk/rust/**'
+            sdk_typescript:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'sdk/typescript/**'
+
+  hygiene:
+    name: Repository hygiene
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -43,14 +114,54 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --locked --all-packages
+      - name: Run repository lint checks
+        run: make lint
 
-      - name: Run Python and documentation checks
-        run: make python-check
+  automation:
+    name: GitHub Actions
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.automation == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate workflows
+        # actionlint 1.7.12 predates GitHub's concurrency queue syntax.
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+          -ignore 'unexpected key "queue" for "concurrency" section'
+
+  python:
+    name: Python workspace
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Run Python checks and build distributions
+        run: make typecheck test python-build
 
   rust:
-    name: Rust quality
+    name: Rust workspace
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -66,11 +177,104 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run Rust checks
-        run: make rust-check
+      - name: Run complete Rust checks
+        run: make rust-check-all
+
+  sdk-python:
+    name: Python SDK
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.sdk_python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Run complete Python SDK checks
+        run: make sdk-python-check-all
+
+  sdk-go:
+    name: Go SDK
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.sdk_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: sdk/go/go.mod
+          cache: false
+
+      - name: Run complete Go SDK checks
+        run: make sdk-go-check-all
+
+  sdk-rust:
+    name: Rust SDK
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.sdk_rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk/rust -> target
+          shared-key: foundation-sdk
+
+      - name: Run complete Rust SDK checks
+        run: make sdk-rust-check-all
+
+  sdk-typescript:
+    name: TypeScript SDK
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.sdk_typescript == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Run complete TypeScript SDK checks
+        run: make sdk-typescript-check-all
 
   containers:
     name: Container images
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.containers == 'true'
     runs-on: ubuntu-latest
     env:
       DOCKER_BUILDKIT: "1"

@@ -60,4 +60,5 @@ testpaths = [
     "packages/agent-harness/tests",
     "packages/logging/tests",
     "packages/foundation-service/tests",
+    "scripts/tests",
 ]
