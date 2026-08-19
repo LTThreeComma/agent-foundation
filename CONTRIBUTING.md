@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions to Agent Foundation are welcome. The project uses GitHub Issues for discussion and progress tracking, and pull requests for every reviewed change to specifications, documentation, code, tests, and automation.
+Contributions to Agent Foundation are welcome. The project uses GitHub Issues for discussion and progress tracking, and pull requests for every reviewed change to specifications, documentation, code, tests, and automation. Repository-wide service engineering requirements are defined in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Before You Start
 
@@ -10,6 +10,8 @@ Open an issue before implementing a change with unresolved product, architecture
 
 Do not add proposals, RFC drafts, discussion logs, or progress tracking to `spec/`. Once an issue reaches an accepted conclusion, update the specification directly in the same pull request as the implementation or as a focused specification pull request.
 
+Before changing service code, persistence, migrations, streaming endpoints, workers, logging, or container behavior, read [DEVELOPMENT.md](DEVELOPMENT.md) and the directly owning specification.
+
 ## Local Setup
 
 Requirements:
@@ -18,6 +20,7 @@ Requirements:
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - Make
+- Docker when generating PostgreSQL migrations, running container-backed integration tests, or validating service images
 
 Clone your fork and install the locked development environment and Git hooks:
 
@@ -29,6 +32,19 @@ make install
 
 The repository selects Python 3.13 through `.python-version`. Python packages are uv workspace members under `packages/`; the Rust workspace under `crates/` is currently validated separately from the Python merge gate.
 
+## Engineering Standards
+
+[DEVELOPMENT.md](DEVELOPMENT.md) is the normative implementation guide for deployable services. In particular:
+
+- service I/O is async-first;
+- database access uses one canonical engine/session factory and short transaction scopes;
+- database sessions never span streams, agent runs, external calls, waits, or background-task boundaries;
+- streaming FastAPI routes complete database-backed authentication and initial reads before constructing the response;
+- logging, process lifespan, role selection, image construction, and graceful shutdown use shared service infrastructure;
+- `foundation-service` uses one artifact for all-in-one, control-plane, and execution-plane deployment roles.
+
+Keep transport handling, application orchestration, domain behavior, and infrastructure adapters separated. Update the accepted design in `spec/` when a change alters ownership, lifecycle, compatibility, security, or deployment semantics; do not use the development guide to introduce product architecture implicitly.
+
 ## Local Validation
 
 Use the Makefile as the stable development interface:
@@ -37,8 +53,12 @@ Use the Makefile as the stable development interface:
 | ----------------- | ---------------------------------------------------------------------- |
 | `make help`       | List available commands                                                |
 | `make install`    | Synchronize the locked Python environment and install pre-commit hooks |
+| `make setup`      | Start local PostgreSQL and Redis                                       |
+| `make dev`        | Upgrade the local schema and run foundation-service                    |
+| `make dev-down`   | Stop local infrastructure and remove its data volumes                  |
 | `make format`     | Apply repository formatting hooks                                      |
 | `make lint`       | Run non-mutating repository lint checks                                |
+| `make deps-check` | Check each Python package's dependency declarations with deptry        |
 | `make typecheck`  | Type-check Python package sources with Pyright                         |
 | `make docs-serve` | Start the local MkDocs development server                              |
 | `make docs-build` | Build the documentation site in strict mode                            |
@@ -51,6 +71,24 @@ Run the full gate before opening or updating a broad pull request:
 ```bash
 make check
 ```
+
+`foundation-service` integration tests use fixture-owned Testcontainers. Application `FOUNDATION_*` variables never select test infrastructure.
+
+## Database Changes
+
+Database changes follow the migration contract in [DEVELOPMENT.md](DEVELOPMENT.md#schema-migrations).
+
+Do not create Alembic revision files manually or autogenerate against an existing developer or shared database. Generate every `foundation-service` revision through the stable repository target:
+
+```bash
+make db-migrate msg="describe the schema change"
+```
+
+The target starts the local PostgreSQL service when needed, rebuilds schema history in a disposable database, autogenerates and formats the revision, and removes the temporary database. Review the generated migration rather than treating a clean model diff as proof of safety. The complete model-import and verification flow is documented in [packages/foundation-service/README.md](packages/foundation-service/README.md#add-an-orm-model).
+
+A schema-change pull request must explain lock duration, scans or rewrites, rolling old/new compatibility, index strategy, bounded backfill, interruption and rerun behavior, and rollback or forward repair. Prefer additive expand-and-contract changes. The shared image auto-migrates `all` and `control` replicas under advisory locking; deployments with a dedicated migration job disable replica auto migration. Execution-only processes never migrate.
+
+Run migration graph, clean-upgrade, schema-parity, and relevant PostgreSQL lock/concurrency tests. Record any required timeout override and its rationale in the pull request.
 
 ## Documentation Changes
 

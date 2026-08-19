@@ -9,8 +9,9 @@ The project is currently in its architecture and specification phase. Public API
 ## Planned Components
 
 - `agent-harness`: a reusable process-local agent harness built on Pydantic AI 2, distributed as `converge-agent-harness`
+- `logging`: shared pretty and structured logging, distributed as `converge-logging`
 - `agent-envd`: an Environment Interaction Protocol provider distributed as the `converge-agent-envd` Rust package
-- `foundation-service`: an optional hosted control and execution service distributed as `converge-foundation-service`
+- [`foundation-service`](packages/foundation-service/README.md): an optional hosted control and execution service distributed as `converge-foundation-service`
 
 Applications will be able to embed the harness directly, use the hosted service, or replace providers through documented capability and protocol boundaries.
 
@@ -21,7 +22,7 @@ Applications will be able to embed the harness directly, use the hosted service,
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for issue workflow, local setup, testing, and pull-request guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for issue workflow, local setup, testing, and pull-request guidelines. Service implementation, persistence, migration, streaming, logging, and container standards are defined in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Maintainers
 

@@ -1,6 +1,10 @@
-"""Agent Foundation hosted service."""
+"""Agent Foundation hosted control and execution service."""
 
+from importlib.metadata import PackageNotFoundError, version
 
-def hello() -> str:
-    """Return the package greeting."""
-    return "Hello from converge-foundation-service!"
+try:
+    __version__ = version("converge-foundation-service")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
+__all__ = ["__version__"]
