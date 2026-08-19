@@ -40,6 +40,9 @@ htmlcov/
 # Documentation output
 site/
 
+# Cloudflare Wrangler local state
+.wrangler/
+
 # Rust
 target/
 **/*.rs.bk
