@@ -33,21 +33,21 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Prepare release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/sdk/python/}"
+          python3 scripts/prepare-release-version.py sdk-python "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: sdk/python/uv.lock
 
-      - name: Validate release version
-        id: version
-        run: |
-          version="${GITHUB_REF_NAME#release/sdk/python/}"
-          python3 scripts/check-release-version.py sdk-python "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Run checks and build distributions
-        run: make sdk-python-check-all
+      - name: Build distributions
+        run: make sdk-python-build
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4
@@ -84,19 +84,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release tag and history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
           name: foundation-sdk-python-dist
           path: dist
 
-      - name: Create release
+      - name: Create release with channel-scoped notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            --title "Foundation SDK for Python $VERSION"
+        run: >-
+          python3 scripts/create-github-release.py sdk-python "$VERSION"
+          "Foundation SDK for Python $VERSION" dist/*

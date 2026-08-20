@@ -1,8 +1,15 @@
+# Generated notes contain merged pull requests between consecutive tags in the
+# same component release channel. Direct commits remain available through the
+# Full Changelog comparison link.
 changelog:
   exclude:
     labels:
       - chore
+      - skip-changelog
   categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
     - title: Features
       labels:
         - enhancement

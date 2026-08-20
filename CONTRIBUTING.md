@@ -82,22 +82,15 @@ make check-all
 
 ## Releases
 
-Releases are created by pushing an explicit, versioned tag after the matching manifests have been updated and merged. Validate the version before tagging:
+Create a release by pushing an explicit canonical `X.Y.Z` tag that points to a commit whose required CI checks have passed. Do not commit release-only version bumps: each release workflow injects the tag version into its known manifests and lock files in the ephemeral checkout, validates the resulting source, and then builds and publishes it. Release workflows do not repeat CI tests or lint checks.
 
-```bash
-make release-check component=foundation version=0.1.0
-make release-check component=agent-envd version=0.1.0
-make release-check component=sdk-python version=0.1.0
-make release-check component=sdk-go version=0.1.0
-make release-check component=sdk-rust version=0.1.0
-make release-check component=sdk-typescript version=0.1.0
-```
+Foundation releases use `release/foundation-vX.Y.Z`. The workflow versions and builds every Python workspace package, publishes them to PyPI using the `PYPI_TOKEN` secret in the `foundation-pypi` environment, publishes `ghcr.io/converge-ai-labs/agent-foundation-service:X.Y.Z`, and attaches the distributions to one GitHub Release.
 
-Foundation releases use `release/foundation-vX.Y.Z`. The root project and every Python workspace package must carry the same version. The workflow builds and checks all wheels and source distributions, publishes them to PyPI using the `PYPI_TOKEN` secret in the `foundation-pypi` environment, publishes `ghcr.io/converge-ai-labs/agent-foundation-service:X.Y.Z`, and attaches the distributions to one GitHub Release.
+agent-envd releases use `release/agent-envd-vX.Y.Z`. The workflow versions the Cargo workspace and lock file, concurrently builds Linux GNU and macOS archives, publishes `converge-agent-envd` to crates.io with `CARGO_REGISTRY_TOKEN` from the `agent-envd-crates-io` environment, and publishes `ghcr.io/converge-ai-labs/agent-foundation-sandbox:X.Y.Z`. The GitHub Release waits for all three paths, generates checksums, and attaches the binary archives. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
 
-agent-envd releases use `release/agent-envd-vX.Y.Z`. The Cargo workspace version must match. After validation, the workflow concurrently builds Linux GNU and macOS archives, publishes `converge-agent-envd` to crates.io with `CARGO_REGISTRY_TOKEN` from the `agent-envd-crates-io` environment, and publishes `ghcr.io/converge-ai-labs/agent-foundation-sandbox:X.Y.Z`. The GitHub Release waits for all three paths, generates checksums, and attaches the binary archives. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
+SDK languages version and release independently from the standalone `sdk/` directory. Push `release/sdk/<language>/X.Y.Z`; the workflow versions that language's package metadata before building. Python publishes through `sdk-python-pypi`, Rust through `sdk-rust-crates-io`, and TypeScript through npm Trusted Publishing bound to `release-sdk-typescript.yml` and `sdk-typescript-npm`. Go has no embedded package version; its workflow validates the release version and creates the canonical `sdk/go/vX.Y.Z` module tag through `sdk-go-github`.
 
-SDK languages version and release independently from the standalone `sdk/` directory. Push `release/sdk/<language>/X.Y.Z` after updating that language's manifest and lock file. Python publishes through `sdk-python-pypi`, Rust through `sdk-rust-crates-io`, and TypeScript through npm Trusted Publishing bound to `release-sdk-typescript.yml` and `sdk-typescript-npm`. The Go workflow creates the canonical `sdk/go/vX.Y.Z` module tag through `sdk-go-github`.
+Generated release notes compare only with the previous canonical tag in the same component release channel. Pull requests are categorized by the labels configured in `.github/release.yml`; use `breaking-change`, `enhancement`, `bug`, or `documentation`, and use `chore` or `skip-changelog` to omit a pull request. Direct commits remain visible through the generated Full Changelog comparison link but are not listed as categorized pull requests.
 
 Every push to `main` also publishes both images with the mutable `dev` tag and an immutable `sha-*` tag. Release tags publish only the exact `X.Y.Z` image tag. Replace each placeholder registry secret in its scoped GitHub Environment before the corresponding release.
 

@@ -34,23 +34,20 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Prepare release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/foundation-v}"
+          python scripts/prepare-release-version.py foundation "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
-      - name: Validate release version
-        id: version
-        run: |
-          version="${GITHUB_REF_NAME#release/foundation-v}"
-          python scripts/check-release-version.py foundation "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install dependencies
-        run: uv sync --locked --all-packages
-
-      - name: Run Foundation checks and build distributions
-        run: make python-check-all
+      - name: Build Python distributions
+        run: make python-build
 
       - name: Upload Python distributions
         uses: actions/upload-artifact@v4
@@ -93,6 +90,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Prepare release version
+        env:
+          VERSION: ${{ needs.build-python.outputs.version }}
+        run: python3 scripts/prepare-release-version.py foundation "$VERSION"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -127,19 +129,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release tag and history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download Python distributions
         uses: actions/download-artifact@v4
         with:
           name: foundation-python-dist
           path: dist
 
-      - name: Create release
+      - name: Create release with channel-scoped notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build-python.outputs.version }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            --title "Agent Foundation $VERSION"
+        run: >-
+          python3 scripts/create-github-release.py foundation "$VERSION"
+          "Agent Foundation $VERSION" dist/*

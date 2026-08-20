@@ -28,6 +28,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Prepare release version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#release/sdk/typescript/}"
+          python3 scripts/prepare-release-version.py sdk-typescript "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -35,15 +42,8 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
 
-      - name: Validate release version
-        id: version
-        run: |
-          version="${GITHUB_REF_NAME#release/sdk/typescript/}"
-          python3 scripts/check-release-version.py sdk-typescript "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Run TypeScript SDK checks
-        run: make sdk-typescript-check-all
+      - name: Build TypeScript SDK
+        run: make sdk-typescript-build
 
       - name: Pack npm package
         run: |
@@ -110,19 +110,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release tag and history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download npm package
         uses: actions/download-artifact@v4
         with:
           name: foundation-sdk-typescript-package
           path: dist
 
-      - name: Create release
+      - name: Create release with channel-scoped notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            --title "Foundation SDK for TypeScript $VERSION"
+        run: >-
+          python3 scripts/create-github-release.py sdk-typescript "$VERSION"
+          "Foundation SDK for TypeScript $VERSION" dist/*

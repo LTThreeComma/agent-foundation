@@ -48,6 +48,10 @@ include = [
     "packages/logging/converge_logging",
     "packages/foundation-service/converge_foundation_service",
     "scripts/check-release-version.py",
+    "scripts/create-github-release.py",
+    "scripts/prepare-release-version.py",
+    "scripts/release_notes.py",
+    "scripts/release_version.py",
 ]
 exclude = ["**/tests", "**/node_modules", "**/__pycache__", "**/.*", ".venv"]
 pythonVersion = "3.13"

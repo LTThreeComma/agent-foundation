@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate Go SDK
+    name: Prepare Go SDK release
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -28,21 +28,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: sdk/go/go.mod
-          cache: false
-
-      - name: Validate release version
+      - name: Prepare release version
         id: version
         run: |
           version="${GITHUB_REF_NAME#release/sdk/go/}"
-          python3 scripts/check-release-version.py sdk-go "$version"
+          python3 scripts/prepare-release-version.py sdk-go "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Run Go SDK checks
-        run: make sdk-go-check-all
 
   publish-tag:
     name: Publish Go module tag
@@ -78,13 +69,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Create release
+      - name: Checkout release tag and history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create release with channel-scoped notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            --title "Foundation SDK for Go $VERSION"
+        run: >-
+          python3 scripts/create-github-release.py sdk-go "$VERSION"
+          "Foundation SDK for Go $VERSION"
