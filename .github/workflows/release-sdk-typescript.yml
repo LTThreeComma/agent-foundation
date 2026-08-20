@@ -101,7 +101,7 @@ jobs:
           JS
 
       - name: Publish package with npm Trusted Publishing
-        run: npm publish dist/*.tgz --access public
+        run: npm publish ./dist/*.tgz --access public
 
   create-release:
     name: Create GitHub Release
