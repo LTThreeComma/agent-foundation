@@ -58,8 +58,8 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           tag="sdk/go/v${VERSION}"
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)"
-          if [ -n "$existing" ]; then
+          existing=""
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null)"; then
             test "$existing" = "$GITHUB_SHA" || {
               echo "Tag $tag already points to $existing, expected $GITHUB_SHA" >&2
               exit 1
