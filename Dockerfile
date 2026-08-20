@@ -7,6 +7,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
+COPY packages/agent-envd-client/pyproject.toml packages/agent-envd-client/pyproject.toml
 COPY packages/agent-harness/pyproject.toml packages/agent-harness/pyproject.toml
 COPY packages/logging/pyproject.toml packages/logging/pyproject.toml
 COPY packages/foundation-service/pyproject.toml packages/foundation-service/pyproject.toml
