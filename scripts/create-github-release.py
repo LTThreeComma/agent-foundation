@@ -5,7 +5,14 @@ import os
 import subprocess
 from pathlib import Path
 
-from release_notes import TAG_PREFIXES, build_release_command, previous_release_tag, release_tag
+from release_notes import (
+    TAG_PREFIXES,
+    build_release_command,
+    previous_release_tag,
+    read_manual_release_notes,
+    release_notes_path,
+    release_tag,
+)
 from release_version import COMPONENTS
 
 
@@ -50,6 +57,7 @@ def main() -> None:
         if expected_tag not in tags:
             raise ValueError(f"Release tag is missing from the checkout: {expected_tag}")
         previous_tag = previous_release_tag(args.component, args.version, tags)
+        manual_notes = read_manual_release_notes(Path.cwd(), args.component, args.version)
 
         missing_assets = [asset for asset in args.assets if not Path(asset).is_file()]
         if missing_assets:
@@ -63,10 +71,13 @@ def main() -> None:
             title=args.title,
             assets=args.assets,
             previous_tag=previous_tag,
+            manual_notes=manual_notes,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
+    if manual_notes is not None:
+        print(f"Prepending curated notes from {release_notes_path(args.component, args.version)}")
     if previous_tag is None:
         print(f"Creating {expected_tag} as the first release in its channel")
     else:

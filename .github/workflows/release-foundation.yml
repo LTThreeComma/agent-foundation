@@ -115,12 +115,24 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.FOUNDATION_SERVICE_IMAGE }}:${{ needs.build-python.outputs.version }}
+          tags: |
+            ${{ env.FOUNDATION_SERVICE_IMAGE }}:${{ needs.build-python.outputs.version }}
+            ${{ env.FOUNDATION_SERVICE_IMAGE }}:latest
           build-args: |
             BUILD_VERSION=${{ needs.build-python.outputs.version }}
             BUILD_REVISION=${{ github.sha }}
           cache-from: type=gha,scope=release-foundation-service
           cache-to: type=gha,mode=max,scope=release-foundation-service
+
+      - name: Verify published image tags
+        env:
+          IMAGE: ${{ env.FOUNDATION_SERVICE_IMAGE }}
+          VERSION: ${{ needs.build-python.outputs.version }}
+        run: |
+          version_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}')"
+          latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
+          test -n "$version_digest"
+          test "$version_digest" = "$latest_digest"
 
   create-release:
     name: Create GitHub Release

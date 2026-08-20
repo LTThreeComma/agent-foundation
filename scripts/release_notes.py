@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 
 from release_version import COMPONENTS, validate_version_syntax
 
@@ -20,6 +21,7 @@ INITIAL_NOTES = {
     "sdk-rust": "Initial release for the Foundation SDK for Rust.",
     "sdk-typescript": "Initial release for the Foundation SDK for TypeScript.",
 }
+RELEASE_NOTES_DIRECTORY = Path(".github/release-notes")
 
 
 class ReleaseNotesError(ValueError):
@@ -62,6 +64,25 @@ def previous_release_tag(component: str, version: str, tags: Iterable[str]) -> s
     return max(candidates)[1]
 
 
+def release_notes_path(component: str, version: str) -> Path:
+    release_tag(component, version)
+    return RELEASE_NOTES_DIRECTORY / component / f"{version}.md"
+
+
+def read_manual_release_notes(root: Path, component: str, version: str) -> str | None:
+    relative_path = release_notes_path(component, version)
+    path = root / relative_path
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ReleaseNotesError(f"Release notes path is not a file: {relative_path}")
+    try:
+        notes = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        raise ReleaseNotesError(f"Cannot read release notes from {relative_path}: {error}") from error
+    return notes or None
+
+
 def build_release_command(
     *,
     component: str,
@@ -70,6 +91,7 @@ def build_release_command(
     title: str,
     assets: Sequence[str],
     previous_tag: str | None,
+    manual_notes: str | None = None,
 ) -> list[str]:
     tag = release_tag(component, version)
     command = [
@@ -85,7 +107,9 @@ def build_release_command(
         title,
     ]
     if previous_tag is None:
-        command.extend(("--notes", INITIAL_NOTES[component]))
+        command.extend(("--notes", manual_notes or INITIAL_NOTES[component]))
     else:
+        if manual_notes is not None:
+            command.extend(("--notes", manual_notes))
         command.extend(("--generate-notes", "--notes-start-tag", previous_tag))
     return command

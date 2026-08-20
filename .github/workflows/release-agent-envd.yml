@@ -36,6 +36,20 @@ jobs:
           python3 scripts/prepare-release-version.py agent-envd "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Create release version patch
+        run: |
+          git diff --check
+          git diff --binary -- Cargo.toml Cargo.lock > release-version.patch
+          test -s release-version.patch
+
+      - name: Upload release version patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-version-agent-envd
+          path: release-version.patch
+          if-no-files-found: error
+          retention-days: 7
+
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: prepare
@@ -44,35 +58,53 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             cross_linux: false
-          - os: ubuntu-latest
+            windows: false
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             cross_linux: true
-          - os: macos-latest
+            windows: false
+          - os: macos-15
             target: x86_64-apple-darwin
             cross_linux: false
-          - os: macos-latest
+            windows: false
+          - os: macos-15
             target: aarch64-apple-darwin
             cross_linux: false
+            windows: false
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            cross_linux: false
+            windows: true
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            cross_linux: false
+            windows: true
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Prepare release version
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/prepare-release-version.py agent-envd "$VERSION"
+      - name: Download release version patch
+        uses: actions/download-artifact@v4
+        with:
+          name: release-version-agent-envd
+          path: .
+
+      - name: Apply release version patch
+        run: |
+          git apply --whitespace=error release-version.patch
+          git clean -f -- release-version.patch
 
       - name: Install Linux cross compiler
         if: matrix.cross_linux
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: ${{ matrix.target }}
 
@@ -81,7 +113,8 @@ jobs:
         with:
           shared-key: release-agent-envd-${{ matrix.target }}
 
-      - name: Build binary
+      - name: Build Unix binary archive
+        if: matrix.windows == false
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           TARGET: ${{ matrix.target }}
@@ -94,17 +127,31 @@ jobs:
           archive="agent-envd-${VERSION}-${TARGET}.tar.gz"
           tar -czf "$archive" -C staging agent-envd LICENSE
 
+      - name: Build Windows binary archive
+        if: matrix.windows
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cargo build --release --locked --package converge-agent-envd --target $env:TARGET
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item "target/$env:TARGET/release/agent-envd.exe" staging/agent-envd.exe
+          Copy-Item LICENSE staging/LICENSE
+          $archive = "agent-envd-$env:VERSION-$env:TARGET.zip"
+          Compress-Archive -Path staging/agent-envd.exe, staging/LICENSE -DestinationPath $archive
+
       - name: Upload binary archive
         uses: actions/upload-artifact@v4
         with:
           name: agent-envd-${{ matrix.target }}
-          path: agent-envd-*.tar.gz
+          path: agent-envd-*
           if-no-files-found: error
           retention-days: 7
 
   publish-crate:
     name: Publish crate
-    needs: prepare
+    needs: [prepare, build-binaries]
     runs-on: ubuntu-latest
     environment: agent-envd-crates-io
     steps:
@@ -113,22 +160,63 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prepare release version
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/prepare-release-version.py agent-envd "$VERSION"
+      - name: Download release version patch
+        uses: actions/download-artifact@v4
+        with:
+          name: release-version-agent-envd
+          path: .
+
+      - name: Apply release version patch
+        run: |
+          git apply --whitespace=error release-version.patch
+          git clean -f -- release-version.patch
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Package crate
+        run: cargo package --locked --allow-dirty --package converge-agent-envd
+
+      - name: Resolve crate publication state
+        id: crate-status
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --user-agent "agent-foundation-release/$GITHUB_RUN_ID" \
+            "https://crates.io/api/v1/crates/converge-agent-envd/$VERSION")"
+          case "$status" in
+            200)
+              curl --fail --location --silent --show-error \
+                --user-agent "agent-foundation-release/$GITHUB_RUN_ID" \
+                --output published.crate \
+                "https://crates.io/api/v1/crates/converge-agent-envd/$VERSION/download"
+              local_crate="target/package/converge-agent-envd-$VERSION.crate"
+              if ! cmp --silent "$local_crate" published.crate; then
+                echo "Published converge-agent-envd $VERSION does not match this release tag" >&2
+                sha256sum "$local_crate" published.crate >&2
+                exit 1
+              fi
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unexpected crates.io status: $status" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish crate to crates.io
+        if: steps.crate-status.outputs.published != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked --allow-dirty --package converge-agent-envd
 
   publish-image:
     name: Publish sandbox image
-    needs: prepare
+    needs: [prepare, build-binaries, publish-crate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -139,10 +227,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prepare release version
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/prepare-release-version.py agent-envd "$VERSION"
+      - name: Download release version patch
+        uses: actions/download-artifact@v4
+        with:
+          name: release-version-agent-envd
+          path: .
+
+      - name: Apply release version patch
+        run: |
+          git apply --whitespace=error release-version.patch
+          git clean -f -- release-version.patch
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -164,12 +258,24 @@ jobs:
           file: Dockerfile.sandbox
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.SANDBOX_IMAGE }}:${{ needs.prepare.outputs.version }}
+          tags: |
+            ${{ env.SANDBOX_IMAGE }}:${{ needs.prepare.outputs.version }}
+            ${{ env.SANDBOX_IMAGE }}:latest
           build-args: |
             BUILD_VERSION=${{ needs.prepare.outputs.version }}
             BUILD_REVISION=${{ github.sha }}
           cache-from: type=gha,scope=release-sandbox
           cache-to: type=gha,mode=max,scope=release-sandbox
+
+      - name: Verify published image tags
+        env:
+          IMAGE: ${{ env.SANDBOX_IMAGE }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          version_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}')"
+          latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
+          test -n "$version_digest"
+          test "$version_digest" = "$latest_digest"
 
   create-release:
     name: Create GitHub Release
@@ -192,7 +298,10 @@ jobs:
           merge-multiple: true
 
       - name: Create checksums
-        run: cd dist && sha256sum ./*.tar.gz > SHA256SUMS
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
 
       - name: Create release with channel-scoped notes
         env:
