@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/timestamp.proto";
+import "agent-envd/eip/v1/options.proto";
+
+message ProcessHandle {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message OutputReference {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message OutputCursor {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message ProcessLeaseRef {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message OutputLeaseRef {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message ReceiptRef {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message StateRef {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message FileRevision {
+  option (eip_message).transparent = true;
+  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message InvocationGrantRef {
+  string grant_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string audience = 2;
+  string claims_digest = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message EIPCallContext {
+  string operation_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  optional google.protobuf.Timestamp deadline = 2;
+  optional string idempotency_key = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  optional InvocationGrantRef invocation_grant = 4;
+}
+
+enum ReceiptStage {
+  RECEIPT_STAGE_UNSPECIFIED = 0;
+  RECEIPT_STAGE_ACCEPTED = 1 [(eip_enum_value).json_name = "accepted"];
+  RECEIPT_STAGE_DISPATCHED = 2 [(eip_enum_value).json_name = "dispatched"];
+  RECEIPT_STAGE_EXEC_CONFIRMED = 3 [(eip_enum_value).json_name = "exec_confirmed"];
+  RECEIPT_STAGE_COMPLETED = 4 [(eip_enum_value).json_name = "completed"];
+  RECEIPT_STAGE_UNKNOWN = 5 [(eip_enum_value).json_name = "unknown"];
+}
+
+enum ReceiptOutcome {
+  RECEIPT_OUTCOME_UNSPECIFIED = 0;
+  RECEIPT_OUTCOME_SUCCEEDED = 1 [(eip_enum_value).json_name = "succeeded"];
+  RECEIPT_OUTCOME_FAILED = 2 [(eip_enum_value).json_name = "failed"];
+  RECEIPT_OUTCOME_CANCELLED = 3 [(eip_enum_value).json_name = "cancelled"];
+  RECEIPT_OUTCOME_TIMED_OUT = 4 [(eip_enum_value).json_name = "timed_out"];
+  RECEIPT_OUTCOME_UNKNOWN = 5 [(eip_enum_value).json_name = "unknown"];
+}
+
+message OperationReceipt {
+  ReceiptRef receipt_ref = 1;
+  string operation_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string method = 3;
+  string environment_id = 4 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  uint64 generation = 5;
+  string request_digest = 6;
+  ReceiptStage stage = 7;
+  optional ReceiptOutcome outcome = 8;
+  google.protobuf.Timestamp observed_at = 9;
+}
+
+enum OperationCancelStatus {
+  OPERATION_CANCEL_STATUS_UNSPECIFIED = 0;
+  OPERATION_CANCEL_STATUS_NOT_FOUND = 1 [(eip_enum_value).json_name = "not_found"];
+  OPERATION_CANCEL_STATUS_ALREADY_TERMINAL = 2 [(eip_enum_value).json_name = "already_terminal"];
+  OPERATION_CANCEL_STATUS_CANCELLATION_REQUESTED = 3 [(eip_enum_value).json_name = "cancellation_requested"];
+  OPERATION_CANCEL_STATUS_NOT_CANCELLABLE = 4 [(eip_enum_value).json_name = "not_cancellable"];
+}
+
+message OperationCancelParams {
+  EIPCallContext context = 1;
+  string target_operation_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
+message OperationCancelResult {
+  OperationCancelStatus status = 1;
+}
+
+message ReceiptGetParams {
+  EIPCallContext context = 1;
+  ReceiptRef receipt_ref = 2;
+}
+
+message ReceiptGetResult {
+  OperationReceipt receipt = 1;
+}

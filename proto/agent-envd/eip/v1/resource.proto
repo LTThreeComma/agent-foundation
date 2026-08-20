@@ -1,0 +1,360 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "agent-envd/eip/v1/common.proto";
+import "agent-envd/eip/v1/options.proto";
+import "agent-envd/eip/v1/output.proto";
+
+message EIPPath {
+  string mount_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string path = 2 [(eip_field).string_format = EIP_STRING_FORMAT_PATH];
+}
+
+message MountDescriptor {
+  string mount_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string logical_root = 2 [(eip_field).string_format = EIP_STRING_FORMAT_PATH];
+  bool writable = 3;
+  optional bool case_sensitive = 4;
+  bool supports_atomic_replace = 5;
+  bool supports_file_revision = 6;
+  uint64 max_file_bytes = 7;
+}
+
+enum ResourceAction {
+  RESOURCE_ACTION_UNSPECIFIED = 0;
+  RESOURCE_ACTION_READ = 1 [(eip_enum_value).json_name = "read"];
+  RESOURCE_ACTION_WRITE = 2 [(eip_enum_value).json_name = "write"];
+  RESOURCE_ACTION_DELETE = 3 [(eip_enum_value).json_name = "delete"];
+  RESOURCE_ACTION_EXECUTE = 4 [(eip_enum_value).json_name = "execute"];
+}
+
+enum ResolvedResourceKind {
+  RESOLVED_RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOLVED_RESOURCE_KIND_FILE = 1 [(eip_enum_value).json_name = "file"];
+  RESOLVED_RESOURCE_KIND_DIRECTORY = 2 [(eip_enum_value).json_name = "directory"];
+  RESOLVED_RESOURCE_KIND_SYMLINK = 3 [(eip_enum_value).json_name = "symlink"];
+  RESOLVED_RESOURCE_KIND_MISSING_TARGET = 4 [(eip_enum_value).json_name = "missing_target"];
+}
+
+message ResourceResolveParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  ResourceAction action = 3;
+  optional bool follow_symlinks = 4 [(eip_field).default_bool = true];
+}
+
+message ResolvedResource {
+  string namespace = 1;
+  ResolvedResourceKind kind = 2;
+  string identifier = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  uint64 generation = 4;
+  optional FileRevision revision = 5;
+}
+
+message ResourceResolveResult {
+  ResolvedResource resource = 1;
+}
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_FILE = 1 [(eip_enum_value).json_name = "file"];
+  FILE_KIND_DIRECTORY = 2 [(eip_enum_value).json_name = "directory"];
+  FILE_KIND_SYMLINK = 3 [(eip_enum_value).json_name = "symlink"];
+  FILE_KIND_OTHER = 4 [(eip_enum_value).json_name = "other"];
+}
+
+message FileInfo {
+  EIPPath path = 1;
+  FileKind kind = 2;
+  optional uint64 size_bytes = 3;
+  optional google.protobuf.Timestamp modified_at = 4;
+  optional bool executable = 5;
+  optional FileRevision revision = 6;
+}
+
+message FileStatParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional bool follow_symlinks = 3 [(eip_field).default_bool = true];
+}
+
+message FileStatResult {
+  FileInfo info = 1;
+}
+
+message FileReadParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional uint64 offset = 3 [(eip_field).default_uint = 0];
+  optional uint64 length = 4;
+  optional FileRevision expected_revision = 5;
+  OutputPolicy output_policy = 6;
+}
+
+message FileReadResult {
+  FileInfo info = 1;
+  uint64 range_start = 2;
+  uint64 range_end = 3;
+  OutputCapture output = 4;
+}
+
+message FileListParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional bool recursive = 3 [(eip_field).default_bool = false];
+  optional uint32 max_depth = 4 [(eip_field).default_uint = 1];
+  optional OutputCursor cursor = 5;
+  OutputPolicy output_policy = 6;
+}
+
+message FileListEntry {
+  string relative_path = 1;
+  FileInfo info = 2;
+}
+
+message FileListResult {
+  repeated FileListEntry entries = 1;
+  StructuredOutputDisposition output = 2;
+}
+
+enum SearchMode {
+  SEARCH_MODE_UNSPECIFIED = 0;
+  SEARCH_MODE_LITERAL = 1 [(eip_enum_value).json_name = "literal"];
+  SEARCH_MODE_GLOB = 2 [(eip_enum_value).json_name = "glob"];
+  SEARCH_MODE_REGEX = 3 [(eip_enum_value).json_name = "regex"];
+}
+
+message FileSearchParams {
+  EIPCallContext context = 1;
+  EIPPath root = 2;
+  string query = 3;
+  SearchMode mode = 4;
+  repeated string include = 5;
+  repeated string exclude = 6;
+  uint32 max_depth = 7;
+  optional OutputCursor cursor = 8;
+  OutputPolicy output_policy = 9;
+}
+
+message FileSearchMatch {
+  EIPPath path = 1;
+  optional uint64 line_number = 2;
+  optional uint64 byte_offset = 3;
+  optional string preview = 4;
+}
+
+message FileSearchResult {
+  repeated FileSearchMatch matches = 1;
+  StructuredOutputDisposition output = 2;
+}
+
+enum WriteMode {
+  WRITE_MODE_UNSPECIFIED = 0;
+  WRITE_MODE_CREATE = 1 [(eip_enum_value).json_name = "create"];
+  WRITE_MODE_REPLACE = 2 [(eip_enum_value).json_name = "replace"];
+  WRITE_MODE_UPSERT = 3 [(eip_enum_value).json_name = "upsert"];
+  WRITE_MODE_APPEND = 4 [(eip_enum_value).json_name = "append"];
+  WRITE_MODE_WRITE_AT = 5 [(eip_enum_value).json_name = "write_at"];
+}
+
+message FileWriteParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  WriteMode mode = 3;
+  EncodedBytes data = 4;
+  optional uint64 offset = 5;
+  optional FileRevision expected_revision = 6;
+  optional bool create_parents = 7 [(eip_field).default_bool = false];
+  optional bool executable = 8;
+}
+
+message FileWriteResult {
+  FileInfo info = 1;
+  uint64 bytes_written = 2;
+  OperationReceipt receipt = 3;
+}
+
+message FileMkdirParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional bool parents = 3 [(eip_field).default_bool = false];
+  optional bool exist_ok = 4 [(eip_field).default_bool = false];
+}
+
+message FileMkdirResult {
+  FileInfo info = 1;
+  uint64 created_directories = 2;
+  OperationReceipt receipt = 3;
+}
+
+message FilePatchParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  string patch_format = 3 [(eip_field).const_string = "unified_diff"];
+  string patch = 4;
+  FileRevision expected_revision = 5;
+}
+
+message FilePatchResult {
+  FileInfo info = 1;
+  uint64 hunks_applied = 2;
+  OperationReceipt receipt = 3;
+}
+
+message FileCopyParams {
+  EIPCallContext context = 1;
+  EIPPath source = 2;
+  EIPPath destination = 3;
+  optional FileRevision expected_source_revision = 4;
+  optional FileRevision expected_destination_revision = 5;
+  optional bool replace = 6 [(eip_field).default_bool = false];
+  optional bool require_atomic_destination = 7 [(eip_field).default_bool = false];
+}
+
+message FileCopyResult {
+  FileInfo destination = 1;
+  uint64 bytes_copied = 2;
+  bool atomic_destination = 3;
+  OperationReceipt receipt = 4;
+}
+
+message FileMoveParams {
+  EIPCallContext context = 1;
+  EIPPath source = 2;
+  EIPPath destination = 3;
+  optional FileRevision expected_source_revision = 4;
+  optional FileRevision expected_destination_revision = 5;
+  optional bool replace = 6 [(eip_field).default_bool = false];
+}
+
+message FileMoveResult {
+  FileInfo destination = 1;
+  OperationReceipt receipt = 2;
+}
+
+message FileRemoveParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  FileKind expected_kind = 3;
+  optional FileRevision expected_revision = 4;
+  optional bool recursive = 5 [(eip_field).default_bool = false];
+  optional uint64 max_entries = 6 [(eip_field).default_uint = 1];
+}
+
+message FileRemoveResult {
+  uint64 removed_entries = 1;
+  OperationReceipt receipt = 2;
+}
+
+enum PortAddress {
+  PORT_ADDRESS_UNSPECIFIED = 0;
+  PORT_ADDRESS_LOOPBACK = 1 [(eip_enum_value).json_name = "loopback"];
+  PORT_ADDRESS_ANY = 2 [(eip_enum_value).json_name = "any"];
+}
+
+enum PortStatus {
+  PORT_STATUS_UNSPECIFIED = 0;
+  PORT_STATUS_LISTENING = 1 [(eip_enum_value).json_name = "listening"];
+  PORT_STATUS_NOT_LISTENING = 2 [(eip_enum_value).json_name = "not_listening"];
+  PORT_STATUS_UNKNOWN = 3 [(eip_enum_value).json_name = "unknown"];
+}
+
+enum DesiredPortStatus {
+  DESIRED_PORT_STATUS_UNSPECIFIED = 0;
+  DESIRED_PORT_STATUS_LISTENING = 1 [(eip_enum_value).json_name = "listening"];
+  DESIRED_PORT_STATUS_NOT_LISTENING = 2 [(eip_enum_value).json_name = "not_listening"];
+}
+
+message PortTarget {
+  string protocol = 1 [(eip_field).const_string = "tcp"];
+  PortAddress address = 2;
+  uint32 port = 3 [(eip_field).minimum = 1, (eip_field).maximum = 65535];
+}
+
+message PortObservation {
+  PortTarget target = 1;
+  PortStatus status = 2;
+  optional ProcessHandle managed_process = 3;
+  google.protobuf.Timestamp observed_at = 4;
+}
+
+message PortInspectParams {
+  EIPCallContext context = 1;
+  PortTarget target = 2;
+}
+
+message PortInspectResult {
+  PortObservation observation = 1;
+}
+
+message PortWaitParams {
+  EIPCallContext context = 1;
+  PortTarget target = 2;
+  DesiredPortStatus desired_status = 3;
+}
+
+message PortWaitResult {
+  PortObservation observation = 1;
+}
+
+message EIPProcessStateObject {
+  string kind = 1 [(eip_field).const_string = "process_lease"];
+  ProcessLeaseRef lease = 2;
+  ProcessHandle handle = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message EIPOutputStateObject {
+  string kind = 1 [(eip_field).const_string = "output_lease"];
+  OutputLeaseRef lease = 2;
+  OutputReference reference = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message EIPCursorStateObject {
+  string kind = 1 [(eip_field).const_string = "cursor"];
+  OutputLeaseRef lease = 2;
+  OutputCursor cursor = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message EIPStateObject {
+  option (eip_message).discriminated_union = true;
+  oneof object {
+    EIPProcessStateObject process_lease = 1;
+    EIPOutputStateObject output_lease = 2;
+    EIPCursorStateObject cursor = 3;
+  }
+}
+
+message EIPEnvironmentState {
+  string schema_version = 1 [(eip_field).string_format = EIP_STRING_FORMAT_PROTOCOL_VERSION];
+  string environment_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  uint64 observed_generation = 3;
+  repeated EIPStateObject objects = 4;
+  optional google.protobuf.Value provider_data = 5;
+}
+
+message StateExportParams {
+  EIPCallContext context = 1;
+  repeated ProcessLeaseRef process_leases = 2;
+  repeated OutputLeaseRef output_leases = 3;
+}
+
+message StateExportResult {
+  EIPEnvironmentState state = 1;
+  google.protobuf.Timestamp observed_at = 2;
+}
+
+message StateRestoreParams {
+  EIPCallContext context = 1;
+  EIPEnvironmentState state = 2;
+}
+
+message StateRestoreResult {
+  repeated EIPStateObject restored = 1;
+  repeated string omitted_expired = 2;
+}

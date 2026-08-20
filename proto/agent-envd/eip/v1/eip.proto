@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/empty.proto";
+import "agent-envd/eip/v1/common.proto";
+import "agent-envd/eip/v1/environment.proto";
+import "agent-envd/eip/v1/options.proto";
+import "agent-envd/eip/v1/output.proto";
+import "agent-envd/eip/v1/process.proto";
+import "agent-envd/eip/v1/resource.proto";
+
+service EnvironmentInteractionProtocol {
+  rpc Initialize(InitializeParams) returns (InitializeResult) {
+    option (eip_method) = { jsonrpc_method: "initialize" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_INITIALIZATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_INITIALIZATION };
+  }
+  rpc EnvironmentDescribe(EnvironmentDescribeParams) returns (EnvironmentDescribeResult) {
+    option (eip_method) = { jsonrpc_method: "environment.describe" capability: "environment.describe" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_COMMON };
+  }
+  rpc StateExport(StateExportParams) returns (StateExportResult) {
+    option (eip_method) = { jsonrpc_method: "state.export" capability: "environment.state" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_EXPORT idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_STATE };
+  }
+  rpc StateRestore(StateRestoreParams) returns (StateRestoreResult) {
+    option (eip_method) = { jsonrpc_method: "state.restore" capability: "environment.state" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_STATE };
+  }
+  rpc ResourceResolve(ResourceResolveParams) returns (ResourceResolveResult) {
+    option (eip_method) = { jsonrpc_method: "resource.resolve" capability: "resource.resolve" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileStat(FileStatParams) returns (FileStatResult) {
+    option (eip_method) = { jsonrpc_method: "file.stat" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileRead(FileReadParams) returns (FileReadResult) {
+    option (eip_method) = { jsonrpc_method: "file.read" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileList(FileListParams) returns (FileListResult) {
+    option (eip_method) = { jsonrpc_method: "file.list" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileSearch(FileSearchParams) returns (FileSearchResult) {
+    option (eip_method) = { jsonrpc_method: "file.search" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileWrite(FileWriteParams) returns (FileWriteResult) {
+    option (eip_method) = { jsonrpc_method: "file.write" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileMkdir(FileMkdirParams) returns (FileMkdirResult) {
+    option (eip_method) = { jsonrpc_method: "file.mkdir" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FilePatch(FilePatchParams) returns (FilePatchResult) {
+    option (eip_method) = { jsonrpc_method: "file.patch" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileCopy(FileCopyParams) returns (FileCopyResult) {
+    option (eip_method) = { jsonrpc_method: "file.copy" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileMove(FileMoveParams) returns (FileMoveResult) {
+    option (eip_method) = { jsonrpc_method: "file.move" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileRemove(FileRemoveParams) returns (FileRemoveResult) {
+    option (eip_method) = { jsonrpc_method: "file.remove" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc ShellExec(ShellExecParams) returns (ShellExecResult) {
+    option (eip_method) = { jsonrpc_method: "shell.exec" capability: "shell.exec" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_COMMAND };
+  }
+  rpc ProcessStart(ProcessStartParams) returns (ProcessStartResult) {
+    option (eip_method) = { jsonrpc_method: "process.start" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessInspect(ProcessInspectParams) returns (ProcessInspectResult) {
+    option (eip_method) = { jsonrpc_method: "process.inspect" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessReadOutput(ProcessReadOutputParams) returns (ProcessReadOutputResult) {
+    option (eip_method) = { jsonrpc_method: "process.read_output" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessWriteStdin(ProcessWriteStdinParams) returns (ProcessWriteStdinResult) {
+    option (eip_method) = { jsonrpc_method: "process.write_stdin" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessCloseStdin(ProcessCloseStdinParams) returns (ProcessCloseStdinResult) {
+    option (eip_method) = { jsonrpc_method: "process.close_stdin" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessSignal(ProcessSignalParams) returns (ProcessSignalResult) {
+    option (eip_method) = { jsonrpc_method: "process.signal" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessWait(ProcessWaitParams) returns (ProcessWaitResult) {
+    option (eip_method) = { jsonrpc_method: "process.wait" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessKill(ProcessKillParams) returns (ProcessKillResult) {
+    option (eip_method) = { jsonrpc_method: "process.kill" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessRetain(ProcessRetainParams) returns (ProcessRetainResult) {
+    option (eip_method) = { jsonrpc_method: "process.retain" capability: "process.retain" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc ProcessRelease(ProcessReleaseParams) returns (ProcessReleaseResult) {
+    option (eip_method) = { jsonrpc_method: "process.release" capability: "process.manage" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_PROCESS };
+  }
+  rpc PortInspect(PortInspectParams) returns (PortInspectResult) {
+    option (eip_method) = { jsonrpc_method: "port.inspect" capability: "port.observe" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc PortWait(PortWaitParams) returns (PortWaitResult) {
+    option (eip_method) = { jsonrpc_method: "port.wait" capability: "port.observe" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc OutputRead(OutputReadParams) returns (OutputReadResult) {
+    option (eip_method) = { jsonrpc_method: "output.read" capability: "output.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_OUTPUT };
+  }
+  rpc OutputRetain(OutputRetainParams) returns (OutputRetainResult) {
+    option (eip_method) = { jsonrpc_method: "output.retain" capability: "output.retain" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_OUTPUT };
+  }
+  rpc OutputRelease(OutputReleaseParams) returns (OutputReleaseResult) {
+    option (eip_method) = { jsonrpc_method: "output.release" capability: "output.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_OUTPUT };
+  }
+  rpc OperationCancel(OperationCancelParams) returns (OperationCancelResult) {
+    option (eip_method) = { jsonrpc_method: "operation.cancel" capability: "operation.cancel" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_COMMON };
+  }
+  rpc ReceiptGet(ReceiptGetParams) returns (ReceiptGetResult) {
+    option (eip_method) = { jsonrpc_method: "receipt.get" capability: "receipt.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_COMMON };
+  }
+  rpc SessionClose(SessionCloseParams) returns (SessionCloseResult) {
+    option (eip_method) = { jsonrpc_method: "session.close" capability: "session.close" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_SESSION_TERMINAL idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_SESSION };
+  }
+  rpc EnvironmentChanged(EnvironmentChangedNotification) returns (google.protobuf.Empty) {
+    option (eip_method) = { jsonrpc_method: "environment.changed" kind: METHOD_KIND_SERVER_NOTIFICATION idempotency: IDEMPOTENCY_CLASS_NOTIFICATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_NOTIFICATION };
+  }
+  rpc ProcessChanged(ProcessChangedNotification) returns (google.protobuf.Empty) {
+    option (eip_method) = { jsonrpc_method: "process.changed" kind: METHOD_KIND_SERVER_NOTIFICATION idempotency: IDEMPOTENCY_CLASS_NOTIFICATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_NOTIFICATION };
+  }
+  rpc OutputAvailable(OutputAvailableNotification) returns (google.protobuf.Empty) {
+    option (eip_method) = { jsonrpc_method: "output.available" kind: METHOD_KIND_SERVER_NOTIFICATION idempotency: IDEMPOTENCY_CLASS_NOTIFICATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_NOTIFICATION };
+  }
+  rpc SessionExpiring(SessionExpiringNotification) returns (google.protobuf.Empty) {
+    option (eip_method) = { jsonrpc_method: "session.expiring" kind: METHOD_KIND_SERVER_NOTIFICATION idempotency: IDEMPOTENCY_CLASS_NOTIFICATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_NOTIFICATION };
+  }
+}

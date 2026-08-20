@@ -28,14 +28,16 @@ The normative Markdown specification owns meaning. The canonical IDL must encode
 
 The stable source and output ownership is:
 
-| Path or distribution                             | Content                                                                                                                |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `proto/agent-envd/eip/v1/`                       | Protobuf messages, services, EIP custom options, package identity, and reserved field numbers/names                    |
-| `packages/agent-envd-client/`                    | `converge-agent-envd-client` Python project, generated Python EIP surface, handwritten transports, fixtures, and tests |
-| `crates/agent-envd/`                             | Rust daemon and generated Rust EIP surface consumed by its server dispatcher                                           |
-| `spec/agent-envd/`                               | Normative architecture, protocol, transport, resource, output, isolation, and generation contracts                     |
-| Generated contract artifacts                     | Canonical descriptor set, method inventory, JSON Schema/OpenRPC views, and normalized golden JSON-RPC fixtures         |
-| `packages/agent-harness/converge_agent_harness/` | Direct-local Environment implementations plus the EIP adapter that consumes `converge-agent-envd-client`               |
+| Path or distribution                                                              | Content                                                                                                               |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `proto/agent-envd/eip/v1/*.proto`                                                 | Canonical Protobuf service, messages, custom options, package identity, and reserved field numbers/names              |
+| `crates/agent-envd/protocol/eip/v1/descriptor.pb`                                 | Checked deterministic descriptor set consumed by the crate build without requiring Protobuf tooling                   |
+| `proto/agent-envd/eip/v1/artifacts/{methods,schema,openrpc,generated-files}.json` | Checked method inventory, JSON Schema, OpenRPC view, descriptor digest, and complete generated-file manifest          |
+| `packages/agent-envd-client/converge_agent_envd_client/eip/v1/`                   | Checked generated Pydantic models, JSON codecs, method registry, protocol identity, and typed async request stubs     |
+| `crates/agent-envd/build_support/` and Cargo `OUT_DIR`                            | Descriptor-driven Rust generator and its generated serde models, method registry, handler trait, and dispatch surface |
+| `crates/agent-envd/protocol/eip/v1/testdata/`                                     | Shared hand-curated canonical JSON values consumed by Python and Rust conformance tests                               |
+| `spec/agent-envd/`                                                                | Normative architecture, protocol, transport, resource, output, isolation, and generation contracts                    |
+| `packages/agent-harness/converge_agent_harness/`                                  | Direct-local Environment implementations plus the EIP adapter that consumes `converge-agent-envd-client`              |
 
 `converge-agent-envd-client` is a Python workspace member for repository development and validation, but it belongs to the agent-envd release group rather than the Foundation Python release group. A Foundation release can depend on a compatible published client range but does not version or republish that package.
 
@@ -43,7 +45,7 @@ The client package is lower-level than the Harness. It imports no Pydantic AI Ag
 
 ## Canonical IDL Profile
 
-Each request-response method is one Protobuf service method with named request and result messages. EIP-specific method options declare at least:
+Every canonical IDL file uses the Protobuf package `converge.agent_envd.eip.v1`. Each request-response method is one Protobuf service method with named request and result messages. EIP-specific method options declare at least:
 
 - exact JSON-RPC method name;
 - capability key;
@@ -58,6 +60,7 @@ The EIP JSON profile, not a language runtime's defaults, controls JSON-RPC `para
 
 - wire field names are `snake_case`;
 - absent optional values are omitted by generated senders; `null` is accepted only where the selected EIP schema explicitly permits it;
+- a bare repeated or map field with no non-empty constraint treats absence and an empty collection as the same wire value and is canonically omitted when empty; a presence-sensitive collection uses an explicit wrapper or presence field instead;
 - integer, timestamp, base64, enum/string taxonomy, discriminated-union, and unknown-field behavior match the owning EIP schema and golden fixtures exactly;
 - generated request decoders reject unknown or duplicate authority-bearing fields unless the negotiated minor explicitly defines them;
 - generated response decoders can ignore only additive fields allowed by the selected minor-version compatibility rules;
@@ -73,7 +76,7 @@ Generation consumes a deterministic Protobuf descriptor set including interprete
 ```mermaid
 flowchart LR
     IDL[Canonical EIP Protobuf IDL] --> Descriptor[Deterministic descriptor set]
-    Descriptor --> Lint[Protocol compatibility and profile lint]
+    Descriptor --> Lint[Descriptor and JSON profile validation]
     Descriptor --> Rust[Rust models codecs registry and dispatch]
     Descriptor --> Python[Python models codecs registry and typed stubs]
     Descriptor --> Docs[JSON Schema OpenRPC and method inventory]
@@ -92,9 +95,11 @@ The generator produces:
 - typed Rust dispatch entries or traits for every daemon method;
 - notification decode/dispatch metadata;
 - JSON Schema and OpenRPC views for inspection and non-generated tooling;
-- a normalized method inventory and golden request/result/error fixtures.
+- a normalized method inventory and complete generated-file manifest.
 
-Generated files carry a stable generated marker and are never manually edited. Python generated source is checked into the client project so source distributions, code review, and downstream type checking do not require a compiler toolchain. Rust source is generated deterministically into Cargo `OUT_DIR` from the same descriptor during build and is never checked in as another editable copy. Release and CI regenerate the descriptor and both language surfaces independently, verify the embedded descriptor digest, and reject drift.
+Shared golden request, result, notification, and error values are hand-curated wire evidence rather than generator output. Python and Rust consume the same checked fixture file so a renderer cannot redefine its own expected JSON independently.
+
+Generated files carry a stable generated marker and are never manually edited. Python generated source is checked into the client project so source distributions, code review, and downstream type checking do not require a compiler toolchain. Rust source is generated deterministically into Cargo `OUT_DIR` from the checked descriptor during build and is never checked in as another editable copy. CI and release generation creates a candidate descriptor, Python surface, and inspection artifacts outside the repository and compares the complete manifest and bytes without first rewriting the checkout. Cargo independently regenerates the Rust surface from the checked descriptor, embeds the same digest, and rejects an invalid descriptor during build.
 
 The Protobuf compiler, plugins, and generator dependencies are locked development/build tools. Generated runtime models use Pydantic in Python and serde in Rust, so the client does not depend on a Protobuf compiler or runtime. In particular, compiler packages such as `grpcio-tools` never enter the published client's dependencies.
 
@@ -163,12 +168,12 @@ A protocol-only compatible addition can ship in a later package release without 
 
 The protocol gate includes:
 
-- deterministic descriptor and generated-output drift checks;
-- Protobuf field-number/name reservation and compatibility lint;
-- method-option uniqueness and complete generated registry/stub/dispatch coverage;
-- canonical JSON fixtures for every method plus representative errors and notifications;
+- deterministic descriptor and generated-output drift checks that do not rewrite the checked tree;
+- descriptor-profile checks for the fixed package, interpreted custom options, and valid union/selector shapes;
+- method-option uniqueness and complete generated registry/stub/dispatch coverage for every method;
+- hand-curated canonical JSON fixtures spanning request, result, error, selector, union, binary, and notification shapes;
 - strict invalid fixtures for unknown authority fields, duplicate fields, malformed selectors, bounds, unions, and forbidden batches;
-- Python-to-Rust and Rust-to-Python encode/decode fixtures;
+- shared canonical values independently decoded and encoded by both Python and Rust;
 - generated Python client against the actual Rust daemon over stdio, HTTP, and WebSocket;
 - authentication, HTTP session, WebSocket initialization, reconnect, cancellation, idempotency, receipt, cursor, and unknown-outcome cases;
 - regeneration in a clean checkout with no diff.
@@ -201,5 +206,5 @@ One release group makes source, generated descriptor, conformance fixtures, and 
 08. `converge-agent-envd-client` imports no Harness or Host lifecycle type and grants no provider authority.
 09. The Harness directly owns EIP-to-Environment adaptation and does not reimplement wire models, method constants, or transport handshakes.
 10. The client and daemon share the agent-envd release group and descriptor digest, while package version and EIP version remain independent identities.
-11. Golden wire bytes, negative fixtures, and actual cross-language daemon/client tests are required in addition to generated-model round trips.
+11. Shared hand-curated golden wire values, focused structural negative fixtures, and actual cross-language daemon/client tests are required in addition to generated-model round trips.
 12. Direct-local Harness Environments remain first-class and do not depend on starting envd.

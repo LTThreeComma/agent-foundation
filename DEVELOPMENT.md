@@ -22,6 +22,12 @@ Organize business code by feature and add layers only for a real capability; do 
 - Durable asynchronous lifecycles use idempotent reconcilers and fenced workers. Model, tool, queue, and stream waits happen outside database transactions.
 - Process-role wiring selects routers, reconcilers, and workers; `control` and `execution` do not duplicate feature or domain models.
 
+## Generated Code and Static Analysis
+
+Repository-wide static analysis uses a moderate profile focused on actionable correctness and maintainability signals rather than enabling every optional strict or opinionated rule. Tighten or relax that profile when recurring evidence justifies the change, not to silence one isolated finding.
+
+Generated output must compile, type-check where applicable, and pass its contract, round-trip, and integration tests. Style-oriented lint rules can be disabled at the narrow generated-file or generated-module boundary when satisfying them would add renderer complexity without improving correctness. The generator, build integration, and all handwritten code remain under the normal repository checks. Do not weaken repository-wide checks merely to accommodate mechanical output, and do not complicate a generator solely to reproduce hand-written style.
+
 ## Async and Process Lifespan
 
 Service I/O is async-first. Use async database, `httpx2`, Redis, queue, object-store, and subprocess clients. Do not introduce `httpx` or another general HTTP client alongside `httpx2`. Isolate unavoidable bounded blocking work with `anyio.to_thread.run_sync`; never block the event loop or call `asyncio.run()` from an active async path.

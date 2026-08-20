@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/timestamp.proto";
+import "agent-envd/eip/v1/common.proto";
+import "agent-envd/eip/v1/options.proto";
+
+enum OutputOverflow {
+  OUTPUT_OVERFLOW_UNSPECIFIED = 0;
+  OUTPUT_OVERFLOW_FAIL = 1 [(eip_enum_value).json_name = "fail"];
+  OUTPUT_OVERFLOW_TRUNCATE = 2 [(eip_enum_value).json_name = "truncate"];
+  OUTPUT_OVERFLOW_RETAIN = 3 [(eip_enum_value).json_name = "retain"];
+}
+
+message OutputPolicy {
+  uint64 max_inline_bytes = 1 [(eip_field).minimum = 1];
+  uint64 max_output_bytes = 2 [(eip_field).minimum = 1];
+  OutputOverflow overflow = 3;
+}
+
+message EncodedBytes {
+  string encoding = 1 [(eip_field).const_string = "base64"];
+  string data = 2 [(eip_field).string_format = EIP_STRING_FORMAT_BASE64_UNPADDED];
+}
+
+message OutputSegment {
+  uint64 start_offset = 1;
+  EncodedBytes data = 2;
+}
+
+message OutputPreview {
+  repeated OutputSegment segments = 1;
+  uint64 represented_bytes = 2;
+}
+
+enum OutputKind {
+  OUTPUT_KIND_UNSPECIFIED = 0;
+  OUTPUT_KIND_EMPTY = 1 [(eip_enum_value).json_name = "empty"];
+  OUTPUT_KIND_INLINE = 2 [(eip_enum_value).json_name = "inline"];
+  OUTPUT_KIND_RETAINED = 3 [(eip_enum_value).json_name = "retained"];
+  OUTPUT_KIND_TRUNCATED = 4 [(eip_enum_value).json_name = "truncated"];
+}
+
+message OutputCapture {
+  OutputKind kind = 1;
+  bool producer_complete = 2;
+  bool content_complete = 3;
+  uint64 produced_bytes = 4;
+  uint64 captured_bytes = 5;
+  uint64 dropped_bytes = 6;
+  optional EncodedBytes inline = 7;
+  optional OutputPreview preview = 8;
+  optional OutputReference reference = 9;
+  optional OutputCursor cursor = 10;
+  uint64 available_start = 11;
+  uint64 available_end = 12;
+  optional google.protobuf.Timestamp expires_at = 13;
+}
+
+message StructuredOutputDisposition {
+  bool producer_complete = 1;
+  bool content_complete = 2;
+  uint64 emitted_items = 3;
+  optional uint64 dropped_items = 4;
+  uint64 encoded_bytes = 5;
+  optional OutputCursor cursor = 6;
+  optional google.protobuf.Timestamp expires_at = 7;
+}
+
+message OutputReadParams {
+  EIPCallContext context = 1;
+  OutputReference reference = 2;
+  oneof position {
+    OutputCursor cursor = 3;
+    uint64 start_offset = 4;
+  }
+  OutputPolicy output_policy = 5;
+}
+
+message OutputReadResult {
+  repeated OutputSegment chunks = 1;
+  optional OutputCursor next_cursor = 2;
+  OutputCapture capture = 3;
+}
+
+message OutputRetainParams {
+  EIPCallContext context = 1;
+  oneof selector {
+    OutputReference reference = 2;
+    OutputCursor cursor = 3;
+  }
+  google.protobuf.Timestamp requested_expires_at = 4;
+}
+
+message OutputRetainResult {
+  OutputLeaseRef lease = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message OutputReleaseParams {
+  EIPCallContext context = 1;
+  oneof selector {
+    OutputReference reference = 2;
+    OutputCursor cursor = 3;
+  }
+}
+
+message OutputReleaseResult {
+  bool released = 1;
+  OperationReceipt receipt = 2;
+}

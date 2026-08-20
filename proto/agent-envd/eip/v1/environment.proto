@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/timestamp.proto";
+import "agent-envd/eip/v1/common.proto";
+import "agent-envd/eip/v1/options.proto";
+import "agent-envd/eip/v1/process.proto";
+import "agent-envd/eip/v1/resource.proto";
+
+message EIPClientInfo {
+  string name = 1;
+  string version = 2;
+}
+
+message InitializeParams {
+  repeated string supported_protocol_versions = 1 [(eip_field).min_length = 1];
+  EIPClientInfo client = 2;
+  string expected_environment_id = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  repeated string required_capabilities = 4;
+  repeated string optional_capabilities = 5;
+}
+
+message EIPServerInfo {
+  string name = 1 [(eip_field).const_string = "agent-envd"];
+  string version = 2;
+}
+
+message EIPLimits {
+  uint64 max_request_bytes = 1;
+  uint64 max_response_bytes = 2;
+  uint64 max_concurrent_operations = 3;
+  uint64 max_processes = 4;
+  uint64 max_operation_duration_ms = 5;
+  uint64 max_inline_output_bytes = 6;
+  uint64 max_output_bytes = 7;
+  uint64 max_retained_bytes = 8;
+  uint64 max_retained_objects = 9;
+  uint64 max_retention_ttl_ms = 10;
+  uint64 receipt_ttl_ms = 11;
+}
+
+enum IsolationMode {
+  ISOLATION_MODE_UNSPECIFIED = 0;
+  ISOLATION_MODE_REQUIRED = 1 [(eip_enum_value).json_name = "required"];
+  ISOLATION_MODE_DISABLED = 2 [(eip_enum_value).json_name = "disabled"];
+}
+
+enum IsolationBackend {
+  ISOLATION_BACKEND_UNSPECIFIED = 0;
+  ISOLATION_BACKEND_LINUX_BUBBLEWRAP = 1 [(eip_enum_value).json_name = "linux_bubblewrap"];
+  ISOLATION_BACKEND_MACOS_SEATBELT = 2 [(eip_enum_value).json_name = "macos_seatbelt"];
+  ISOLATION_BACKEND_OUTER_HOST = 3 [(eip_enum_value).json_name = "outer_host"];
+}
+
+enum IsolationNetworkPolicy {
+  ISOLATION_NETWORK_POLICY_UNSPECIFIED = 0;
+  ISOLATION_NETWORK_POLICY_HOST = 1 [(eip_enum_value).json_name = "host"];
+  ISOLATION_NETWORK_POLICY_DENY = 2 [(eip_enum_value).json_name = "deny"];
+}
+
+message IsolationPosture {
+  IsolationMode mode = 1;
+  IsolationBackend backend = 2;
+  bool filesystem_containment = 3;
+  bool process_containment = 4;
+  bool network_containment = 5;
+  IsolationNetworkPolicy network_policy = 6;
+}
+
+message EnvironmentDescriptor {
+  string environment_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  uint64 generation = 2;
+  repeated string capabilities = 3;
+  repeated MountDescriptor mounts = 4;
+  repeated ShellProfileDescriptor shell_profiles = 5;
+  EIPLimits limits = 6;
+  IsolationPosture isolation = 7;
+}
+
+message InitializeResult {
+  string protocol_version = 1 [(eip_field).string_format = EIP_STRING_FORMAT_PROTOCOL_VERSION];
+  EIPServerInfo server = 2;
+  EnvironmentDescriptor descriptor = 3;
+}
+
+message EnvironmentDescribeParams {
+  EIPCallContext context = 1;
+}
+
+message EnvironmentDescribeResult {
+  EnvironmentDescriptor descriptor = 1;
+}
+
+message SessionCloseParams {
+  EIPCallContext context = 1;
+}
+
+message SessionCloseResult {
+  uint64 operations_cancellation_requested = 1;
+  uint64 processes_termination_requested = 2;
+  uint64 output_objects_released = 3;
+  uint64 leased_processes_preserved = 4;
+  uint64 leased_output_objects_preserved = 5;
+}
+
+message EnvironmentChangedNotification {
+  uint64 observed_generation = 1;
+}
+
+message ProcessChangedNotification {
+  ProcessHandle handle = 1;
+}
+
+message OutputAvailableNotification {
+  OutputCursor cursor = 1;
+}
+
+message SessionExpiringNotification {
+  google.protobuf.Timestamp expires_at = 1;
+}

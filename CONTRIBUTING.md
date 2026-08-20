@@ -50,27 +50,28 @@ Keep transport handling, application orchestration, domain behavior, and infrast
 
 Use the Makefile as the stable development interface:
 
-| Command            | Purpose                                                         |
-| ------------------ | --------------------------------------------------------------- |
-| `make help`        | List available commands                                         |
-| `make install`     | Synchronize locked workspace and standalone SDK dependencies    |
-| `make setup`       | Start local PostgreSQL and Redis                                |
-| `make dev`         | Upgrade the local schema and run foundation-service             |
-| `make dev-down`    | Stop local infrastructure and remove its data volumes           |
-| `make format`      | Apply repository formatting hooks                               |
-| `make lint`        | Run non-mutating repository lint checks                         |
-| `make deps-check`  | Check each Python package's dependency declarations with deptry |
-| `make typecheck`   | Type-check Python package sources with Pyright                  |
-| `make docs-serve`  | Start the local MkDocs development server                       |
-| `make docs-build`  | Build the documentation site in strict mode                     |
-| `make test`        | Run Python workspace tests                                      |
-| `make rust-check`  | Run the fast root Rust workspace gate                           |
-| `make sdk-check`   | Run the fast Python, Go, Rust, and TypeScript SDK gates         |
-| `make build`       | Build all workspace packages and standalone SDKs                |
-| `make images`      | Build the foundation-service and sandbox images                 |
-| `make image-check` | Build and smoke-check both container images                     |
-| `make check`       | Run the fast repository and standalone SDK feedback gate        |
-| `make check-all`   | Run every build, package, documentation, and SDK release check  |
+| Command            | Purpose                                                           |
+| ------------------ | ----------------------------------------------------------------- |
+| `make help`        | List available commands                                           |
+| `make install`     | Synchronize locked workspace and standalone SDK dependencies      |
+| `make setup`       | Start local PostgreSQL and Redis                                  |
+| `make dev`         | Upgrade the local schema and run foundation-service               |
+| `make dev-down`    | Stop local infrastructure and remove its data volumes             |
+| `make format`      | Apply repository formatting hooks                                 |
+| `make lint`        | Run non-mutating repository lint checks                           |
+| `make deps-check`  | Check each Python package's dependency declarations with deptry   |
+| `make typecheck`   | Type-check Python package sources with Pyright                    |
+| `make docs-serve`  | Start the local MkDocs development server                         |
+| `make docs-build`  | Build the documentation site in strict mode                       |
+| `make test`        | Run Python workspace tests                                        |
+| `make eip-check`   | Verify generated EIP artifacts and shared Python/Rust wire models |
+| `make rust-check`  | Run the fast root Rust workspace gate                             |
+| `make sdk-check`   | Run the fast Python, Go, Rust, and TypeScript SDK gates           |
+| `make build`       | Build all workspace packages and standalone SDKs                  |
+| `make images`      | Build the foundation-service and sandbox images                   |
+| `make image-check` | Build and smoke-check both container images                       |
+| `make check`       | Run the fast repository and standalone SDK feedback gate          |
+| `make check-all`   | Run every build, package, documentation, and SDK release check    |
 
 Use `make check` while iterating. Run the full local gate before opening or updating a broad pull request:
 

@@ -29,12 +29,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+
       - name: Prepare release version
         id: version
         run: |
           version="${GITHUB_REF_NAME#release/agent-envd-v}"
           python3 scripts/prepare-release-version.py agent-envd "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run EIP protocol gate
+        run: make eip-check
 
       - name: Create release version patch
         run: |

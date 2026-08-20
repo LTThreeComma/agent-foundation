@@ -2,7 +2,7 @@
 
 ## Design Position
 
-The Environment Interaction Protocol (EIP) is the transport-neutral wire contract between an authenticated Environment client and `agent-envd`. EIP uses JSON-RPC 2.0 envelopes, one versioned method catalog, bounded JSON values, typed errors, opaque handles, and explicit side-effect evidence.
+The Environment Interaction Protocol (EIP) is the transport-neutral wire contract between an authenticated Environment client and `agent-envd`. The initial protocol version is EIP `1.0`. EIP uses JSON-RPC 2.0 envelopes, one versioned method catalog, bounded JSON values, typed errors, opaque handles, and explicit side-effect evidence.
 
 EIP is a semantic Environment protocol, not a remote syscall interface. Operations such as canonical path resolution, bounded search, patch validation, command-tree control, retained-output reads, and local-port observation execute beside the native resources. Client-side validation improves errors but never replaces envd enforcement.
 
@@ -403,14 +403,35 @@ A timeout, cancellation race, dropped HTTP response, WebSocket close, or stdio E
 
 ## Notifications
 
-WebSocket and stdio can carry optional JSON-RPC notifications after negotiation. Initial notification names are:
+WebSocket and stdio can carry optional JSON-RPC notifications after negotiation. The initial notification payloads are serialized EIP JSON:
 
-- `environment.changed`, indicating that descriptor or generation observation should be refreshed;
-- `process.changed`, indicating that a visible process record may have new status or output;
-- `output.available`, indicating that a cursor may advance;
-- `session.expiring`, indicating impending session expiry.
+```python
+class EnvironmentChangedNotification(BaseModel):
+    observed_generation: int
 
-Notifications are bounded hints. They can be coalesced, delayed, or lost and never carry authority, full output, or a terminal Host fact. Clients reconcile with `environment.describe`, `process.inspect`, `process.wait`, or `output.read`. HTTP remains semantically complete without server push.
+
+class ProcessChangedNotification(BaseModel):
+    handle: ProcessHandle
+
+
+class OutputAvailableNotification(BaseModel):
+    cursor: OutputCursor
+
+
+class SessionExpiringNotification(BaseModel):
+    expires_at: datetime
+```
+
+The corresponding method names and meanings are:
+
+| Method                | Meaning                                                                  |
+| --------------------- | ------------------------------------------------------------------------ |
+| `environment.changed` | Descriptor or generation observation should be refreshed                 |
+| `process.changed`     | The selected visible process record may have new status or output        |
+| `output.available`    | The selected output cursor may advance                                   |
+| `session.expiring`    | The current session is approaching the reported absolute UTC expiry time |
+
+Notifications are bounded hints. They can be coalesced, delayed, or lost and never carry authority, full output, or a terminal Host fact. `observed_generation` does not move the session to another generation, and a notification's handle or cursor remains an opaque selector that grants no access by possession. Clients reconcile with `environment.describe`, `process.inspect`, `process.wait`, or `output.read`, which repeat ordinary authentication, ownership, generation, capability, and policy checks. HTTP remains semantically complete without server push.
 
 Client-to-server JSON-RPC notifications are not accepted for mutations, cancellation, release, or session close because those actions require a correlated result. Unknown notifications are ignored only when their namespace was negotiated as optional.
 

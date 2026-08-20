@@ -1,0 +1,17 @@
+{
+  "descriptor_sha256": "eb524fe0af240c7d2ea9ea3cfef6ce5eb2a99e605e3fafc3e102acb698ddbcf4",
+  "files": [
+    "crates/agent-envd/protocol/eip/v1/descriptor.pb",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/__init__.py",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/client.py",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/codec.py",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/methods.py",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/models.py",
+    "packages/agent-envd-client/converge_agent_envd_client/eip/v1/protocol.py",
+    "proto/agent-envd/eip/v1/artifacts/generated-files.json",
+    "proto/agent-envd/eip/v1/artifacts/methods.json",
+    "proto/agent-envd/eip/v1/artifacts/openrpc.json",
+    "proto/agent-envd/eip/v1/artifacts/schema.json"
+  ],
+  "generated": true
+}

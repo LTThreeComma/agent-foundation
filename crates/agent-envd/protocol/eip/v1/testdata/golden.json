@@ -1,0 +1,91 @@
+{
+  "cases": [
+    {
+      "type": "InitializeParams",
+      "value": {
+        "client": {"name": "fixture-client", "version": "1.2.3"},
+        "expected_environment_id": "env-fixture",
+        "optional_capabilities": ["output.retain"],
+        "required_capabilities": ["file.read"],
+        "supported_protocol_versions": ["1.0"]
+      }
+    },
+    {
+      "type": "EnvironmentChangedNotification",
+      "value": {"observed_generation": 8}
+    },
+    {
+      "type": "FileStatParams",
+      "value": {
+        "context": {"operation_id": "op-stat"},
+        "path": {"mount_id": "workspace", "path": "/src/main.py"}
+      }
+    },
+    {
+      "type": "FileStatResult",
+      "value": {
+        "info": {
+          "kind": "file",
+          "modified_at": "2026-08-20T14:00:00.123456789Z",
+          "path": {"mount_id": "workspace", "path": "/src/main.py"},
+          "revision": "revision-1",
+          "size_bytes": 128
+        }
+      }
+    },
+    {
+      "type": "ShellExecParams",
+      "value": {
+        "context": {"deadline": "2026-08-20T14:00:00Z", "operation_id": "op-exec"},
+        "request": {
+          "command": {"arguments": ["status", "--short"], "executable": "git", "kind": "argv"},
+          "cwd": {"mount_id": "workspace", "path": "/repo"},
+          "output_policy": {"max_inline_bytes": 16384, "max_output_bytes": 1048576, "overflow": "retain"}
+        }
+      }
+    },
+    {
+      "type": "OutputReadParams",
+      "value": {
+        "context": {"operation_id": "op-output-read"},
+        "output_policy": {"max_inline_bytes": 4096, "max_output_bytes": 65536, "overflow": "truncate"},
+        "reference": "output-ref-1",
+        "start_offset": 0
+      }
+    },
+    {
+      "type": "ProcessWriteStdinParams",
+      "value": {
+        "close_after_write": true,
+        "context": {"idempotency_key": "stdin-key-1", "operation_id": "op-stdin"},
+        "data": {"data": "AAE", "encoding": "base64"},
+        "handle": "process-1"
+      }
+    },
+    {
+      "type": "StateExportParams",
+      "value": {
+        "context": {"operation_id": "op-state-export"},
+        "output_leases": ["output-lease-1"],
+        "process_leases": ["process-lease-1"]
+      }
+    },
+    {
+      "type": "SessionExpiringNotification",
+      "value": {"expires_at": "2026-08-20T14:15:00Z"}
+    },
+    {
+      "type": "EIPError",
+      "value": {
+        "code": -32042,
+        "data": {
+          "dispatch_stage": "unknown",
+          "error_type": "unknown_outcome",
+          "operation_id": "op-ambiguous",
+          "retry_hint": "reconcile_first"
+        },
+        "message": "operation outcome is unknown"
+      }
+    }
+  ]
+}

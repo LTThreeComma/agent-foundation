@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package converge.agent_envd.eip.v1;
+
+import "google/protobuf/descriptor.proto";
+
+enum MethodKind {
+  METHOD_KIND_UNSPECIFIED = 0;
+  METHOD_KIND_REQUEST_RESPONSE = 1;
+  METHOD_KIND_SERVER_NOTIFICATION = 2;
+}
+
+enum IdempotencyClass {
+  IDEMPOTENCY_CLASS_UNSPECIFIED = 0;
+  IDEMPOTENCY_CLASS_INITIALIZATION = 1;
+  IDEMPOTENCY_CLASS_READ_ONLY_RETRY = 2;
+  IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY = 3;
+  IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL = 4;
+  IDEMPOTENCY_CLASS_SESSION_TERMINAL = 5;
+  IDEMPOTENCY_CLASS_STATE_EXPORT = 6;
+  IDEMPOTENCY_CLASS_NOTIFICATION = 7;
+}
+
+enum IdempotencyKeyMode {
+  IDEMPOTENCY_KEY_MODE_UNSPECIFIED = 0;
+  IDEMPOTENCY_KEY_MODE_DISALLOWED = 1;
+  IDEMPOTENCY_KEY_MODE_OPTIONAL = 2;
+  IDEMPOTENCY_KEY_MODE_REQUIRED = 3;
+}
+
+enum ErrorFamily {
+  ERROR_FAMILY_UNSPECIFIED = 0;
+  ERROR_FAMILY_COMMON = 1;
+  ERROR_FAMILY_INITIALIZATION = 2;
+  ERROR_FAMILY_RESOURCE = 3;
+  ERROR_FAMILY_COMMAND = 4;
+  ERROR_FAMILY_PROCESS = 5;
+  ERROR_FAMILY_OUTPUT = 6;
+  ERROR_FAMILY_STATE = 7;
+  ERROR_FAMILY_SESSION = 8;
+  ERROR_FAMILY_NOTIFICATION = 9;
+}
+
+message EIPMethodOptions {
+  string jsonrpc_method = 1;
+  string capability = 2;
+  MethodKind kind = 3;
+  IdempotencyClass idempotency = 4;
+  IdempotencyKeyMode idempotency_key = 5;
+  uint32 introduced_major = 6;
+  uint32 introduced_minor = 7;
+  ErrorFamily error_family = 8;
+}
+
+message EIPMessageOptions {
+  bool transparent = 1;
+  bool discriminated_union = 2;
+  bool additive_response = 3;
+}
+
+message EIPEnumValueOptions {
+  string json_name = 1;
+}
+
+enum EIPStringFormat {
+  EIP_STRING_FORMAT_UNSPECIFIED = 0;
+  EIP_STRING_FORMAT_IDENTIFIER = 1;
+  EIP_STRING_FORMAT_PATH = 2;
+  EIP_STRING_FORMAT_BASE64_UNPADDED = 3;
+  EIP_STRING_FORMAT_PROTOCOL_VERSION = 4;
+}
+
+message EIPFieldOptions {
+  EIPStringFormat string_format = 1;
+  optional uint64 minimum = 2;
+  optional uint64 maximum = 3;
+  optional uint32 min_length = 4;
+  optional uint32 max_length = 5;
+  optional bool const_bool = 6;
+  optional string const_string = 7;
+  optional bool default_bool = 8;
+  optional uint64 default_uint = 9;
+  optional string default_string = 10;
+  bool default_message = 11;
+}
+
+extend google.protobuf.MethodOptions {
+  EIPMethodOptions eip_method = 51001;
+}
+
+extend google.protobuf.MessageOptions {
+  EIPMessageOptions eip_message = 51002;
+}
+
+extend google.protobuf.EnumValueOptions {
+  EIPEnumValueOptions eip_enum_value = 51003;
+}
+
+extend google.protobuf.FieldOptions {
+  EIPFieldOptions eip_field = 51004;
+}

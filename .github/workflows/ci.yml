@@ -26,6 +26,7 @@ jobs:
       agent_envd: ${{ steps.filter.outputs.agent_envd }}
       agent_envd_client: ${{ steps.filter.outputs.agent_envd_client }}
       agent_harness: ${{ steps.filter.outputs.agent_harness }}
+      eip_protocol: ${{ steps.filter.outputs.eip_protocol }}
       automation: ${{ steps.filter.outputs.automation }}
       containers: ${{ steps.filter.outputs.containers }}
       python: ${{ steps.filter.outputs.python }}
@@ -49,12 +50,41 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'Makefile'
               - 'crates/agent-envd/**'
+              - 'proto/agent-envd/eip/**'
+              - 'scripts/eip_codegen/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'pyproject.toml'
+              - 'uv.lock'
             agent_envd_client:
               - '.github/workflows/ci.yml'
               - 'Makefile'
               - 'packages/agent-envd-client/**'
+              - 'proto/agent-envd/eip/**'
+              - 'scripts/eip_codegen/**'
+              - 'scripts/tests/test_eip_codegen.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            eip_protocol:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release-agent-envd.yml'
+              - 'Makefile'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/agent-envd/Cargo.toml'
+              - 'crates/agent-envd/build.rs'
+              - 'crates/agent-envd/build_support/**'
+              - 'crates/agent-envd/protocol/eip/**'
+              - 'crates/agent-envd/src/eip/**'
+              - 'crates/agent-envd/src/lib.rs'
+              - 'packages/agent-envd-client/pyproject.toml'
+              - 'packages/agent-envd-client/converge_agent_envd_client/eip/**'
+              - 'packages/agent-envd-client/tests/eip/**'
+              - 'proto/agent-envd/eip/**'
+              - 'scripts/eip_codegen/**'
+              - 'scripts/tests/test_eip_codegen.py'
+              - 'spec/agent-envd/02-eip-protocol.md'
+              - 'spec/agent-envd/08-protocol-source-client-and-generation.md'
               - 'pyproject.toml'
               - 'uv.lock'
             agent_harness:
@@ -148,6 +178,39 @@ jobs:
         run: >-
           docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
           -ignore 'unexpected key "queue" for "concurrency" section'
+
+  eip-protocol:
+    name: EIP protocol
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.eip_protocol == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: eip-protocol
+
+      - name: Verify generated protocol and shared wire models
+        run: make eip-check
 
   python:
     name: Python workspace

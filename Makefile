@@ -83,6 +83,22 @@ docs-build: sync docs-check ## Build the documentation site in strict mode
 test: sync ## Run Python workspace tests
 	@uv run --locked python -m pytest
 
+.PHONY: eip-generate
+eip-generate: sync ## Generate checked EIP descriptor, Python surface, and inspection artifacts
+	@uv run --locked python -m scripts.eip_codegen generate
+
+.PHONY: eip-verify
+eip-verify: sync ## Verify checked EIP artifacts without modifying the repository
+	@uv run --locked python -m scripts.eip_codegen verify
+
+.PHONY: eip-test
+eip-test: sync ## Run EIP generator and shared Python/Rust wire-model tests
+	@uv run --locked python -m pytest scripts/tests/test_eip_codegen.py packages/agent-envd-client/tests/eip
+	@cargo test --locked --package converge-agent-envd --lib eip::tests
+
+.PHONY: eip-check
+eip-check: eip-verify eip-test ## Run the complete EIP protocol gate
+
 .PHONY: python-build
 python-build: sync ## Build all Python workspace distributions
 	@rm -rf dist
@@ -293,10 +309,10 @@ python-check: lint typecheck test ## Run the fast Python workspace gate
 python-check-all: python-check python-build docs-build ## Run the complete Python and documentation gate
 
 .PHONY: check
-check: python-check rust-check sdk-check ## Run the fast repository gate
+check: eip-check python-check rust-check sdk-check ## Run the fast repository gate
 
 .PHONY: check-all
-check-all: python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
+check-all: eip-check python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
