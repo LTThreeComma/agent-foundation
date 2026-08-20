@@ -9,6 +9,11 @@ dependencies = [
     "converge-logging",
 ]
 
+[dependency-groups]
+test = [
+    "pytest>=9,<10",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

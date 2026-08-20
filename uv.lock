@@ -277,8 +277,16 @@ dependencies = [
     { name = "converge-logging" },
 ]
 
+[package.dev-dependencies]
+test = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [{ name = "converge-logging", editable = "packages/logging" }]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest", specifier = ">=9,<10" }]
 
 [[package]]
 name = "converge-foundation-service"

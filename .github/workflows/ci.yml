@@ -23,10 +23,11 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
+      agent_envd: ${{ steps.filter.outputs.agent_envd }}
+      agent_harness: ${{ steps.filter.outputs.agent_harness }}
       automation: ${{ steps.filter.outputs.automation }}
       containers: ${{ steps.filter.outputs.containers }}
       python: ${{ steps.filter.outputs.python }}
-      rust: ${{ steps.filter.outputs.rust }}
       sdk_go: ${{ steps.filter.outputs.sdk_go }}
       sdk_python: ${{ steps.filter.outputs.sdk_python }}
       sdk_rust: ${{ steps.filter.outputs.sdk_rust }}
@@ -43,6 +44,18 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
+            agent_envd:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'crates/agent-envd/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            agent_harness:
+              - '.github/workflows/ci.yml'
+              - 'packages/agent-harness/**'
+              - 'packages/logging/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
             automation:
               - '.github/**'
               - 'scripts/check-release-version.py'
@@ -65,12 +78,6 @@ jobs:
               - 'scripts/**'
               - 'pyproject.toml'
               - 'uv.lock'
-            rust:
-              - '.github/workflows/ci.yml'
-              - 'Makefile'
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
             sdk_go:
               - '.github/workflows/ci.yml'
               - 'Makefile'
@@ -159,11 +166,92 @@ jobs:
       - name: Run Python checks and build distributions
         run: make typecheck test python-build
 
-  rust:
-    name: Rust workspace
+  agent-harness:
+    name: Agent Harness (${{ matrix.name }})
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agent_harness == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+          - name: Windows x64
+            runner: windows-2025
+            architecture: x64
+          - name: Windows arm64
+            runner: windows-11-arm
+            architecture: arm64
+          - name: macOS x64
+            runner: macos-15-intel
+            architecture: x64
+          - name: macOS arm64
+            runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.architecture }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Run Agent Harness tests
+        run: >-
+          uv run --locked --package converge-agent-harness --no-default-groups
+          --group test python -m pytest packages/agent-harness/tests
+
+  agent-envd:
+    name: agent-envd (${{ matrix.name }})
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agent_envd == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            cache-key: linux-x64
+            complete: true
+            components: clippy, rustfmt
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            cache-key: linux-arm64
+            complete: false
+            components: ""
+          - name: Windows x64
+            runner: windows-2025
+            cache-key: windows-x64
+            complete: false
+            components: ""
+          - name: Windows arm64
+            runner: windows-11-arm
+            cache-key: windows-arm64
+            complete: false
+            components: ""
+          - name: macOS x64
+            runner: macos-15-intel
+            cache-key: macos-x64
+            complete: false
+            components: ""
+          - name: macOS arm64
+            runner: macos-15
+            cache-key: macos-arm64
+            complete: false
+            components: ""
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -171,15 +259,23 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
-          components: clippy, rustfmt
+          components: ${{ matrix.components }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: agent-envd-${{ matrix.cache-key }}
 
-      - name: Run complete Rust checks
+      - name: Run complete agent-envd checks
+        if: matrix.complete
         run: make rust-check-all
+
+      - name: Run agent-envd tests
+        if: matrix.complete == false
+        run: cargo test --locked --package converge-agent-envd
 
   sdk-python:
     name: Python SDK
