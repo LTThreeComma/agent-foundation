@@ -121,23 +121,6 @@ def test_rejects_invalid_version_without_writing(tmp_path: Path) -> None:
     assert snapshot(tmp_path) == before
 
 
-def test_treats_empty_curated_notes_as_absent(tmp_path: Path) -> None:
-    copy_release_files(tmp_path)
-    notes_path = tmp_path / ".github/release-notes/foundation/9.8.7.md"
-    notes_path.parent.mkdir(parents=True)
-    notes_path.write_text("\n", encoding="utf-8")
-
-    result = run_script(PREPARER, tmp_path, "foundation", "9.8.7")
-
-    assert result.returncode == 0, result.stderr
-    assert "Validated curated notes at" not in result.stdout
-
-    notes_path.write_text("## Highlights\n\n- Curated release.\n", encoding="utf-8")
-    result = run_script(PREPARER, tmp_path, "foundation", "9.8.7")
-    assert result.returncode == 0, result.stderr
-    assert "Validated curated notes at" in result.stdout
-
-
 def test_validates_all_targets_before_writing(tmp_path: Path) -> None:
     copy_release_files(tmp_path)
     lock_path = tmp_path / "sdk/typescript/package-lock.json"

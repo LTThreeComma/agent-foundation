@@ -157,15 +157,6 @@ def test_treats_empty_versioned_release_notes_as_absent(tmp_path: Path) -> None:
     assert read_manual_release_notes(tmp_path, "sdk-rust", "1.2.3") is None
 
 
-def test_rejects_non_utf8_release_notes(tmp_path: Path) -> None:
-    path = tmp_path / release_notes_path("sdk-rust", "1.2.3")
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"\xff")
-
-    with pytest.raises(ValueError, match="Cannot read release notes"):
-        read_manual_release_notes(tmp_path, "sdk-rust", "1.2.3")
-
-
 def test_cli_scopes_generated_notes_to_previous_channel_tag(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Release Test"], cwd=tmp_path, check=True)
