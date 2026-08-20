@@ -13,7 +13,8 @@ This document defines the normative content and workflow boundaries of the Agent
 | GitHub Issues     | Primary venue for proposals, open questions, design discussion, coordination, and progress tracking   | Normative design or implementation state                                                                          |
 | Pull requests     | Reviewed mechanism for changing specifications, documentation, code, tests, and repository automation | Long-running discussion that belongs in an issue                                                                  |
 | `CONTRIBUTING.md` | Contributor setup, local development, validation, and pull-request workflow                           | Product or architecture design                                                                                    |
-| `AGENTS.md`       | Concise operational guidance for coding agents working in the repository                              | Detailed design already owned by `spec/`                                                                          |
+| `DEVELOPMENT.md`  | Repository-wide engineering standards for deployable services, persistence, migrations, and images    | Product semantics, package-specific commands, and rollout history                                                 |
+| `AGENTS.md`       | Concise operational guidance for coding agents working in the repository                              | Detailed design owned by `spec/` or engineering standards owned by `DEVELOPMENT.md`                               |
 | `packages/`       | Python 3.13 uv workspace packages whose distribution names use the `converge-` prefix                 | Design discussion and unrelated generated artifacts                                                               |
 | `crates/`         | Rust workspace crates whose package names use the `converge-` prefix                                  | Python packages and local reference repositories                                                                  |
 
@@ -61,6 +62,12 @@ Do not add the following to `spec/`:
 - temporary migration planning that is not part of the accepted design.
 
 Keep those materials in GitHub Issues. When discussion changes the accepted design, update `spec/` through a pull request and make the resulting document internally consistent without requiring readers to reconstruct issue history.
+
+## Development Standards
+
+`DEVELOPMENT.md` defines how deployable services are implemented consistently across the repository. It owns cross-service coding and operational engineering conventions such as async I/O, database session and transaction lifetimes, migration generation and locking, streaming endpoint resource safety, logging, process roles, and container construction.
+
+The development guide does not establish product semantics or subsystem ownership; those remain in `spec/`. It also does not replace package-local setup and command documentation or the contributor workflow in `CONTRIBUTING.md`. `AGENTS.md` may summarize high-risk rules and link to the guide, but must not become a second complete copy.
 
 ## Repository Automation
 

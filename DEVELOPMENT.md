@@ -89,4 +89,4 @@ Build one reproducible multi-stage image from `uv.lock` for all roles. Run as no
 
 Image changes must verify build, non-root startup, role selection, migration ownership, health/readiness, and SIGTERM handling. Package-specific commands are documented in [packages/foundation-service/README.md](packages/foundation-service/README.md).
 
-The separate sandbox image is a non-root Debian runtime with `agent-envd`, process supervision, the system CA bundle, and a small set of common command-line tools. It is built from the same source revision rather than downloading an unverified latest binary. Pushes to `main` publish both service and sandbox images as `dev` plus an immutable commit tag; release tags publish exact semantic-version image tags.
+The separate sandbox image is a non-root Debian runtime with `agent-envd`, process supervision, the system CA bundle, and a small set of common command-line tools. It is built from the same source revision rather than downloading an unverified latest binary.

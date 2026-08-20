@@ -12,7 +12,7 @@ Agent Foundation is a Python-first open-source cloud foundation for building age
 - `DEVELOPMENT.md` defines repository-wide engineering standards for deployable services.
 - `MAINTAINERS.md` defines semantic reviewer routing.
 
-Read [spec/repository-model.md](spec/repository-model.md) before changing repository structure or workflow. **Before starting implementation work, read [DEVELOPMENT.md](DEVELOPMENT.md).** Its applicable engineering rules are mandatory, especially for service code, persistence, migrations, streaming endpoints, workers, logging, and container behavior.
+Read [spec/repository-model.md](spec/repository-model.md) before changing repository structure or workflow. **Before starting any change, read [CONTRIBUTING.md](CONTRIBUTING.md); before implementation, also read [DEVELOPMENT.md](DEVELOPMENT.md).** The contribution workflow and applicable engineering standards are mandatory.
 
 ## Workflow
 
@@ -31,7 +31,7 @@ Read [spec/repository-model.md](spec/repository-model.md) before changing reposi
 
 ## Development
 
-Do not implement from this summary alone. Read [DEVELOPMENT.md](DEVELOPMENT.md) first and follow the applicable standards throughout design, implementation, and review.
+Do not work from this summary alone. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for the Issue-to-PR workflow and [DEVELOPMENT.md](DEVELOPMENT.md) for implementation standards throughout design, development, and review.
 
 The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`. Foundation Service SDKs live independently under `sdk/{python,go,rust,typescript}` and do not join the root Python or Rust workspaces.
 
