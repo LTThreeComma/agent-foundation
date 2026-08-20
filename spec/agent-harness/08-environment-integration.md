@@ -2,9 +2,9 @@
 
 ## Design Position
 
-The host composes provider resources and an initial `EnvironmentTopologyRequest` into a single-use `EnvironmentRunBinding`. During stream entry, the Harness binds it to the new run ID and trusted Agent instance, enters its async resource scope, and publishes one stable multi-binding `BoundEnvironment` through `AgentContext`. The public `EnvironmentCapability` integrates that exact facade with Pydantic lifecycle, state, model context, and topology notices; it does not retain another Environment list.
+The host composes provider resources and an initial `EnvironmentTopologyRequest` into a single-use `EnvironmentRunBinding`. During stream entry, the Harness binds it to the new run ID and trusted Agent instance, enters its async resource scope, and publishes one stable multi-binding `BoundEnvironment` through `AgentContext`. Entry establishes trusted binding identity, descriptors, routing, and a readiness path, but a provider can continue provisioning operation resources in the background. The public `EnvironmentCapability` integrates that exact facade with Pydantic lifecycle, state, model context, and topology notices; it does not retain another Environment list.
 
-Environment operations are provider-neutral. `LocalFileOperator` and `LocalShell` are first-class direct implementations for an embedding process that intentionally grants local roots and commands. `agent-envd` and its EIP adapters are equally first-class backends for sandboxed, container, E2B, remote, or otherwise daemon-governed resources. Local execution is never forced through a daemon, and using a direct local backend makes no sandbox claim.
+Environment operations are provider-neutral. `LocalFileOperator` and `LocalShell` are first-class direct implementations for an embedding process that intentionally grants local roots and commands. The Harness directly includes the EIP Environment adapter over the generated `converge-agent-envd-client` package for sandboxed, container, E2B, remote, or otherwise daemon-governed resources. Local execution is never forced through a daemon, and using a direct local backend makes no sandbox claim.
 
 `BoundEnvironment.files` is a stable virtual filesystem facade that can route across direct-local and EIP-backed bindings. A host-retained `EnvironmentTopologyController` paired with the run binding atomically publishes immutable routing snapshots while the run remains active, without replacing `AgentContext.environment`, rebuilding the Agent, or changing its cacheable instruction prefix.
 
@@ -12,22 +12,26 @@ The host selects bindings. The harness performs binding selection, lexical valid
 
 ## Boundary
 
-| Concern                                                                                                              | Owner                                               |
-| -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Available Environment bindings                                                                                       | Host                                                |
-| Process-local multi-Environment facade, virtual filesystem routing, live topology observation, and state aggregation | Harness                                             |
-| Agent Identity and lineage                                                                                           | `AgentContext`                                      |
-| Direct local path and process enforcement                                                                            | `LocalFileOperator`, `LocalShell`, and embedding OS |
-| EIP canonical resources, generations, handles, cursors, and retained output                                          | `agent-envd`                                        |
-| EIP connection initialization, negotiation, methods, payloads, errors, and transport semantics                       | [agent-envd and EIP](../agent-envd/00-overview.md)  |
-| Vendor provision, attach, suspend, and destroy lifecycle                                                             | Host provider adapter                               |
-| Native isolation and outer resource enforcement                                                                      | Selected local or sandbox provider                  |
+| Concern                                                                                                              | Owner                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Available Environment bindings                                                                                       | Host                                                                                                                                  |
+| Process-local multi-Environment facade, virtual filesystem routing, live topology observation, and state aggregation | Harness                                                                                                                               |
+| Agent Identity and lineage                                                                                           | `AgentContext`                                                                                                                        |
+| Direct local path and process enforcement                                                                            | `LocalFileOperator`, `LocalShell`, and embedding OS                                                                                   |
+| EIP canonical resources, generations, handles, cursors, and retained output                                          | `agent-envd` and its [resource](../agent-envd/04-resource-operations.md) and [output](../agent-envd/06-output-retention.md) contracts |
+| EIP initialization, methods, payloads, errors, cancellation, and receipts                                            | [EIP Protocol](../agent-envd/02-eip-protocol.md)                                                                                      |
+| Generated EIP models, codecs, typed stubs, and transport/session runtime                                             | [`converge-agent-envd-client`](../agent-envd/08-protocol-source-client-and-generation.md)                                             |
+| EIP-to-provider-neutral Environment adaptation                                                                       | Harness                                                                                                                               |
+| EIP framing, authentication, and session lifecycle                                                                   | [Transports and Sessions](../agent-envd/03-transports-and-sessions.md)                                                                |
+| Vendor provision, attach, suspend, and destroy lifecycle                                                             | Host provider adapter                                                                                                                 |
+| Envd inner command isolation                                                                                         | [Execution Isolation](../agent-envd/07-execution-isolation.md), in `required` or explicit `disabled` mode                             |
+| Outer container, VM, and provider resource enforcement                                                               | Selected sandbox provider                                                                                                             |
 
 Provider denial always narrows a harness allow decision. Binding IDs, paths, handles, and cursors are selectors, not bearer credentials.
 
-The base Harness imports neither an `agent-envd` transport nor Docker, E2B, or another vendor SDK. Backend packages implement the provider-neutral file, shell, process, port, and state protocols. The local package supplies direct implementations; an EIP package maps the same semantic surface to `agent-envd`. A sandbox provider adapter provisions or attaches its environment and establishes the daemon connection before producing an EIP-backed run binding. Provider lifecycle credentials remain on the Host side; transport credentials and trusted binding context stay inside the binding and backend. Neither appears in `EnvironmentDescriptor`, model-facing operations, or saved Environment state.
+The Harness depends on the low-level `converge-agent-envd-client` and owns the direct adapter from generated EIP values to its provider-neutral file, shell, process, port, and state protocols. It does not implement JSON-RPC, transport framing, API-key/session handling, or generated wire models, and it imports no Docker, E2B, or other vendor SDK. A sandbox provider adapter provisions or attaches its environment and supplies trusted connection/bootstrap configuration before producing an EIP-backed run binding. Provider lifecycle credentials remain on the Host side; transport credentials and trusted binding context stay inside the binding and client session. Neither appears in `EnvironmentDescriptor`, model-facing operations, or saved Environment state.
 
-For an EIP-backed binding, stdio, HTTP, and WebSocket are interchangeable transport profiles for one EIP method and payload contract, not separate Environment implementations. Transport selection is fixed for one entered connection. Reconnect or fallback initializes a fresh connection and revalidates Environment identity, generation, capabilities, and authority; it never retargets an opaque handle or silently retries an ambiguous mutation. Direct-local bindings have no transport negotiation. The EIP protocol and failure rules are defined by [agent-envd and EIP](../agent-envd/00-overview.md).
+For an EIP-backed binding, the Harness adapter uses the client package's stdio, HTTP, or WebSocket session runtime. They are interchangeable transport profiles for one generated EIP method and payload contract, not separate Environment implementations. Transport selection is fixed for one entered connection. Reconnect, including an explicit Host selection of another profile, initializes a fresh session and revalidates Environment identity, generation, capabilities, and authority; there is no automatic transport fallback, opaque-handle retargeting, or silent retry of an ambiguous mutation. Direct-local bindings have no transport negotiation. [EIP Protocol](../agent-envd/02-eip-protocol.md) owns method and failure semantics, while [Transports and Sessions](../agent-envd/03-transports-and-sessions.md) owns framing, API-key authentication, and WebSocket initialization.
 
 ## Binding and Facade
 
@@ -69,6 +73,13 @@ class EnvironmentTopology(BaseModel):
     default_binding_id: str | None
 
 
+class EnvironmentReadinessRequirement(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operations: frozenset[EnvironmentOperation]
+    binding_ids: frozenset[str] | None = None
+
+
 class BoundEnvironment(Protocol):
     @property
     def topology(self) -> EnvironmentTopology: ...
@@ -86,6 +97,10 @@ class BoundEnvironment(Protocol):
     def ports(self) -> BoundPortOperations: ...
 
     async def describe(self, binding_id: str) -> EnvironmentDescriptor: ...
+    async def ensure_ready(
+        self,
+        requirement: EnvironmentReadinessRequirement,
+    ) -> None: ...
     async def export_state(self) -> EnvironmentState: ...
     async def restore_state(self, state: EnvironmentState) -> None: ...
 
@@ -123,11 +138,30 @@ class EnvironmentTopologyController(Protocol):
 
 `EnvironmentBindingRequest` and `EnvironmentTopologyRequest` are trusted desired inputs, not observed provider state. Their `provider_ref` selects an already authorized provider resource factory or connection setup and contains no vendor credential, lifecycle reattachment record, or `EnvironmentDescriptor`. The Host provider adapter consumes any lifecycle record before constructing the run binding or request. All request and published snapshot types are frozen value objects; nested provider references, descriptors, permission sets, limits, and mappings used by routing or authority are likewise frozen or normalized to immutable tuples and read-only mappings. `frozen=True` alone is not treated as deep immutability.
 
-`EnvironmentRunBinding` is trusted host input and is single-use for one Harness stream. Its `bind()` method verifies the supplied instance, creates the run-local routing coordinator, prepares and enters the requested backend resources, obtains each backend descriptor, intersects requested permission ceilings with observed capabilities and provider policy, and only then publishes `EnvironmentBinding` values through the facade. Run assembly validates that the published surface satisfies `AgentDefinition.environment.operations` before model or tool work. EIP initialization is part of entering an EIP backend; direct-local entry validates configured roots, command policy, and local resource bounds without starting a daemon. Failed entry closes every provider already opened; normal exit closes providers after operation leases drain. Rebinding the same object, using a controller paired with another binding, or presenting provider state for another instance fails before model work. Policy and invocation-grant collaborators are captured by the trusted binding or its providers rather than accepted from model-facing operations.
+`EnvironmentRunBinding` is trusted host input and is single-use for one Harness stream. Its `bind()` method verifies the supplied instance, creates the run-local routing coordinator, enters each provider's binding scope, obtains a trustworthy identity and descriptor, intersects requested permission ceilings with observed capabilities and provider policy, and only then publishes `EnvironmentBinding` values through the facade. Run assembly validates that the published surface advertises every `AgentDefinition.environment.operations` family before model or tool work. A provider may publish such a family while its concrete worker or operation resource is still provisioning only when it supplies the bounded readiness path defined below; advertisement without an enforceable readiness path is invalid.
+
+EIP session initialization and authenticated Environment identity are part of entering an EIP backend, while later worker or operation provisioning can remain pending. Direct-local entry validates configured roots, command policy, and local resource bounds without starting a daemon. Failed entry closes every provider already opened; normal exit cancels or drains provisioning and closes providers after operation leases drain. Rebinding the same object, using a controller paired with another binding, or presenting provider state for another instance fails before model work. Policy and invocation-grant collaborators are captured by the trusted binding or its providers rather than accepted from model-facing operations.
 
 `BoundEnvironment` is always a multi-Environment aggregate. Zero bindings form the no-operation case and one binding is the ordinary simple case; tools and Capabilities never switch between separate single- and multi-Environment context types. `EnvironmentDescriptor` is a provider-neutral observed value published only after backend entry or refresh; EIP initialization is one way to obtain it. Provider clients, lifecycle records, and credentials are absent from desired and published public bindings.
 
 The host creates and retains the run binding and its `EnvironmentTopologyController`; neither mutation handle is placed on `AgentContext` or exposed as an Agent tool. The controller is inactive before the Pydantic run starts, becomes active through the Environment Capability's run observer, and becomes permanently closed when the binding's context exits. The controller and entered `BoundEnvironment` are paired handles over the same run-local routing coordinator. The five `BoundEnvironment` facade members and the run binding's paired `controller` are read-only Protocol properties with no replacement setter. `BoundEnvironment.topology` is an immutable current snapshot backed by the coordinator's private normalized values, not caller-owned objects. Each `EnvironmentBinding`, its permission ceiling, and its observed provider generation are recursively immutable within one snapshot. A topology replacement creates another snapshot rather than mutating values already selected by an operation.
+
+## Scoped Readiness
+
+`EnvironmentReadinessRequirement` names provider-neutral operation families and optionally an exact set of current `binding_id` values. `binding_ids=None` selects every binding in the captured topology whose effective descriptor advertises at least one requested operation; a Capability that depends on one workspace or Environment selects its exact binding IDs. An empty operation set or explicitly empty binding-ID set is invalid. The requirement contains no provider name, task handle, event, polling callback, credential, or implementation-specific readiness token.
+
+`ensure_ready()` captures one immutable topology snapshot and computes the selected set. Selection must be non-empty, every explicitly selected ID must exist and advertise at least one requested family, and the union of requested families advertised across the selected set must cover the complete requirement. The method awaits each selected provider only for the non-empty intersection between that binding's advertised families and the requirement. Thus heterogeneous bindings can satisfy an aggregate requirement, while one explicitly selected workspace must itself cover every requested family. No match or missing aggregate coverage fails before any success is reported; it never succeeds vacuously.
+
+Concurrent equivalent or overlapping waits share provider provisioning without requiring Capability-to-Capability coordination. Successful return means every requested family is ready on at least one selected binding, and every selected per-binding intersection is ready under that binding identity and generation for the current binding lifetime. Binding removal, generation change, timeout, cancellation, provider failure, or teardown returns a typed Environment failure; it never silently retargets the requirement.
+
+Readiness has two uses:
+
+- a Capability whose first model-visible instructions or tool surface depends on Environment data awaits readiness in its Pydantic `for_run()`, materializes that data once, and returns an immutable run-bound Capability;
+- a concrete file, shell, process, port, or state operation ensures readiness for its already selected binding and operation before dispatch.
+
+A `RunInputFactory` executes before Capability `for_run()`. When input production itself needs a ready operation, it calls the same `ensure_ready()` contract through `RunPreparationContext.environment`. The Harness does not add a global prepare hook or wait for unrelated providers. `before_run()` is not a model-surface preparation seam, and one Capability never waits for a sibling Capability's setup event.
+
+Readiness is not topology, authority, or continuation state. It is not stored in `HarnessState`; a later run binds providers again and reevaluates requirements. Provider-specific worker events remain private. A readiness failure before the first model request fails the owning input or Capability path before exposing an incomplete model surface. A later lazy operation failure is attributed to that operation.
 
 ## Model-facing Routing
 
@@ -224,7 +258,7 @@ sequenceDiagram
     Backend-->>Bound: provider-neutral outcome
 ```
 
-When central policy depends on a provider-canonical resource, the backend uses an explicit provider resolution operation before the final policy decision. The Harness never infers a canonical remote path from lexical text. EIP invocation context can carry the generic grant reference defined by the invocation-security boundary. Direct-local backends preserve the same policy inputs without inventing network tokens.
+When central policy depends on a provider-canonical resource, the backend uses an explicit provider resolution operation before the final policy decision. The Harness never infers a canonical remote path from lexical text. EIP uses [`resource.resolve`](../agent-envd/04-resource-operations.md#canonical-resource-resolution), then re-resolves at final dispatch against the generic invocation-grant reference defined by the invocation-security boundary. Direct-local backends preserve the same policy inputs without inventing network tokens.
 
 ## File and Shell Surface
 
@@ -232,7 +266,7 @@ The public semantic protocols retain the useful SDK split:
 
 - `FileOperator` is the provider-neutral async file contract;
 - `LocalFileOperator` maps configured logical roots directly to host files with canonical containment and symlink-escape checks;
-- `EIPFileOperator` maps the same contract to an EIP-backed binding;
+- the Harness-owned EIP file adapter maps the same contract through `converge-agent-envd-client` to an EIP-backed binding;
 - `VirtualFileOperator` is the stable mount-and-routing facade used by `BoundEnvironment.files`;
 - `Shell` is the provider-neutral command and process contract;
 - `LocalShell` and `EIPShell` are direct and daemon-backed first-class implementations.
@@ -264,7 +298,7 @@ Background work outlives a run only through explicit Host and backend retention.
 
 The Harness exposes a compact set of categories: invalid request, denied, unsupported, stale binding, invalid topology, topology in use, unavailable, timeout, unknown outcome, and provider failure. EIP method codes and provider diagnostics remain bounded extensions. Transport-specific framing and authentication failures are normalized without erasing whether a valid JSON-RPC method error was received.
 
-Transport loss after a mutation is unknown unless `agent-envd` can replay the same idempotency identity or reconcile a receipt. Closing stdio, HTTP, or WebSocket is not proof of cancellation. The Harness does not translate ambiguity into success or blind retry; the detailed boundary belongs to [agent-envd and EIP](../agent-envd/00-overview.md#failure-and-side-effect-semantics).
+Transport loss after a mutation is unknown unless `agent-envd` can replay the same idempotency identity or reconcile a receipt. Closing stdio, HTTP, or WebSocket is not proof of cancellation. The Harness does not translate ambiguity into success or blind retry; [EIP retry and unknown-outcome semantics](../agent-envd/02-eip-protocol.md#retry-and-unknown-outcomes) own the detailed boundary.
 
 ## Trade-offs
 
@@ -274,6 +308,7 @@ Transport loss after a mutation is unknown unless `agent-envd` can replay the sa
 - Provider canonicalization prevents the Harness from pretending to understand remote filesystem semantics.
 - Opaque handles keep ownership authoritative at the provider, at the cost of provider-dependent reattachment.
 - A stable facade gives capabilities one interface without reproducing EIP lifecycle or transport internals.
+- Scoped readiness lets providers overlap provisioning with input and Capability setup, but any model-surface dependency still blocks the first dependent request and every operation must preserve typed failure and cancellation.
 - Supporting direct-local and EIP-backed implementations adds two backend packages, but one provider-neutral semantic contract and shared virtual routing prevent their tool behavior from diverging. Local embedding stays lightweight while sandbox enforcement remains beside sandbox resources.
 - Saving per-binding Environment state with Agent Context state makes continuation cohesive, at the cost of requiring each stateful provider to maintain a versioned codec.
 
@@ -293,3 +328,6 @@ Transport loss after a mutation is unknown unless `agent-envd` can replay the sa
 12. `VirtualFileOperator` routes recursively immutable mount snapshots without native-path fallback; direct and EIP operations preserve one provider-neutral file and shell contract.
 13. Direct and EIP retained outputs obey finite aggregate bytes and object counts in addition to per-call limits; allocation, release, expiry, and close cannot bypass those ceilings.
 14. For EIP-backed bindings, stdio, HTTP, and WebSocket do not change method semantics.
+15. Binding entry establishes trustworthy identity, descriptors, routing, and readiness paths; it does not imply that unrelated operation resources are already provisioned.
+16. Scoped readiness is typed, idempotent, generation-bound, requires non-empty aggregate operation coverage across a non-empty selected binding set, and never restores or grants authority.
+17. The Harness owns direct EIP Environment adaptation but delegates generated wire models, JSON-RPC, authentication/session carriers, and transport framing to `converge-agent-envd-client`.

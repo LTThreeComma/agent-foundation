@@ -17,7 +17,7 @@ flowchart TB
     RunContext --> Loop
 ```
 
-The Harness does not define a second generic hook system, Toolset lifecycle, dependency solver, or Capability registry. Pydantic AI public run and per-node hooks remain available to Capability authors. Direct native tools and Toolsets retain their upstream lifecycle and trusted-process boundary; portable declarative tool features use the owning Capability spec. The Harness adds only the semantic pre-run input-factory seam owned by the input contract because it must execute after Environment readiness and before a Pydantic run receives its prompt.
+The Harness does not define a second generic hook system, Toolset lifecycle, dependency solver, or Capability registry. Pydantic AI public run and per-node hooks remain available to Capability authors. Direct native tools and Toolsets retain their upstream lifecycle and trusted-process boundary; portable declarative tool features use the owning Capability spec. The Harness adds only the semantic pre-run input-factory seam owned by the input contract because it must execute after Environment binding and compatible state restore and before a Pydantic run receives its prompt. An input factory that needs a provisioned Environment operation explicitly awaits the typed readiness contract rather than relying on a global ready-all barrier.
 
 ## Native Composition
 
@@ -50,7 +50,9 @@ Hosts do not receive a list of generic callback slots. Agent-affecting lifecycle
 
 Per-node hooks remain an advanced Capability-author surface because checkpointing, safe suspension, usage collection, and host authority checks can require exact execution boundaries. A host collaborator passed to such a Capability receives semantic values such as a checkpoint boundary or authority decision request, not a raw graph node. The public `run()` and `stream()` methods therefore do not reproduce the former `pre_node_hook`, `post_node_hook`, `pre_event_hook`, or `post_event_hook` argument set.
 
-Pydantic may call sibling `for_run()` methods concurrently, so `for_run()` only derives a run-bound copy or binding and must not wait for another Capability's setup. Harness preparation has already bound and entered the Environment before the Pydantic run. `before_run()` remains an ordered observe-only seam for validation, state acceptance, and notifications that acquire no run-scoped resource. A Capability that acquires a connection, lease, task, or other scoped collaborator uses `wrap_run()` or its Toolset context manager, with `CapabilityOrdering` controlling wrapper nesting and teardown. Input production uses `RunInputFactory` because a prompt must exist before Pydantic can start the Agent run. Completion behavior uses Capability lifecycle or consumes the terminal Harness result; the Harness does not add `on_agent_start` and `on_agent_complete` callbacks beside those paths.
+Pydantic may call sibling `for_run()` methods concurrently, so `for_run()` derives a run-bound copy or binding and must not wait for another Capability's setup. Harness preparation has already bound and entered the Environment before the Pydantic run. An Environment-dependent Capability can directly await `ctx.deps.environment.ensure_ready(requirement)` in its own `for_run()`, then return an immutable run-bound replacement containing the instructions, Toolsets, or other model-surface values materialized from that ready resource. Pydantic re-extracts those contributions from the replacement before its first model request. The replacement performs no later discovery I/O, and its model-visible values remain stable for the run.
+
+`before_run()` remains an ordered observe-only seam for validation, state acceptance, and notifications that acquire no run-scoped resource. It is too late to select instructions or tool definitions because run contributions have already been assembled. A Capability that acquires a connection, lease, task, or other scoped collaborator uses `wrap_run()` or its Toolset context manager, with `CapabilityOrdering` controlling wrapper nesting and teardown. Input production uses `RunInputFactory` because a prompt must exist before Pydantic can start the Agent run; a factory that needs readiness calls the same `BoundEnvironment.ensure_ready()` contract itself because it runs before Capability `for_run()`. Completion behavior uses Capability lifecycle or consumes the terminal Harness result; the Harness does not add `on_agent_start` and `on_agent_complete` callbacks beside those paths.
 
 ## Capability Categories
 
@@ -138,22 +140,23 @@ class AgentContextState(BaseModel):
 
 The owning Capability defines its state model and version. A stateful Capability has an explicit stable Pydantic Capability ID; an automatically derived process-local ID is not a continuation key. It reads only its configured ID and replaces a validated value atomically; it does not mutate another Capability's entry. Stateless capabilities create no entry.
 
-Core and optional features use the same namespace model. The Environment Capability stores the current multi-binding `EnvironmentState` under its stable Capability ID; Working State, compaction, discovery, and other stateful Capabilities store their own typed entries. Inline delegation deliberately creates no partial parent-batch state; hosted child continuation remains host-owned. `AgentContextState` therefore remains extensible without adding a field for every feature.
+Core and optional features use the same namespace model. The Environment Capability stores the current multi-binding `EnvironmentState` under its stable Capability ID; Working State, compaction, discovery, and other stateful Capabilities store their own typed entries. The Delegation Capability stores bounded complete inline-child continuation snapshots under its own stable ID. A Host-owned background Capability either owns another explicit state entry or keeps its scheduler, delivery, and lifecycle data outside `HarnessState`; it cannot write another Capability's entry. `AgentContextState` therefore remains extensible without adding a field for every feature.
 
 | Continuation concern                                               | Owning Capability entry  |
 | ------------------------------------------------------------------ | ------------------------ |
 | Per-binding Environment and provider recovery data                 | Environment              |
-| Tasks, notes, and TODOs                                            | Working State            |
+| Local task snapshot or provider cursor, plus notes and TODOs       | Working State            |
 | Prior-response reference and compaction metadata                   | Compaction               |
 | Loaded tool and namespace IDs                                      | Tool Discovery           |
 | Pending explicit file references                                   | File Reference           |
+| Complete inline-child identities and continuation snapshots        | Delegation               |
 | Trusted deferred authorization correlation not already in messages | Invocation Authorization |
 
 Pydantic messages remain in `HarnessState.message_history`, outside the namespace map. Run usage, external API usage, queues, callbacks, locks, clients, configuration, host delivery records, and host lifecycle fields are either process-local observations or host state; they are not copied into `AgentContextState`.
 
 Messages remain Pydantic AI messages. `await AgentContext.export_state(message_history)` verifies envelope limits and JSON encodability and combines message history with the current namespace values. Before returning, it asks the bound Environment facade for its current state and replaces the Environment Capability entry. Other stateful Capabilities update their entries at the semantic transitions they own. Before first iteration, their imported entries are preserved as pending values rather than reported as refreshed or accepted; after run binding, every included entry has been accepted or produced by its owner. Entry replacement and snapshot copy use the same short process-local state lock. Entry validation occurs when the owning Capability reads or writes its typed state, so `AgentContext` does not maintain a second codec registry.
 
-Capability entries are reserved for continuation semantics that messages cannot express, including loaded tool discovery, working notes, and compaction metadata. They do not contain partial parent tool batches or inline-child execution state. Environment state can contain opaque references only to backend-local objects reachable after any required Host attachment and fresh binding construction; the owning backend codec treats them as non-authoritative and revalidates them. Provider-adapter lifecycle records, credentials, policy decisions, live clients, bearer handles, host delivery records, and durable lifecycle values are excluded.
+Capability entries are reserved for continuation semantics that messages cannot express, including loaded tool discovery, working notes, a local task snapshot or non-authoritative provider cursor, compaction metadata, and complete inline-child snapshots. Provider-backed task contents, scope authority, clients, and mutation receipts remain with the Host task provider and fresh run binding; imported cursor metadata never seeds that provider. Delegation State contains no active child task, running status, lock, partial parent tool batch, Host receipt, scheduler record, or delivery fact. A child snapshot becomes part of exported parent state only at a complete parent semantic boundary. Environment state can contain opaque references only to backend-local objects reachable after any required Host attachment and fresh binding construction; the owning backend codec treats them as non-authoritative and revalidates them. Provider-adapter lifecycle records, credentials, policy decisions, live clients, bearer handles, host delivery records, and durable lifecycle values are excluded.
 
 ## Capability Interaction
 
@@ -245,14 +248,15 @@ Identity, invocation authorization, context state, and any Capability needed to 
 
 ## Failure Semantics
 
-| Failure                                          | Result                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------ |
-| Capability configuration is invalid              | Agent build fails with Pydantic validation details           |
-| Capability ID is duplicated                      | Agent build or run setup fails                               |
-| Required Capability is absent or ordering cycles | Pydantic AI composition fails                                |
-| Imported state version is unsupported            | Run creation fails before model or tool work                 |
-| A Capability `for_run` or hook fails             | The run fails and entered resources close                    |
-| Optional checkpoint write fails                  | Host writer policy determines retry, warning, or run failure |
+| Failure                                           | Result                                                                                    |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Capability configuration is invalid               | Agent build fails with Pydantic validation details                                        |
+| Capability ID is duplicated                       | Agent build or run setup fails                                                            |
+| Required Capability is absent or ordering cycles  | Pydantic AI composition fails                                                             |
+| Imported state version is unsupported             | Run creation fails before model or tool work                                              |
+| A Capability `for_run` or hook fails              | The run fails and entered resources close                                                 |
+| Required Environment readiness fails or times out | The owning preparation or `for_run()` path fails before exposing dependent model behavior |
+| Optional checkpoint write fails                   | Host writer policy determines retry, warning, or run failure                              |
 
 ## Boundaries
 

@@ -47,7 +47,15 @@ Dynamic content is data under the trust level of its source. Retrieved text, fil
 
 ## Cache-stable Context Injection
 
-Agent and Toolset instructions contain stable behavior: tool purpose, generic routing syntax, safety constraints, and provider-independent usage guidance. They do not enumerate current Environment aliases, mounted projects, directory trees, live processes, working-state values, or other run-specific data. A live value therefore cannot change `get_instructions()` output, tool schemas, or another cacheable prefix segment.
+Model-facing data has three cache classes:
+
+- build-static behavior, including tool purpose, generic routing syntax, safety constraints, and provider-independent usage guidance, remains in the stable instruction and tool prefix;
+- run-frozen model surface, such as an Environment-backed skill catalog required for the first request, is materialized once by the owning Capability's `for_run()` after scoped readiness, deterministically ordered, and immutable for that Harness run;
+- request-dynamic context, including current Environment aliases, mounts, processes, working state, background results, and topology changes, enters a user-content suffix, enqueue, or owning history/request hook after the stable prefix.
+
+A run-frozen Capability returns a replacement whose `get_instructions()` and tool discovery read only frozen in-memory values and perform no provider, filesystem, or registry I/O. Pydantic re-extracts that replacement's contributions before the first model request. A provider cache breakpoint can separate the build-static prefix from a run-frozen catalog when the provider supports one; readiness and deterministic ordering prevent placeholder-to-real or mid-run mutations but do not claim a cross-run cache hit when catalog bytes differ.
+
+Request-dynamic data never mutates instructions or tool schemas. A Capability that intentionally supports hot reload takes a new Harness run or injects an explicit dynamic notice; it does not silently rescan and alter a cacheable prefix during one run. Ordinary operation readiness stays inside the selected Environment operation and does not force unrelated model-surface preparation.
 
 `ContextInputPart(placement="user_suffix")` is the standard semantic input for bounded fresh context. The input adapter appends it after the caller's ordinary text and media in the same user request. First-party Environment context uses this placement for the current topology and uses native enqueue to deliver a startup or coalesced live-change notice when no ordinary user content can carry required fresh routing context. Working state, file references, and similar Capabilities may use the same placement when their content is naturally associated with a user turn; content that transforms history for correctness remains in an owning Pydantic history Capability.
 
@@ -65,25 +73,89 @@ Messages are appended only at complete semantic boundaries. Tool calls and resul
 
 ## Working State Capability
 
-Tasks, notes, and per-Agent TODOs form one optional Working State Capability because they share tools, dynamic guidance, and persistence behavior.
+Tasks, notes, and per-Agent TODOs form one optional Working State Capability because they share tool presentation, bounded dynamic guidance, and persistence ownership while retaining distinct child-sharing rules.
 
 ```python
+class TaskState(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    revision: int = 0
+    tasks: Mapping[str, Task] = Field(default_factory=dict)
+
+
+type TaskStateMode = Literal["local", "provider"]
+
+
+class ProviderTaskCursor(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    provider_type: str
+    state_version: str
+    observed_revision: int | None = None
+
+
 class WorkingState(BaseModel):
-    tasks: tuple[Task, ...] = ()
-    notes: Mapping[str, str] = {}
+    model_config = ConfigDict(frozen=True)
+
+    task_mode: TaskStateMode = "local"
+    tasks: TaskState | None = None
+    provider_cursor: ProviderTaskCursor | None = None
+    notes: Mapping[str, str] = Field(default_factory=dict)
     todos: tuple[TodoItem, ...] = ()
+
+
+class TaskStateCell(Protocol):
+    """Task view already bound to one trusted Agent instance."""
+
+    async def snapshot(self) -> TaskState: ...
+    async def create(self, request: CreateTask) -> Task: ...
+    async def claim(
+        self,
+        task_id: str,
+        expected_revision: int | None = None,
+    ) -> Task: ...
+    async def update(
+        self,
+        task_id: str,
+        mutation: TaskMutation,
+        expected_revision: int,
+    ) -> Task: ...
+
+
+type TaskStateRunBindingSource = Literal["local_borrowed", "provider"]
+
+
+@dataclass(frozen=True)
+class TaskStateRunBinding:
+    source: TaskStateRunBindingSource
+    cell: TaskStateCell
 ```
+
+`TaskState`, `ProviderTaskCursor`, and `WorkingState` are replacement values. Their owners defensively copy and recursively normalize task, note, dependency, and status data into immutable values and read-only mappings before publication or state entry replacement; `frozen=True` alone is not treated as deep immutability. A cell never returns a mutable view that can bypass its revision boundary.
 
 The Capability:
 
 - contributes task, note, and TODO Toolsets selected by configuration;
 - contributes bounded dynamic user context describing relevant state;
-- stores `WorkingState` in its `AgentContextState` namespace;
-- defines explicit parent/child sharing policy.
+- stores its owned `WorkingState` in one `AgentContextState` namespace;
+- exposes a typed `TaskStateCell` for linearizable local or provider-backed task mutations;
+- defines the explicit child task projection without sharing a whole context or State map.
 
-Tasks can be shared with inline children when coordination is configured. TODOs are private to one Agent instance by default. Notes can be copied or shared by policy; no mutable object reference crosses a hosted child boundary.
+The Working State Capability configuration fixes `task_mode` for the definition. `TaskStateRunBinding` is trusted run input carried by `RunBindings.task_state`; it is never built from model-authored configuration or restored from State. Its cell is already bound to the trusted Agent instance, so model tools call `claim()` and `update()` without supplying an owner or actor. The binding source distinguishes a Harness-borrowed local view from a Host provider view only so the owning Capability can reject a mode mismatch.
 
-Working state assists the Agent. It is not a host workflow, scheduler, durable business task, or authorization source.
+`local` is the default. A root or parent Working State Capability owns complete `TaskState` and a process-local cell without requiring a run binding. For a shared inline child, the parent Capability creates a child-identity-bound view over that same local cell and the Delegation Capability places it in the child's final `RunBindings.task_state` with `source="local_borrowed"`. An isolated local child receives no task binding and owns its own local cell. A `local_borrowed` binding is valid only for a child instance with explicit parent lineage: the Delegation Capability creates it for inline execution, while a process-local Host can create it for a Host-owned background child under that Host's lifetime and State rules. An independent root cannot select it.
+
+In `provider` mode, `tasks` must be absent and every run requires one fresh Host-supplied `TaskStateRunBinding(source="provider")` whose API-backed cell is bound to that run's stable Agent instance. The trusted Host selects the provider scope according to the authored shared or isolated child policy, and that selection is authoritative for the run. A missing binding, source or mode mismatch, an imported local task map, or a Host binding that cannot serve the selected policy fails before task tools become available. The scope, provider client, credentials, Attempt fence, and authority stay behind the fresh cell and never enter `HarnessState`.
+
+`provider_cursor` is optional bounded non-authoritative continuation metadata. It can identify the provider codec and last observed revision for diagnostics or compatibility, but it cannot select a scope, seed or overwrite provider data, establish task ownership, or satisfy a provider read. On resume, the fresh provider binding is authoritative and every task operation reads its current state. The owning Capability validates or discards a compatible cursor without treating it as a task snapshot.
+
+Inline children use `DelegationContextPolicy.task_state="shared"` by default and receive an identity-bound view over the same local or provider-backed task store. A child view can list, create, claim, update, and complete tasks subject to current tool and Host policy. `claim(task_id)` derives the claimant from a stable non-authoritative `AgentInstanceRef` captured when the cell is bound, verifies dependencies and eligibility, advances a monotonic revision under the cell's linearization boundary, is idempotent for the same owner, and conflicts for another owner. General update and dependency mutation require the expected revision; task creation allocates under the same boundary, so concurrent children cannot duplicate IDs or silently overwrite one another.
+
+The child does not serialize a second copy of borrowed task state into its private nested `HarnessState`. In `local` mode, the parent Working State entry remains the sole snapshot owner: before each successful cell mutation returns, the parent Capability replaces `WorkingState.tasks` with that mutation's immutable revised `TaskState` under the Agent Context state lock. In `provider` mode, the Host provider is the sole task-data authority and the parent entry keeps `tasks=None`; after a successful provider mutation it may replace only the bounded observed cursor. A later parent export copies the applicable local snapshot or non-authoritative cursor together with the Delegation Capability's child-private continuation snapshots without a generic export callback or second state registry. Notes and TODOs remain private to one Agent instance. No non-task Capability state, mutable whole `WorkingState`, `AgentContextState`, or `AgentContext` object crosses the inline child boundary.
+
+A process-local Host can deliberately retain a local task cell for background children. A distributed Host selects `provider` mode and uses a durable task provider or service API with equivalent claim, mutation-idempotency, compare-and-swap, and stale-owner reconciliation semantics rather than sharing Python memory. If a provider mutation from an inline child outlives the enclosing parent checkpoint, the Host uses the mutation's trusted run provenance to reconcile that owner before replacement work proceeds; the Harness neither rolls it back nor lets a new child silently override it. Provider task data and lifecycle are not smuggled into a parent or child Harness snapshot.
+
+Working state assists Agent coordination. Task owner and status values are not execution authority, a Host workflow, scheduler, durable business task, or policy grant.
 
 ## Operational Context Capabilities
 
@@ -171,21 +243,22 @@ Provider writes can be inline when required for consistency or emitted as host w
 
 ## State Ownership
 
-| State                                       | Owner                                                                |
-| ------------------------------------------- | -------------------------------------------------------------------- |
-| Active Pydantic messages                    | `HarnessState.message_history`                                       |
-| Tasks, notes, TODOs                         | Working State Capability                                             |
-| Loaded skills or discovered tools           | Owning discovery Capability                                          |
-| Compaction-only metadata                    | Compaction Capability                                                |
-| Long-term memory records                    | Memory provider                                                      |
-| Recoverable multi-Environment state         | Environment Capability entry; native resources remain provider-owned |
-| Host delivery, counters, and scheduler work | Host                                                                 |
+| State                                       | Owner                                                                       |
+| ------------------------------------------- | --------------------------------------------------------------------------- |
+| Active Pydantic messages                    | `HarnessState.message_history`                                              |
+| Local task snapshot, notes, and TODOs       | Working State Capability; inline children can receive an explicit task view |
+| Provider-backed task data and scope         | Host task provider; Working State exports only an optional observed cursor  |
+| Loaded skills or discovered tools           | Owning discovery Capability                                                 |
+| Compaction-only metadata                    | Compaction Capability                                                       |
+| Long-term memory records                    | Memory provider                                                             |
+| Recoverable multi-Environment state         | Environment Capability entry; native resources remain provider-owned        |
+| Host delivery, counters, and scheduler work | Host                                                                        |
 
 ## Resume and Delegation
 
 A resumed run imports messages and Capability state, then resolves dynamic Environment, working-state, skill, and memory content again. Rendered Environment topology context is not restored as authority. The next ordinary user turn receives a fresh user-suffix snapshot; if execution continues without one and the topology version changed, a bounded startup change notice enters through native enqueue before the next model request. Fresh policy can remove access that existed in an earlier run.
 
-A child run receives an explicit context seed and a fresh `AgentContext`. Parent messages or summaries transfer only when delegation policy selects them. Parent and child never share mutable message lists or `AgentContextState`.
+A child run receives an explicit context seed and a fresh `AgentContext`. Parent messages or summaries transfer only when delegation policy selects them. The Delegation Capability stores each child's private `HarnessState`, including its independent message history, for later resume. Parent and child never share mutable message lists, a whole `AgentContextState`, or a whole `AgentContext`; only the Working State task cell can cross the inline state boundary.
 
 ## Failure Semantics
 
@@ -194,6 +267,8 @@ A child run receives an explicit context seed and a fresh `AgentContext`. Parent
 | Imported messages are invalid                   | Run creation fails before provider work                                |
 | Optional dynamic guidance is unavailable        | Owning Capability omits it and emits a diagnostic                      |
 | Required guidance or memory fails               | Model step fails                                                       |
+| Shared task binding is missing or incompatible  | Inline child dispatch fails before child model/tool work               |
+| Task claim conflicts or uses a stale revision   | Typed conflict; the existing task owner and state remain unchanged     |
 | Compaction output is invalid                    | Original history remains active                                        |
 | Context exceeds the provider limit after policy | Model step fails with a bounded context error                          |
 | Memory observation fails                        | Owning policy chooses run failure or host retry; history remains valid |
@@ -216,7 +291,7 @@ Direct instructions, semantic user-content placement, native enqueue, and Capabi
 
 ### One Working State Capability vs. Independent Managers
 
-Tasks, notes, and TODOs share tools and persistence without turning `AgentContext` into a collection of managers. Their distinct parent/child sharing semantics remain explicit within the Capability.
+Tasks, notes, and TODOs share tool presentation and one state owner without turning `AgentContext` into a collection of managers. A typed task cell supports atomic parent/child coordination, while notes, TODOs, messages, and unrelated Capability state remain isolated.
 
 ### Host-owned Memory Work vs. Automatic Background Tasks
 

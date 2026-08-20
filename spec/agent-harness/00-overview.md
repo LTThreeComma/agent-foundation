@@ -8,7 +8,7 @@ The Harness is the reusable process-local execution layer that turns a durable o
 
 ## Design Position
 
-The Harness is a cohesive layer over Pydantic AI public primitives. Every reusable Agent plugin and lifecycle component is an `AbstractCapability[AgentContext]`. Capabilities contribute instructions, model behavior, Toolsets, lifecycle behavior, state, and host integrations; trusted native Pydantic models, tools, and Toolsets can also enter the process-local resolved build plan without becoming another plugin model. The Harness contributes a canonical materialized `AgentDefinition`, trusted `AgentContext`, identity-bound dynamically composable multi-Environment access, typed client-side external-tool deferral, semantic Environment-ready input production, resumable state, subagent adapters, normalized events, and terminal snapshots of native Pydantic `RunUsage`.
+The Harness is a cohesive layer over Pydantic AI public primitives. Every reusable Agent plugin and lifecycle component is an `AbstractCapability[AgentContext]`. Capabilities contribute instructions, model behavior, Toolsets, lifecycle behavior, state, and host integrations; trusted native Pydantic models, tools, and Toolsets can also enter the process-local resolved build plan without becoming another plugin model. The Harness contributes a canonical materialized `AgentDefinition`, trusted `AgentContext`, identity-bound dynamically composable multi-Environment access, typed client-side external-tool deferral, semantic Environment-ready input production, resumable State-backed inline delegation over immutable built children, normalized events, and terminal snapshots of native Pydantic `RunUsage`.
 
 Embedded applications and hosted execution workers call the same build and run interfaces. Durability differences remain in the host.
 
@@ -88,7 +88,7 @@ The trusted launcher may be an embedded application or a hosted execution worker
 | Tool invocation pipeline | Preserve native Pydantic Toolsets and apply Identity, authorization, credentials, retry, and result safety when Harness metadata opts a function tool into managed dispatch. | Unannotated in-process tools remain trusted plugin code; provider-side policy remains authoritative.            |
 | Client-tool boundary     | Map typed default or permitted per-run schemas to native `ExternalToolset` and deferred values.                                                                              | External executor and Host own side effects, durability, authenticated delivery, and feedback.                  |
 | Environment adapter      | Present identity-bound file, shell, process, and port operations with atomic live multi-binding topology.                                                                    | Host owns topology selection; provider owns native state and enforcement.                                       |
-| Delegation coordinator   | Resolve declared child Agents, narrow authority, track lineage, and dispatch inline or host-managed work.                                                                    | Hosted child durability belongs to the host.                                                                    |
+| Delegation coordinator   | Expose immutable built children and provide State-backed blocking inline execution with fresh narrowed authority and lineage.                                                | Async child scheduling, durable lifecycle, and delivery belong to a Host Capability and Host services.          |
 | Event and result output  | Emit typed process-local events, attributed response-usage observations, and live plus terminal Pydantic `RunUsage`, with normal-path custom pricing and explicit coverage.  | Delivery, durable per-response records, cross-run aggregation, billing, and payment belong to the Host.         |
 
 ## End-to-End Execution Flow
@@ -166,7 +166,7 @@ flowchart LR
 08. Environment routing, live topology selection, and Environment authorization are separate steps.
 09. Process-local state, host durable state, live event delivery, telemetry, and billing are separate facts.
 10. Stateful capabilities own versioned state segments and explicit incompatible-state behavior.
-11. Inline and hosted subagents share declaration and lineage semantics but not durability authority.
+11. Complete child declarations and immutable built collections are execution-mode neutral; the Harness owns blocking State-backed inline delegation, while Host Capabilities own asynchronous child lifecycle and delivery.
 12. Provider failures are normalized without hiding retry safety, side effects, or uncertainty.
 13. Optional integrations do not expand the base dependency set or change core semantics.
 14. Public harness contracts avoid Pydantic AI private graph APIs and internal package layout.

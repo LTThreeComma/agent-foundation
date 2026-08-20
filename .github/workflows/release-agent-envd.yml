@@ -39,7 +39,11 @@ jobs:
       - name: Create release version patch
         run: |
           git diff --check
-          git diff --binary -- Cargo.toml Cargo.lock > release-version.patch
+          git diff --binary -- \
+            Cargo.toml \
+            Cargo.lock \
+            packages/agent-envd-client/pyproject.toml \
+            uv.lock > release-version.patch
           test -s release-version.patch
 
       - name: Upload release version patch
@@ -47,6 +51,48 @@ jobs:
         with:
           name: release-version-agent-envd
           path: release-version.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  build-client:
+    name: Build Python client distributions
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download release version patch
+        uses: actions/download-artifact@v4
+        with:
+          name: release-version-agent-envd
+          path: .
+
+      - name: Apply release version patch
+        run: |
+          git apply --whitespace=error release-version.patch
+          git clean -f -- release-version.patch
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Build Python client distributions
+        run: make agent-envd-client-build
+
+      - name: Upload Python client distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: envd-client-python-dist
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -149,9 +195,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Verify crate package
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo package --locked --allow-dirty --package converge-agent-envd
+
   publish-crate:
     name: Publish crate
-    needs: [prepare, build-binaries]
+    needs: [prepare, build-client, build-binaries]
     runs-on: ubuntu-latest
     environment: agent-envd-crates-io
     steps:
@@ -214,9 +264,31 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked --allow-dirty --package converge-agent-envd
 
+  publish-client:
+    name: Publish Python client
+    needs: [prepare, build-client, build-binaries]
+    runs-on: ubuntu-latest
+    environment: agent-envd-client-pypi
+    steps:
+      - name: Download Python client distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: envd-client-python-dist
+          path: dist
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Publish Python client to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
+
   publish-image:
     name: Publish sandbox image
-    needs: [prepare, build-binaries, publish-crate]
+    needs: [prepare, build-binaries, publish-crate, publish-client]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -279,7 +351,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [prepare, build-binaries, publish-crate, publish-image]
+    needs: [prepare, build-client, build-binaries, publish-crate, publish-client, publish-image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -296,6 +368,12 @@ jobs:
           pattern: agent-envd-*
           path: dist
           merge-multiple: true
+
+      - name: Download Python client distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: envd-client-python-dist
+          path: dist
 
       - name: Create checksums
         run: |

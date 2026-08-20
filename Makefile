@@ -46,6 +46,7 @@ format: sync sdk-python-sync sdk-typescript-sync ## Format repository and standa
 
 .PHONY: deps-check
 deps-check: sync ## Check Python package dependency declarations
+	@(cd packages/agent-envd-client && uv run --locked deptry converge_agent_envd_client)
 	@(cd packages/agent-harness && uv run --locked deptry converge_agent_harness)
 	@(cd packages/logging && uv run --locked deptry converge_logging)
 	@(cd packages/foundation-service && uv run --locked deptry converge_foundation_service)
@@ -86,6 +87,18 @@ test: sync ## Run Python workspace tests
 python-build: sync ## Build all Python workspace distributions
 	@rm -rf dist
 	@uv build --all-packages
+
+.PHONY: foundation-python-build
+foundation-python-build: sync ## Build only Foundation release-group Python distributions
+	@rm -rf dist
+	@for package in converge-agent-harness converge-logging converge-foundation-service; do \
+		uv build --package "$$package" --out-dir dist || exit $$?; \
+	done
+
+.PHONY: agent-envd-client-build
+agent-envd-client-build: sync ## Build the agent-envd client Python distributions
+	@rm -rf dist
+	@uv build --package converge-agent-envd-client --out-dir dist
 
 .PHONY: rust-format-check
 rust-format-check: ## Check Rust formatting

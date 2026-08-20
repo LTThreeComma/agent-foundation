@@ -1,0 +1,24 @@
+[project]
+name = "converge-agent-envd-client"
+version = "0.0.0"
+description = "Low-level Python client for the Agent Environment Interaction Protocol"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+test = [
+    "pytest>=9,<10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["converge_agent_envd_client"]
+
+[tool.deptry]
+known_first_party = ["converge_agent_envd_client"]

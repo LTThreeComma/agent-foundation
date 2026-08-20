@@ -28,15 +28,15 @@ flowchart LR
     Harness -. sanitized projection .-> Telemetry
 ```
 
-| Boundary                                  | Design                                                                                                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Host to Harness                           | The Host supplies one `ResolvedAgentDefinition` for build, then fresh `RunBindings` carrying Agent Identity, Environment, policy, credentials, and opaque run references. |
-| Model to tool                             | Every tool uses Pydantic dispatch; metadata-aware tools additionally cross the Harness-managed authorization and result path.                                             |
-| Harness to Environment                    | `BoundEnvironment` carries the selected binding and execution identity; the provider rechecks native resource policy.                                                     |
-| Tool authorization to credential provider | The authorization capability uses a narrow collaborator to request an audience-scoped lease for one action.                                                               |
-| Host to external client-tool executor     | The Host exposes only a durably committed pending external call; the client separately authorizes its action and returns an exact-parent result.                          |
-| Harness to state store                    | The harness exports `HarnessState`; the host decides durability, encryption, retention, and checkpoint ownership.                                                         |
-| Harness to telemetry                      | Events and spans are sanitized projections, not execution or billing facts.                                                                                               |
+| Boundary                                  | Design                                                                                                                                                                                                         |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host to Harness                           | The Host supplies one `ResolvedAgentDefinition` for build, then fresh `RunBindings` carrying Agent Identity, Environment, policy, credentials, any provider-backed task-state cell, and opaque run references. |
+| Model to tool                             | Every tool uses Pydantic dispatch; metadata-aware tools additionally cross the Harness-managed authorization and result path.                                                                                  |
+| Harness to Environment                    | `BoundEnvironment` carries the selected binding and execution identity; the provider rechecks native resource policy.                                                                                          |
+| Tool authorization to credential provider | The authorization capability uses a narrow collaborator to request an audience-scoped lease for one action.                                                                                                    |
+| Host to external client-tool executor     | The Host exposes only a durably committed pending external call; the client separately authorizes its action and returns an exact-parent result.                                                               |
+| Harness to state store                    | The harness exports `HarnessState`; the host decides durability, encryption, retention, and checkpoint ownership.                                                                                              |
+| Harness to telemetry                      | Events and spans are sanitized projections, not execution or billing facts.                                                                                                                                    |
 
 ## Identity and Authority
 
@@ -79,7 +79,7 @@ Automatic retry is limited to operations with an idempotency key or a receiver-d
 
 The harness first routes an operation to an Environment binding, then evaluates authorization for that selected binding. Routing does not grant access.
 
-The provider owns path normalization, mount policy, symlink behavior, process isolation, resource limits, handle visibility, port policy, and generation fencing. Client-side checks improve error quality but do not replace provider enforcement.
+The provider owns path normalization, mount policy, symlink behavior, resource limits, handle visibility, port policy, and generation fencing. An EIP-backed envd also owns its [inner command-isolation posture](../agent-envd/07-execution-isolation.md): `required` applies fail-closed bubblewrap or Seatbelt, while explicit `disabled` delegates OS command containment to an outer sandbox without disabling daemon authentication, resource policy, process ownership, output bounds, or cleanup. Client-side checks improve error quality but do not replace provider enforcement.
 
 Process handles include Environment identity, generation, binding, and Agent ownership in provider-private state. Later input, signal, wait, kill, and release operations repeat authorization. A handle never migrates silently to another Environment after reconnect or fallback.
 
@@ -91,7 +91,7 @@ This design avoids an in-process sandbox abstraction that Python cannot reliably
 
 ## Output Resource Safety
 
-Managed tool results and first-party Environment operations always have finite per-call inline and total output ceilings plus finite aggregate retained bytes and object counts. Direct-local and EIP providers reserve quota while reading producer streams, use bounded previews and retention, and report truncation, quota exhaustion, expiry, or dropped bytes explicitly. Effective limits can only narrow from Harness hard ceilings through Host, tool, binding, and provider limits. This prevents normal shell, search, and file operations from forcing the worker to hold unbounded memory, protocol frames, retained files, or cursors.
+Managed tool results and first-party Environment operations always have finite per-call inline and total output ceilings plus finite aggregate retained bytes and object counts. Direct-local providers and the EIP [`OutputPolicy`](../agent-envd/06-output-retention.md) path reserve quota while reading producer streams, use bounded previews and retention, and report truncation, quota exhaustion, expiry, or dropped bytes explicitly. Effective limits can only narrow from Harness hard ceilings through Host, tool, binding, and provider limits. This prevents normal shell, search, and file operations from forcing the worker to hold unbounded memory, protocol frames, retained files, or cursors.
 
 The guarantee cannot retroactively prevent trusted in-process Python code from allocating an oversized return object before the wrapper receives it. Such code is part of the plugin process trust boundary. A strict deployment requires metadata-aware tools and streaming provider APIs but still uses OS or container resource limits as the final process-memory boundary.
 
@@ -103,7 +103,7 @@ For shell operations, the default is no credential projection. When compatibilit
 
 ## State Integrity
 
-`HarnessState` contains versioned entries for the Capabilities that persist continuation data. Preparation verifies that every entry ID belongs to the active resolved Capability set and validates Environment state before the input factory; each other owner accepts its typed version on first iteration before model or tool work. Definition selection and migration policy remain host concerns.
+`HarnessState` contains versioned entries for the Capabilities that persist continuation data. Preparation verifies that every entry ID belongs to the active resolved Capability set and validates Environment state before the input factory; each other owner accepts its typed version on first iteration before model or tool work. Delegation State stores bounded complete child `HarnessState` values, including child message history, but no active job or authority. The parent Working State entry is the sole snapshot owner for a task cell explicitly shared with inline children, whose claims derive the actor from trusted child Identity and linearize under the Capability's process-local mutation boundary. Definition selection and migration policy remain Host concerns.
 
 Recoverable Environment data is stored in the Environment Capability's versioned `AgentContextState` entry only after any required provider attachment and fresh binding construction. It can contain backend-local snapshots or opaque references to objects reachable through that selected Environment, but not provider-adapter lifecycle records, credentials, live clients, authorization decisions, or raw bearer handles. Files and processes remain provider-owned, and every restored reference is checked against the current binding, Identity, policy, and Environment generation.
 
@@ -176,4 +176,4 @@ Using native deferred external tools keeps browser and application handlers out 
 
 ### Cohesive state envelope
 
-Persisting message history with explicitly stateful Capability entries keeps resume understandable and prevents a host from assembling parallel Harness and Environment blobs. The envelope is larger when Environment or optional feature state is present, and it still cannot reproduce partial parent tool batches, inline-child execution, arbitrary live Python objects, or OS processes; providers restore only their versioned data under fresh authority checks.
+Persisting message history with explicitly stateful Capability entries keeps resume understandable and prevents a Host from assembling parallel Harness, inline-child, and Environment blobs. The envelope is larger when nested child, Environment, or other optional feature state is present. It preserves the last complete inline-child continuation but cannot reproduce an active child, a partial parent tool batch, arbitrary live Python objects, Host asynchronous lifecycle, or OS processes; every owner restores only versioned data under fresh authority checks.

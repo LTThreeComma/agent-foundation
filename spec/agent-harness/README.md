@@ -21,7 +21,7 @@ The Harness is a process-local execution boundary. It owns the canonical materia
 | [08-environment-integration.md](08-environment-integration.md)                           | Multi-binding Bound Environment, dynamic topology, model-facing routing, recoverable state, and provider enforcement                   |
 | [09-context-and-memory.md](09-context-and-memory.md)                                     | History, context assembly, guidance, compaction, memory boundary, and token budgets                                                    |
 | [10-snapshot-and-resume.md](10-snapshot-and-resume.md)                                   | `message_history` plus namespaced Agent Context state, semantic checkpoints, restore, resume, fork, and host state boundary            |
-| [11-delegation-and-subagents.md](11-delegation-and-subagents.md)                         | Agent declarations, delegation grants, child usage limits, inline and hosted execution, continuation, lineage, and results             |
+| [11-delegation-and-subagents.md](11-delegation-and-subagents.md)                         | Complete child declarations, immutable built collection, State-backed inline delegation, shared tasks, and Host async boundary         |
 | [12-events-observability-and-usage.md](12-events-observability-and-usage.md)             | Canonical event stream, terminal result, telemetry, native accumulation and limits, custom pricing, and per-response usage observation |
 | [13-hosting-contract.md](13-hosting-contract.md)                                         | Embedded and hosted execution integration contracts                                                                                    |
 | [14-public-api-and-packaging.md](14-public-api-and-packaging.md)                         | Stable durable and code-first API, package layers, optional capabilities, and compatibility policy                                     |
@@ -41,7 +41,7 @@ Read `03`, `04`, `05`, and `14`. For hosted Preset materialization and immutable
 
 ### Integrate tools or Environments
 
-Read `02`, `06`, `07`, `08`, and `15`. Direct local file and shell integration is owned by `08`; for Docker, E2B, remote, optional local-daemon, transport, or protocol integration, also read [agent-envd and EIP](../agent-envd/00-overview.md). For durable client-side tool delivery and Foundation Client feedback, read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
+Read `02`, `06`, `07`, `08`, and `15`. Direct local file and shell integration is owned by `08`; for Docker, E2B, remote, optional local-daemon, transport, protocol, output-retention, or native command-isolation integration, follow the [agent-envd specification catalog](../agent-envd/README.md). For durable client-side tool delivery and Foundation Client feedback, read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
 
 ### Implement persistence or hosted execution
 
@@ -56,7 +56,7 @@ Read the relevant owning contract and finish with `15`.
 - This directory owns process-local harness semantics.
 - Pydantic AI owns its Agent loop and public capability, toolset, model, output, and run contracts.
 - The host owns trusted execution identity issuance, durable acceptance, durable storage, provider installation, and product policy.
-- The Harness owns provider-neutral Environment semantics and virtual routing; direct `LocalFileOperator` and `LocalShell` enforce configured local access, while EIP and `agent-envd` own daemon-backed methods, processes, handles, cursors, retained output, generation, and native enforcement.
+- The Harness owns provider-neutral Environment semantics, virtual routing, and the direct EIP adapter over `converge-agent-envd-client`; the client owns generated wire and transport/session behavior, while EIP and `agent-envd` own daemon-backed methods, processes, handles, cursors, retained output, generation, and native enforcement. Direct `LocalFileOperator` and `LocalShell` enforce configured local access without envd.
 - A telemetry backend owns exported observations but is never an execution-state authority.
 - Each host owns its durable execution, queue, lease, recovery, and lifecycle facts.
 

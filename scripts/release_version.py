@@ -32,6 +32,8 @@ ROOT_UV_LOCK = Path("uv.lock")
 AGENT_ENVD_WORKSPACE_MANIFEST = Path("Cargo.toml")
 AGENT_ENVD_MANIFEST = Path("crates/agent-envd/Cargo.toml")
 AGENT_ENVD_LOCK = Path("Cargo.lock")
+AGENT_ENVD_CLIENT_MANIFEST = Path("packages/agent-envd-client/pyproject.toml")
+AGENT_ENVD_CLIENT_PACKAGE = "converge-agent-envd-client"
 SDK_PYTHON_MANIFEST = Path("sdk/python/pyproject.toml")
 SDK_PYTHON_LOCK = Path("sdk/python/uv.lock")
 SDK_RUST_MANIFEST = Path("sdk/rust/Cargo.toml")
@@ -174,6 +176,12 @@ def component_versions(root: Path, component: str) -> dict[str, str]:
                 root,
                 AGENT_ENVD_LOCK,
                 "converge-agent-envd",
+            ),
+            str(AGENT_ENVD_CLIENT_MANIFEST): _project_version(root, AGENT_ENVD_CLIENT_MANIFEST),
+            f"{ROOT_UV_LOCK} package {AGENT_ENVD_CLIENT_PACKAGE}": _lock_package_version(
+                root,
+                ROOT_UV_LOCK,
+                AGENT_ENVD_CLIENT_PACKAGE,
             ),
         }
     if component == "sdk-python":
@@ -365,6 +373,18 @@ def prepare_component_version(root: Path, component: str, version: str) -> tuple
             "converge-agent-envd",
             version,
             AGENT_ENVD_LOCK,
+        )
+        planned[AGENT_ENVD_CLIENT_MANIFEST] = _replace_table_version(
+            _read_text(root, AGENT_ENVD_CLIENT_MANIFEST),
+            "project",
+            version,
+            AGENT_ENVD_CLIENT_MANIFEST,
+        )
+        planned[ROOT_UV_LOCK] = _replace_lock_package_version(
+            _read_text(root, ROOT_UV_LOCK),
+            AGENT_ENVD_CLIENT_PACKAGE,
+            version,
+            ROOT_UV_LOCK,
         )
     elif component == "sdk-python":
         planned[SDK_PYTHON_MANIFEST] = _replace_table_version(

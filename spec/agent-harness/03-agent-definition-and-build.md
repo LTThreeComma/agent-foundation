@@ -28,10 +28,14 @@ type EnvironmentOperation = Literal[
 
 
 class EnvironmentRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     operations: frozenset[EnvironmentOperation] = frozenset()
 
 
 class AgentDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     definition_id: str
     agent: AgentSpec
     environment: EnvironmentRequest | None = None
@@ -43,17 +47,19 @@ class AgentDefinition(BaseModel):
 | `definition_id` | Stable logical definition identifier; it grants no execution authority                     |
 | `agent`         | Native Pydantic AI model-loop, instructions, settings, output, retry, and Capability specs |
 | `environment`   | Portable Environment operation families required from the host                             |
-| `subagents`     | Named complete child definitions exposed through the delegation Capability                 |
+| `subagents`     | Named complete child definitions built into the executable's immutable child collection    |
 
 The definition is the one effective logical view after any Host Preset materialization. Execution never reconstructs behavior from separate global `ModelConfig`, `ToolConfig`, plugin, and override bags. Reusable model and Toolset Presets materialize their owned values into `agent.model`, `agent.model_settings`, or typed `agent.capabilities`; they do not remain unresolved inheritance layers inside the Harness. Because Pydantic `ModelProfileSpec` is a native `Model` construction contract rather than an `AgentSpec` field, a Model Preset selects the logical model integration whose resolver constructs that native Model instead of inventing a serialized `agent.model_profile` property.
 
 `agent.capabilities` uses Pydantic AI `CapabilitySpec` syntax. Plugin packages make additional Capability types available through the resolved build plan. Portable behavior configuration belongs to the owning Capability schema. The first-party Client Tools Capability can contain exact default external-tool declarations and an explicit `allow_run_override` policy; that typed opt-in is the only run path that can replace a model-visible tool schema without creating another definition revision. Host-only provider selection, artifact locks, secret resolution, and live collaborators remain outside the serialized definition.
 
-`EnvironmentRequest.operations` is a minimal portable requirement: every listed operation family must be available through the run's effective Environment surface before model or tool work. It does not name a provider, binding, alias, path, default, mount, credential, multiplicity, or topology. The generic `EnvironmentRoleRequest` abstraction is deliberately absent because a semantic role cannot be resolved consistently without feature-specific meaning. If a feature genuinely needs a named Environment slot, that feature's Capability owns the slot schema and validation. Runtime aliases, the default binding, local or remote backend selection, and multi-binding topology remain Host binding concerns.
+`EnvironmentRequest.operations` is a minimal portable requirement: every listed operation family must be advertised by the run's effective Environment surface with an enforceable readiness path before model or tool work. Concrete resources can finish provisioning lazily under scoped `ensure_ready()` calls. The request does not name a provider, binding, alias, path, default, mount, credential, multiplicity, or topology. The generic `EnvironmentRoleRequest` abstraction is deliberately absent because a semantic role cannot be resolved consistently without feature-specific meaning. If a feature genuinely needs a named Environment slot, that feature's Capability owns the slot schema and validation. Runtime aliases, the default binding, local or remote backend selection, and multi-binding topology remain Host binding concerns.
 
 The request grants no authority. The Host can reject it or satisfy it with a direct-local, EIP-backed, or mixed `EnvironmentRunBinding`; stream entry binds and enters that value to obtain `AgentContext.environment`. A topology can contain any number of bindings as long as the effective surface satisfies the declared operations. Host-specific mount sources and durable lifecycle records remain in the Host definition layer.
 
 Raw credentials, executable objects, ambient environment substitutions, and implicit Python import paths are not definition fields. Capability configuration can contain typed logical provider or secret references, but the host resolves those references only through fresh run bindings after selecting a trusted definition revision.
+
+`frozen=True` is only the outer model guard. Materialization and Harness build defensively copy and recursively normalize every Harness-owned nested tuple, mapping, context policy, usage limit, and child value. Upstream `AgentSpec` or Capability values that cannot guarantee deep freezing are never exposed from the executable as the same object used for `Agent.from_spec()`: the builder retains a private validated copy and public definition/declaration access returns a read-only projection or defensive copy. Mutating caller input or a nested value obtained from public inspection therefore cannot change child selectors, policy ceilings, Agent behavior, or the already built Pydantic Agent. Compatibility tests enforce this behavioral immutability rather than relying on a frozen dataclass or Pydantic model alone.
 
 Durable `AgentSpec.model_settings` contains only canonical JSON model-request intent. For every hosted root and child logical model, the locked integration validates the value through its strict route-envelope-aware settings schema before revision commit. The validation policy rejects unknown keys, arbitrary `extra_headers` and `extra_body` passthrough, non-JSON client or timeout objects, target-incompatible fields, and every raw header, token, API key, cookie, proxy credential, or other secret carrier. Hosted native Models use `settings=None`, so no integration adds hidden static request defaults below the materialized definition. Request headers and credentials are live provider inputs resolved through the current run. Embedded code-first callers can use the broader native Pydantic type in process, but that value cannot be committed until it passes the hosted codec.
 
@@ -119,7 +125,7 @@ The code-first path creates the same canonical `AgentDefinition` and `ResolvedAg
 
 ## ResolvedAgentDefinition
 
-`ResolvedAgentDefinition` is the immutable process-local build plan after Host definition-revision, Preset, provider, artifact, and trust decisions have completed. It is never a durable wire format.
+`ResolvedAgentDefinition` is the immutable process-local build plan after Host definition-revision, Preset, provider, artifact, and trust decisions have completed. Its frozen dataclass shell is supplemented by the same defensive recursive normalization and private-copy rule above; shallow dataclass freezing alone is insufficient. It is never a durable wire format.
 
 ```python
 class ResolvedDefinitionRef(BaseModel):
@@ -154,7 +160,6 @@ class ResolvedAgentComponents:
 class ResolvedSubagentDefinition:
     declaration: SubagentDefinition
     definition: "ResolvedAgentDefinition"
-    source_ref: ResolvedDefinitionRef | None
 
 
 @dataclass(frozen=True)
@@ -178,13 +183,15 @@ Every concrete native Model carries the profile selected by its Pydantic model/p
 
 `output_type` is process-local build data. A durable definition uses `str` as the ordinary build value and lets `Agent.from_spec()` derive Pydantic `StructuredDict(agent.output_schema)` when a wire output schema exists; a resolver can supply another Python `OutputSpec` only when its generated schema is equivalent to the durable `agent.output_schema`. `HarnessBuilder.build()` applies this check recursively to every node, using the same rule as `build_code()`. Python output types are never serialized inside `AgentDefinition`.
 
-Environment, policy, credential, telemetry, checkpoint, and explicitly permitted external client-tool bindings that vary by execution enter through `RunBindings` and run Capabilities rather than the immutable executable. The client-tool binding changes only the Capability-owned external schema surface under its declared whole-replacement policy and grants no server or Environment authority. Optional shared `RunUsage` and native `UsageLimits` remain direct run arguments. The Harness constructs the event emitter, run-local active-run bridge, and run-specific `ActiveRunCapability` for each streamed run.
+Environment, policy, credential, telemetry, checkpoint, identity-bound task-state, and explicitly permitted external client-tool bindings that vary by execution enter through `RunBindings` and run Capabilities rather than the immutable executable. The client-tool binding changes only the Capability-owned external schema surface under its declared whole-replacement policy and grants no server or Environment authority. Optional shared `RunUsage` and native `UsageLimits` remain direct run arguments. The Harness constructs the event emitter, run-local active-run bridge, and run-specific `ActiveRunCapability` for each streamed run.
 
-`subagents` contains recursively resolved child build plans with unique declaration names. At every node it is an ordered one-to-one realization of `definition.subagents`: each authored edge appears exactly once in authored order, `resolved.declaration` equals that edge, and `resolved.definition.definition` equals `resolved.declaration.agent`. Resolution can add only process-local components, output type, provenance, and recursively resolved edges; it cannot add, omit, replace, or mutate child behavior, execution mode, context policy, or usage limits. Each `ResolvedSubagentDefinition.source_ref` carries the edge's hosted-submission reference independently of the child's own build provenance. For hosted or `either` execution, that opaque value identifies the parent exact definition revision plus an immutable child path, not a separately mutable child revision. The Host submission adapter must execute the embedded child bytes with the parent revision's transitive dependency-lock closure. The builder validates the ordinary authored/resolved equalities, constructs inline-capable child executables from those values, and captures them in the parent's Delegation Capability; hosted-capable declarations also require this parent-bound `source_ref`.
+`subagents` contains recursively resolved child build plans with unique declaration names. At every node it is an ordered one-to-one realization of `definition.subagents`: each authored edge appears exactly once in authored order, `resolved.declaration` equals that edge, and `resolved.definition.definition` equals `resolved.declaration.agent`. Resolution can add only process-local components, output type, provenance, and recursively resolved edges; it cannot add, omit, replace, or mutate child behavior, context policy, or usage limits.
 
-Every materialized child contains a complete `AgentDefinition`; the host dereferences registry keys, Presets, version selectors, and component artifacts before producing the recursive build plan. Structural cycles are rejected. A Host that wants self-like delegation materializes a finite child definition with a narrowed or removed delegation surface rather than passing an unresolved recursive reference.
+The builder validates those equalities, constructs child executables before the parent, and publishes them as the parent's immutable [`SubagentCollection`](11-delegation-and-subagents.md#child-definitions-and-built-collection). The first-party Delegation Capability consumes that collection for State-backed inline execution; a trusted Host Capability can consume the same collection for its own background execution surface. Neither the resolved edge nor the collection carries an execution mode, scheduler, durable submission reference, or current-run authority.
 
-`ResolvedDefinitionRef.value` is opaque host provenance and hosted-submission correlation. The Harness validates only that it is non-empty and does not interpret revision, tenant, rollout, dependency-lock, lookup, or fencing semantics.
+Every materialized child contains a complete `AgentDefinition`; the Host dereferences registry keys, Presets, version selectors, and component artifacts before producing the recursive build plan. Structural cycles are rejected. A Host that wants self-like delegation materializes a finite child definition with a narrowed or removed delegation surface rather than passing an unresolved recursive reference.
+
+`ResolvedDefinitionRef.value` is opaque Host build provenance. The Harness validates only that it is non-empty and does not interpret revision, tenant, rollout, dependency-lock, lookup, scheduling, or fencing semantics.
 
 ## Build API and Flow
 
@@ -201,7 +208,7 @@ sequenceDiagram
     Registry-->>Host: authority-neutral process-local components
     Host->>Host: assemble recursive ResolvedAgentDefinition
     Host->>Harness: build resolved definition
-    Harness->>Harness: validate authored/resolved graph and output schemas, then prepare inline children
+    Harness->>Harness: validate authored/resolved graph and output schemas, then build child collections
     Harness->>PAI: Agent.from_spec with spec and resolved components
     PAI->>PAI: validate specs, construct Capabilities, and compose Toolsets
     PAI-->>Harness: process-local Agent
@@ -222,7 +229,7 @@ For each node in the finite graph, the Harness first validates the resolved mode
 
 Explicit upstream values use Pydantic's documented merge and override semantics around the spec. Client-side `ExternalToolset` values are not build inputs: the Harness derives them from the configured Client Tools Capability and optional `ClientToolRunBinding` for one run, then uses Pydantic's public per-run Toolset argument. The Harness does not translate `AgentSpec` field by field, resolve Host Presets, install packages, read secrets, or reconstruct former SDK configuration bags.
 
-Construction becomes visible only after the complete child graph, parent Agent, mandatory Capability set, and duplicate tool identities are valid. The parent executable owns recursively built inline child executables; normal `close()` and failed construction close them in reverse acquisition order while preserving secondary cleanup causes.
+Construction becomes visible only after the complete child graph, parent Agent, mandatory Capability set, and duplicate tool identities are valid. Each parent executable exposes its immediate built children through an immutable `SubagentCollection` and owns their executables recursively. Normal `close()` and failed construction close owned children in reverse acquisition order while preserving secondary cleanup causes.
 
 ## Failure Semantics
 

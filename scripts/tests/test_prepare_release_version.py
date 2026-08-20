@@ -17,6 +17,7 @@ RELEASE_FILES = (
     Path("packages/agent-harness/pyproject.toml"),
     Path("packages/logging/pyproject.toml"),
     Path("packages/foundation-service/pyproject.toml"),
+    Path("packages/agent-envd-client/pyproject.toml"),
     Path("Cargo.toml"),
     Path("Cargo.lock"),
     Path("crates/agent-envd/Cargo.toml"),
@@ -68,7 +69,15 @@ def run_script(
                 Path("packages/foundation-service/pyproject.toml"),
             },
         ),
-        ("agent-envd", {Path("Cargo.toml"), Path("Cargo.lock")}),
+        (
+            "agent-envd",
+            {
+                Path("Cargo.toml"),
+                Path("Cargo.lock"),
+                Path("packages/agent-envd-client/pyproject.toml"),
+                Path("uv.lock"),
+            },
+        ),
         (
             "sdk-python",
             {Path("sdk/python/pyproject.toml"), Path("sdk/python/uv.lock")},
@@ -108,6 +117,26 @@ def test_prepares_only_component_files_and_is_idempotent(
     assert second_result.returncode == 0, second_result.stderr
     assert snapshot(tmp_path) == after
     assert "no files changed" in second_result.stdout
+
+
+def test_foundation_release_does_not_version_agent_envd_client(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "foundation", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    check_result = run_script(CHECKER, tmp_path, "agent-envd", "0.0.0")
+    assert check_result.returncode == 0, check_result.stderr
+
+
+def test_agent_envd_release_does_not_version_foundation_packages(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "agent-envd", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    check_result = run_script(CHECKER, tmp_path, "foundation", "0.0.0")
+    assert check_result.returncode == 0, check_result.stderr
 
 
 def test_rejects_invalid_version_without_writing(tmp_path: Path) -> None:

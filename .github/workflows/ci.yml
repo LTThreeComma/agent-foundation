@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       agent_envd: ${{ steps.filter.outputs.agent_envd }}
+      agent_envd_client: ${{ steps.filter.outputs.agent_envd_client }}
       agent_harness: ${{ steps.filter.outputs.agent_harness }}
       automation: ${{ steps.filter.outputs.automation }}
       containers: ${{ steps.filter.outputs.containers }}
@@ -50,6 +51,12 @@ jobs:
               - 'crates/agent-envd/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+            agent_envd_client:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'packages/agent-envd-client/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
             agent_harness:
               - '.github/workflows/ci.yml'
               - 'packages/agent-harness/**'
@@ -212,6 +219,53 @@ jobs:
         run: >-
           uv run --locked --package converge-agent-harness --no-default-groups
           --group test python -m pytest packages/agent-harness/tests
+
+  agent-envd-client:
+    name: agent-envd client (${{ matrix.name }})
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agent_envd_client == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+          - name: Windows x64
+            runner: windows-2025
+            architecture: x64
+          - name: Windows arm64
+            runner: windows-11-arm
+            architecture: arm64
+          - name: macOS x64
+            runner: macos-15-intel
+            architecture: x64
+          - name: macOS arm64
+            runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.architecture }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Run agent-envd client tests
+        run: >-
+          uv run --locked --package converge-agent-envd-client --no-default-groups
+          --group test python -m pytest packages/agent-envd-client/tests
 
   agent-envd:
     name: agent-envd (${{ matrix.name }})

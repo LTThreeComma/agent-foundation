@@ -152,11 +152,13 @@ The service does not automatically execute or retry a client handler. A client t
 
 The versioned batch transition plus uniquely consumed resume fact prevents duplicate continuation runs; it cannot make an already dispatched external side effect exactly once. Concurrent executors, local crashes after dispatch, and providers without idempotency can still require product reconciliation. Cancellation or expiry fences the pending batch and rejects late results, but neither action proves that an already dispatched side effect was rolled back.
 
-## Delegation and Scope
+## Asynchronous Subagents Are Not Deferred Tools
 
-Client tools do not implicitly pass to inline or hosted children. A child exposes them only when its own materialized definition contains the Client Tools Capability and its fresh child `RunBindings` receives an explicitly selected attachment under host policy. Hosted children never inherit a parent client connection, caller Principal, or pending-batch authority.
+An asynchronous subagent spawn is an ordinary Host Capability tool call. Its successful result is a `SubagentSpawnReceipt`, the parent Harness run continues, and the independent child Execution later produces a Host-owned result delivery. The service never stores that child as `DeferredToolRequests`, maps its result into `DeferredToolResults`, or moves the parent Execution to `waiting` merely because the child remains active. Only external calls and approvals that suspend the current Pydantic run use the durable pending-batch contract in this document.
 
-This default prevents background or delegated Agents from creating calls that no authorized online client has agreed to execute. A product can deliberately rebind the same Foundation Client to a child, but that is a new host authorization decision rather than Capability inheritance.
+Client tools do not implicitly pass to inline or Host-managed asynchronous children. A child exposes them only when its own materialized definition contains the Client Tools Capability and its fresh child `RunBindings` receives an explicitly selected attachment under Host policy. Asynchronous children never inherit a parent client connection, caller Principal, or pending-batch authority.
+
+This default prevents background or delegated Agents from creating calls that no authorized online client has agreed to execute. A product can deliberately rebind the same Foundation Client to a child, but that is a new Host authorization decision rather than Capability inheritance.
 
 ## Failure Semantics
 
@@ -207,5 +209,5 @@ A bounded codec and explicit references keep Foundation Service, Foundation Clie
 06. Result feedback is authenticated, parent-bound, complete, idempotent, and constructed through the authoritative `DeferredToolRequests` value.
 07. Resume creates a new Harness run with fresh authority and no retained Python task.
 08. Delivery loss, duplication, cancellation, and timeout never fabricate client side-effect outcomes; feedback fencing does not imply exactly-once execution.
-09. Client tools are independent from Environment, EIP, MCP, and hosted delegation execution.
+09. Client tools are independent from Environment, EIP, MCP, inline delegation, and Foundation asynchronous subagent execution.
 10. Tool definitions, arguments, public metadata, and results contain no credential or authorization claim.

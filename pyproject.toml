@@ -44,6 +44,7 @@ select = ["B", "E", "F", "I", "RUF", "UP"]
 
 [tool.pyright]
 include = [
+    "packages/agent-envd-client/converge_agent_envd_client",
     "packages/agent-harness/converge_agent_harness",
     "packages/logging/converge_logging",
     "packages/foundation-service/converge_foundation_service",
@@ -61,6 +62,7 @@ reportTypedDictNotRequiredAccess = false
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
 testpaths = [
+    "packages/agent-envd-client/tests",
     "packages/agent-harness/tests",
     "packages/logging/tests",
     "packages/foundation-service/tests",

@@ -11,6 +11,7 @@ The project is currently in its architecture and specification phase. Public API
 - `agent-harness`: a reusable process-local agent harness built on Pydantic AI 2, distributed as `converge-agent-harness`
 - `logging`: shared pretty and structured logging, distributed as `converge-logging`
 - `agent-envd`: an Environment Interaction Protocol provider distributed as the `converge-agent-envd` Rust package
+- [`agent-envd-client`](packages/agent-envd-client/README.md): the matching low-level Python EIP client, distributed as `converge-agent-envd-client`
 - [`foundation-service`](packages/foundation-service/README.md): an optional hosted control and execution service distributed as `converge-foundation-service`
 - [Foundation Service SDKs](sdk/README.md): standalone Python, Go, Rust, and TypeScript packages that will expose the hosted service API after its contract stabilizes
 
@@ -19,7 +20,7 @@ Applications will be able to embed the harness directly, use the hosted service,
 ## Release Channels
 
 - Foundation releases publish the Agent Harness, logging, and hosted service Python packages together, plus the versioned foundation-service image.
-- agent-envd releases publish the `converge-agent-envd` crate, platform binaries, and the matching versioned sandbox image.
+- agent-envd releases publish the `converge-agent-envd` crate, `converge-agent-envd-client` Python package, platform binaries, and the matching versioned sandbox image.
 - SDK releases are independent per language under `release/sdk/<language>/X.Y.Z` tags.
 - Every `main` revision publishes `dev` service and sandbox images to GHCR.
 

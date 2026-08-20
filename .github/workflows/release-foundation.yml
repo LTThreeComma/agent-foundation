@@ -46,8 +46,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build Python distributions
-        run: make python-build
+      - name: Build Foundation Python distributions
+        run: make foundation-python-build
 
       - name: Upload Python distributions
         uses: actions/upload-artifact@v4
