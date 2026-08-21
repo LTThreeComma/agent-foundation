@@ -181,13 +181,20 @@
           "default": "configured"
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
         "command",
-        "cwd",
-        "output_policy"
+        "cwd"
       ],
       "title": "CommandRequest",
       "type": "object"
@@ -257,17 +264,6 @@
           "default": null,
           "title": "Idempotency Key"
         },
-        "invocation_grant": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/InvocationGrantRef"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "operation_id": {
           "minLength": 1,
           "title": "Operation Id",
@@ -299,82 +295,6 @@
       "title": "EIPClientInfo",
       "type": "object"
     },
-    "EIPCursorStateObject": {
-      "additionalProperties": false,
-      "properties": {
-        "cursor": {
-          "$ref": "#/$defs/OutputCursor"
-        },
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "kind": {
-          "const": "cursor",
-          "title": "Kind",
-          "type": "string"
-        },
-        "lease": {
-          "$ref": "#/$defs/OutputLeaseRef"
-        }
-      },
-      "required": [
-        "kind",
-        "lease",
-        "cursor",
-        "expires_at"
-      ],
-      "title": "EIPCursorStateObject",
-      "type": "object"
-    },
-    "EIPEnvironmentState": {
-      "additionalProperties": false,
-      "properties": {
-        "environment_id": {
-          "minLength": 1,
-          "title": "Environment Id",
-          "type": "string"
-        },
-        "objects": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/EIPStateObject"
-          },
-          "title": "Objects",
-          "type": "array"
-        },
-        "observed_generation": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Observed Generation",
-          "type": "integer"
-        },
-        "provider_data": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonValue"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "schema_version": {
-          "pattern": "^[1-9][0-9]*\\.[0-9]+$",
-          "title": "Schema Version",
-          "type": "string"
-        }
-      },
-      "required": [
-        "schema_version",
-        "environment_id",
-        "observed_generation"
-      ],
-      "title": "EIPEnvironmentState",
-      "type": "object"
-    },
     "EIPError": {
       "additionalProperties": false,
       "properties": {
@@ -403,6 +323,34 @@
     "EIPErrorData": {
       "additionalProperties": false,
       "properties": {
+        "available_end": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available End"
+        },
+        "available_start": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available Start"
+        },
         "capability": {
           "anyOf": [
             {
@@ -506,7 +454,7 @@
           "anyOf": [
             {
               "maximum": 18446744073709551615,
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             {
@@ -606,68 +554,92 @@
       "properties": {
         "max_concurrent_operations": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Concurrent Operations",
           "type": "integer"
         },
         "max_inline_output_bytes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Inline Output Bytes",
           "type": "integer"
         },
         "max_operation_duration_ms": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Operation Duration Ms",
+          "type": "integer"
+        },
+        "max_operation_records": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Operation Records",
           "type": "integer"
         },
         "max_output_bytes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Output Bytes",
+          "type": "integer"
+        },
+        "max_process_records": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Process Records",
           "type": "integer"
         },
         "max_processes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Processes",
           "type": "integer"
         },
         "max_request_bytes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Request Bytes",
           "type": "integer"
         },
         "max_response_bytes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Response Bytes",
           "type": "integer"
         },
         "max_retained_bytes": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Retained Bytes",
           "type": "integer"
         },
         "max_retained_objects": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Retained Objects",
           "type": "integer"
         },
         "max_retention_ttl_ms": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Max Retention Ttl Ms",
           "type": "integer"
         },
-        "receipt_ttl_ms": {
+        "operation_record_ttl_ms": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Receipt Ttl Ms",
+          "minimum": 1,
+          "title": "Operation Record Ttl Ms",
+          "type": "integer"
+        },
+        "session_idle_ttl_ms": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Session Idle Ttl Ms",
+          "type": "integer"
+        },
+        "terminal_process_record_ttl_ms": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Terminal Process Record Ttl Ms",
           "type": "integer"
         }
       },
@@ -682,38 +654,13 @@
         "max_retained_bytes",
         "max_retained_objects",
         "max_retention_ttl_ms",
-        "receipt_ttl_ms"
+        "max_operation_records",
+        "operation_record_ttl_ms",
+        "session_idle_ttl_ms",
+        "max_process_records",
+        "terminal_process_record_ttl_ms"
       ],
       "title": "EIPLimits",
-      "type": "object"
-    },
-    "EIPOutputStateObject": {
-      "additionalProperties": false,
-      "properties": {
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "kind": {
-          "const": "output_lease",
-          "title": "Kind",
-          "type": "string"
-        },
-        "lease": {
-          "$ref": "#/$defs/OutputLeaseRef"
-        },
-        "reference": {
-          "$ref": "#/$defs/OutputReference"
-        }
-      },
-      "required": [
-        "kind",
-        "lease",
-        "reference",
-        "expires_at"
-      ],
-      "title": "EIPOutputStateObject",
       "type": "object"
     },
     "EIPPath": {
@@ -737,35 +684,6 @@
       "title": "EIPPath",
       "type": "object"
     },
-    "EIPProcessStateObject": {
-      "additionalProperties": false,
-      "properties": {
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "handle": {
-          "$ref": "#/$defs/ProcessHandle"
-        },
-        "kind": {
-          "const": "process_lease",
-          "title": "Kind",
-          "type": "string"
-        },
-        "lease": {
-          "$ref": "#/$defs/ProcessLeaseRef"
-        }
-      },
-      "required": [
-        "kind",
-        "lease",
-        "handle",
-        "expires_at"
-      ],
-      "title": "EIPProcessStateObject",
-      "type": "object"
-    },
     "EIPServerInfo": {
       "additionalProperties": false,
       "properties": {
@@ -786,27 +704,6 @@
       "title": "EIPServerInfo",
       "type": "object"
     },
-    "EIPStateObject": {
-      "discriminator": {
-        "mapping": {
-          "cursor": "#/$defs/EIPCursorStateObject",
-          "output_lease": "#/$defs/EIPOutputStateObject",
-          "process_lease": "#/$defs/EIPProcessStateObject"
-        },
-        "propertyName": "kind"
-      },
-      "oneOf": [
-        {
-          "$ref": "#/$defs/EIPProcessStateObject"
-        },
-        {
-          "$ref": "#/$defs/EIPOutputStateObject"
-        },
-        {
-          "$ref": "#/$defs/EIPCursorStateObject"
-        }
-      ]
-    },
     "EncodedBytes": {
       "additionalProperties": false,
       "properties": {
@@ -826,22 +723,6 @@
         "data"
       ],
       "title": "EncodedBytes",
-      "type": "object"
-    },
-    "EnvironmentChangedNotification": {
-      "additionalProperties": false,
-      "properties": {
-        "observed_generation": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Observed Generation",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "observed_generation"
-      ],
-      "title": "EnvironmentChangedNotification",
       "type": "object"
     },
     "EnvironmentDescribeParams": {
@@ -888,7 +769,7 @@
         },
         "generation": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Generation",
           "type": "integer"
         },
@@ -952,8 +833,7 @@
         "execution_isolation_failed",
         "cleanup_failed",
         "command_start_failed",
-        "conflict",
-        "invalid_state"
+        "conflict"
       ],
       "title": "ErrorType",
       "type": "string"
@@ -1038,6 +918,93 @@
         "receipt"
       ],
       "title": "FileCopyResult",
+      "type": "object"
+    },
+    "FileFindParams": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_depth": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Max Depth",
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/FindMode"
+        },
+        "output_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/EIPPath"
+        }
+      },
+      "required": [
+        "context",
+        "root",
+        "pattern",
+        "mode",
+        "max_depth"
+      ],
+      "title": "FileFindParams",
+      "type": "object"
+    },
+    "FileFindResult": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FileListEntry"
+          },
+          "title": "Entries",
+          "type": "array"
+        },
+        "output": {
+          "$ref": "#/$defs/StructuredOutputDisposition"
+        }
+      },
+      "required": [
+        "output"
+      ],
+      "title": "FileFindResult",
       "type": "object"
     },
     "FileInfo": {
@@ -1160,7 +1127,15 @@
           "type": "integer"
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
@@ -1173,8 +1148,7 @@
       },
       "required": [
         "context",
-        "path",
-        "output_policy"
+        "path"
       ],
       "title": "FileListParams",
       "type": "object"
@@ -1411,7 +1385,15 @@
           "type": "integer"
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
@@ -1419,8 +1401,7 @@
       },
       "required": [
         "context",
-        "path",
-        "output_policy"
+        "path"
       ],
       "title": "FileReadParams",
       "type": "object"
@@ -1529,51 +1510,30 @@
       "additionalProperties": false,
       "properties": {
         "byte_offset": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Byte Offset"
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Byte Offset",
+          "type": "integer"
         },
         "line_number": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Line Number"
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Line Number",
+          "type": "integer"
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
         },
         "preview": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Preview"
+          "title": "Preview",
+          "type": "string"
         }
       },
       "required": [
-        "path"
+        "path",
+        "line_number",
+        "byte_offset",
+        "preview"
       ],
       "title": "FileSearchMatch",
       "type": "object"
@@ -1581,6 +1541,11 @@
     "FileSearchParams": {
       "additionalProperties": false,
       "properties": {
+        "case_sensitive": {
+          "default": true,
+          "title": "Case Sensitive",
+          "type": "boolean"
+        },
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
@@ -1621,7 +1586,15 @@
           "$ref": "#/$defs/SearchMode"
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "query": {
           "title": "Query",
@@ -1636,8 +1609,7 @@
         "root",
         "query",
         "mode",
-        "max_depth",
-        "output_policy"
+        "max_depth"
       ],
       "title": "FileSearchParams",
       "type": "object"
@@ -1789,6 +1761,14 @@
       "title": "FileWriteResult",
       "type": "object"
     },
+    "FindMode": {
+      "enum": [
+        "glob",
+        "regex"
+      ],
+      "title": "FindMode",
+      "type": "string"
+    },
     "InitializeParams": {
       "additionalProperties": false,
       "properties": {
@@ -1856,37 +1836,6 @@
       "title": "InitializeResult",
       "type": "object"
     },
-    "InvocationGrantRef": {
-      "additionalProperties": false,
-      "properties": {
-        "audience": {
-          "title": "Audience",
-          "type": "string"
-        },
-        "claims_digest": {
-          "title": "Claims Digest",
-          "type": "string"
-        },
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "grant_id": {
-          "minLength": 1,
-          "title": "Grant Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "grant_id",
-        "audience",
-        "claims_digest",
-        "expires_at"
-      ],
-      "title": "InvocationGrantRef",
-      "type": "object"
-    },
     "IsolationBackend": {
       "enum": [
         "linux_bubblewrap",
@@ -1894,6 +1843,15 @@
         "outer_host"
       ],
       "title": "IsolationBackend",
+      "type": "string"
+    },
+    "IsolationCleanupGuarantee": {
+      "enum": [
+        "namespace_complete",
+        "residual_confined_possible",
+        "outer_host"
+      ],
+      "title": "IsolationCleanupGuarantee",
       "type": "string"
     },
     "IsolationMode": {
@@ -1917,6 +1875,9 @@
       "properties": {
         "backend": {
           "$ref": "#/$defs/IsolationBackend"
+        },
+        "cleanup_guarantee": {
+          "$ref": "#/$defs/IsolationCleanupGuarantee"
         },
         "filesystem_containment": {
           "title": "Filesystem Containment",
@@ -1943,12 +1904,12 @@
         "filesystem_containment",
         "process_containment",
         "network_containment",
-        "network_policy"
+        "network_policy",
+        "cleanup_guarantee"
       ],
       "title": "IsolationPosture",
       "type": "object"
     },
-    "JsonValue": {},
     "MountDescriptor": {
       "additionalProperties": false,
       "properties": {
@@ -2056,7 +2017,7 @@
         },
         "generation": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Generation",
           "type": "integer"
         },
@@ -2107,19 +2068,6 @@
         "observed_at"
       ],
       "title": "OperationReceipt",
-      "type": "object"
-    },
-    "OutputAvailableNotification": {
-      "additionalProperties": false,
-      "properties": {
-        "cursor": {
-          "$ref": "#/$defs/OutputCursor"
-        }
-      },
-      "required": [
-        "cursor"
-      ],
-      "title": "OutputAvailableNotification",
       "type": "object"
     },
     "OutputCapture": {
@@ -2252,11 +2200,6 @@
       "title": "OutputKind",
       "type": "string"
     },
-    "OutputLeaseRef": {
-      "minLength": 1,
-      "title": "OutputLeaseRef",
-      "type": "string"
-    },
     "OutputOverflow": {
       "enum": [
         "fail",
@@ -2319,6 +2262,36 @@
     },
     "OutputReadParams": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "cursor": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "cursor"
+              ]
+            },
+            {
+              "properties": {
+                "start_offset": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "start_offset"
+              ]
+            }
+          ]
+        }
+      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
@@ -2335,7 +2308,15 @@
           "default": null
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "reference": {
           "$ref": "#/$defs/OutputReference"
@@ -2357,8 +2338,7 @@
       },
       "required": [
         "context",
-        "reference",
-        "output_policy"
+        "reference"
       ],
       "title": "OutputReadParams",
       "type": "object"
@@ -2402,6 +2382,36 @@
     },
     "OutputReleaseParams": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "reference": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "reference"
+              ]
+            },
+            {
+              "properties": {
+                "cursor": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "cursor"
+              ]
+            }
+          ]
+        }
+      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
@@ -2451,66 +2461,6 @@
         "receipt"
       ],
       "title": "OutputReleaseResult",
-      "type": "object"
-    },
-    "OutputRetainParams": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "reference": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputReference"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "requested_expires_at": {
-          "format": "date-time",
-          "title": "Requested Expires At",
-          "type": "string"
-        }
-      },
-      "required": [
-        "context",
-        "requested_expires_at"
-      ],
-      "title": "OutputRetainParams",
-      "type": "object"
-    },
-    "OutputRetainResult": {
-      "additionalProperties": false,
-      "properties": {
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "lease": {
-          "$ref": "#/$defs/OutputLeaseRef"
-        }
-      },
-      "required": [
-        "lease",
-        "expires_at"
-      ],
-      "title": "OutputRetainResult",
       "type": "object"
     },
     "OutputSegment": {
@@ -2674,19 +2624,6 @@
       "title": "PortWaitResult",
       "type": "object"
     },
-    "ProcessChangedNotification": {
-      "additionalProperties": false,
-      "properties": {
-        "handle": {
-          "$ref": "#/$defs/ProcessHandle"
-        }
-      },
-      "required": [
-        "handle"
-      ],
-      "title": "ProcessChangedNotification",
-      "type": "object"
-    },
     "ProcessCloseStdinParams": {
       "additionalProperties": false,
       "properties": {
@@ -2738,23 +2675,12 @@
         },
         "generation": {
           "maximum": 18446744073709551615,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Generation",
           "type": "integer"
         },
         "handle": {
           "$ref": "#/$defs/ProcessHandle"
-        },
-        "lease": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProcessLeaseRef"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "output": {
           "$ref": "#/$defs/ProcessOutputSnapshot"
@@ -2842,11 +2768,6 @@
       "title": "ProcessKillResult",
       "type": "object"
     },
-    "ProcessLeaseRef": {
-      "minLength": 1,
-      "title": "ProcessLeaseRef",
-      "type": "string"
-    },
     "ProcessOutputSnapshot": {
       "additionalProperties": false,
       "properties": {
@@ -2887,7 +2808,15 @@
           "$ref": "#/$defs/ProcessHandle"
         },
         "output_policy": {
-          "$ref": "#/$defs/OutputPolicy"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "stderr_cursor": {
           "anyOf": [
@@ -2921,8 +2850,7 @@
       },
       "required": [
         "context",
-        "handle",
-        "output_policy"
+        "handle"
       ],
       "title": "ProcessReadOutputParams",
       "type": "object"
@@ -2981,52 +2909,6 @@
         "receipt"
       ],
       "title": "ProcessReleaseResult",
-      "type": "object"
-    },
-    "ProcessRetainParams": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "handle": {
-          "$ref": "#/$defs/ProcessHandle"
-        },
-        "requested_expires_at": {
-          "format": "date-time",
-          "title": "Requested Expires At",
-          "type": "string"
-        }
-      },
-      "required": [
-        "context",
-        "handle",
-        "requested_expires_at"
-      ],
-      "title": "ProcessRetainParams",
-      "type": "object"
-    },
-    "ProcessRetainResult": {
-      "additionalProperties": false,
-      "properties": {
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        },
-        "lease": {
-          "$ref": "#/$defs/ProcessLeaseRef"
-        },
-        "receipt": {
-          "$ref": "#/$defs/OperationReceipt"
-        }
-      },
-      "required": [
-        "lease",
-        "expires_at",
-        "receipt"
-      ],
-      "title": "ProcessRetainResult",
       "type": "object"
     },
     "ProcessSignal": {
@@ -3346,17 +3228,67 @@
     },
     "ReceiptGetParams": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "receipt_ref": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "receipt_ref"
+              ]
+            },
+            {
+              "properties": {
+                "operation_id": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "operation_id"
+              ]
+            }
+          ]
+        }
+      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
+        "operation_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation Id"
+        },
         "receipt_ref": {
-          "$ref": "#/$defs/ReceiptRef"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReceiptRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
-        "context",
-        "receipt_ref"
+        "context"
       ],
       "title": "ReceiptGetParams",
       "type": "object"
@@ -3409,107 +3341,6 @@
       "title": "RequestedProcessSignal",
       "type": "string"
     },
-    "ResolvedResource": {
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Generation",
-          "type": "integer"
-        },
-        "identifier": {
-          "minLength": 1,
-          "title": "Identifier",
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/ResolvedResourceKind"
-        },
-        "namespace": {
-          "title": "Namespace",
-          "type": "string"
-        },
-        "revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "namespace",
-        "kind",
-        "identifier",
-        "generation"
-      ],
-      "title": "ResolvedResource",
-      "type": "object"
-    },
-    "ResolvedResourceKind": {
-      "enum": [
-        "file",
-        "directory",
-        "symlink",
-        "missing_target"
-      ],
-      "title": "ResolvedResourceKind",
-      "type": "string"
-    },
-    "ResourceAction": {
-      "enum": [
-        "read",
-        "write",
-        "delete",
-        "execute"
-      ],
-      "title": "ResourceAction",
-      "type": "string"
-    },
-    "ResourceResolveParams": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "$ref": "#/$defs/ResourceAction"
-        },
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "follow_symlinks": {
-          "default": true,
-          "title": "Follow Symlinks",
-          "type": "boolean"
-        },
-        "path": {
-          "$ref": "#/$defs/EIPPath"
-        }
-      },
-      "required": [
-        "context",
-        "path",
-        "action"
-      ],
-      "title": "ResourceResolveParams",
-      "type": "object"
-    },
-    "ResourceResolveResult": {
-      "additionalProperties": false,
-      "properties": {
-        "resource": {
-          "$ref": "#/$defs/ResolvedResource"
-        }
-      },
-      "required": [
-        "resource"
-      ],
-      "title": "ResourceResolveResult",
-      "type": "object"
-    },
     "RetryHint": {
       "enum": [
         "never",
@@ -3525,7 +3356,6 @@
     "SearchMode": {
       "enum": [
         "literal",
-        "glob",
         "regex"
       ],
       "title": "SearchMode",
@@ -3547,60 +3377,16 @@
     "SessionCloseResult": {
       "additionalProperties": false,
       "properties": {
-        "leased_output_objects_preserved": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Leased Output Objects Preserved",
-          "type": "integer"
-        },
-        "leased_processes_preserved": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Leased Processes Preserved",
-          "type": "integer"
-        },
-        "operations_cancellation_requested": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Operations Cancellation Requested",
-          "type": "integer"
-        },
-        "output_objects_released": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Output Objects Released",
-          "type": "integer"
-        },
-        "processes_termination_requested": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Processes Termination Requested",
-          "type": "integer"
+        "closed": {
+          "const": true,
+          "title": "Closed",
+          "type": "boolean"
         }
       },
       "required": [
-        "operations_cancellation_requested",
-        "processes_termination_requested",
-        "output_objects_released",
-        "leased_processes_preserved",
-        "leased_output_objects_preserved"
+        "closed"
       ],
       "title": "SessionCloseResult",
-      "type": "object"
-    },
-    "SessionExpiringNotification": {
-      "additionalProperties": false,
-      "properties": {
-        "expires_at": {
-          "format": "date-time",
-          "title": "Expires At",
-          "type": "string"
-        }
-      },
-      "required": [
-        "expires_at"
-      ],
-      "title": "SessionExpiringNotification",
       "type": "object"
     },
     "ShellCommand": {
@@ -3702,99 +3488,6 @@
         "max_script_bytes"
       ],
       "title": "ShellProfileDescriptor",
-      "type": "object"
-    },
-    "StateExportParams": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "output_leases": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/OutputLeaseRef"
-          },
-          "title": "Output Leases",
-          "type": "array"
-        },
-        "process_leases": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ProcessLeaseRef"
-          },
-          "title": "Process Leases",
-          "type": "array"
-        }
-      },
-      "required": [
-        "context"
-      ],
-      "title": "StateExportParams",
-      "type": "object"
-    },
-    "StateExportResult": {
-      "additionalProperties": false,
-      "properties": {
-        "observed_at": {
-          "format": "date-time",
-          "title": "Observed At",
-          "type": "string"
-        },
-        "state": {
-          "$ref": "#/$defs/EIPEnvironmentState"
-        }
-      },
-      "required": [
-        "state",
-        "observed_at"
-      ],
-      "title": "StateExportResult",
-      "type": "object"
-    },
-    "StateRef": {
-      "minLength": 1,
-      "title": "StateRef",
-      "type": "string"
-    },
-    "StateRestoreParams": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "state": {
-          "$ref": "#/$defs/EIPEnvironmentState"
-        }
-      },
-      "required": [
-        "context",
-        "state"
-      ],
-      "title": "StateRestoreParams",
-      "type": "object"
-    },
-    "StateRestoreResult": {
-      "additionalProperties": false,
-      "properties": {
-        "omitted_expired": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Omitted Expired",
-          "type": "array"
-        },
-        "restored": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/EIPStateObject"
-          },
-          "title": "Restored",
-          "type": "array"
-        }
-      },
-      "title": "StateRestoreResult",
       "type": "object"
     },
     "StructuredOutputDisposition": {

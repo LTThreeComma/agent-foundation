@@ -21,19 +21,19 @@ This contract defines logical identities, states, fencing, and completion rules.
 
 ## Boundaries
 
-| Concern                                          | Owner                                                      | Relationship                                            |
-| ------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------- |
-| Durable Execution identity and state             | Foundation Service                                         | Sole public lifecycle authority                         |
-| Attempt lease, generation, and commit fence      | Foundation Service scheduler and execution lifecycle       | Prevent stale workers from advancing durable state      |
-| Process-local run, result, and `HarnessState`    | Harness                                                    | Candidate observations submitted by the current Attempt |
-| Provider-adapter lifecycle record                | Environment provider adapter                               | Service has bounded opaque storage custody              |
-| Environment-local state and side-effect evidence | EIP provider and affected external system                  | Revalidated under every fresh binding                   |
-| Accepted input and command receipts              | [Execution API and Events](04-execution-api-and-events.md) | Inputs to lifecycle transitions, not Attempt state      |
-| Durable model-usage records and estimates        | [Usage Recording](05-usage-accounting.md)                  | Independent observation boundary                        |
-| Async child acceptance and lineage               | Foundation Service subagent lifecycle                      | Child is an independent Execution                       |
-| Shared async task coordination                   | Foundation durable task scope                              | CAS API, never shared Python memory                     |
-| Child-result retention and parent routing        | Foundation subagent delivery ledger                        | Later Host input, never a deferred spawn result         |
-| Product delivery or webhook completion           | Connector or product                                       | Never commits Execution completion retroactively        |
+| Concern                                           | Owner                                                      | Relationship                                                                         |
+| ------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Durable Execution identity and state              | Foundation Service                                         | Sole public lifecycle authority                                                      |
+| Attempt lease, generation, and commit fence       | Foundation Service scheduler and execution lifecycle       | Prevent stale workers from advancing durable state                                   |
+| Process-local run, result, and `HarnessState`     | Harness                                                    | Candidate observations submitted by the current Attempt                              |
+| Provider-adapter lifecycle record                 | Environment provider adapter                               | Service has bounded opaque storage custody                                           |
+| Native Environment state and side-effect evidence | Selected Environment provider and affected external system | Provider-specific; EIP runtime evidence exists only in the current daemon generation |
+| Accepted input and command receipts               | [Execution API and Events](04-execution-api-and-events.md) | Inputs to lifecycle transitions, not Attempt state                                   |
+| Durable model-usage records and estimates         | [Usage Recording](05-usage-accounting.md)                  | Independent observation boundary                                                     |
+| Async child acceptance and lineage                | Foundation Service subagent lifecycle                      | Child is an independent Execution                                                    |
+| Shared async task coordination                    | Foundation durable task scope                              | CAS API, never shared Python memory                                                  |
+| Child-result retention and parent routing         | Foundation subagent delivery ledger                        | Later Host input, never a deferred spawn result                                      |
+| Product delivery or webhook completion            | Connector or product                                       | Never commits Execution completion retroactively                                     |
 
 ## Core Model
 

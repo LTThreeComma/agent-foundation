@@ -48,13 +48,27 @@ def test_checked_inspection_artifacts_follow_eip_json_profile() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]
     assert schema["EIPPath"]["properties"]["path"]["format"] == "eip-absolute-path"
     assert schema["EncodedBytes"]["properties"]["data"]["format"] == "eip-base64-unpadded"
-    assert schema["EnvironmentChangedNotification"]["properties"]["observed_generation"]["maximum"] == 2**64 - 1
+    generation = schema["EnvironmentDescriptor"]["properties"]["generation"]
+    assert generation["minimum"] == 1
+    assert generation["maximum"] == 2**64 - 1
     assert schema["EIPError"]["properties"]["code"]["minimum"] == -(2**31)
+    for model_name, selector_names in {
+        "OutputReadParams": {"cursor", "start_offset"},
+        "OutputReleaseParams": {"reference", "cursor"},
+        "ReceiptGetParams": {"receipt_ref", "operation_id"},
+    }.items():
+        one_of = schema[model_name]["allOf"][0]["oneOf"]
+        assert {entry["required"][0] for entry in one_of} == selector_names
+        for entry in one_of:
+            selector = entry["required"][0]
+            assert entry["properties"][selector] == {"not": {"type": "null"}}
 
     openrpc = json.loads(OPENRPC_PATH.read_text(encoding="utf-8"))
     shell_exec = next(method for method in openrpc["methods"] if method["name"] == "shell.exec")
     assert [item["name"] for item in shell_exec["params"]] == ["context", "request"]
     assert all(item["required"] is True for item in shell_exec["params"])
+    receipt_get = next(method for method in openrpc["methods"] if method["name"] == "receipt.get")
+    assert receipt_get["x-eip-params-schema"] == {"$ref": "schema.json#/$defs/ReceiptGetParams"}
 
 
 def test_verify_generated_does_not_modify_checked_tree(tmp_path: Path) -> None:

@@ -5,25 +5,6 @@
   },
   "methods": [
     {
-      "name": "environment.changed",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "observed_generation",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/EnvironmentChangedNotification/properties/observed_generation"
-          }
-        }
-      ],
-      "x-eip-capability": null,
-      "x-eip-error-family": "notification",
-      "x-eip-idempotency": "notification",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "server_notification"
-    },
-    {
       "name": "environment.describe",
       "paramStructure": "by-name",
       "params": [
@@ -46,7 +27,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/EnvironmentDescribeParams"
+      }
     },
     {
       "name": "file.copy",
@@ -113,7 +97,87 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileCopyParams"
+      }
+    },
+    {
+      "name": "file.find",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/context"
+          }
+        },
+        {
+          "name": "root",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/root"
+          }
+        },
+        {
+          "name": "pattern",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/pattern"
+          }
+        },
+        {
+          "name": "mode",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/mode"
+          }
+        },
+        {
+          "name": "kind",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/kind"
+          }
+        },
+        {
+          "name": "max_depth",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/max_depth"
+          }
+        },
+        {
+          "name": "cursor",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/cursor"
+          }
+        },
+        {
+          "name": "output_policy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/output_policy"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FileFindResult"
+        }
+      },
+      "x-eip-capability": "file.find",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "read_only_retry",
+      "x-eip-idempotency-key": "disallowed",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileFindParams"
+      }
     },
     {
       "name": "file.list",
@@ -156,7 +220,7 @@
         },
         {
           "name": "output_policy",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/FileListParams/properties/output_policy"
           }
@@ -173,7 +237,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileListParams"
+      }
     },
     {
       "name": "file.mkdir",
@@ -219,7 +286,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileMkdirParams"
+      }
     },
     {
       "name": "file.move",
@@ -279,7 +349,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileMoveParams"
+      }
     },
     {
       "name": "file.patch",
@@ -332,7 +405,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FilePatchParams"
+      }
     },
     {
       "name": "file.read",
@@ -375,7 +451,7 @@
         },
         {
           "name": "output_policy",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/FileReadParams/properties/output_policy"
           }
@@ -392,7 +468,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileReadParams"
+      }
     },
     {
       "name": "file.remove",
@@ -452,7 +531,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileRemoveParams"
+      }
     },
     {
       "name": "file.search",
@@ -516,9 +598,16 @@
         },
         {
           "name": "output_policy",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/FileSearchParams/properties/output_policy"
+          }
+        },
+        {
+          "name": "case_sensitive",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileSearchParams/properties/case_sensitive"
           }
         }
       ],
@@ -528,12 +617,15 @@
           "$ref": "schema.json#/$defs/FileSearchResult"
         }
       },
-      "x-eip-capability": "file.read",
+      "x-eip-capability": "file.search",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileSearchParams"
+      }
     },
     {
       "name": "file.stat",
@@ -572,7 +664,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileStatParams"
+      }
     },
     {
       "name": "file.write",
@@ -646,7 +741,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileWriteParams"
+      }
     },
     {
       "name": "initialize",
@@ -699,7 +797,10 @@
       "x-eip-idempotency": "initialization",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/InitializeParams"
+      }
     },
     {
       "name": "operation.cancel",
@@ -731,26 +832,10 @@
       "x-eip-idempotency": "state_idempotent_control",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "output.available",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "cursor",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputAvailableNotification/properties/cursor"
-          }
-        }
-      ],
-      "x-eip-capability": null,
-      "x-eip-error-family": "notification",
-      "x-eip-idempotency": "notification",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "server_notification"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/OperationCancelParams"
+      }
     },
     {
       "name": "output.read",
@@ -786,7 +871,7 @@
         },
         {
           "name": "output_policy",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/OutputReadParams/properties/output_policy"
           }
@@ -803,7 +888,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/OutputReadParams"
+      }
     },
     {
       "name": "output.release",
@@ -842,53 +930,10 @@
       "x-eip-idempotency": "state_idempotent_control",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "output.retain",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "context",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputRetainParams/properties/context"
-          }
-        },
-        {
-          "name": "reference",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputRetainParams/properties/reference"
-          }
-        },
-        {
-          "name": "cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputRetainParams/properties/cursor"
-          }
-        },
-        {
-          "name": "requested_expires_at",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputRetainParams/properties/requested_expires_at"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "schema.json#/$defs/OutputRetainResult"
-        }
-      },
-      "x-eip-capability": "output.retain",
-      "x-eip-error-family": "output",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/OutputReleaseParams"
+      }
     },
     {
       "name": "port.inspect",
@@ -920,7 +965,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/PortInspectParams"
+      }
     },
     {
       "name": "port.wait",
@@ -959,26 +1007,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "process.changed",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "handle",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessChangedNotification/properties/handle"
-          }
-        }
-      ],
-      "x-eip-capability": null,
-      "x-eip-error-family": "notification",
-      "x-eip-idempotency": "notification",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "server_notification"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/PortWaitParams"
+      }
     },
     {
       "name": "process.close_stdin",
@@ -1010,7 +1042,10 @@
       "x-eip-idempotency": "state_idempotent_control",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessCloseStdinParams"
+      }
     },
     {
       "name": "process.inspect",
@@ -1042,7 +1077,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessInspectParams"
+      }
     },
     {
       "name": "process.kill",
@@ -1074,7 +1112,10 @@
       "x-eip-idempotency": "state_idempotent_control",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessKillParams"
+      }
     },
     {
       "name": "process.read_output",
@@ -1117,7 +1158,7 @@
         },
         {
           "name": "output_policy",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/output_policy"
           }
@@ -1134,7 +1175,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessReadOutputParams"
+      }
     },
     {
       "name": "process.release",
@@ -1166,46 +1210,10 @@
       "x-eip-idempotency": "state_idempotent_control",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "process.retain",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "context",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessRetainParams/properties/context"
-          }
-        },
-        {
-          "name": "handle",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessRetainParams/properties/handle"
-          }
-        },
-        {
-          "name": "requested_expires_at",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessRetainParams/properties/requested_expires_at"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "schema.json#/$defs/ProcessRetainResult"
-        }
-      },
-      "x-eip-capability": "process.retain",
-      "x-eip-error-family": "process",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessReleaseParams"
+      }
     },
     {
       "name": "process.signal",
@@ -1244,7 +1252,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessSignalParams"
+      }
     },
     {
       "name": "process.start",
@@ -1276,7 +1287,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessStartParams"
+      }
     },
     {
       "name": "process.wait",
@@ -1315,7 +1329,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessWaitParams"
+      }
     },
     {
       "name": "process.write_stdin",
@@ -1361,7 +1378,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ProcessWriteStdinParams"
+      }
     },
     {
       "name": "receipt.get",
@@ -1376,9 +1396,16 @@
         },
         {
           "name": "receipt_ref",
-          "required": true,
+          "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/ReceiptGetParams/properties/receipt_ref"
+          }
+        },
+        {
+          "name": "operation_id",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/ReceiptGetParams/properties/operation_id"
           }
         }
       ],
@@ -1393,53 +1420,10 @@
       "x-eip-idempotency": "read_only_retry",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "resource.resolve",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "context",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ResourceResolveParams/properties/context"
-          }
-        },
-        {
-          "name": "path",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ResourceResolveParams/properties/path"
-          }
-        },
-        {
-          "name": "action",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/ResourceResolveParams/properties/action"
-          }
-        },
-        {
-          "name": "follow_symlinks",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/ResourceResolveParams/properties/follow_symlinks"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "schema.json#/$defs/ResourceResolveResult"
-        }
-      },
-      "x-eip-capability": "resource.resolve",
-      "x-eip-error-family": "resource",
-      "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ReceiptGetParams"
+      }
     },
     {
       "name": "session.close",
@@ -1464,26 +1448,10 @@
       "x-eip-idempotency": "session_terminal",
       "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "session.expiring",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "expires_at",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/SessionExpiringNotification/properties/expires_at"
-          }
-        }
-      ],
-      "x-eip-capability": null,
-      "x-eip-error-family": "notification",
-      "x-eip-idempotency": "notification",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "server_notification"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/SessionCloseParams"
+      }
     },
     {
       "name": "shell.exec",
@@ -1515,78 +1483,10 @@
       "x-eip-idempotency": "provider_key_replay",
       "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "state.export",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "context",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/StateExportParams/properties/context"
-          }
-        },
-        {
-          "name": "process_leases",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/StateExportParams/properties/process_leases"
-          }
-        },
-        {
-          "name": "output_leases",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/StateExportParams/properties/output_leases"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "schema.json#/$defs/StateExportResult"
-        }
-      },
-      "x-eip-capability": "environment.state",
-      "x-eip-error-family": "state",
-      "x-eip-idempotency": "state_export",
-      "x-eip-idempotency-key": "disallowed",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
-    },
-    {
-      "name": "state.restore",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "context",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/StateRestoreParams/properties/context"
-          }
-        },
-        {
-          "name": "state",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/StateRestoreParams/properties/state"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "schema.json#/$defs/StateRestoreResult"
-        }
-      },
-      "x-eip-capability": "environment.state",
-      "x-eip-error-family": "state",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
-      "x-eip-introduced": "1.0",
-      "x-eip-kind": "request_response"
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/ShellExecParams"
+      }
     }
   ],
   "openrpc": "1.3.2"

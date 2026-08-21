@@ -57,7 +57,7 @@ One isolation manager is created before transport readiness. It owns immutable b
 Each command captures one policy snapshot containing:
 
 - Environment identity and generation;
-- canonical selected mount roots and their read/write ceilings;
+- the canonical `cwd` mount root and its read/write ceiling;
 - canonical cwd and executable authority;
 - curated runtime and explicit extra read-only roots;
 - private execution home and temporary root;
@@ -66,7 +66,7 @@ Each command captures one policy snapshot containing:
 - final payload identity and environment;
 - backend-independent wall-time, output, and process lifecycle limits.
 
-A later daemon generation or provider topology change does not mutate a running command's sandbox. Revoking a mount or authority that existing leased processes still hold requires terminating and cleaning those process trees before the revocation is acknowledged. A new generation never silently retargets them.
+A later provider topology change does not mutate a running command's sandbox. Revoking the mount or authority held by an existing process requires terminating and cleaning that process tree before the revocation is acknowledged. A daemon restart terminates all old-generation trees and never retargets them.
 
 The isolation manager returns a backend-neutral execution object to the sole command execution manager. Callers cannot assume the host child PID is the requested executable, process-group leader, or complete tree. Status, signaling, force cleanup, initial-command wait, and tree-cleanup wait use semantic operations defined by [Command and Process Execution](05-command-and-process-execution.md).
 
@@ -76,7 +76,7 @@ Required isolation starts from deny-by-default filesystem authority.
 
 | Root class                                                                       | Payload access                                                                                                              |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Selected configured mount                                                        | Read-only or read-write according to its trusted mount ceiling                                                              |
+| Command `cwd` mount                                                              | The complete selected mount, read-only or read-write according to its trusted ceiling; no other EIP mount is exposed        |
 | Private execution home                                                           | Read-write; distinct from the daemon or host user's home                                                                    |
 | Private execution temporary root                                                 | Read-write and presented through forced temporary-directory environment values                                              |
 | Curated immutable platform runtime                                               | Read and executable mapping only as required for shells, loaders, tools, certificates, locale, and basic account resolution |
@@ -91,7 +91,7 @@ Required isolation grants executable mapping only where code execution is intend
 
 ### Protected paths and overlap
 
-Protected paths include daemon configuration and credentials, `AGENT_ENVD_STATE_DIR` except an exact dedicated execution-home child, retained-output storage, transport sockets, logs, install and helper roots, service definitions, isolation control data, and probe sentinels.
+Protected paths include daemon configuration and credentials, `AGENT_ENVD_RUNTIME_DIR` except an exact dedicated execution-home child, retained-output storage, transport sockets, logs, install and helper roots, service definitions, isolation control data, and probe sentinels.
 
 Protected denial has absolute precedence. Every root is canonicalized and identity checked. A selected mount, runtime root, or extra root is rejected when it:
 
@@ -319,7 +319,7 @@ Narrow runtime grants can require explicit configuration for Homebrew, Nix, or c
 02. Required mode defaults on, runs a production probe before transport admission, and never falls back.
 03. Disabled mode is explicit and delegates only OS command containment; all other envd controls remain active.
 04. EIP callers cannot select isolation mode, backend, profile, helper, native root, payload identity, or wider network policy.
-05. Required filesystem authority starts deny-by-default and includes only selected mounts, private execution roots, curated runtime, explicit read-only roots, minimal devices, and stdio.
+05. Required filesystem authority starts deny-by-default and includes only the command's `cwd` mount, private execution roots, curated runtime, explicit read-only roots, minimal devices, and stdio.
 06. Protected-path overlap is rejected symmetrically after canonicalization; symlinks and concurrent root replacement cannot widen grants.
 07. Request environment reaches only the final payload after isolation and identity setup; daemon secrets and transport state never reach helpers or payloads.
 08. No requested executable starts before final sandbox readiness and process/output ownership commit.

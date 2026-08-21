@@ -6,11 +6,12 @@ from types import MappingProxyType
 from typing import Literal
 
 from .models import (
-    EnvironmentChangedNotification,
     EnvironmentDescribeParams,
     EnvironmentDescribeResult,
     FileCopyParams,
     FileCopyResult,
+    FileFindParams,
+    FileFindResult,
     FileListParams,
     FileListResult,
     FileMkdirParams,
@@ -33,18 +34,14 @@ from .models import (
     InitializeResult,
     OperationCancelParams,
     OperationCancelResult,
-    OutputAvailableNotification,
     OutputReadParams,
     OutputReadResult,
     OutputReleaseParams,
     OutputReleaseResult,
-    OutputRetainParams,
-    OutputRetainResult,
     PortInspectParams,
     PortInspectResult,
     PortWaitParams,
     PortWaitResult,
-    ProcessChangedNotification,
     ProcessCloseStdinParams,
     ProcessCloseStdinResult,
     ProcessInspectParams,
@@ -55,8 +52,6 @@ from .models import (
     ProcessReadOutputResult,
     ProcessReleaseParams,
     ProcessReleaseResult,
-    ProcessRetainParams,
-    ProcessRetainResult,
     ProcessSignalParams,
     ProcessSignalResult,
     ProcessStartParams,
@@ -67,17 +62,10 @@ from .models import (
     ProcessWriteStdinResult,
     ReceiptGetParams,
     ReceiptGetResult,
-    ResourceResolveParams,
-    ResourceResolveResult,
     SessionCloseParams,
     SessionCloseResult,
-    SessionExpiringNotification,
     ShellExecParams,
     ShellExecResult,
-    StateExportParams,
-    StateExportResult,
-    StateRestoreParams,
-    StateRestoreResult,
 )
 
 
@@ -85,26 +73,14 @@ from .models import (
 class MethodSpec[P, R]:
     name: str
     capability: str | None
-    kind: Literal["request_response", "server_notification"]
+    kind: Literal["request_response"]
     idempotency: str
     idempotency_key: Literal["disallowed", "optional", "required"]
     introduced: str
     error_family: str
     params_type: type[P]
-    result_type: type[R] | None
+    result_type: type[R]
 
-
-ENVIRONMENT_CHANGED = MethodSpec(
-    name="environment.changed",
-    capability=None,
-    kind="server_notification",
-    idempotency="notification",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="notification",
-    params_type=EnvironmentChangedNotification,
-    result_type=None,
-)
 
 ENVIRONMENT_DESCRIBE = MethodSpec(
     name="environment.describe",
@@ -128,6 +104,18 @@ FILE_COPY = MethodSpec(
     error_family="resource",
     params_type=FileCopyParams,
     result_type=FileCopyResult,
+)
+
+FILE_FIND = MethodSpec(
+    name="file.find",
+    capability="file.find",
+    kind="request_response",
+    idempotency="read_only_retry",
+    idempotency_key="disallowed",
+    introduced="1.0",
+    error_family="resource",
+    params_type=FileFindParams,
+    result_type=FileFindResult,
 )
 
 FILE_LIST = MethodSpec(
@@ -204,7 +192,7 @@ FILE_REMOVE = MethodSpec(
 
 FILE_SEARCH = MethodSpec(
     name="file.search",
-    capability="file.read",
+    capability="file.search",
     kind="request_response",
     idempotency="read_only_retry",
     idempotency_key="disallowed",
@@ -262,18 +250,6 @@ OPERATION_CANCEL = MethodSpec(
     result_type=OperationCancelResult,
 )
 
-OUTPUT_AVAILABLE = MethodSpec(
-    name="output.available",
-    capability=None,
-    kind="server_notification",
-    idempotency="notification",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="notification",
-    params_type=OutputAvailableNotification,
-    result_type=None,
-)
-
 OUTPUT_READ = MethodSpec(
     name="output.read",
     capability="output.read",
@@ -298,18 +274,6 @@ OUTPUT_RELEASE = MethodSpec(
     result_type=OutputReleaseResult,
 )
 
-OUTPUT_RETAIN = MethodSpec(
-    name="output.retain",
-    capability="output.retain",
-    kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
-    introduced="1.0",
-    error_family="output",
-    params_type=OutputRetainParams,
-    result_type=OutputRetainResult,
-)
-
 PORT_INSPECT = MethodSpec(
     name="port.inspect",
     capability="port.observe",
@@ -332,18 +296,6 @@ PORT_WAIT = MethodSpec(
     error_family="resource",
     params_type=PortWaitParams,
     result_type=PortWaitResult,
-)
-
-PROCESS_CHANGED = MethodSpec(
-    name="process.changed",
-    capability=None,
-    kind="server_notification",
-    idempotency="notification",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="notification",
-    params_type=ProcessChangedNotification,
-    result_type=None,
 )
 
 PROCESS_CLOSE_STDIN = MethodSpec(
@@ -406,18 +358,6 @@ PROCESS_RELEASE = MethodSpec(
     result_type=ProcessReleaseResult,
 )
 
-PROCESS_RETAIN = MethodSpec(
-    name="process.retain",
-    capability="process.retain",
-    kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
-    introduced="1.0",
-    error_family="process",
-    params_type=ProcessRetainParams,
-    result_type=ProcessRetainResult,
-)
-
 PROCESS_SIGNAL = MethodSpec(
     name="process.signal",
     capability="process.manage",
@@ -478,18 +418,6 @@ RECEIPT_GET = MethodSpec(
     result_type=ReceiptGetResult,
 )
 
-RESOURCE_RESOLVE = MethodSpec(
-    name="resource.resolve",
-    capability="resource.resolve",
-    kind="request_response",
-    idempotency="read_only_retry",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="resource",
-    params_type=ResourceResolveParams,
-    result_type=ResourceResolveResult,
-)
-
 SESSION_CLOSE = MethodSpec(
     name="session.close",
     capability="session.close",
@@ -500,18 +428,6 @@ SESSION_CLOSE = MethodSpec(
     error_family="session",
     params_type=SessionCloseParams,
     result_type=SessionCloseResult,
-)
-
-SESSION_EXPIRING = MethodSpec(
-    name="session.expiring",
-    capability=None,
-    kind="server_notification",
-    idempotency="notification",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="notification",
-    params_type=SessionExpiringNotification,
-    result_type=None,
 )
 
 SHELL_EXEC = MethodSpec(
@@ -526,35 +442,11 @@ SHELL_EXEC = MethodSpec(
     result_type=ShellExecResult,
 )
 
-STATE_EXPORT = MethodSpec(
-    name="state.export",
-    capability="environment.state",
-    kind="request_response",
-    idempotency="state_export",
-    idempotency_key="disallowed",
-    introduced="1.0",
-    error_family="state",
-    params_type=StateExportParams,
-    result_type=StateExportResult,
-)
-
-STATE_RESTORE = MethodSpec(
-    name="state.restore",
-    capability="environment.state",
-    kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
-    introduced="1.0",
-    error_family="state",
-    params_type=StateRestoreParams,
-    result_type=StateRestoreResult,
-)
-
 METHODS = MappingProxyType(
     {
-        ENVIRONMENT_CHANGED.name: ENVIRONMENT_CHANGED,
         ENVIRONMENT_DESCRIBE.name: ENVIRONMENT_DESCRIBE,
         FILE_COPY.name: FILE_COPY,
+        FILE_FIND.name: FILE_FIND,
         FILE_LIST.name: FILE_LIST,
         FILE_MKDIR.name: FILE_MKDIR,
         FILE_MOVE.name: FILE_MOVE,
@@ -566,35 +458,21 @@ METHODS = MappingProxyType(
         FILE_WRITE.name: FILE_WRITE,
         INITIALIZE.name: INITIALIZE,
         OPERATION_CANCEL.name: OPERATION_CANCEL,
-        OUTPUT_AVAILABLE.name: OUTPUT_AVAILABLE,
         OUTPUT_READ.name: OUTPUT_READ,
         OUTPUT_RELEASE.name: OUTPUT_RELEASE,
-        OUTPUT_RETAIN.name: OUTPUT_RETAIN,
         PORT_INSPECT.name: PORT_INSPECT,
         PORT_WAIT.name: PORT_WAIT,
-        PROCESS_CHANGED.name: PROCESS_CHANGED,
         PROCESS_CLOSE_STDIN.name: PROCESS_CLOSE_STDIN,
         PROCESS_INSPECT.name: PROCESS_INSPECT,
         PROCESS_KILL.name: PROCESS_KILL,
         PROCESS_READ_OUTPUT.name: PROCESS_READ_OUTPUT,
         PROCESS_RELEASE.name: PROCESS_RELEASE,
-        PROCESS_RETAIN.name: PROCESS_RETAIN,
         PROCESS_SIGNAL.name: PROCESS_SIGNAL,
         PROCESS_START.name: PROCESS_START,
         PROCESS_WAIT.name: PROCESS_WAIT,
         PROCESS_WRITE_STDIN.name: PROCESS_WRITE_STDIN,
         RECEIPT_GET.name: RECEIPT_GET,
-        RESOURCE_RESOLVE.name: RESOURCE_RESOLVE,
         SESSION_CLOSE.name: SESSION_CLOSE,
-        SESSION_EXPIRING.name: SESSION_EXPIRING,
         SHELL_EXEC.name: SHELL_EXEC,
-        STATE_EXPORT.name: STATE_EXPORT,
-        STATE_RESTORE.name: STATE_RESTORE,
     }
-)
-REQUEST_METHODS = MappingProxyType(
-    {name: method for name, method in METHODS.items() if method.kind == "request_response"}
-)
-NOTIFICATION_METHODS = MappingProxyType(
-    {name: method for name, method in METHODS.items() if method.kind == "server_notification"}
 )

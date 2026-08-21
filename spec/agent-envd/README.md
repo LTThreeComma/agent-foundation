@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory defines the current design of `agent-envd`, the first-class Environment data-plane daemon for daemon-governed local, sandboxed, and remote execution. `agent-envd` implements the versioned Environment Interaction Protocol (EIP) for bounded file, command, process, port, state, and retained-output operations.
+This directory defines the current design of `agent-envd`, the first-class Environment data-plane daemon for daemon-governed local, sandboxed, and remote execution. One daemon serves one user and one Environment for one process generation. `agent-envd` implements the versioned Environment Interaction Protocol (EIP) for bounded file, command, process, port, and retained-output operations.
 
 The Harness consumes only its typed provider-neutral [`Environment`](../agent-harness/08-environment-integration.md) abstraction. Docker, E2B, remote, and optional local-daemon adapters provision or attach the native resource and establish an EIP connection. Direct `LocalFileOperator` and `LocalShell` bindings remain equally first-class and do not require this daemon. The Foundation Service defines no platform-owned Sandbox resource.
 
@@ -16,9 +16,9 @@ The Harness consumes only its typed provider-neutral [`Environment`](../agent-ha
 | [01-daemon-lifecycle-and-configuration.md](01-daemon-lifecycle-and-configuration.md)       | Trusted startup configuration, Environment identity and generation, readiness, admission, shutdown, and observability                             |
 | [02-eip-protocol.md](02-eip-protocol.md)                                                   | Shared JSON-RPC envelope, initialization, operation context, method catalog, handles, receipts, errors, cancellation, idempotency, and versioning |
 | [03-transports-and-sessions.md](03-transports-and-sessions.md)                             | Stdio framing, env-secret-authenticated HTTP, WebSocket upgrade and initialization handshake, session lifecycle, and transport failure            |
-| [04-resource-operations.md](04-resource-operations.md)                                     | Mount-scoped paths, filesystem methods, local port observation, recoverable Environment state, canonicalization, and mutation semantics           |
-| [05-command-and-process-execution.md](05-command-and-process-execution.md)                 | Structured commands, shell profiles, transactional spawn, process records, foreground/background lifecycle, signaling, cleanup, and leases        |
-| [06-output-retention.md](06-output-retention.md)                                           | EIP `OutputPolicy`, Harness policy translation, producer-side bounds, aggregate retention quotas, references, cursors, expiry, and gaps           |
+| [04-resource-operations.md](04-resource-operations.md)                                     | Mount-scoped paths, filesystem methods, local port observation, canonicalization, search, and mutation semantics                                  |
+| [05-command-and-process-execution.md](05-command-and-process-execution.md)                 | Structured commands, shell profiles, transactional spawn, process records, foreground/background lifecycle, signaling, and cleanup                |
+| [06-output-retention.md](06-output-retention.md)                                           | Optional EIP `OutputPolicy`, generous daemon defaults, producer-side bounds, generation-scoped references, cursors, expiry, and gaps              |
 | [07-execution-isolation.md](07-execution-isolation.md)                                     | `required` and `disabled` modes, filesystem and child-environment policy, Linux bubblewrap, macOS Seatbelt, network policy, probes, and posture   |
 | [08-protocol-source-client-and-generation.md](08-protocol-source-client-and-generation.md) | Canonical IDL, generated Rust/Python protocol surfaces, dedicated client package, direct Harness adapter, validation, and co-release contract     |
 
@@ -36,9 +36,9 @@ Read `00`, `01`, `02`, `03`, and `08`, then [Harness Environment Integration](..
 
 Read `02`, `04`, `05`, `06`, and `08`. Read `07` before implementing any command start path: foreground and background commands share one transactional execution and containment boundary.
 
-### Review security or recovery
+### Review security or resource lifetime
 
-Read `01`, `03`, `06`, and `07` together with [Harness Security, Compatibility, and Trade-offs](../agent-harness/15-security-compatibility-and-tradeoffs.md) and [Harness State and Resume](../agent-harness/10-snapshot-and-resume.md).
+Read `01`, `03`, `06`, and `07` together with [Harness Security, Compatibility, and Trade-offs](../agent-harness/15-security-compatibility-and-tradeoffs.md).
 
 ## Authority Rules
 
@@ -48,8 +48,9 @@ Read `01`, `03`, `06`, and `07` together with [Harness Security, Compatibility, 
 - The selected transport authenticates the peer and establishes a session. Transport identity and session state never come from ordinary EIP method params.
 - `agent-envd` owns Environment-local canonicalization, configured mount and command policy, process-tree lifecycle, native command isolation when enabled, handles, producer-side output bounds, aggregate retained-output quotas, release and expiry, and provider receipts.
 - An outer sandbox owns containment outside envd only when the operator explicitly configures envd isolation as `disabled`. No platform detection or failed probe can select that mode implicitly.
-- Neither a descriptor, handle, cursor, receipt, saved Environment state, nor model-supplied identifier grants authority. Every operation is checked against the authenticated current session, generation, configured ceiling, and any required invocation grant.
-- Adapter lifecycle continuation is consumed before binding creation and remains outside Harness `EnvironmentState`, which contains only backend-local recoverable data.
+- One API key or trusted stdio parent authenticates the daemon's single user. Sessions negotiate protocol metadata but do not partition authority or own processes and retained output.
+- Neither a descriptor, handle, cursor, receipt, nor model-supplied identifier grants authority. Every operation is checked against the authenticated user, current daemon generation, capability, and configured ceiling.
+- Files are native Environment state. Process, operation, receipt, cursor, and retained-output records are volatile daemon-generation state and are never exported or restored through EIP.
 
 ## Specification Conventions
 

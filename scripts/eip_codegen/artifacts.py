@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from .model import OptionReader, SchemaIndex, short_name
+from .model import OptionReader, SchemaIndex, real_oneofs, short_name
 from .python_renderer import method_records
 
 
@@ -27,7 +27,7 @@ def _load_models(models_path: Path) -> Any:
     return module
 
 
-def build_schema(index: SchemaIndex, models_path: Path) -> dict[str, object]:
+def build_schema(index: SchemaIndex, options: OptionReader, models_path: Path) -> dict[str, object]:
     module = _load_models(models_path)
     definitions: dict[str, object] = {}
     wire_names = sorted(
@@ -49,6 +49,32 @@ def build_schema(index: SchemaIndex, models_path: Path) -> dict[str, object]:
             existing = definitions.get(name)
             if existing is None:
                 definitions[name] = schema
+
+    for message in index.messages.values():
+        message_option = options.message(message)
+        if message_option is not None and message_option.discriminated_union:
+            continue
+        oneofs = real_oneofs(message)
+        if not oneofs:
+            continue
+        definition = definitions.get(message.name)
+        if not isinstance(definition, dict):
+            raise ValueError(f"EIP oneof message {message.name} has no object schema")
+        constraints = definition.setdefault("allOf", [])
+        if not isinstance(constraints, list):
+            raise ValueError(f"EIP schema {message.name} has invalid allOf constraints")
+        for fields in oneofs.values():
+            constraints.append(
+                {
+                    "oneOf": [
+                        {
+                            "required": [field.name],
+                            "properties": {field.name: {"not": {"type": "null"}}},
+                        }
+                        for field in fields
+                    ]
+                }
+            )
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/converge-ai-labs/agent-foundation/eip/v1/schema.json",
@@ -87,6 +113,7 @@ def build_openrpc(records: list[dict[str, Any]], schema: dict[str, object]) -> d
             "x-eip-idempotency-key": record["idempotency_key"],
             "x-eip-introduced": record["introduced"],
             "x-eip-error-family": record["error_family"],
+            "x-eip-params-schema": {"$ref": f"schema.json#/$defs/{params_type}"},
         }
         if record["result_type"] is not None:
             method["result"] = {
@@ -113,11 +140,10 @@ def write_artifacts(
         "generated": True,
         "protocol": {"package": "converge.agent_envd.eip.v1", "version": "1.0"},
         "descriptor_sha256": descriptor_sha256,
-        "request_method_count": sum(record["kind"] == "request_response" for record in records),
-        "notification_count": sum(record["kind"] == "server_notification" for record in records),
+        "method_count": len(records),
         "methods": records,
     }
-    schema = build_schema(index, models_path)
+    schema = build_schema(index, options, models_path)
     outputs = {
         "methods.json": inventory,
         "schema.json": schema,

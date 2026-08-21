@@ -75,27 +75,13 @@ message OutputReadParams {
     OutputCursor cursor = 3;
     uint64 start_offset = 4;
   }
-  OutputPolicy output_policy = 5;
+  optional OutputPolicy output_policy = 5;
 }
 
 message OutputReadResult {
   repeated OutputSegment chunks = 1;
   optional OutputCursor next_cursor = 2;
   OutputCapture capture = 3;
-}
-
-message OutputRetainParams {
-  EIPCallContext context = 1;
-  oneof selector {
-    OutputReference reference = 2;
-    OutputCursor cursor = 3;
-  }
-  google.protobuf.Timestamp requested_expires_at = 4;
-}
-
-message OutputRetainResult {
-  OutputLeaseRef lease = 1;
-  google.protobuf.Timestamp expires_at = 2;
 }
 
 message OutputReleaseParams {

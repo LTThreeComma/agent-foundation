@@ -1,19 +1,8 @@
 {
-  "descriptor_sha256": "eb524fe0af240c7d2ea9ea3cfef6ce5eb2a99e605e3fafc3e102acb698ddbcf4",
+  "descriptor_sha256": "a1cac18f08fa45ae57816765ba1fc328ab9f66b91e49cf6d49d84e6ff835a723",
   "generated": true,
+  "method_count": 30,
   "methods": [
-    {
-      "capability": null,
-      "error_family": "notification",
-      "idempotency": "notification",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "environment.changed",
-      "kind": "server_notification",
-      "params_type": "EnvironmentChangedNotification",
-      "result_type": null,
-      "rpc_name": "EnvironmentChanged"
-    },
     {
       "capability": "environment.describe",
       "error_family": "common",
@@ -37,6 +26,18 @@
       "params_type": "FileCopyParams",
       "result_type": "FileCopyResult",
       "rpc_name": "FileCopy"
+    },
+    {
+      "capability": "file.find",
+      "error_family": "resource",
+      "idempotency": "read_only_retry",
+      "idempotency_key": "disallowed",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.find",
+      "kind": "request_response",
+      "params_type": "FileFindParams",
+      "result_type": "FileFindResult",
+      "rpc_name": "FileFind"
     },
     {
       "capability": "file.read",
@@ -111,7 +112,7 @@
       "rpc_name": "FileRemove"
     },
     {
-      "capability": "file.read",
+      "capability": "file.search",
       "error_family": "resource",
       "idempotency": "read_only_retry",
       "idempotency_key": "disallowed",
@@ -171,18 +172,6 @@
       "rpc_name": "OperationCancel"
     },
     {
-      "capability": null,
-      "error_family": "notification",
-      "idempotency": "notification",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "output.available",
-      "kind": "server_notification",
-      "params_type": "OutputAvailableNotification",
-      "result_type": null,
-      "rpc_name": "OutputAvailable"
-    },
-    {
       "capability": "output.read",
       "error_family": "output",
       "idempotency": "read_only_retry",
@@ -207,18 +196,6 @@
       "rpc_name": "OutputRelease"
     },
     {
-      "capability": "output.retain",
-      "error_family": "output",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
-      "introduced": "1.0",
-      "jsonrpc_method": "output.retain",
-      "kind": "request_response",
-      "params_type": "OutputRetainParams",
-      "result_type": "OutputRetainResult",
-      "rpc_name": "OutputRetain"
-    },
-    {
       "capability": "port.observe",
       "error_family": "resource",
       "idempotency": "read_only_retry",
@@ -241,18 +218,6 @@
       "params_type": "PortWaitParams",
       "result_type": "PortWaitResult",
       "rpc_name": "PortWait"
-    },
-    {
-      "capability": null,
-      "error_family": "notification",
-      "idempotency": "notification",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "process.changed",
-      "kind": "server_notification",
-      "params_type": "ProcessChangedNotification",
-      "result_type": null,
-      "rpc_name": "ProcessChanged"
     },
     {
       "capability": "process.manage",
@@ -315,18 +280,6 @@
       "rpc_name": "ProcessRelease"
     },
     {
-      "capability": "process.retain",
-      "error_family": "process",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
-      "introduced": "1.0",
-      "jsonrpc_method": "process.retain",
-      "kind": "request_response",
-      "params_type": "ProcessRetainParams",
-      "result_type": "ProcessRetainResult",
-      "rpc_name": "ProcessRetain"
-    },
-    {
       "capability": "process.manage",
       "error_family": "process",
       "idempotency": "provider_key_replay",
@@ -387,18 +340,6 @@
       "rpc_name": "ReceiptGet"
     },
     {
-      "capability": "resource.resolve",
-      "error_family": "resource",
-      "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "resource.resolve",
-      "kind": "request_response",
-      "params_type": "ResourceResolveParams",
-      "result_type": "ResourceResolveResult",
-      "rpc_name": "ResourceResolve"
-    },
-    {
       "capability": "session.close",
       "error_family": "session",
       "idempotency": "session_terminal",
@@ -411,18 +352,6 @@
       "rpc_name": "SessionClose"
     },
     {
-      "capability": null,
-      "error_family": "notification",
-      "idempotency": "notification",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "session.expiring",
-      "kind": "server_notification",
-      "params_type": "SessionExpiringNotification",
-      "result_type": null,
-      "rpc_name": "SessionExpiring"
-    },
-    {
       "capability": "shell.exec",
       "error_family": "command",
       "idempotency": "provider_key_replay",
@@ -433,36 +362,10 @@
       "params_type": "ShellExecParams",
       "result_type": "ShellExecResult",
       "rpc_name": "ShellExec"
-    },
-    {
-      "capability": "environment.state",
-      "error_family": "state",
-      "idempotency": "state_export",
-      "idempotency_key": "disallowed",
-      "introduced": "1.0",
-      "jsonrpc_method": "state.export",
-      "kind": "request_response",
-      "params_type": "StateExportParams",
-      "result_type": "StateExportResult",
-      "rpc_name": "StateExport"
-    },
-    {
-      "capability": "environment.state",
-      "error_family": "state",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
-      "introduced": "1.0",
-      "jsonrpc_method": "state.restore",
-      "kind": "request_response",
-      "params_type": "StateRestoreParams",
-      "result_type": "StateRestoreResult",
-      "rpc_name": "StateRestore"
     }
   ],
-  "notification_count": 4,
   "protocol": {
     "package": "converge.agent_envd.eip.v1",
     "version": "1.0"
-  },
-  "request_method_count": 34
+  }
 }

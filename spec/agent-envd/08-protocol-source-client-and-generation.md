@@ -50,13 +50,15 @@ Every canonical IDL file uses the Protobuf package `converge.agent_envd.eip.v1`.
 - exact JSON-RPC method name;
 - capability key;
 - idempotency class and whether an idempotency key is allowed or required;
-- request/response versus server-notification behavior;
+- correlated request-response behavior;
 - protocol major and first minor in which the method exists;
 - owning error set or error family when narrower than the common EIP set.
 
+The `ErrorType` enum value option declares the fixed signed JSON-RPC code for every wire error type. Codes and JSON names are unique, and generated Python and Rust outbound validation rejects a mismatched `EIPError.code` and `data.error_type` pair.
+
 The IDL uses stable package namespaces and field numbers. Removed fields reserve both number and name. Presence-sensitive scalars use explicit presence; mutually exclusive payload alternatives use a real discriminated union; dynamic maps are limited to fields whose keys are intentionally open. Secrets, native paths, PIDs, process objects, transport headers, and provider lifecycle values are absent from the IDL unless an owning EIP contract explicitly makes a bounded representation observable.
 
-The EIP JSON profile, not a language runtime's defaults, controls JSON-RPC `params`, `result`, notification `params`, and typed `error.data`:
+The EIP JSON profile, not a language runtime's defaults, controls JSON-RPC `params`, `result`, and typed `error.data`:
 
 - wire field names are `snake_case`;
 - absent optional values are omitted by generated senders; `null` is accepted only where the selected EIP schema explicitly permits it;
@@ -88,16 +90,19 @@ flowchart LR
 The generator produces:
 
 - protocol identity and supported-version constants;
-- Pydantic-based Python and serde-based Rust request, result, notification, common-envelope, selector, and typed-error models;
+- Pydantic-based Python and serde-based Rust request, result, JSON-RPC request/response/error envelope, selector, and typed-error models;
 - exact JSON profile encoders and decoders;
 - one method metadata registry derived from service descriptors;
 - typed Python client methods for every request-response EIP method;
 - typed Rust dispatch entries or traits for every daemon method;
-- notification decode/dispatch metadata;
 - JSON Schema and OpenRPC views for inspection and non-generated tooling;
 - a normalized method inventory and complete generated-file manifest.
 
-Shared golden request, result, notification, and error values are hand-curated wire evidence rather than generator output. Python and Rust consume the same checked fixture file so a renderer cannot redefine its own expected JSON independently.
+Shared golden request, result, and error values are hand-curated wire evidence rather than generator output. Python and Rust consume the same checked fixture file so a renderer cannot redefine its own expected JSON independently.
+
+Generated validation owns wire structure: field types and bounds, presence, unions, canonical formats, and the small cross-field invariants required to interpret a value safely, such as a retained output having a reference. The daemon's domain-to-wire conversion owns lifecycle coherence across observations, such as whether a running process can already have an exit code or whether a receipt stage matches the operation registry. Codegen does not duplicate complete process, operation, filesystem, or isolation state machines as defensive model validators; runtime tests exercise those owners directly.
+
+JSON Schema and OpenRPC are inspection views, not alternate canonical validators. They preserve field shape, bounds, and expressible Protobuf unions, but a standard schema need not duplicate cross-property relationships enforced by generated Python and Rust validation. Consumers that send EIP values use a generated protocol model or implement the normative IDL and specification contract rather than treating the inspection artifact alone as proof of validity.
 
 Generated files carry a stable generated marker and are never manually edited. Python generated source is checked into the client project so source distributions, code review, and downstream type checking do not require a compiler toolchain. Rust source is generated deterministically into Cargo `OUT_DIR` from the checked descriptor during build and is never checked in as another editable copy. CI and release generation creates a candidate descriptor, Python surface, and inspection artifacts outside the repository and compares the complete manifest and bytes without first rewriting the checkout. Cargo independently regenerates the Rust surface from the checked descriptor, embeds the same digest, and rejects an invalid descriptor during build.
 
@@ -114,14 +119,14 @@ The handwritten client runtime owns behavior that IDL cannot safely decide:
 - HTTP `Authorization` and `EIP-Session` handling;
 - WebSocket upgrade configuration, required subprotocol, first-message initialization, frames, ping/pong, and close mapping;
 - transport and message size enforcement before generated payload decode;
-- initialization state, selected protocol minor, descriptor refresh, session expiry, and generation-stale fencing;
+- initialization state, selected protocol minor, descriptor refresh, logical-session idle expiry, and prior-generation selector fencing;
 - deadline-to-transport timeout narrowing without treating a transport timeout as operation failure;
 - receipt/idempotency reconciliation surfaces without automatic ambiguous mutation retry;
 - secret redaction and lifecycle cleanup.
 
 A common async transport protocol presents framed EIP messages to the generated client core. Stdio, HTTP, and WebSocket implementations satisfy that protocol without changing generated method signatures or EIP result/error meaning. The client never falls back to another transport and repeats a possibly dispatched mutation.
 
-Convenience helpers can compose ordinary typed methods for cursor iteration, output reads, and explicit reconciliation. They preserve every bound, expiry, gap, cancellation, and unknown-outcome fact and never emulate an unsupported daemon capability through a wider local operation.
+Convenience helpers can compose ordinary typed methods for file ranges, cursor iteration, output reads, explicit reconciliation, and streaming into a caller-provided bounded sink. They preserve every bound, expiry, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unsupported daemon capability through a wider local operation or materialize an unbounded value.
 
 ## Harness Integration
 
@@ -139,10 +144,10 @@ The adapter owns:
 
 - conversion from trusted Host endpoint/bootstrap configuration into a client session factory;
 - initialization during binding entry and mapping of the EIP descriptor into the provider-neutral Harness descriptor;
-- logical path, command, process, port, state, receipt, selector, and error translation;
-- mapping the effective Harness `ToolOutputPolicy` decision into EIP `OutputPolicy`;
+- logical path, command, process, port, receipt, selector, and error translation;
+- omitting `OutputPolicy` for the advertised generous envd default or mapping an explicitly narrower Harness `ToolOutputPolicy` decision into EIP `OutputPolicy`;
 - wrapping raw EIP selectors as binding- and generation-scoped logical references before model exposure;
-- provider-neutral readiness, cancellation, state export/restore, and binding cleanup behavior;
+- provider-neutral readiness, cancellation, generation-stale handling, and binding cleanup behavior;
 - preserving dispatch certainty and unknown outcome while normalizing safe Harness error categories.
 
 It does not reimplement JSON-RPC, API-key handling, HTTP session headers, WebSocket handshake, stdio framing, generated payload validation, or method constants. Conversely, the client package does not know Harness virtual paths, Agent Identity, topology, model-facing references, managed redaction, or Tool metadata.
@@ -169,11 +174,11 @@ A protocol-only compatible addition can ship in a later package release without 
 The protocol gate includes:
 
 - deterministic descriptor and generated-output drift checks that do not rewrite the checked tree;
-- descriptor-profile checks for the fixed package, interpreted custom options, and valid union/selector shapes;
+- descriptor-profile checks for the fixed package, interpreted custom options, unique error code/type mapping, and valid union/selector shapes;
 - method-option uniqueness and complete generated registry/stub/dispatch coverage for every method;
-- hand-curated canonical JSON fixtures spanning request, result, error, selector, union, binary, and notification shapes;
+- hand-curated canonical JSON fixtures spanning request, result, error, selector, union, and binary shapes;
 - strict invalid fixtures for unknown authority fields, duplicate fields, malformed selectors, bounds, unions, and forbidden batches;
-- shared canonical values independently decoded and encoded by both Python and Rust;
+- shared canonical values independently decoded and encoded to byte-identical sorted-key JSON by both Python and Rust, including explicit schema defaults and empty collections that must be omitted identically;
 - generated Python client against the actual Rust daemon over stdio, HTTP, and WebSocket;
 - authentication, HTTP session, WebSocket initialization, reconnect, cancellation, idempotency, receipt, cursor, and unknown-outcome cases;
 - regeneration in a clean checkout with no diff.
@@ -198,7 +203,7 @@ One release group makes source, generated descriptor, conformance fixtures, and 
 
 01. One canonical Protobuf descriptor defines every generated EIP method and payload surface; no language keeps a second editable method list.
 02. EIP remains JSON-RPC JSON over stdio, HTTP, and WebSocket; Protobuf is IDL, not a mandatory transport or binary payload wrapper.
-03. Generated codecs implement the accepted EIP JSON profile exactly and never inherit a language runtime's incompatible defaults silently.
+03. Generated codecs implement the accepted EIP JSON profile exactly and never inherit a language runtime's incompatible defaults silently. Sender canonicalization recursively omits absent values, schema-default values, and empty non-presence-sensitive collections even when a caller explicitly constructed them.
 04. Request decoding fails closed for unknown authority-bearing input; response evolution follows the negotiated EIP minor compatibility rules.
 05. Python typed method stubs and Rust dispatch entries are generated for every descriptor method and fail drift checks together.
 06. Transport, authentication, session, retry, and cleanup behavior remains handwritten, bounded, and shared beneath generated method stubs.

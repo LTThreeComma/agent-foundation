@@ -2,7 +2,7 @@
 
 ## Design Position
 
-`agent-envd` exposes semantic, mount-scoped filesystem operations, bounded observation of local listening ports, and versioned backend-local Environment state. It resolves native paths and races inside the Environment boundary rather than exposing host absolute paths or asking the EIP client to emulate filesystem behavior through low-level syscalls.
+`agent-envd` exposes semantic, mount-scoped filesystem operations and bounded observation of local listening ports. It resolves native paths and races inside the Environment boundary rather than exposing host absolute paths or asking the EIP client to emulate filesystem behavior through low-level syscalls.
 
 Trusted daemon configuration defines every native mount root and its maximum access. EIP requests select logical mount IDs and relative paths within those roots; they cannot add a host path, remount a resource, or widen read-only policy.
 
@@ -12,12 +12,12 @@ Trusted daemon configuration defines every native mount root and its maximum acc
 | ----------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------- |
 | Native mount roots, writable ceilings, protected roots, and port-observation policy | Operator or provider adapter               | Trusted immutable daemon configuration      |
 | Harness virtual `/workspace` and `/environment/{alias}` routing                     | Harness                                    | Resolves to one binding before EIP dispatch |
-| Logical mount paths and file/port/state methods                                     | This document                              | Stable EIP resource contract                |
+| Logical mount paths and file, search, and port methods                              | This document                              | Stable EIP resource contract                |
 | Native path canonicalization, symlink containment, compare-and-swap, and receipts   | `agent-envd`                               | Authoritative provider enforcement          |
 | Provider ingress, public URL, tunnel, or container port publishing                  | Provider adapter                           | Outside EIP port observation                |
 | Per-result bytes, references, cursors, and aggregate quotas                         | [Output Retention](06-output-retention.md) | Applies while resource output is produced   |
 
-Filesystem selectors and port numbers are not authority. Every method also crosses authenticated session policy, capability checks, current generation, configured ceilings, and any required invocation grant.
+Filesystem selectors and port numbers are not authority. Every method also crosses authentication, capability checks, current generation, and configured ceilings.
 
 ## Mount Model
 
@@ -81,41 +81,6 @@ A symlink can narrow convenience but cannot expand authority. A link inside a wr
 
 Canonicalization failure is pre-dispatch for the requested filesystem mutation. A root or component identity changed during setup returns a conflict or denial; envd never retries against the replacement path silently.
 
-## Canonical Resource Resolution
-
-When Host policy requires provider-canonical identity before final authorization, the EIP adapter calls `resource.resolve` before the mutating or observing method:
-
-```python
-type ResourceAction = Literal[
-    "read", "write", "delete", "execute"
-]
-
-
-class ResourceResolveParams(BaseModel):
-    context: EIPCallContext
-    path: EIPPath
-    action: ResourceAction
-    follow_symlinks: bool = True
-
-
-class ResolvedResource(BaseModel):
-    namespace: str
-    kind: Literal["file", "directory", "symlink", "missing_target"]
-    identifier: str
-    generation: int
-    revision: FileRevision | None
-
-
-class ResourceResolveResult(BaseModel):
-    resource: ResolvedResource
-```
-
-The result contains no native path. `namespace` identifies the envd Environment resource domain, and `identifier` is a stable bounded provider-canonical value for the resolved object or authorized creation target within the current generation. The EIP adapter maps this value to the Harness-owned [`CanonicalResource`](../agent-harness/07-tool-execution.md#tool-metadata); it does not treat the result as an invocation grant.
-
-Resolution applies authenticated session, mount, lexical path, canonicalization, protected-path, and action-ceiling checks but creates no file mutation. The Host can then issue an invocation grant whose claims digest binds the resolved identity and action. At final dispatch, envd canonicalizes again and verifies that current identity, revision/precondition, action, request digest, and grant claims still agree. Replacement or symlink change between resolution and dispatch returns conflict or denial rather than using a grant for another resource.
-
-`kind="missing_target"` is available only for a creation action whose existing parent was canonicalized and authorized; its identifier binds that parent plus the exact new entry name. It does not allow resolving an arbitrary absent path outside a writable mount.
-
 ## Common File Types
 
 ```python
@@ -163,7 +128,7 @@ class FileReadParams(BaseModel):
     offset: int = 0
     length: int | None = None
     expected_revision: FileRevision | None = None
-    output_policy: OutputPolicy
+    output_policy: OutputPolicy | None = None
 
 
 class FileReadResult(BaseModel):
@@ -175,7 +140,11 @@ class FileReadResult(BaseModel):
 
 The daemon opens and verifies the file before reporting `info`; `expected_revision` prevents reading a different replacement when supplied. `offset` and `length` select a byte range, not text characters. The selected range and response remain subject to effective `OutputPolicy`; a client reads additional ranges or a retained reference rather than requesting an unbounded body.
 
-`output.producer_complete=true` and `output.content_complete=true` mean the requested range was captured completely from one verified file revision. They do not mean the entire file was requested. A concurrent mutation that invalidates revision consistency returns `conflict` rather than combining bytes from two versions.
+`range_start` and `range_end` identify the contiguous half-open file interval captured by this result, inline or through its reference. `range_start` equals the requested `offset`. Under truncation, envd captures a contiguous prefix, sets `range_end` to the first unread file offset, and does not substitute a tail preview. When `info.revision` is present, the next request continues at `range_end` with that value as `expected_revision`; a concurrent replacement then returns `conflict` rather than combining bytes from two versions. This range contract lets clients stream arbitrarily large binary files and images through bounded responses without guessing encoded sizes.
+
+A mount that cannot produce a safe revision still supports bounded range reads, but separate requests are separate observations and can see different file versions. The client selects explicit offsets and lengths and accepts that lack of snapshot consistency, or uses a provider that advertises revision support when one-version streaming is required. Envd never fabricates a revision or claims cross-request consistency it cannot prove.
+
+`output.producer_complete=true` and `output.content_complete=true` mean the requested range was captured completely from the file observation used for that call. They do not mean the entire file was requested.
 
 ### `file.list`
 
@@ -186,7 +155,7 @@ class FileListParams(BaseModel):
     recursive: bool = False
     max_depth: int = 1
     cursor: OutputCursor | None = None
-    output_policy: OutputPolicy
+    output_policy: OutputPolicy | None = None
 
 
 class FileListEntry(BaseModel):
@@ -203,26 +172,52 @@ Entries are returned in a documented stable bytewise path order for one captured
 
 Directory entry names are bounded. A native name that cannot be represented safely in EIP UTF-8 causes an explicit `unsupported` failure before the affected page is returned; it is never silently lossy-decoded, skipped, or represented as another path.
 
+### `file.find`
+
+`file.find` searches path names only. It never opens regular-file content.
+
+```python
+class FileFindParams(BaseModel):
+    context: EIPCallContext
+    root: EIPPath
+    pattern: str
+    mode: Literal["glob", "regex"]
+    kind: FileKind | None = None
+    max_depth: int
+    cursor: OutputCursor | None = None
+    output_policy: OutputPolicy | None = None
+
+
+class FileFindResult(BaseModel):
+    entries: tuple[FileListEntry, ...]
+    output: StructuredOutputDisposition
+```
+
+The pattern matches each descendant's `/`-separated path relative to `root`, never a native path; `root` itself is not a result. Glob syntax is the EIP subset `*`, `?`, `**`, and bracket character classes: `*`, `?`, and classes never match `/`, while `**` matches zero or more complete path segments. Regex mode uses UTF-8 RE2-style syntax without look-around or backreferences and matches the complete relative path. Results use the same stable bytewise relative-path order and cursor invalidation rules as `file.list`.
+
 ### `file.search`
+
+`file.search` searches regular-file content. Path selection is separate from content matching: `include` and `exclude` are EIP path globs relative to `root`, while `query` is matched only against decoded file content.
 
 ```python
 class FileSearchParams(BaseModel):
     context: EIPCallContext
     root: EIPPath
     query: str
-    mode: Literal["literal", "glob", "regex"]
+    mode: Literal["literal", "regex"]
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
+    case_sensitive: bool = True
     max_depth: int
     cursor: OutputCursor | None = None
-    output_policy: OutputPolicy
+    output_policy: OutputPolicy | None = None
 
 
 class FileSearchMatch(BaseModel):
     path: EIPPath
-    line_number: int | None
-    byte_offset: int | None
-    preview: str | None
+    line_number: int
+    byte_offset: int
+    preview: str
 
 
 class FileSearchResult(BaseModel):
@@ -230,9 +225,13 @@ class FileSearchResult(BaseModel):
     output: StructuredOutputDisposition
 ```
 
-Query length, regex complexity, glob count, traversal depth, files visited, bytes scanned, match count, preview bytes, and total duration are finite. Search implementations use bounded streaming and cancellation. A policy cutoff returns the incomplete `StructuredOutputDisposition`; a deadline or cancellation uses the typed EIP error and can include only bounded partial-output metadata. Absence of further matches is claimed only when traversal completed.
+Search reads UTF-8 regular files line by line. A file containing invalid UTF-8 or NUL is skipped deterministically and never lossily decoded. `include=()` selects every relative path; otherwise a file must match at least one include glob, and any matching exclude glob wins. Both use the `file.find` glob dialect.
 
-Search never follows a symlink outside the selected mount and never reads special files. Content previews are untrusted file content and follow the Harness content and redaction policy after provider-side size enforcement.
+`line_number` is one-based, `byte_offset` is the zero-based raw-file offset of the match, and `preview` is one bounded containing line with line terminators removed. Results are ordered by relative path, then byte offset. Literal mode emits every non-overlapping occurrence of the exact query text. Regex mode uses the same RE2-style syntax as `file.find`, is applied independently to each line, and cannot span line boundaries; a zero-width match advances by one Unicode scalar before another match is considered. `case_sensitive=false` uses Unicode simple case folding and is explicit rather than inferred from the filesystem.
+
+Query length, regex complexity, glob count, traversal depth, files visited, bytes scanned, match count, preview bytes, and total duration are finite. Find and search implementations use bounded streaming and cancellation. A policy cutoff returns an incomplete `StructuredOutputDisposition` and continuation cursor when the traversal can continue safely; a deadline or cancellation uses the typed EIP error and can include only bounded partial-output metadata. Absence of further results is claimed only when traversal completed.
+
+Neither method follows a symlink outside the selected mount or reads special files. Content previews are untrusted file content and follow the Harness content and redaction policy after provider-side size enforcement. `file.find` and `file.search` have independent capabilities; omitting either capability is valid, but advertising one requires its complete semantics.
 
 ## Mutation Operations
 
@@ -417,104 +416,35 @@ class PortWaitResult(BaseModel):
 
 `port.inspect` returns one observation. `port.wait` uses the `EIPCallContext.deadline` as its finite wait boundary and returns when the desired status is observed or that deadline expires. The base contract follows the Linux/POSIX TCP port domain: `port` is an integer in `1..65535`; port `0` is valid for listener allocation but is never an observable listening target. Availability of `port.observe` and any narrower current policy determine whether the call is admitted; EIP does not define a configurable default port-range grant. Arbitrary remote hosts, UDP scanning, raw sockets, packet capture, and host-network enumeration are not part of this capability.
 
-When the platform can safely attribute a listener to an envd-managed process visible to the same session, `managed_process` can be returned. Another user's or principal's listener is reported only as policy permits and never reveals a PID or identity. `unknown` is used when namespace, platform, or permission prevents trustworthy observation.
+When the platform can safely attribute a listener to an envd-managed process in the current daemon generation, `managed_process` can be returned. An unmanaged listener is reported only as policy permits and never reveals a PID or identity. `unknown` is used when namespace, platform, or permission prevents trustworthy observation.
 
 A command in isolated Linux `deny` networking has its own empty network namespace and cannot expose an IP listener to envd or the provider. A command using `host` network or an explicit outer sandbox network can be observed only from the network boundary where envd runs. The descriptor reports capability honestly.
 
 Provider adapters own the mapping from a successfully observed local port to a public, tunneled, or container-exposed endpoint. EIP never treats listening status as proof that an external route exists or is authorized.
 
-## Backend-local Environment State
+## Resource Lifetime
 
-Environment state enables a fresh Harness run to ask the same already reachable provider Environment to revalidate daemon-owned objects. It is not provider lifecycle state and does not restart envd, a container, an E2B environment, or a native process.
-
-The serialized state schema is:
-
-```python
-class EIPProcessStateObject(BaseModel):
-    kind: Literal["process_lease"]
-    lease: ProcessLeaseRef
-    handle: ProcessHandle
-    expires_at: datetime
-
-
-class EIPOutputStateObject(BaseModel):
-    kind: Literal["output_lease"]
-    lease: OutputLeaseRef
-    reference: OutputReference
-    expires_at: datetime
-
-
-class EIPCursorStateObject(BaseModel):
-    kind: Literal["cursor"]
-    lease: OutputLeaseRef
-    cursor: OutputCursor
-    expires_at: datetime
-
-
-type EIPStateObject = (
-    EIPProcessStateObject
-    | EIPOutputStateObject
-    | EIPCursorStateObject
-)
-
-
-class EIPEnvironmentState(BaseModel):
-    schema_version: str
-    environment_id: str
-    observed_generation: int
-    objects: tuple[EIPStateObject, ...]
-    provider_data: JsonValue | None = None
-
-
-class StateExportParams(BaseModel):
-    context: EIPCallContext
-    process_leases: tuple[ProcessLeaseRef, ...] = ()
-    output_leases: tuple[OutputLeaseRef, ...] = ()
-
-
-class StateExportResult(BaseModel):
-    state: EIPEnvironmentState
-    observed_at: datetime
-
-
-class StateRestoreParams(BaseModel):
-    context: EIPCallContext
-    state: EIPEnvironmentState
-
-
-class StateRestoreResult(BaseModel):
-    restored: tuple[EIPStateObject, ...]
-    omitted_expired: tuple[str, ...]
-```
-
-`state.export` linearizes against one Environment generation and captures exactly the visible objects selected by valid explicit finite process or output leases. A process object carries the handle governed by its process lease. An output lease carries either its retained reference or the structured/stream cursor and underlying object that the lease preserves. Export does not silently extend process, output, or cursor lifetime. The state is bounded and contains no API key, HTTP session selector, WebSocket state, provider lifecycle credential, invocation grant, live file descriptor, native PID, native path, bearer credential, or authorization decision.
-
-`state.restore` validates schema, Environment identity, generation, selector kind, selector-to-lease binding, current authenticated authority, current policy, and lease expiry before making objects visible in the new session. Validation is atomic for every non-expired object: an incompatible or unauthorized entry fails restore without partially attaching the state. Entries whose finite lease expired are omitted with bounded diagnostics whose strings identify only the expired lease selectors, because expiry is an expected lifecycle fact rather than schema corruption. The returned typed objects give the adapter the process handle, output reference, or cursor to use after successful reattachment.
-
-A process or output remains provider-owned before and after restore. State carries non-authoritative selectors for existing leased objects and causes envd to revalidate them; it does not recreate native resources. A generation mismatch returns `stale_generation`; the client or Host can explicitly drop incompatible Environment state but cannot ask envd to retarget it.
-
-`provider_data`, when present, is a bounded versioned value owned exclusively by the envd backend codec. The Harness and Foundation Service have opaque storage custody and do not interpret or merge it.
+Native files and directories are provider Environment state and can remain after envd exits. EIP does not serialize a filesystem snapshot or daemon registry. Process handles, operation records, receipts, output references, traversal cursors, and private spool data exist only in the current daemon generation. A fresh authenticated protocol session in that generation can continue using them; a daemon restart cannot.
 
 ## Failure Semantics
 
-| Failure                                            | Outcome                                                             | Side-effect meaning                                                 |
-| -------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Invalid logical path, mount, query, or port        | `invalid_params` or `denied`                                        | Pre-dispatch                                                        |
-| Symlink or canonical target escapes policy         | `denied`                                                            | Pre-dispatch for requested mutation                                 |
-| File revision or resource precondition changed     | `conflict`                                                          | No requested commit when detected before commit                     |
-| Output or traversal bound reached                  | Explicit incomplete disposition, quota error, or output-limit error | Read/search may have observed content; no hidden completeness claim |
-| Atomic replacement unsupported                     | `unsupported` before dispatch when atomicity was required           | No destination mutation                                             |
-| Transport lost during mutation                     | Receipt or `unknown_outcome` according to commit evidence           | Reconcile before retry                                              |
-| Recursive removal partially completes              | Failed receipt with known progress                                  | No rollback claim                                                   |
-| Port cannot be observed safely                     | `status="unknown"` or `unsupported`                                 | No listener mutation                                                |
-| State identity, generation, or schema incompatible | `invalid_state` or `stale_generation`                               | Existing provider objects unchanged                                 |
-| Leased state object expired                        | Omitted-expired result or `retention_gap` on direct use             | No fabricated restoration                                           |
+| Failure                                        | Outcome                                                             | Side-effect meaning                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Invalid logical path, mount, query, or port    | `invalid_params` or `denied`                                        | Pre-dispatch                                                        |
+| Symlink or canonical target escapes policy     | `denied`                                                            | Pre-dispatch for requested mutation                                 |
+| File revision or resource precondition changed | `conflict`                                                          | No requested commit when detected before commit                     |
+| Output or traversal bound reached              | Explicit incomplete disposition, quota error, or output-limit error | Read/search may have observed content; no hidden completeness claim |
+| Atomic replacement unsupported                 | `unsupported` before dispatch when atomicity was required           | No destination mutation                                             |
+| Transport lost during mutation                 | Receipt or `unknown_outcome` according to commit evidence           | Reconcile before retry                                              |
+| Recursive removal partially completes          | Failed receipt with known progress                                  | No rollback claim                                                   |
+| Port cannot be observed safely                 | `status="unknown"` or `unsupported`                                 | No listener mutation                                                |
+| Generation-local selector expired or stale     | `retention_gap`, `invalid_handle`, or `stale_generation`            | No fabricated continuation                                          |
 
 ## Compatibility
 
-File method semantics are capability-gated independently from native platform. New metadata fields can be additive, but changing path normalization, symlink behavior, write-mode defaults, atomicity, revision scope, traversal ordering, or state restore authority requires an incompatible protocol revision.
+File method semantics are capability-gated independently from native platform. New metadata fields can be additive, but changing path normalization, symlink behavior, write-mode defaults, atomicity, revision scope, search dialect, or traversal ordering requires an incompatible protocol revision.
 
-Providers can expose narrower limits and omit unsupported methods. A client never infers support from operating system, Docker/E2B labels, or daemon package version. Common conformance tests use symlink escapes, concurrent replacement, output bounds, mutation preconditions, receipt ambiguity, cursor invalidation, and state reauthorization fixtures.
+Providers can expose narrower limits and omit unsupported methods. A client never infers support from operating system, Docker/E2B labels, or daemon package version. Common conformance tests use symlink escapes, concurrent replacement, output bounds, mutation preconditions, receipt ambiguity, path-find/content-search distinctions, and cursor invalidation fixtures.
 
 ## Invariants
 
@@ -526,6 +456,6 @@ Providers can expose narrower limits and omit unsupported methods. A client neve
 06. Atomic mutation is claimed only when the native commit primitive provides it; cross-mount move never masquerades as atomic.
 07. Every mutating method returns bounded side-effect evidence and preserves unknown outcome after ambiguous transport loss.
 08. Port methods observe only policy-authorized local TCP targets in `1..65535` and never create external exposure or scan remote hosts.
-09. State export includes only already leased backend-local objects and never extends lifetime implicitly.
-10. State restore occurs against a fresh authenticated session, current policy, the same Environment identity and generation, and grants no authority by possession.
-11. Provider lifecycle state, transport state, and Host durable execution state never enter EIP Environment state.
+09. `file.find` matches relative path names and never reads file content; `file.search` matches UTF-8 regular-file content and uses path globs only for file selection.
+10. Native files can outlive envd, while process, operation, receipt, output, cursor, and spool records never outlive their daemon generation.
+11. Provider lifecycle state, transport state, and Host durable execution state never enter an EIP state export because EIP defines no state export or restore method.

@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package converge.agent_envd.eip.v1;
 
-import "google/protobuf/timestamp.proto";
 import "agent-envd/eip/v1/common.proto";
 import "agent-envd/eip/v1/options.proto";
 import "agent-envd/eip/v1/process.proto";
@@ -27,17 +26,23 @@ message EIPServerInfo {
 }
 
 message EIPLimits {
-  uint64 max_request_bytes = 1;
-  uint64 max_response_bytes = 2;
-  uint64 max_concurrent_operations = 3;
-  uint64 max_processes = 4;
-  uint64 max_operation_duration_ms = 5;
-  uint64 max_inline_output_bytes = 6;
-  uint64 max_output_bytes = 7;
-  uint64 max_retained_bytes = 8;
-  uint64 max_retained_objects = 9;
-  uint64 max_retention_ttl_ms = 10;
-  uint64 receipt_ttl_ms = 11;
+  uint64 max_request_bytes = 1 [(eip_field).minimum = 1];
+  uint64 max_response_bytes = 2 [(eip_field).minimum = 1];
+  uint64 max_concurrent_operations = 3 [(eip_field).minimum = 1];
+  uint64 max_processes = 4 [(eip_field).minimum = 1];
+  uint64 max_operation_duration_ms = 5 [(eip_field).minimum = 1];
+  uint64 max_inline_output_bytes = 6 [(eip_field).minimum = 1];
+  uint64 max_output_bytes = 7 [(eip_field).minimum = 1];
+  uint64 max_retained_bytes = 8 [(eip_field).minimum = 1];
+  uint64 max_retained_objects = 9 [(eip_field).minimum = 1];
+  uint64 max_retention_ttl_ms = 10 [(eip_field).minimum = 1];
+  reserved 11;
+  reserved "receipt_ttl_ms";
+  uint64 max_operation_records = 12 [(eip_field).minimum = 1];
+  uint64 operation_record_ttl_ms = 13 [(eip_field).minimum = 1];
+  uint64 session_idle_ttl_ms = 14 [(eip_field).minimum = 1];
+  uint64 max_process_records = 15 [(eip_field).minimum = 1];
+  uint64 terminal_process_record_ttl_ms = 16 [(eip_field).minimum = 1];
 }
 
 enum IsolationMode {
@@ -59,6 +64,13 @@ enum IsolationNetworkPolicy {
   ISOLATION_NETWORK_POLICY_DENY = 2 [(eip_enum_value).json_name = "deny"];
 }
 
+enum IsolationCleanupGuarantee {
+  ISOLATION_CLEANUP_GUARANTEE_UNSPECIFIED = 0;
+  ISOLATION_CLEANUP_GUARANTEE_NAMESPACE_COMPLETE = 1 [(eip_enum_value).json_name = "namespace_complete"];
+  ISOLATION_CLEANUP_GUARANTEE_RESIDUAL_CONFINED_POSSIBLE = 2 [(eip_enum_value).json_name = "residual_confined_possible"];
+  ISOLATION_CLEANUP_GUARANTEE_OUTER_HOST = 3 [(eip_enum_value).json_name = "outer_host"];
+}
+
 message IsolationPosture {
   IsolationMode mode = 1;
   IsolationBackend backend = 2;
@@ -66,11 +78,12 @@ message IsolationPosture {
   bool process_containment = 4;
   bool network_containment = 5;
   IsolationNetworkPolicy network_policy = 6;
+  IsolationCleanupGuarantee cleanup_guarantee = 7;
 }
 
 message EnvironmentDescriptor {
   string environment_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  uint64 generation = 2;
+  uint64 generation = 2 [(eip_field).minimum = 1];
   repeated string capabilities = 3;
   repeated MountDescriptor mounts = 4;
   repeated ShellProfileDescriptor shell_profiles = 5;
@@ -97,25 +110,8 @@ message SessionCloseParams {
 }
 
 message SessionCloseResult {
-  uint64 operations_cancellation_requested = 1;
-  uint64 processes_termination_requested = 2;
-  uint64 output_objects_released = 3;
-  uint64 leased_processes_preserved = 4;
-  uint64 leased_output_objects_preserved = 5;
-}
+  reserved 1, 2, 3, 4, 5;
+  reserved "operations_cancellation_requested", "processes_termination_requested", "output_objects_released", "leased_processes_preserved", "leased_output_objects_preserved";
 
-message EnvironmentChangedNotification {
-  uint64 observed_generation = 1;
-}
-
-message ProcessChangedNotification {
-  ProcessHandle handle = 1;
-}
-
-message OutputAvailableNotification {
-  OutputCursor cursor = 1;
-}
-
-message SessionExpiringNotification {
-  google.protobuf.Timestamp expires_at = 1;
+  bool closed = 6 [(eip_field).const_bool = true];
 }

@@ -20,22 +20,7 @@ message OutputCursor {
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
 
-message ProcessLeaseRef {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
-message OutputLeaseRef {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
 message ReceiptRef {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
-message StateRef {
   option (eip_message).transparent = true;
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
@@ -45,18 +30,13 @@ message FileRevision {
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
 
-message InvocationGrantRef {
-  string grant_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  string audience = 2;
-  string claims_digest = 3;
-  google.protobuf.Timestamp expires_at = 4;
-}
-
 message EIPCallContext {
+  reserved 4;
+  reserved "invocation_grant";
+
   string operation_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   optional google.protobuf.Timestamp deadline = 2;
   optional string idempotency_key = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  optional InvocationGrantRef invocation_grant = 4;
 }
 
 enum ReceiptStage {
@@ -82,7 +62,7 @@ message OperationReceipt {
   string operation_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   string method = 3;
   string environment_id = 4 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  uint64 generation = 5;
+  uint64 generation = 5 [(eip_field).minimum = 1];
   string request_digest = 6;
   ReceiptStage stage = 7;
   optional ReceiptOutcome outcome = 8;
@@ -108,7 +88,10 @@ message OperationCancelResult {
 
 message ReceiptGetParams {
   EIPCallContext context = 1;
-  ReceiptRef receipt_ref = 2;
+  oneof selector {
+    ReceiptRef receipt_ref = 2;
+    string operation_id = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  }
 }
 
 message ReceiptGetResult {

@@ -2,7 +2,7 @@
 
 ## Design Position
 
-`agent-envd` is a first-class Environment data-plane daemon. It keeps native filesystem canonicalization, command and process control, port observation, retained output, and resource enforcement beside the governed resources and exposes them through one versioned Environment Interaction Protocol (EIP).
+`agent-envd` is a first-class Environment data-plane daemon. One daemon process serves one user and one Environment for one daemon generation. It keeps native filesystem canonicalization, command and process control, port observation, retained output, and resource enforcement beside the governed resources and exposes them through one versioned Environment Interaction Protocol (EIP).
 
 The daemon is not mandatory for every Harness Environment. Direct `LocalFileOperator` and `LocalShell` implementations are first-class for an embedding process that intentionally grants local roots and commands. Docker, E2B, remote, and optional local-daemon providers use EIP when they need a daemon boundary. Both implementations satisfy the provider-neutral contracts owned by [Harness Environment Integration](../agent-harness/08-environment-integration.md); they are peers rather than fallback paths.
 
@@ -20,7 +20,7 @@ flowchart LR
     subgraph Harness[agent-harness]
         Bound[BoundEnvironment]
         Adapter[EIP Environment adapter]
-        Policy[Run-bound policy and OutputPolicy]
+        Policy[Run-bound policy and optional OutputPolicy]
     end
 
     subgraph ClientPackage[converge-agent-envd-client]
@@ -69,7 +69,7 @@ A single EIP session uses one transport. An envd network listener can admit both
 | IDL, generated wire surfaces, and low-level Python client         | [Protocol Source, Client, and Generation](08-protocol-source-client-and-generation.md) | One daemon/client protocol realization and release group                           |
 | EIP method and result semantics                                   | [EIP Protocol](02-eip-protocol.md)                                                     | One JSON-RPC method, payload, error, handle, and receipt contract                  |
 | Framing, peer authentication, session establishment, and liveness | [Transports and Sessions](03-transports-and-sessions.md)                               | Stdio, HTTP, and WebSocket profiles                                                |
-| Native paths, files, state, and local ports                       | [Resource Operations](04-resource-operations.md)                                       | Canonical resource enforcement inside the selected Environment                     |
+| Native paths, files, search, and local ports                      | [Resource Operations](04-resource-operations.md)                                       | Canonical resource enforcement inside the selected Environment                     |
 | Initial commands and process trees                                | [Command and Process Execution](05-command-and-process-execution.md)                   | One foreground/background lifecycle and ownership model                            |
 | Per-operation and aggregate output safety                         | [Output Retention](06-output-retention.md)                                             | Producer-side counting, bounded response and storage, cursors, release, and expiry |
 | Inner command containment                                         | [Execution Isolation](07-execution-isolation.md)                                       | Fail-closed native isolation or explicit delegation to an outer sandbox            |
@@ -93,7 +93,7 @@ The authenticated transport creates an uninitialized connection or HTTP logical 
 
 ### Resource services
 
-Filesystem operations use logical mount-scoped paths, not host paths. Port operations observe or wait for local listeners but do not provision provider ingress. Environment state exports only versioned backend-local continuation data and cannot provision, attach, or authorize a provider resource.
+Filesystem operations use logical mount-scoped paths, not host paths. Port operations observe or wait for local listeners but do not provision provider ingress. Native files remain ordinary Environment state across daemon restarts; EIP does not export or restore daemon runtime registries.
 
 ### Command execution manager
 
@@ -101,7 +101,7 @@ One execution manager is the sole native owner of every command tree created by 
 
 ### Output retention
 
-Every output producer receives a finite protocol-native `OutputPolicy`. The daemon counts bytes while reading, keeps frames bounded, reserves aggregate capacity before retaining data, and reports truncation or gaps explicitly. It never materializes unbounded command, file, directory, or search output and then applies policy afterward.
+Every output producer uses either an explicit finite protocol-native `OutputPolicy` or the generous finite default advertised by the daemon. The daemon counts bytes while reading, keeps frames bounded, reserves daemon-global capacity before retaining data, and reports truncation or gaps explicitly. It never materializes unbounded command, file, directory, or search output and then applies policy afterward.
 
 ### Native execution isolation
 
@@ -140,7 +140,7 @@ sequenceDiagram
     Client->>Envd: initialize supported versions and expected identity
     Envd-->>Client: selected version, descriptor, generation, and limits
     Harness->>Harness: intersect descriptor with binding and run policy
-    Harness->>Client: semantic operation with effective EIP OutputPolicy
+    Harness->>Client: semantic operation with optional narrower EIP OutputPolicy
     Client->>Envd: JSON-RPC request
     Envd->>Envd: authenticate, validate, authorize, canonicalize, and reserve
     Envd->>Native: execute bounded native operation
@@ -151,19 +151,20 @@ sequenceDiagram
 
 Initialization returns observed capabilities, not authority. The client must already possess a trusted transport credential or parent-process channel, and each operation remains subject to daemon policy. Provider denial can only narrow a Harness allow decision.
 
-A descriptor refresh or reconnect can reveal a new generation or narrower capability set. The Host and Harness reconcile that observation before further use. Handles and retained references never move silently between generations or provider resources.
+A descriptor refresh or reconnect can reveal a different generation or narrower capability set. The Host and Harness reconcile that observation before further use. Handles, operation records, receipts, cursors, and retained references never move between generations or provider resources.
 
-## Identity, State, and Completion Boundaries
+## Identity, Lifetime, and Completion Boundaries
 
-An Environment has a stable `environment_id` within the provider lifecycle selected by the Host and a monotonically changing `generation` whenever daemon-native runtime state resets in a way that can invalidate handles, cursors, leases, or saved references.
+The Host supplies the stable `environment_id` for the selected provider Environment. Each daemon start creates a fresh unpredictable nonzero `generation`; it is an incarnation fence, not a recovery sequence or ordering signal.
 
-Three state classes remain separate:
+Four lifetime classes remain separate:
 
 1. **Provider lifecycle state** belongs to the Host adapter and can identify a Docker container, E2B environment, local daemon instance, or remote resource. It is consumed before a fresh binding is constructed.
-2. **Backend-local Environment state** is exported through EIP after a daemon is reachable. It can name daemon-owned objects for later revalidation but grants no authority and cannot recreate the provider resource.
-3. **Host execution state** owns durable Agent attempts, checkpoints, outcomes, and delivery. It is never committed by envd.
+2. **Native Environment state** consists primarily of files and other provider-owned resources. It can outlive envd without becoming an EIP state object.
+3. **Daemon-generation state** contains sessions, operations, receipts, process handles, output references, cursors, and private spool data. It is volatile, is not restored after restart, and is cleaned when envd exits.
+4. **Host execution state** owns durable Agent attempts, checkpoints, outcomes, and delivery. It is never committed by envd.
 
-A native operation can have several independent facts: accepted by envd, dispatched to the OS, initial command exec confirmed, initial command exited, command tree cleaned, EIP result observed, Harness run completed, and Host execution committed. A receipt records only the envd facts it names.
+A native operation can have several independent facts: accepted by envd, dispatched to the OS, initial command exec confirmed, initial command exited, command tree cleaned, EIP result observed, Harness run completed, and Host execution committed. A generation-scoped receipt records only the envd facts it names.
 
 ## Security Posture
 
@@ -175,7 +176,7 @@ Transport authentication, protocol authorization, resource policy, output bounds
 - `required` execution isolation adds a per-command OS sandbox.
 - `disabled` execution isolation delegates command containment to the outer host but does not disable any other control.
 
-The daemon API key, transport session values, daemon configuration, invocation grants, and business credentials are distinct. Daemon secrets are removed from child environments and excluded from logs, errors, descriptors, state, output previews, and receipts.
+The daemon API key, transport session values, daemon configuration, and business credentials are distinct. Daemon secrets are removed from child environments and excluded from logs, errors, descriptors, output previews, and receipts.
 
 ## Failure Model
 
@@ -190,7 +191,7 @@ Failures preserve the boundary at which certainty was lost:
 | Transport fails after possible mutation dispatch                 | Outcome remains unknown until receipt, idempotency, or resource reconciliation provides evidence                                  |
 | Deadline or cancellation races native work                       | Result distinguishes cancelled, timed out, completed, or unknown from available provider evidence                                 |
 | Output exceeds policy                                            | Bounded failure, explicit truncation, or bounded retained reference according to `OutputPolicy`; side effects are not rewritten   |
-| Generation, handle, cursor, or lease is stale                    | Typed stale or retention-gap error; no silent retargeting                                                                         |
+| Generation, handle, cursor, or output reference is stale         | Typed stale or retention-gap error; no silent retargeting                                                                         |
 | Daemon shutdown begins                                           | New admission stops, active work is boundedly drained or terminated, and native command trees remain daemon-owned through cleanup |
 
 Transport loss, timeout, or connection close is never proof that an accepted mutation did not occur. Likewise, a command exit is not proof that its full process tree is cleaned until the cleanup outcome says so.
@@ -203,7 +204,7 @@ A daemon adds a process, protocol, and compatibility boundary where native or re
 
 ### One semantic JSON-RPC protocol
 
-JSON-RPC keeps method envelopes inspectable and shared across stdio, HTTP, and WebSocket. It requires explicit cursors and references instead of relying on transport-native byte streams, but those objects provide the same bounded and recoverable behavior on every transport.
+JSON-RPC keeps method envelopes inspectable and shared across stdio, HTTP, and WebSocket. It requires explicit cursors and references instead of relying on transport-native byte streams, but those objects provide the same bounded continuation behavior on every transport.
 
 ### Provider-local semantic operations
 
@@ -222,9 +223,9 @@ Fail-closed native isolation protects direct user-machine deployments. Explicitl
 05. `shell.exec` and `process.start` cross one transactional execution manager, and one owner controls every native command tree through cleanup.
 06. `required` execution isolation fails closed; `disabled` is explicit and cannot result from probing, platform detection, test mode, or transport selection.
 07. Disabling inner isolation does not disable authentication, EIP file and cwd policy, environment filtering, process ownership, output bounds, quotas, or cleanup; the outer sandbox then owns the child's actual host-resource containment.
-08. Every output-producing operation is bounded while bytes are produced and is also subject to finite aggregate retained-byte and object quotas.
-09. Provider lifecycle credentials never enter envd; the envd transport key never enters commands, model data, EIP payloads, state, or logs.
-10. Handles, descriptors, cursors, references, receipts, and saved state are non-authoritative selectors scoped to Environment identity and generation.
+08. Every output-producing operation is bounded while bytes are produced and is also subject to finite daemon-global retained-byte and object quotas.
+09. Provider lifecycle credentials never enter envd; the envd transport key never enters commands, model data, EIP payloads, or logs.
+10. Handles, descriptors, cursors, references, and receipts are non-authoritative selectors scoped to Environment identity and one daemon generation; none survives daemon restart.
 11. Transport loss, timeout, or connection close cannot resolve an ambiguous mutation without provider evidence.
 12. One canonical IDL generates daemon and client wire surfaces; neither language maintains an editable parallel method catalog.
 13. The Foundation Service owns no Sandbox domain and never interprets provider-native Environment state.

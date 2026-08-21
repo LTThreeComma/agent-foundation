@@ -56,7 +56,7 @@ message CommandRequest {
   optional CommandLimits limits = 5 [(eip_field).default_message = true];
   optional EncodedBytes initial_stdin = 6;
   optional bool keep_stdin_open = 7 [(eip_field).default_bool = false];
-  OutputPolicy output_policy = 8;
+  optional OutputPolicy output_policy = 8;
 }
 
 enum ProcessPhase {
@@ -128,13 +128,15 @@ message ProcessOutputSnapshot {
 }
 
 message ProcessInfo {
+  reserved 7;
+  reserved "lease";
+
   ProcessHandle handle = 1;
   string environment_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  uint64 generation = 3;
+  uint64 generation = 3 [(eip_field).minimum = 1];
   ProcessStatus status = 4;
   bool stdin_open = 5;
   ProcessOutputSnapshot output = 6;
-  optional ProcessLeaseRef lease = 7;
 }
 
 message ShellProfileDescriptor {
@@ -180,7 +182,7 @@ message ProcessReadOutputParams {
   optional OutputCursor stdout_cursor = 3;
   optional OutputCursor stderr_cursor = 4;
   optional uint64 wait_ms = 5 [(eip_field).default_uint = 0];
-  OutputPolicy output_policy = 6;
+  optional OutputPolicy output_policy = 6;
 }
 
 message ProcessStreamRead {
@@ -254,18 +256,6 @@ message ProcessKillParams {
 message ProcessKillResult {
   ProcessInfo process = 1;
   OperationReceipt receipt = 2;
-}
-
-message ProcessRetainParams {
-  EIPCallContext context = 1;
-  ProcessHandle handle = 2;
-  google.protobuf.Timestamp requested_expires_at = 3;
-}
-
-message ProcessRetainResult {
-  ProcessLeaseRef lease = 1;
-  google.protobuf.Timestamp expires_at = 2;
-  OperationReceipt receipt = 3;
 }
 
 message ProcessReleaseParams {

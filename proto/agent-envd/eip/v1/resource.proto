@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package converge.agent_envd.eip.v1;
 
-import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "agent-envd/eip/v1/common.proto";
 import "agent-envd/eip/v1/options.proto";
@@ -21,41 +20,6 @@ message MountDescriptor {
   bool supports_atomic_replace = 5;
   bool supports_file_revision = 6;
   uint64 max_file_bytes = 7;
-}
-
-enum ResourceAction {
-  RESOURCE_ACTION_UNSPECIFIED = 0;
-  RESOURCE_ACTION_READ = 1 [(eip_enum_value).json_name = "read"];
-  RESOURCE_ACTION_WRITE = 2 [(eip_enum_value).json_name = "write"];
-  RESOURCE_ACTION_DELETE = 3 [(eip_enum_value).json_name = "delete"];
-  RESOURCE_ACTION_EXECUTE = 4 [(eip_enum_value).json_name = "execute"];
-}
-
-enum ResolvedResourceKind {
-  RESOLVED_RESOURCE_KIND_UNSPECIFIED = 0;
-  RESOLVED_RESOURCE_KIND_FILE = 1 [(eip_enum_value).json_name = "file"];
-  RESOLVED_RESOURCE_KIND_DIRECTORY = 2 [(eip_enum_value).json_name = "directory"];
-  RESOLVED_RESOURCE_KIND_SYMLINK = 3 [(eip_enum_value).json_name = "symlink"];
-  RESOLVED_RESOURCE_KIND_MISSING_TARGET = 4 [(eip_enum_value).json_name = "missing_target"];
-}
-
-message ResourceResolveParams {
-  EIPCallContext context = 1;
-  EIPPath path = 2;
-  ResourceAction action = 3;
-  optional bool follow_symlinks = 4 [(eip_field).default_bool = true];
-}
-
-message ResolvedResource {
-  string namespace = 1;
-  ResolvedResourceKind kind = 2;
-  string identifier = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  uint64 generation = 4;
-  optional FileRevision revision = 5;
-}
-
-message ResourceResolveResult {
-  ResolvedResource resource = 1;
 }
 
 enum FileKind {
@@ -91,7 +55,7 @@ message FileReadParams {
   optional uint64 offset = 3 [(eip_field).default_uint = 0];
   optional uint64 length = 4;
   optional FileRevision expected_revision = 5;
-  OutputPolicy output_policy = 6;
+  optional OutputPolicy output_policy = 6;
 }
 
 message FileReadResult {
@@ -107,7 +71,7 @@ message FileListParams {
   optional bool recursive = 3 [(eip_field).default_bool = false];
   optional uint32 max_depth = 4 [(eip_field).default_uint = 1];
   optional OutputCursor cursor = 5;
-  OutputPolicy output_policy = 6;
+  optional OutputPolicy output_policy = 6;
 }
 
 message FileListEntry {
@@ -120,10 +84,34 @@ message FileListResult {
   StructuredOutputDisposition output = 2;
 }
 
+enum FindMode {
+  FIND_MODE_UNSPECIFIED = 0;
+  FIND_MODE_GLOB = 1 [(eip_enum_value).json_name = "glob"];
+  FIND_MODE_REGEX = 2 [(eip_enum_value).json_name = "regex"];
+}
+
+message FileFindParams {
+  EIPCallContext context = 1;
+  EIPPath root = 2;
+  string pattern = 3;
+  FindMode mode = 4;
+  optional FileKind kind = 5;
+  uint32 max_depth = 6;
+  optional OutputCursor cursor = 7;
+  optional OutputPolicy output_policy = 8;
+}
+
+message FileFindResult {
+  repeated FileListEntry entries = 1;
+  StructuredOutputDisposition output = 2;
+}
+
 enum SearchMode {
+  reserved 2;
+  reserved "SEARCH_MODE_GLOB";
+
   SEARCH_MODE_UNSPECIFIED = 0;
   SEARCH_MODE_LITERAL = 1 [(eip_enum_value).json_name = "literal"];
-  SEARCH_MODE_GLOB = 2 [(eip_enum_value).json_name = "glob"];
   SEARCH_MODE_REGEX = 3 [(eip_enum_value).json_name = "regex"];
 }
 
@@ -136,14 +124,15 @@ message FileSearchParams {
   repeated string exclude = 6;
   uint32 max_depth = 7;
   optional OutputCursor cursor = 8;
-  OutputPolicy output_policy = 9;
+  optional OutputPolicy output_policy = 9;
+  optional bool case_sensitive = 10 [(eip_field).default_bool = true];
 }
 
 message FileSearchMatch {
   EIPPath path = 1;
-  optional uint64 line_number = 2;
-  optional uint64 byte_offset = 3;
-  optional string preview = 4;
+  uint64 line_number = 2 [(eip_field).minimum = 1];
+  uint64 byte_offset = 3;
+  string preview = 4;
 }
 
 message FileSearchResult {
@@ -298,63 +287,4 @@ message PortWaitParams {
 
 message PortWaitResult {
   PortObservation observation = 1;
-}
-
-message EIPProcessStateObject {
-  string kind = 1 [(eip_field).const_string = "process_lease"];
-  ProcessLeaseRef lease = 2;
-  ProcessHandle handle = 3;
-  google.protobuf.Timestamp expires_at = 4;
-}
-
-message EIPOutputStateObject {
-  string kind = 1 [(eip_field).const_string = "output_lease"];
-  OutputLeaseRef lease = 2;
-  OutputReference reference = 3;
-  google.protobuf.Timestamp expires_at = 4;
-}
-
-message EIPCursorStateObject {
-  string kind = 1 [(eip_field).const_string = "cursor"];
-  OutputLeaseRef lease = 2;
-  OutputCursor cursor = 3;
-  google.protobuf.Timestamp expires_at = 4;
-}
-
-message EIPStateObject {
-  option (eip_message).discriminated_union = true;
-  oneof object {
-    EIPProcessStateObject process_lease = 1;
-    EIPOutputStateObject output_lease = 2;
-    EIPCursorStateObject cursor = 3;
-  }
-}
-
-message EIPEnvironmentState {
-  string schema_version = 1 [(eip_field).string_format = EIP_STRING_FORMAT_PROTOCOL_VERSION];
-  string environment_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  uint64 observed_generation = 3;
-  repeated EIPStateObject objects = 4;
-  optional google.protobuf.Value provider_data = 5;
-}
-
-message StateExportParams {
-  EIPCallContext context = 1;
-  repeated ProcessLeaseRef process_leases = 2;
-  repeated OutputLeaseRef output_leases = 3;
-}
-
-message StateExportResult {
-  EIPEnvironmentState state = 1;
-  google.protobuf.Timestamp observed_at = 2;
-}
-
-message StateRestoreParams {
-  EIPCallContext context = 1;
-  EIPEnvironmentState state = 2;
-}
-
-message StateRestoreResult {
-  repeated EIPStateObject restored = 1;
-  repeated string omitted_expired = 2;
 }

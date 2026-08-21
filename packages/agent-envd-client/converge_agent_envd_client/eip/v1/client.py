@@ -6,6 +6,7 @@ from typing import Protocol
 from .methods import (
     ENVIRONMENT_DESCRIBE,
     FILE_COPY,
+    FILE_FIND,
     FILE_LIST,
     FILE_MKDIR,
     FILE_MOVE,
@@ -19,7 +20,6 @@ from .methods import (
     OPERATION_CANCEL,
     OUTPUT_READ,
     OUTPUT_RELEASE,
-    OUTPUT_RETAIN,
     PORT_INSPECT,
     PORT_WAIT,
     PROCESS_CLOSE_STDIN,
@@ -27,17 +27,13 @@ from .methods import (
     PROCESS_KILL,
     PROCESS_READ_OUTPUT,
     PROCESS_RELEASE,
-    PROCESS_RETAIN,
     PROCESS_SIGNAL,
     PROCESS_START,
     PROCESS_WAIT,
     PROCESS_WRITE_STDIN,
     RECEIPT_GET,
-    RESOURCE_RESOLVE,
     SESSION_CLOSE,
     SHELL_EXEC,
-    STATE_EXPORT,
-    STATE_RESTORE,
     MethodSpec,
 )
 from .models import (
@@ -45,6 +41,8 @@ from .models import (
     EnvironmentDescribeResult,
     FileCopyParams,
     FileCopyResult,
+    FileFindParams,
+    FileFindResult,
     FileListParams,
     FileListResult,
     FileMkdirParams,
@@ -71,8 +69,6 @@ from .models import (
     OutputReadResult,
     OutputReleaseParams,
     OutputReleaseResult,
-    OutputRetainParams,
-    OutputRetainResult,
     PortInspectParams,
     PortInspectResult,
     PortWaitParams,
@@ -87,8 +83,6 @@ from .models import (
     ProcessReadOutputResult,
     ProcessReleaseParams,
     ProcessReleaseResult,
-    ProcessRetainParams,
-    ProcessRetainResult,
     ProcessSignalParams,
     ProcessSignalResult,
     ProcessStartParams,
@@ -99,16 +93,10 @@ from .models import (
     ProcessWriteStdinResult,
     ReceiptGetParams,
     ReceiptGetResult,
-    ResourceResolveParams,
-    ResourceResolveResult,
     SessionCloseParams,
     SessionCloseResult,
     ShellExecParams,
     ShellExecResult,
-    StateExportParams,
-    StateExportResult,
-    StateRestoreParams,
-    StateRestoreResult,
 )
 
 
@@ -125,6 +113,9 @@ class EIPClient:
 
     async def file_copy(self, params: FileCopyParams) -> FileCopyResult:
         return await self._requester.request(FILE_COPY, params)
+
+    async def file_find(self, params: FileFindParams) -> FileFindResult:
+        return await self._requester.request(FILE_FIND, params)
 
     async def file_list(self, params: FileListParams) -> FileListResult:
         return await self._requester.request(FILE_LIST, params)
@@ -165,9 +156,6 @@ class EIPClient:
     async def output_release(self, params: OutputReleaseParams) -> OutputReleaseResult:
         return await self._requester.request(OUTPUT_RELEASE, params)
 
-    async def output_retain(self, params: OutputRetainParams) -> OutputRetainResult:
-        return await self._requester.request(OUTPUT_RETAIN, params)
-
     async def port_inspect(self, params: PortInspectParams) -> PortInspectResult:
         return await self._requester.request(PORT_INSPECT, params)
 
@@ -189,9 +177,6 @@ class EIPClient:
     async def process_release(self, params: ProcessReleaseParams) -> ProcessReleaseResult:
         return await self._requester.request(PROCESS_RELEASE, params)
 
-    async def process_retain(self, params: ProcessRetainParams) -> ProcessRetainResult:
-        return await self._requester.request(PROCESS_RETAIN, params)
-
     async def process_signal(self, params: ProcessSignalParams) -> ProcessSignalResult:
         return await self._requester.request(PROCESS_SIGNAL, params)
 
@@ -207,17 +192,8 @@ class EIPClient:
     async def receipt_get(self, params: ReceiptGetParams) -> ReceiptGetResult:
         return await self._requester.request(RECEIPT_GET, params)
 
-    async def resource_resolve(self, params: ResourceResolveParams) -> ResourceResolveResult:
-        return await self._requester.request(RESOURCE_RESOLVE, params)
-
     async def session_close(self, params: SessionCloseParams) -> SessionCloseResult:
         return await self._requester.request(SESSION_CLOSE, params)
 
     async def shell_exec(self, params: ShellExecParams) -> ShellExecResult:
         return await self._requester.request(SHELL_EXEC, params)
-
-    async def state_export(self, params: StateExportParams) -> StateExportResult:
-        return await self._requester.request(STATE_EXPORT, params)
-
-    async def state_restore(self, params: StateRestoreParams) -> StateRestoreResult:
-        return await self._requester.request(STATE_RESTORE, params)

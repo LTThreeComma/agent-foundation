@@ -5,14 +5,10 @@
       "value": {
         "client": {"name": "fixture-client", "version": "1.2.3"},
         "expected_environment_id": "env-fixture",
-        "optional_capabilities": ["output.retain"],
+        "optional_capabilities": ["file.search"],
         "required_capabilities": ["file.read"],
         "supported_protocol_versions": ["1.0"]
       }
-    },
-    {
-      "type": "EnvironmentChangedNotification",
-      "value": {"observed_generation": 8}
     },
     {
       "type": "FileStatParams",
@@ -34,6 +30,16 @@
       }
     },
     {
+      "type": "FileFindParams",
+      "value": {
+        "context": {"operation_id": "op-find"},
+        "max_depth": 8,
+        "mode": "glob",
+        "pattern": "**/*.py",
+        "root": {"mount_id": "workspace", "path": "/src"}
+      }
+    },
+    {
       "type": "ShellExecParams",
       "value": {
         "context": {"deadline": "2026-08-20T14:00:00Z", "operation_id": "op-exec"},
@@ -48,7 +54,6 @@
       "type": "OutputReadParams",
       "value": {
         "context": {"operation_id": "op-output-read"},
-        "output_policy": {"max_inline_bytes": 4096, "max_output_bytes": 65536, "overflow": "truncate"},
         "reference": "output-ref-1",
         "start_offset": 0
       }
@@ -63,16 +68,11 @@
       }
     },
     {
-      "type": "StateExportParams",
+      "type": "ReceiptGetParams",
       "value": {
-        "context": {"operation_id": "op-state-export"},
-        "output_leases": ["output-lease-1"],
-        "process_leases": ["process-lease-1"]
+        "context": {"operation_id": "op-receipt-query"},
+        "operation_id": "op-ambiguous"
       }
-    },
-    {
-      "type": "SessionExpiringNotification",
-      "value": {"expires_at": "2026-08-20T14:15:00Z"}
     },
     {
       "type": "EIPError",
@@ -85,6 +85,20 @@
           "retry_hint": "reconcile_first"
         },
         "message": "operation outcome is unknown"
+      }
+    },
+    {
+      "type": "EIPError",
+      "value": {
+        "code": -32022,
+        "data": {
+          "available_end": 8192,
+          "available_start": 4096,
+          "dispatch_stage": "completed",
+          "error_type": "retention_gap",
+          "retry_hint": "never"
+        },
+        "message": "requested output is no longer available"
       }
     }
   ]

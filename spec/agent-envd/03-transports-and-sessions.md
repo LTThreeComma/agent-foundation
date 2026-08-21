@@ -4,7 +4,7 @@
 
 Stdio, HTTP, and WebSocket are framing and authenticated-session profiles over the same EIP JSON-RPC contract. A transport establishes peer context, message boundaries, size limits, session lifetime, and liveness. It cannot add provider-specific method envelopes or change operation semantics.
 
-Network profiles are authenticated with one envd-specific API key supplied to the daemon through `AGENT_ENVD_API_KEY`. The key is transport bootstrap authority, not a model-visible argument, EIP field, business credential, provider lifecycle credential, or invocation grant.
+Network profiles are authenticated with one envd-specific API key supplied to the daemon through `AGENT_ENVD_API_KEY`. The key authenticates the daemon's single user; it is not a model-visible argument, EIP field, business credential, or provider lifecycle credential.
 
 ## Boundaries
 
@@ -16,7 +16,7 @@ Network profiles are authenticated with one envd-specific API key supplied to th
 | Provider routing and optional TLS/tunnel                                    | Host provider adapter                                                          | Supplies a protected route without injecting caller identity |
 | Method authorization and native enforcement                                 | `agent-envd` resource owners                                                   | Repeated after transport authentication                      |
 
-A transport session authenticates access to the daemon's configured Environment ceiling. The single network key maps to one daemon-configured logical transport principal; the secret bytes or their digest are never used as object identity, so an operator key rotation does not silently retag retained ownership. It does not grant every operation: capabilities, current daemon policy, method params, generation, ownership, quotas, and any required invocation grant still apply.
+A transport session authenticates access to the daemon's configured Environment ceiling. The single network key maps to the daemon's one user; the secret bytes or their digest are never used as object identity. Capabilities, current daemon policy, method params, generation, handles, and daemon-global safety limits still apply.
 
 ## Session Model
 
@@ -28,25 +28,21 @@ stateDiagram-v2
     Authenticating --> Closed: authentication fails
     Uninitialized --> Initialized: initialize succeeds
     Uninitialized --> Closed: initialize fails or times out
-    Initialized --> Expiring: idle or absolute lifetime nears limit
-    Expiring --> Initialized: valid authenticated activity within renewable limit
-    Expiring --> Closed: expiry reached
-    Initialized --> Draining: session.close, transport loss, or daemon drain
-    Draining --> Closed: owned work handled and session resources released
+    Initialized --> Closed: session.close, idle expiry, transport loss, or daemon drain
     Closed --> [*]
 ```
 
 An initialized EIP session binds:
 
-- authenticated transport principal;
+- the authenticated daemon user;
 - selected EIP protocol version;
 - Environment identity and generation observed at initialization;
 - effective capabilities and hard limits;
-- authority partition and object ownership scope;
-- session idle and absolute expiry;
-- accepted operation IDs and session-owned resources.
+- bounded correlation metadata and idle expiry.
 
-It does not bind a Harness run as durable authority. One single-key network listener represents one trusted authority partition and cannot isolate mutually untrusted tenants or workloads from each other. A Host requiring that separation uses distinct envd instances, keys, state/retention roots, and provider bindings. Within one partition, a provider adapter can dedicate a session to one run or use invocation grants and a trusted binding layer to narrow operations further. Envd never accepts `run_id`, tenant, actor, principal, mount ceiling, or capability claims from a caller-controlled header or ordinary method param as a replacement for trusted session context.
+It does not bind a Harness run, own an operation or resource, or create an authority partition. A Host requiring separation between users or mutually untrusted workloads uses distinct envd instances, keys, runtime roots, and provider bindings. Envd never accepts `run_id`, tenant, actor, principal, mount ceiling, or capability claims from a caller-controlled header or ordinary method param as a replacement for trusted daemon configuration.
+
+Session count and metadata are daemon-bounded. The descriptor advertises `session_idle_ttl_ms`; a successfully authenticated request refreshes idle time after its session selector is validated. EIP defines no absolute session lifetime, renewal protocol, or expiring notification. Idle expiry requires reinitialization and has no process, operation, receipt, or output-lifetime effect.
 
 Session IDs and connection IDs are correlation selectors rather than bearer credentials. HTTP always re-authenticates the API key. WebSocket authenticates the upgrade and ties the session to that one connection. Stdio ties the session to the parent-created pipes.
 
@@ -60,11 +56,11 @@ All profiles enforce:
 - independent JSON-RPC IDs for multiplexed requests;
 - out-of-order responses when operations execute concurrently;
 - one response for each request unless the transport fails;
-- no application mutation in an uncorrelated client notification;
+- every application operation uses a correlated request and response;
 - no secrets in URLs, query strings, cookies, subprotocol values, WebSocket frames, readiness, or EIP params;
 - no implicit fallback to another transport after a possibly dispatched mutation.
 
-A transport can stop reading when admission or memory limits are reached. Backpressure must bound server memory; it must not cause envd to accumulate unbounded parsed requests or outbound notifications.
+A transport can stop reading when admission or memory limits are reached. Backpressure must bound server memory; it must not cause envd to accumulate unbounded parsed requests or outbound responses.
 
 ## Stdio Profile
 
@@ -81,15 +77,13 @@ Content-Type: application/json; charset=utf-8\r\n
 
 `Content-Length` is mandatory, decimal, non-negative, canonical, and within the configured request or response ceiling. `Content-Type` is optional on input; when present it must identify UTF-8 JSON. Unknown headers are rejected if repeated, oversized, malformed, or security-sensitive. Header and body reads have finite deadlines during startup and drain.
 
-Stdin carries client-to-server frames. Stdout carries server-to-client responses and negotiated notifications only. Stderr carries structured daemon logs and never protocol frames. Command stdout and stderr are data inside EIP results or retained output, never daemon stdout.
+Stdin carries client-to-server frames. Stdout carries server-to-client responses only. Stderr carries structured daemon logs and never protocol frames. Command stdout and stderr are data inside EIP results or retained output, never daemon stdout.
 
 ### Trust and lifecycle
 
 Stdio has no API-key header. Authentication relies on the parent creating private pipes, launching the expected executable under trusted configuration, validating child ownership, and preventing another local principal from replacing or attaching to those descriptors. If this assumption is not valid, the provider uses an authenticated network profile or another protected channel.
 
-The first request is `initialize`. EOF before initialization closes without a session. Parent stdin EOF after initialization begins session drain and best-effort cancellation of session-owned work. EOF is not proof that a mutation was cancelled. A stdio-mode daemon has one connection and one protocol session and exits after bounded cleanup.
-
-Because no fresh client can reattach after that process exits, its descriptor omits `process.retain` and `output.retain`. This is a capability/lifecycle restriction, not a different definition of either lease method; any reconnectable profile that advertises those capabilities uses the owning common lease contracts.
+The first request is `initialize`. EOF before initialization closes without a session. Parent stdin EOF after initialization normally requests daemon shutdown. The daemon stops admission, terminates every owned command tree, cleans generation-local output, and exits after bounded cleanup. EOF is not proof that a mutation was cancelled.
 
 ## HTTP Profile
 
@@ -119,7 +113,7 @@ EIP-Session: <opaque selector>
 Cache-Control: no-store
 ```
 
-Every later request supplies both the same API key and `EIP-Session`. The selector chooses negotiated protocol and session-owned state but is not sufficient without successful API-key authentication. It is bound to the authenticated principal, Environment identity and generation, selected protocol, expiry, authority partition, and safe backend routing state. It is never stored in Harness state or model data and is excluded from normal logs to avoid unnecessary correlation leakage.
+Every later request supplies both the same API key and `EIP-Session`. The selector chooses negotiated protocol and logical-session metadata but is not sufficient without successful API-key authentication. It is bound to the authenticated daemon user, Environment identity and generation, selected protocol, idle expiry, and safe backend routing state. It is never stored in Harness state or model data and is excluded from normal logs to avoid unnecessary correlation leakage.
 
 HTTP logical sessions are independent of TCP connections, HTTP keep-alive, connection pools, source ports, trusted reverse proxies, and backend connection reuse. A client can send concurrent requests for one session over multiple TCP connections. Envd serializes only operations whose domain invariants require it.
 
@@ -146,7 +140,7 @@ Responses set `Cache-Control: no-store`; intermediaries must not cache, transfor
 
 ### HTTP retries
 
-A dropped HTTP response does not reveal whether envd dispatched the method. Standard HTTP client middleware must not automatically retry EIP `POST` requests. The EIP client uses operation receipts, method idempotency, or proven pre-dispatch status before retrying. A new TCP connection does not require new initialization, while an expired logical session does.
+A dropped HTTP response does not reveal whether envd dispatched the method. Standard HTTP client middleware must not automatically retry EIP `POST` requests. The EIP client uses operation receipts, method idempotency, or proven pre-dispatch status before retrying. A new TCP connection does not require new initialization, while an expired logical session does. Reinitialization against the same generation can continue using generation-scoped process handles and output references.
 
 ## WebSocket Profile
 
@@ -188,9 +182,9 @@ A non-`initialize` first message, another request received before initialization
 
 ### Frames, multiplexing, and liveness
 
-Each EIP request, response, or notification occupies exactly one complete WebSocket text message. Fragmentation at the WebSocket protocol layer is allowed only within the configured aggregate message ceiling; envd reassembles with bounded memory before JSON parsing. Binary messages are unsupported. Multiple JSON objects in one message are invalid.
+Each EIP request or response occupies exactly one complete WebSocket text message. Fragmentation at the WebSocket protocol layer is allowed only within the configured aggregate message ceiling; envd reassembles with bounded memory before JSON parsing. Binary messages are unsupported. Multiple JSON objects in one message are invalid.
 
-After initialization, requests can be multiplexed and responses can arrive out of order by JSON-RPC ID. Server notifications share the same stream. Control ping and pong frames provide transport liveness and carry no EIP data, authority, or completion meaning. Envd closes an unresponsive connection after bounded missed-liveness intervals.
+After initialization, requests can be multiplexed and responses can arrive out of order by JSON-RPC ID. Control ping and pong frames provide transport liveness and carry no EIP data, authority, or completion meaning. Envd closes an unresponsive connection after bounded missed-liveness intervals.
 
 Standard close behavior is:
 
@@ -203,7 +197,7 @@ Standard close behavior is:
 | `1009` | Message exceeds size ceiling                                 |
 | `1011` | Bounded unexpected server failure requiring connection close |
 
-A close reason is bounded and contains no secrets or request content. WebSocket close initiates session drain but does not prove cancellation or native non-dispatch.
+A close reason is bounded and contains no secrets or request content. WebSocket close discards only protocol-session metadata; it does not cancel accepted operations, terminate processes, release retained output, or prove native non-dispatch.
 
 ## Session Close and Resource Lifetime
 
@@ -215,36 +209,21 @@ class SessionCloseParams(BaseModel):
 
 
 class SessionCloseResult(BaseModel):
-    operations_cancellation_requested: int
-    processes_termination_requested: int
-    output_objects_released: int
-    leased_processes_preserved: int
-    leased_output_objects_preserved: int
+    closed: Literal[True]
 ```
 
-It atomically marks the session draining, refuses later operations, and returns that bounded summary of session-owned active operations, processes, and retained objects that were released, cancellation-requested, or preserved by explicit lease.
+It atomically invalidates the logical session after returning the correlated result. It does not cancel accepted operations, close process stdin, terminate processes, or release output objects. Those resources belong to the daemon generation and remain available to any fresh authenticated session for the same Environment identity and generation.
 
-Default ownership rules are:
-
-- accepted foreground operations are cancellation-requested on session loss;
-- unleased background processes are terminated on session close;
-- session-owned retained output and cursors are released;
-- finite process or output leases can survive one client session but remain scoped to the same Environment generation and authority partition;
-- daemon shutdown terminates even leased processes and invalidates all session carriers.
-
-`session.close` completion proves only that envd applied these ownership transitions. Individual operations can still require receipt or process reconciliation when cancellation races execution.
-
-HTTP session expiry follows the same drain path. WebSocket transport loss and stdio EOF trigger it implicitly. A client reconnects by creating a new session and reinitializing; it never resumes a WebSocket object or stdio stream itself. Explicitly leased provider objects can then be reattached through their owning methods under fresh authentication and generation checks.
+HTTP session idle expiry and WebSocket transport loss have the same resource-neutral effect. A client reconnects by creating a new session and reinitializing; it never resumes a WebSocket or stdio stream itself. Explicit `operation.cancel`, process-control, `process.release`, and `output.release` methods own resource transitions. Daemon shutdown is the only protocol-lifecycle event that unconditionally terminates all command trees and invalidates every volatile selector.
 
 ## Authentication and Secret Handling
 
 The API key authenticates only the envd endpoint. It is distinct from:
 
 - provider lifecycle credentials held by the Host adapter;
-- Host-issued invocation grants referenced by EIP operations;
 - business or model-provider credentials optionally projected into a particular command;
 - HTTP `EIP-Session` selectors;
-- opaque process, output, receipt, and state selectors.
+- opaque process, output, cursor, and receipt selectors.
 
 Envd and trusted proxies redact `Authorization` completely. The key is absent from access logs, panic reports, telemetry, request mirrors, state, readiness, errors, and child environments. Authentication failure uses one response shape and does not reveal whether a key was absent, malformed, expired, or incorrect.
 
@@ -263,8 +242,7 @@ A deployment using `AGENT_ENVD_EXECUTION_ISOLATION=disabled` must ensure that pa
 | Message too large                                  | HTTP `413`, WebSocket `1009`, or stdio framing failure     | No EIP method dispatched                  |
 | Connection loss before envd accepts operation      | Transport failure with proven pre-dispatch stage           | Retry can follow method policy            |
 | Connection loss after possible acceptance          | Transport failure and potentially unknown outcome          | Reconcile before mutating retry           |
-| Ping/pong or idle expiry                           | Session drain                                              | Not proof of native cancellation          |
-| Server notification loss                           | No method failure                                          | Client reads authoritative state          |
+| Ping/pong failure or session idle expiry           | Protocol session closes                                    | Resources remain generation-scoped        |
 
 ## Compatibility
 
@@ -288,7 +266,7 @@ A provider adapter declares supported transport profiles and chooses one before 
 06. Browser origins are denied by default and an allowlisted origin never replaces API-key authentication.
 07. Stdio stdout contains only framed EIP traffic and stderr contains only logs.
 08. Batch requests, binary WebSocket application messages, and unbounded decompression are unsupported.
-09. Connection close initiates drain but never proves cancellation, non-dispatch, or mutation failure.
-10. Session loss releases unleased resources; only explicit finite leases can survive into a fresh authenticated session of the same Environment generation and authority partition.
+09. Connection or logical-session close never proves cancellation, non-dispatch, or mutation failure and never owns process or output cleanup.
+10. Processes, operations, receipts, output references, and cursors belong to the daemon generation and can be used from a fresh authenticated session until explicitly released, expired, capacity-reclaimed, or daemon shutdown occurs.
 11. API keys, authorization headers, and session correlation values never enter model content, Harness state, EIP params, child environments, or normal logs.
 12. Transport-level retries never repeat a possibly dispatched mutation without EIP idempotency or reconciliation evidence.

@@ -89,7 +89,8 @@ pub fn render(pool: &DescriptorPool, digest: &str) -> Result<String, String> {
          }\n\n\
          pub fn encode<T: Serialize + EipValidate>(value: &T) -> Result<Vec<u8>, EncodeError> {\n\
          \x20   value.validate().map_err(EncodeError::Validation)?;\n\
-         \x20   serde_json::to_vec(value).map_err(EncodeError::Json)\n\
+         \x20   let canonical = serde_json::to_value(value).map_err(EncodeError::Json)?;\n\
+         \x20   serde_json::to_vec(&canonical).map_err(EncodeError::Json)\n\
          }\n\n\
          fn validate_absolute_path(value: &str) -> bool {\n\
          \x20   value.starts_with('/')\n\
@@ -214,6 +215,7 @@ impl<'de> serde::de::Visitor<'de> for UniqueJsonVisitor {
     for item in messages {
         render_message(&mut output, &item, &extensions, &defaulted_messages)?;
     }
+    render_jsonrpc_envelopes(&mut output);
 
     let mut methods = method_records(pool, &extensions)?;
     methods.sort_by(|left, right| left.jsonrpc_method.cmp(&right.jsonrpc_method));
@@ -262,6 +264,13 @@ fn u32_field(message: &DynamicMessage, name: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("option field {name} is not a uint32"))
 }
 
+fn i32_field(message: &DynamicMessage, name: &str) -> Result<i32, String> {
+    message
+        .get_field_by_name(name)
+        .and_then(|value| value.as_i32())
+        .ok_or_else(|| format!("option field {name} is not an int32"))
+}
+
 fn enum_field_name(message: &DynamicMessage, name: &str) -> Result<String, String> {
     let field = message
         .descriptor()
@@ -289,6 +298,8 @@ fn render_enum(
     output.push_str(&format!("pub enum {} {{\n", descriptor.name()));
     let prefix = format!("{}_", descriptor.name().to_shouty_snake_case());
     let mut rendered = 0;
+    let mut error_codes = Vec::new();
+    let mut used_error_codes = BTreeSet::new();
     for value in descriptor.values() {
         let options = value.options();
         if !options.has_extension(&extensions.enum_value) {
@@ -307,6 +318,19 @@ fn render_enum(
         output.push_str(&format!(
             "    #[serde(rename = \"{json_name}\")]\n    {variant},\n"
         ));
+        if descriptor.name() == "ErrorType" {
+            if !option.has_field_by_name("error_code") {
+                return Err(format!(
+                    "EIP error type {} has no JSON-RPC code",
+                    value.name()
+                ));
+            }
+            let error_code = i32_field(&option, "error_code")?;
+            if !used_error_codes.insert(error_code) {
+                return Err(format!("duplicate EIP JSON-RPC error code: {error_code}"));
+            }
+            error_codes.push((variant, error_code));
+        }
         rendered += 1;
     }
     if rendered == 0 {
@@ -316,6 +340,15 @@ fn render_enum(
         ));
     }
     output.push_str("}\n\n");
+    if descriptor.name() == "ErrorType" {
+        output.push_str(
+            "impl ErrorType {\n    pub const fn code(self) -> i32 {\n        match self {\n",
+        );
+        for (variant, code) in error_codes {
+            output.push_str(&format!("            Self::{variant} => {code},\n"));
+        }
+        output.push_str("        }\n    }\n}\n\n");
+    }
     Ok(())
 }
 
@@ -652,6 +685,37 @@ fn render_validation_impl(
                 "        if self.max_inline_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_bytes cannot exceed max_output_bytes\".to_owned())); }\n",
             );
         }
+        if descriptor.name() == "OutputCapture" {
+            output.push_str(
+                "        if self.available_start > self.available_end { return Err(ValidationError(\"available_start cannot exceed available_end\".to_owned())); }\n\
+                 \x20       match self.kind {\n\
+                 \x20           OutputKind::Empty if self.produced_bytes != 0 || self.captured_bytes != 0 || self.dropped_bytes != 0 || self.available_start != 0 || self.available_end != 0 || self.inline.is_some() || self.preview.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"empty output must contain no bytes or retained state\".to_owned())),\n\
+                 \x20           OutputKind::Inline if self.inline.is_none() || self.preview.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"inline output requires only inline data\".to_owned())),\n\
+                 \x20           OutputKind::Retained if self.reference.is_none() || self.inline.is_some() || self.expires_at.is_none() => return Err(ValidationError(\"retained output requires a reference and expiry\".to_owned())),\n\
+                 \x20           OutputKind::Truncated if self.inline.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"truncated output cannot contain retained or inline state\".to_owned())),\n\
+                 \x20           _ => {}\n\
+                 \x20       }\n",
+            );
+        }
+        if descriptor.name() == "EIPLimits" {
+            output.push_str(
+                "        if self.max_inline_output_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_output_bytes cannot exceed max_output_bytes\".to_owned())); }\n\
+                 \x20       if self.max_processes > self.max_process_records { return Err(ValidationError(\"max_processes cannot exceed max_process_records\".to_owned())); }\n\
+                 \x20       if self.max_concurrent_operations > self.max_operation_records { return Err(ValidationError(\"max_concurrent_operations cannot exceed max_operation_records\".to_owned())); }\n",
+            );
+        }
+        if descriptor.name() == "EIPErrorData" {
+            output.push_str(
+                "        if self.available_start.is_some() != self.available_end.is_some() { return Err(ValidationError(\"available_start and available_end must be present together\".to_owned())); }\n\
+                 \x20       if self.error_type == ErrorType::RetentionGap && self.available_start.is_none() { return Err(ValidationError(\"retention_gap requires available bounds\".to_owned())); }\n\
+                 \x20       if let (Some(start), Some(end)) = (self.available_start, self.available_end) && start > end { return Err(ValidationError(\"available_start cannot exceed available_end\".to_owned())); }\n",
+            );
+        }
+        if descriptor.name() == "EIPError" {
+            output.push_str(
+                "        if self.code != self.data.error_type.code() { return Err(ValidationError(\"JSON-RPC code does not match error_type\".to_owned())); }\n",
+            );
+        }
     }
     output.push_str("        Ok(())\n    }\n}\n\n");
     Ok(())
@@ -885,12 +949,9 @@ fn method_records(
                 record.jsonrpc_method
             ));
         }
-        if !matches!(
-            record.kind.as_str(),
-            "request_response" | "server_notification"
-        ) {
+        if record.kind != "request_response" {
             return Err(format!(
-                "EIP method {} has unspecified kind",
+                "EIP 1.0 method {} must use correlated request-response",
                 record.jsonrpc_method
             ));
         }
@@ -909,13 +970,7 @@ fn method_records(
                 record.jsonrpc_method
             ));
         }
-        if record.kind == "server_notification" && record.result_type.is_some() {
-            return Err(format!(
-                "EIP notification {} must return google.protobuf.Empty",
-                record.jsonrpc_method
-            ));
-        }
-        if record.kind == "request_response" && record.result_type.is_none() {
+        if record.result_type.is_none() {
             return Err(format!(
                 "EIP request-response method {} must have a result message",
                 record.jsonrpc_method
@@ -964,6 +1019,87 @@ fn method_record(
     })
 }
 
+fn render_jsonrpc_envelopes(output: &mut String) {
+    output.push_str(
+        r#"#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    String(String),
+    Integer(i64),
+}
+
+fn deserialize_nullable_jsonrpc_id<'de, D>(deserializer: D) -> Result<Option<JsonRpcId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<JsonRpcId>::deserialize(deserializer)
+}
+
+fn validate_jsonrpc_envelope(
+    jsonrpc: &str,
+    extensions: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), ValidationError> {
+    if jsonrpc != "2.0" {
+        return Err(ValidationError("jsonrpc must equal 2.0".to_owned()));
+    }
+    if let Some(name) = extensions.keys().find(|name| name.starts_with("eip_")) {
+        return Err(ValidationError(format!("unknown reserved JSON-RPC field: {name}")));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: JsonRpcId,
+    pub method: String,
+    pub params: BTreeMap<String, serde_json::Value>,
+    #[serde(default, flatten, skip_serializing)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl EipValidate for JsonRpcRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_jsonrpc_envelope(&self.jsonrpc, &self.extensions)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcSuccessResponse {
+    pub jsonrpc: String,
+    pub id: JsonRpcId,
+    pub result: BTreeMap<String, serde_json::Value>,
+    #[serde(default, flatten, skip_serializing)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl EipValidate for JsonRpcSuccessResponse {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_jsonrpc_envelope(&self.jsonrpc, &self.extensions)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: String,
+    #[serde(deserialize_with = "deserialize_nullable_jsonrpc_id")]
+    pub id: Option<JsonRpcId>,
+    pub error: EIPError,
+    #[serde(default, flatten, skip_serializing)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl EipValidate for JsonRpcErrorResponse {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_jsonrpc_envelope(&self.jsonrpc, &self.extensions)?;
+        self.error.validate()
+    }
+}
+
+"#,
+    );
+}
+
 fn render_registry(output: &mut String, methods: &[MethodRecord]) {
     output.push_str(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
@@ -976,7 +1112,7 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
          \x20   pub introduced: &'static str,\n\
          \x20   pub error_family: &'static str,\n\
          \x20   pub params_type: &'static str,\n\
-         \x20   pub result_type: Option<&'static str>,\n\
+         \x20   pub result_type: &'static str,\n\
          }\n\n\
          pub static METHODS: &[MethodSpec] = &[\n",
     );
@@ -987,10 +1123,10 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
             .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
         let result = method
             .result_type
-            .as_ref()
-            .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
+            .as_deref()
+            .expect("validated EIP request-response has a result type");
         output.push_str(&format!(
-            "    MethodSpec {{ name: \"{}\", capability: {}, kind: \"{}\", idempotency: \"{}\", idempotency_key: \"{}\", introduced: \"{}\", error_family: \"{}\", params_type: \"{}\", result_type: {} }},\n",
+            "    MethodSpec {{ name: \"{}\", capability: {}, kind: \"{}\", idempotency: \"{}\", idempotency_key: \"{}\", introduced: \"{}\", error_family: \"{}\", params_type: \"{}\", result_type: \"{}\" }},\n",
             method.jsonrpc_method,
             capability,
             method.kind,
@@ -1006,32 +1142,34 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
 }
 
 fn render_dispatch(output: &mut String, methods: &[MethodRecord]) {
-    let requests: Vec<_> = methods
-        .iter()
-        .filter(|method| method.kind == "request_response")
-        .collect();
     output.push_str("#[derive(Debug, Clone, PartialEq)]\npub enum EipRequest {\n");
-    for method in &requests {
+    for method in methods {
         output.push_str(&format!(
             "    {}({}),\n",
             method.rpc_name, method.params_type
         ));
     }
     output.push_str("}\n\n#[derive(Debug, Clone, PartialEq, Serialize)]\npub enum EipResponse {\n");
-    for method in &requests {
+    for method in methods {
         output.push_str(&format!(
             "    {}({}),\n",
             method.rpc_name,
-            method.result_type.as_deref().unwrap_or("serde_json::Value")
+            method
+                .result_type
+                .as_deref()
+                .expect("validated EIP request-response has a result type")
         ));
     }
     output.push_str("}\n\n#[allow(async_fn_in_trait)]\npub trait EipHandler {\n");
-    for method in &requests {
+    for method in methods {
         output.push_str(&format!(
             "    async fn {}(&self, params: {}) -> Result<{}, EIPError>;\n",
             method.rust_name,
             method.params_type,
-            method.result_type.as_deref().unwrap_or("serde_json::Value")
+            method
+                .result_type
+                .as_deref()
+                .expect("validated EIP request-response has a result type")
         ));
     }
     output.push_str(
@@ -1047,7 +1185,7 @@ fn render_dispatch(output: &mut String, methods: &[MethodRecord]) {
          pub async fn dispatch<H: EipHandler>(handler: &H, method: &str, params_json: &str) -> Result<serde_json::Value, DispatchError> {\n\
          \x20   match method {\n",
     );
-    for method in &requests {
+    for method in methods {
         output.push_str(&format!(
             "        \"{}\" => {{ let params: {} = decode(params_json).map_err(DispatchError::InvalidParams)?; let result = handler.{}(params).await.map_err(DispatchError::Method)?; result.validate().map_err(DispatchError::InvalidResult)?; serde_json::to_value(result).map_err(DispatchError::Encode) }},\n",
             method.jsonrpc_method, method.params_type, method.rust_name

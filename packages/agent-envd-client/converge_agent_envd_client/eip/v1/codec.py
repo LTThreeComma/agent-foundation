@@ -16,7 +16,9 @@ def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, obj
 
 
 def encode_model(value: BaseModel) -> bytes:
-    data = value.model_dump(mode="json", exclude_unset=True)
+    candidate = value.model_dump(mode="python", round_trip=True, warnings="error")
+    validated = type(value).model_validate(candidate)
+    data = validated.model_dump(mode="json", exclude_unset=True, exclude_defaults=True, warnings="error")
     return json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 

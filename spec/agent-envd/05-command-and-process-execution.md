@@ -8,16 +8,16 @@ A background process record is an EIP-visible projection over manager-owned nati
 
 ## Boundaries
 
-| Concern                                                                | Owner                                            | Relationship                                                                      |
-| ---------------------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------- |
-| Model-facing tool and Harness authorization                            | Harness                                          | Produces a selected binding, effective constraints, and optional invocation grant |
-| Command schema, process lifecycle, handle methods, status, and cleanup | This document                                    | Stable EIP behavior                                                               |
-| Per-command filesystem and network containment                         | [Execution Isolation](07-execution-isolation.md) | Required native backend or explicit outer-sandbox delegation                      |
-| Output capture, references, cursors, and quotas                        | [Output Retention](06-output-retention.md)       | Applies while stdout and stderr are read                                          |
-| Provider ingress for a listening process                               | Provider adapter                                 | Separate from starting or observing the process                                   |
-| Durable Agent attempt and completion                                   | Host                                             | Never owned by process exit or envd receipt                                       |
+| Concern                                                                | Owner                                            | Relationship                                                 |
+| ---------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
+| Model-facing tool and Harness authorization                            | Harness                                          | Produces a selected binding and effective constraints        |
+| Command schema, process lifecycle, handle methods, status, and cleanup | This document                                    | Stable EIP behavior                                          |
+| Per-command filesystem and network containment                         | [Execution Isolation](07-execution-isolation.md) | Required native backend or explicit outer-sandbox delegation |
+| Output capture, references, cursors, and quotas                        | [Output Retention](06-output-retention.md)       | Applies while stdout and stderr are read                     |
+| Provider ingress for a listening process                               | Provider adapter                                 | Separate from starting or observing the process              |
+| Durable Agent attempt and completion                                   | Host                                             | Never owned by process exit or envd receipt                  |
 
-Command permission is the intersection of authenticated session authority, current invocation policy, configured shell and executable policy, selected mounts, Environment generation, process and resource quotas, and execution-isolation posture.
+Command permission is the intersection of authenticated daemon-user authority, configured shell and executable policy, the selected working-directory mount, Environment generation, daemon safety limits, and execution-isolation posture.
 
 ## Command Model
 
@@ -61,7 +61,7 @@ class CommandRequest(BaseModel):
     limits: CommandLimits = CommandLimits()
     initial_stdin: EncodedBytes | None = None
     keep_stdin_open: bool = False
-    output_policy: OutputPolicy
+    output_policy: OutputPolicy | None = None
 ```
 
 Every string, argument count, script byte length, environment entry, initial stdin body, and requested limit is bounded. NUL is invalid in executable, arguments, script, environment names and values, and paths.
@@ -101,7 +101,7 @@ A descriptor reports only logical profile information, not native helper paths o
 
 ### Working directory
 
-`cwd` selects one configured mount and is canonicalized under [Resource Operations](04-resource-operations.md). It must be an existing directory allowed for command execution. Read-only mounts can be working directories but remain read-only inside required isolation. A valid cwd does not by itself grant access to any other host path.
+`cwd` selects one configured mount and is canonicalized under [Resource Operations](04-resource-operations.md). It must be an existing directory allowed for command execution. In EIP 1.0 this is the command's only ordinary Environment mount: required isolation exposes that complete mount with its configured read/write ceiling and does not expose other EIP mounts. Read-only mounts can be working directories but remain read-only. Curated immutable runtime roots plus private `HOME` and temporary roots remain available as defined by the isolation contract. A valid cwd never grants another host path.
 
 ### Environment construction
 
@@ -183,7 +183,6 @@ class ProcessInfo(BaseModel):
     status: ProcessStatus
     stdin_open: bool
     output: ProcessOutputSnapshot
-    lease: ProcessLeaseRef | None
 ```
 
 `starting` is internal until `process.start` can return a committed handle; a client normally first observes `running` or an already terminal phase. `exit_code` belongs to the initial requested executable, never a supervisor or sandbox wrapper. A normal Unix signal is mapped only to the supported semantic signal names; raw host signal numbers are not a portable EIP contract.
@@ -284,7 +283,7 @@ class ProcessReadOutputParams(BaseModel):
     stdout_cursor: OutputCursor | None = None
     stderr_cursor: OutputCursor | None = None
     wait_ms: int = 0
-    output_policy: OutputPolicy
+    output_policy: OutputPolicy | None = None
 
 
 class ProcessStreamRead(BaseModel):
@@ -354,18 +353,6 @@ class ProcessKillResult(BaseModel):
     receipt: OperationReceipt
 
 
-class ProcessRetainParams(BaseModel):
-    context: EIPCallContext
-    handle: ProcessHandle
-    requested_expires_at: datetime
-
-
-class ProcessRetainResult(BaseModel):
-    lease: ProcessLeaseRef
-    expires_at: datetime
-    receipt: OperationReceipt
-
-
 class ProcessReleaseParams(BaseModel):
     context: EIPCallContext
     handle: ProcessHandle
@@ -376,11 +363,11 @@ class ProcessReleaseResult(BaseModel):
     receipt: OperationReceipt
 ```
 
-`process.inspect` returns the latest typed snapshot without draining output or changing lifetime. Polling and WebSocket notifications observe the same record.
+`process.inspect` returns the latest typed snapshot without draining output or changing lifetime.
 
 ### Output reads
 
-`process.read_output` accepts a handle, independent stdout and stderr cursor positions, a wait duration bounded by the EIP deadline, and an `OutputPolicy`. It returns stream-tagged chunks, next cursors, per-stream captured/dropped counts, completeness, process status, and any retention floor. Reads are non-draining: one reader cannot consume data needed by another. Cursor and gap semantics are owned by [Output Retention](06-output-retention.md).
+`process.read_output` accepts a handle, independent optional stdout and stderr cursors, a wait duration bounded by the EIP deadline, and an `OutputPolicy`. For either stream, an omitted cursor starts that stream at its current `available_start`; a supplied cursor continues from its bound offset. This makes the first call and independently advanced streams unambiguous without another initialization method. The result returns stream-tagged chunks, next cursors, per-stream captured/dropped counts, completeness, process status, and retention floor. Reads are non-draining: one reader cannot consume data needed by another. Cursor and gap semantics are owned by [Output Retention](06-output-retention.md).
 
 ### Stdin
 
@@ -403,37 +390,29 @@ It returns the current `ProcessInfo` on satisfaction or a typed timeout without 
 
 ### Release
 
-`process.release` removes a terminal, fully cleaned, unleased record and its session-owned output references. Releasing an active process is a conflict; the client first cancels or kills it. Release is idempotent for a handle already released by the same authority while its tombstone remains, then becomes `not_found_or_denied` after bounded tombstone expiry.
+`process.release` removes a terminal, fully cleaned process record and its generation-owned output references. Releasing an active process is a conflict; the client first cancels or kills it. Release is idempotent for an already released handle while its tombstone remains, then becomes `not_found_or_denied` after bounded tombstone expiry.
 
-## Process Leases and Reattachment
+## Generation-scoped Process Lifetime
 
-Processes are session-owned by default. Session close or loss terminates an unleased active process. A provider that permits background work across Harness runs exposes process retention under an explicit capability and finite quota.
+Every background process belongs to the daemon generation, not to the protocol session that started it. HTTP or WebSocket disconnect, logical-session close or expiry, and Harness run completion do not terminate it. A fresh authenticated session initialized against the same Environment identity and generation can inspect and control the existing handle.
 
-`process.retain` accepts a live handle and requested expiry. Envd narrows expiry to configured maximum lifetime, reserves retained-process capacity, and returns a `ProcessLeaseRef`. The lease binds principal, Environment identity and generation, process handle, command policy snapshot, and expiry. It grants no authority by possession and cannot survive daemon shutdown.
+An owned command tree ends through its own command lifecycle, an explicit cancellation/signal/kill path, an enforced limit, policy revocation requiring termination, or daemon drain. `process.release` acts only after terminal cleanup and removes the record; it does not terminate a live tree. No handle or native command tree is adopted after daemon restart. Envd shutdown terminates and cleans every still-owned command tree; a provider that needs background work to continue keeps the same envd process alive.
 
-A leased process:
-
-- remains manager-owned after its creating EIP session closes;
-- retains bounded output and process quotas for its complete lease lifetime;
-- is included in `state.export` only when explicitly selected by the state owner;
-- can be reattached from a fresh authenticated session through `state.restore` or direct handle validation under the same authority partition;
-- is terminated when the lease expires, policy revocation requires it, its mount is revoked, or daemon drain begins.
-
-Lease renewal is another `process.retain` decision under current policy and cannot exceed the hard absolute lifetime. Disconnect never renews a lease. A stale generation or changed authority invalidates reattachment but does not transfer the process to another caller.
+A start reserves one process-record slot before native preparation. `max_processes` bounds active command trees, while `max_process_records` bounds active plus terminal handle records. A terminal fully cleaned record remains usable until explicit release, `terminal_process_record_ttl_ms`, or capacity reclamation. When a new start needs a record slot, envd can reclaim the oldest terminal fully cleaned record and its process-owned output references; it never reclaims an active or cleanup-pending record. A reclaimed handle returns `not_found_or_denied`, and reads of reclaimed output return the applicable `retention_gap` or handle error. The TTL is an upper retention bound, not a minimum guarantee against earlier capacity reclamation.
 
 ## Concurrency and Ownership
 
 The execution manager uses async admission and event-driven child/output observation so waiting for one process does not block unrelated EIP work. This is an observable scalability requirement, not a public class API. Blocking OS waits or reads are isolated from the protocol event loop.
 
-Per-daemon, per-principal, and per-session active-process and start-admission limits apply before preparation. A process start reserves process count, output budget, supervisor capacity, and any isolation resources atomically. Failure releases all reservations.
+Daemon-global active-process, process-record, and start-admission limits apply before preparation. A process start reserves active count, one handle record, output budget, supervisor capacity, and any isolation resources atomically. Failure releases all reservations.
 
 Operations on one handle obey a defined order:
 
 - stdin writes serialize with stdin close;
 - signal and kill serialize with terminal transition;
 - status observation and output reads can proceed concurrently from immutable snapshots;
-- release waits for no active operation lease on the record;
-- session close and daemon shutdown use the same owner, rather than racing a second cleanup registry.
+- release waits for no active operation using the record;
+- daemon shutdown uses the same owner, rather than racing a second cleanup registry.
 
 A native process discovered outside this manager cannot be adopted through EIP. Envd never controls by caller-supplied PID.
 
@@ -462,11 +441,11 @@ The supervisor's own exit status never replaces the initial command's status. Ba
 | Background output crosses fail threshold after start returned                 | Tree termination and `failed` status with `output_limit`      | Original start remains successful; later process state reports failure |
 | Backend supervision lost                                                      | `backend_lost`, cleanup attempt, and possible unknown outcome | No fabricated exit status                                              |
 | Initial command terminal but tree cleanup fails                               | `cleanup_failed` or status with `cleanup="failed"`            | Host cannot assume descendants are gone                                |
-| Lease expires                                                                 | Envd terminates tree and expires handle/reference             | Fresh session cannot revive it                                         |
+| Daemon generation ends                                                        | Envd terminates every tree and invalidates all handles        | A later daemon cannot adopt or revive it                               |
 
 ## Compatibility
 
-Command schema changes, profile IDs, process phases, termination reasons, cleanup outcomes, and signal meanings are EIP compatibility facts. Additive status fields are safe only when old clients do not infer terminal cleanup from their absence. Changing when `process.start` publishes a handle, conflating wrapper and payload status, allowing active release, or weakening session-loss cleanup requires an incompatible protocol revision.
+Command schema changes, profile IDs, process phases, termination reasons, cleanup outcomes, and signal meanings are EIP compatibility facts. Additive status fields are safe only when old clients do not infer terminal cleanup from their absence. Changing when `process.start` publishes a handle, conflating wrapper and payload status, allowing active release, or making process lifetime session-owned requires an incompatible protocol revision.
 
 Backends can advertise narrower resource-limit support, but foreground and background lifecycle, transactional start, opaque ownership, output bounds, and cleanup distinctions remain common conformance requirements.
 
@@ -482,11 +461,11 @@ Structured argv avoids accidental shell parsing. Explicit shell profiles preserv
 
 ### Opaque handles over PIDs
 
-Opaque handles require envd follow-up methods and generation checks. They prevent cross-principal PID guessing, wrapper/PID confusion, and silent retargeting after restart.
+Opaque handles require envd follow-up methods and generation checks. They prevent caller-supplied PID targeting, wrapper/PID confusion, and silent retargeting after restart.
 
-### Finite leases over detached processes
+### Generation ownership over session ownership
 
-Explicit leases add retention state and quotas. They make cross-run background work recoverable without allowing arbitrary daemonized children or pretending a saved handle survives daemon loss.
+Keeping processes under the daemon's single manager lets normal background work survive transient client reconnects without leases or detached children. The trade-off is explicit: daemon shutdown ends every process and no saved handle survives restart.
 
 ## Invariants
 
@@ -500,6 +479,7 @@ Explicit leases add retention state and quotas. They make cross-run background w
 08. Initial-command status, wrapper status, tree cleanup, and Host completion remain separate facts.
 09. Process operations accept only opaque handles and repeat generation, ownership, capability, and policy checks.
 10. Output reads are non-draining and bounded, and output overflow never blocks native pipe draining.
-11. Session loss terminates unleased processes; only explicit finite leases can preserve a process across sessions, and no lease survives daemon shutdown.
-12. A failed or unavailable isolation backend never triggers native fallback.
-13. Cleanup uncertainty is explicit: only `complete` proves full teardown, and `residual_confined` is valid solely under an active required-isolation boundary.
+11. Session loss does not terminate a process; every process remains generation-scoped and daemon-owned, and daemon shutdown terminates all remaining command trees.
+12. Active and terminal process records are both bounded; only terminal fully cleaned records can expire or be capacity-reclaimed before generation end.
+13. A failed or unavailable isolation backend never triggers native fallback.
+14. Cleanup uncertainty is explicit: only `complete` proves full teardown, and `residual_confined` is valid solely under an active required-isolation boundary.

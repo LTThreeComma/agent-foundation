@@ -15,10 +15,7 @@ NO_REBUILD_MODELS = {
     "ProcessHandle",
     "OutputReference",
     "OutputCursor",
-    "ProcessLeaseRef",
-    "OutputLeaseRef",
     "ReceiptRef",
-    "StateRef",
     "FileRevision",
 }
 
@@ -36,6 +33,27 @@ def _enum_values(enum: descriptor_pb2.EnumDescriptorProto, options: OptionReader
             continue
         member = value.name.removeprefix(prefix)
         values.append((member, option.json_name))
+    return values
+
+
+def _error_code_values(
+    enum: descriptor_pb2.EnumDescriptorProto,
+    options: OptionReader,
+) -> list[tuple[str, str, int]]:
+    prefix = f"{_snake_upper(enum.name)}_"
+    values: list[tuple[str, str, int]] = []
+    codes: set[int] = set()
+    for value in enum.value:
+        option = options.enum_value(value)
+        if option is None or not option.json_name:
+            continue
+        if not option.HasField("error_code"):
+            raise ValueError(f"EIP error type {value.name} has no JSON-RPC code")
+        if option.error_code in codes:
+            raise ValueError(f"duplicate EIP JSON-RPC error code: {option.error_code}")
+        codes.add(option.error_code)
+        member = value.name.removeprefix(prefix)
+        values.append((member, option.json_name, option.error_code))
     return values
 
 
@@ -173,7 +191,8 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
         "import re",
         "from datetime import datetime, timezone",
         "from enum import StrEnum",
-        "from typing import Annotated, Literal",
+        "from types import MappingProxyType",
+        "from typing import Annotated, Final, Literal, Mapping",
         "",
         "from pydantic import (",
         "    AfterValidator,",
@@ -280,6 +299,7 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
     ]
 
     public_names: list[str] = []
+    error_code_values: list[tuple[str, str, int]] = []
     for _, enum in sorted(index.enums.items()):
         if enum.name in TOOLING_ENUMS:
             continue
@@ -289,6 +309,15 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
         public_names.append(enum.name)
         lines.extend(["", f"class {enum.name}(StrEnum):"])
         lines.extend(f"    {member} = {json_name!r}" for member, json_name in values)
+        if enum.name == "ErrorType":
+            error_code_values = _error_code_values(enum, options)
+
+    if not error_code_values:
+        raise ValueError("EIP ErrorType has no code mapping")
+    lines.extend(["", "EIP_ERROR_CODES: Final[Mapping[ErrorType, int]] = MappingProxyType({"])
+    lines.extend(f"    ErrorType.{member}: {code}," for member, _, code in error_code_values)
+    lines.extend(["})", ""])
+    public_names.append("EIP_ERROR_CODES")
 
     model_classes: list[str] = []
     for _, message in topological_messages(index):
@@ -365,6 +394,99 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "        return self",
                 ]
             )
+        if message.name == "OutputCapture":
+            lines.extend(
+                [
+                    "",
+                    "    @model_validator(mode='after')",
+                    "    def _validate_capture_structure(self) -> OutputCapture:",
+                    "        if self.available_start > self.available_end:",
+                    "            raise ValueError('available_start cannot exceed available_end')",
+                    "        if self.kind is OutputKind.EMPTY:",
+                    "            if (",
+                    "                self.produced_bytes != 0",
+                    "                or self.captured_bytes != 0",
+                    "                or self.dropped_bytes != 0",
+                    "                or self.available_start != 0",
+                    "                or self.available_end != 0",
+                    "                or any(",
+                    "                    value is not None",
+                    "                    for value in (",
+                    "                        self.inline,",
+                    "                        self.preview,",
+                    "                        self.reference,",
+                    "                        self.cursor,",
+                    "                        self.expires_at,",
+                    "                    )",
+                    "                )",
+                    "            ):",
+                    "                raise ValueError('empty output must contain no bytes or retained state')",
+                    "        elif self.kind is OutputKind.INLINE:",
+                    "            if self.inline is None or any(",
+                    "                value is not None",
+                    "                for value in (self.preview, self.reference, self.cursor, self.expires_at)",
+                    "            ):",
+                    "                raise ValueError('inline output requires only inline data')",
+                    "        elif self.kind is OutputKind.RETAINED:",
+                    "            if self.reference is None or self.inline is not None or self.expires_at is None:",
+                    "                raise ValueError('retained output requires a reference and expiry')",
+                    "        elif self.kind is OutputKind.TRUNCATED and any(",
+                    "            value is not None",
+                    "            for value in (self.inline, self.reference, self.cursor, self.expires_at)",
+                    "        ):",
+                    "            raise ValueError('truncated output cannot contain retained or inline state')",
+                    "        return self",
+                ]
+            )
+        if message.name == "EIPLimits":
+            lines.extend(
+                [
+                    "",
+                    "    @model_validator(mode='after')",
+                    "    def _validate_limit_relationships(self) -> EIPLimits:",
+                    "        if self.max_inline_output_bytes > self.max_output_bytes:",
+                    "            raise ValueError('max_inline_output_bytes cannot exceed max_output_bytes')",
+                    "        if self.max_processes > self.max_process_records:",
+                    "            raise ValueError('max_processes cannot exceed max_process_records')",
+                    "        if self.max_concurrent_operations > self.max_operation_records:",
+                    "            raise ValueError('max_concurrent_operations cannot exceed max_operation_records')",
+                    "        return self",
+                ]
+            )
+        if message.name == "EIPErrorData":
+            lines.extend(
+                [
+                    "",
+                    "    @model_validator(mode='after')",
+                    "    def _validate_retention_gap_bounds(self) -> EIPErrorData:",
+                    "        available_start = self.available_start",
+                    "        available_end = self.available_end",
+                    "        has_start = available_start is not None",
+                    "        has_end = available_end is not None",
+                    "        if has_start != has_end:",
+                    "            raise ValueError('available_start and available_end must be present together')",
+                    "        if self.error_type is ErrorType.RETENTION_GAP and not has_start:",
+                    "            raise ValueError('retention_gap requires available bounds')",
+                    "        if (",
+                    "            available_start is not None",
+                    "            and available_end is not None",
+                    "            and available_start > available_end",
+                    "        ):",
+                    "            raise ValueError('available_start cannot exceed available_end')",
+                    "        return self",
+                ]
+            )
+        if message.name == "EIPError":
+            lines.extend(
+                [
+                    "",
+                    "    @model_validator(mode='after')",
+                    "    def _validate_error_code(self) -> EIPError:",
+                    "        if self.code != EIP_ERROR_CODES[self.data.error_type]:",
+                    "            raise ValueError('JSON-RPC code does not match error_type')",
+                    "        return self",
+                ]
+            )
 
     lines.extend(["", ""])
     for name in model_classes:
@@ -413,8 +535,8 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
         if name in names:
             raise ValueError(f"duplicate EIP JSON-RPC method: {name}")
         names.add(name)
-        if record["kind"] not in {"request_response", "server_notification"}:
-            raise ValueError(f"EIP method {name} has unspecified kind")
+        if record["kind"] != "request_response":
+            raise ValueError(f"EIP 1.0 method {name} must use correlated request-response")
         if record["idempotency"] == "unspecified":
             raise ValueError(f"EIP method {name} has unspecified idempotency")
         if record["idempotency_key"] == "unspecified":
@@ -423,9 +545,7 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
             raise ValueError(f"EIP method {name} has unspecified error family")
         if record["introduced"].startswith("0."):
             raise ValueError(f"EIP method {name} has invalid introduced version")
-        if record["kind"] == "server_notification" and record["result_type"] is not None:
-            raise ValueError(f"EIP notification {name} must return google.protobuf.Empty")
-        if record["kind"] == "request_response" and record["result_type"] is None:
+        if record["result_type"] is None:
             raise ValueError(f"EIP request-response method {name} must have a result message")
     records.sort(key=lambda record: record["jsonrpc_method"])
     return records
@@ -451,13 +571,13 @@ def render_methods(records: list[dict[str, Any]]) -> str:
         "class MethodSpec[P, R]:",
         "    name: str",
         "    capability: str | None",
-        "    kind: Literal['request_response', 'server_notification']",
+        "    kind: Literal['request_response']",
         "    idempotency: str",
         "    idempotency_key: Literal['disallowed', 'optional', 'required']",
         "    introduced: str",
         "    error_family: str",
         "    params_type: type[P]",
-        "    result_type: type[R] | None",
+        "    result_type: type[R]",
         "",
     ]
     constants: list[str] = []
@@ -476,7 +596,7 @@ def render_methods(records: list[dict[str, Any]]) -> str:
                 f"    introduced={record['introduced']!r},",
                 f"    error_family={record['error_family']!r},",
                 f"    params_type={record['params_type']},",
-                f"    result_type={record['result_type'] or 'None'},",
+                f"    result_type={record['result_type']},",
                 ")",
             ]
         )
@@ -486,12 +606,6 @@ def render_methods(records: list[dict[str, Any]]) -> str:
             "METHODS = MappingProxyType({",
             *[f"    {constant}.name: {constant}," for constant in constants],
             "})",
-            "REQUEST_METHODS = MappingProxyType(",
-            "    {name: method for name, method in METHODS.items() if method.kind == 'request_response'}",
-            ")",
-            "NOTIFICATION_METHODS = MappingProxyType(",
-            "    {name: method for name, method in METHODS.items() if method.kind == 'server_notification'}",
-            ")",
             "",
         ]
     )
@@ -499,11 +613,8 @@ def render_methods(records: list[dict[str, Any]]) -> str:
 
 
 def render_client(records: list[dict[str, Any]]) -> str:
-    request_records = [record for record in records if record["kind"] == "request_response"]
-    model_names = sorted(
-        {record["params_type"] for record in request_records} | {record["result_type"] for record in request_records}
-    )
-    constants = [re.sub(r"[^A-Za-z0-9]+", "_", record["jsonrpc_method"]).upper() for record in request_records]
+    model_names = sorted({record["params_type"] for record in records} | {record["result_type"] for record in records})
+    constants = [re.sub(r"[^A-Za-z0-9]+", "_", record["jsonrpc_method"]).upper() for record in records]
     lines = [
         GENERATED_HEADER.rstrip(),
         "from __future__ import annotations",
@@ -522,7 +633,7 @@ def render_client(records: list[dict[str, Any]]) -> str:
         "    def __init__(self, requester: EIPRequester) -> None:",
         "        self._requester = requester",
     ]
-    for record, constant in zip(request_records, constants, strict=True):
+    for record, constant in zip(records, constants, strict=True):
         function_name = record["jsonrpc_method"].replace(".", "_")
         lines.extend(
             [
@@ -555,7 +666,9 @@ def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, obj
 
 
 def encode_model(value: BaseModel) -> bytes:
-    data = value.model_dump(mode="json", exclude_unset=True)
+    candidate = value.model_dump(mode="python", round_trip=True, warnings="error")
+    validated = type(value).model_validate(candidate)
+    data = validated.model_dump(mode="json", exclude_unset=True, exclude_defaults=True, warnings="error")
     return json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
@@ -577,9 +690,9 @@ def render_protocol(descriptor_sha256: str) -> str:
         GENERATED_HEADER
         + f'''from __future__ import annotations
 
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from .models import EIPError
 
@@ -589,7 +702,7 @@ EIP_PROTOCOL_MINOR: Final = 0
 EIP_PROTO_PACKAGE: Final = "converge.agent_envd.eip.v1"
 EIP_DESCRIPTOR_SHA256: Final = "{descriptor_sha256}"
 
-type JsonRpcId = StrictStr | StrictInt
+type JsonRpcId = StrictStr | Annotated[StrictInt, Field(ge=-(2**63), le=2**63 - 1)]
 
 
 class JsonRpcEnvelope(BaseModel):
@@ -609,12 +722,6 @@ class JsonRpcEnvelope(BaseModel):
 class JsonRpcRequest(JsonRpcEnvelope):
     jsonrpc: Literal["2.0"]
     id: JsonRpcId
-    method: StrictStr
-    params: dict[str, object]
-
-
-class JsonRpcNotification(JsonRpcEnvelope):
-    jsonrpc: Literal["2.0"]
     method: StrictStr
     params: dict[str, object]
 
@@ -643,8 +750,8 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         GENERATED_HEADER.rstrip(),
         "from .client import EIPClient, EIPRequester",
         "from .codec import decode_model, encode_model",
-        "from .methods import METHODS, NOTIFICATION_METHODS, REQUEST_METHODS, MethodSpec",
-        f"from .models import {', '.join(public_models)}",
+        "from .methods import METHODS, MethodSpec",
+        f"from .models import EIP_ERROR_CODES, {', '.join(public_models)}",
         "from .protocol import (",
         "    EIP_DESCRIPTOR_SHA256,",
         "    EIP_PROTOCOL_MAJOR,",
@@ -654,7 +761,6 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         "    JsonRpcEnvelope,",
         "    JsonRpcErrorResponse,",
         "    JsonRpcId,",
-        "    JsonRpcNotification,",
         "    JsonRpcRequest,",
         "    JsonRpcSuccessResponse,",
         ")",
@@ -664,8 +770,6 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         "    'EIPRequester',",
         "    'MethodSpec',",
         "    'METHODS',",
-        "    'REQUEST_METHODS',",
-        "    'NOTIFICATION_METHODS',",
         "    'encode_model',",
         "    'decode_model',",
         "    'EIP_DESCRIPTOR_SHA256',",
@@ -673,10 +777,9 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         "    'EIP_PROTOCOL_MINOR',",
         "    'EIP_PROTOCOL_VERSION',",
         "    'EIP_PROTO_PACKAGE',",
+        "    'EIP_ERROR_CODES',",
         "    'JsonRpcEnvelope',",
-        "    'JsonRpcErrorResponse',",
-        "    'JsonRpcId',",
-        "    'JsonRpcNotification',",
+        "    'JsonRpcErrorResponse',    'JsonRpcId',",
         "    'JsonRpcRequest',",
         "    'JsonRpcSuccessResponse',",
         *[f"    {name!r}," for name in public_models],

@@ -5,20 +5,23 @@ package converge.agent_envd.eip.v1;
 import "google/protobuf/descriptor.proto";
 
 enum MethodKind {
+  reserved 2;
+  reserved "METHOD_KIND_SERVER_NOTIFICATION";
+
   METHOD_KIND_UNSPECIFIED = 0;
   METHOD_KIND_REQUEST_RESPONSE = 1;
-  METHOD_KIND_SERVER_NOTIFICATION = 2;
 }
 
 enum IdempotencyClass {
+  reserved 6, 7;
+  reserved "IDEMPOTENCY_CLASS_STATE_EXPORT", "IDEMPOTENCY_CLASS_NOTIFICATION";
+
   IDEMPOTENCY_CLASS_UNSPECIFIED = 0;
   IDEMPOTENCY_CLASS_INITIALIZATION = 1;
   IDEMPOTENCY_CLASS_READ_ONLY_RETRY = 2;
   IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY = 3;
   IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL = 4;
   IDEMPOTENCY_CLASS_SESSION_TERMINAL = 5;
-  IDEMPOTENCY_CLASS_STATE_EXPORT = 6;
-  IDEMPOTENCY_CLASS_NOTIFICATION = 7;
 }
 
 enum IdempotencyKeyMode {
@@ -29,6 +32,9 @@ enum IdempotencyKeyMode {
 }
 
 enum ErrorFamily {
+  reserved 7, 9;
+  reserved "ERROR_FAMILY_STATE", "ERROR_FAMILY_NOTIFICATION";
+
   ERROR_FAMILY_UNSPECIFIED = 0;
   ERROR_FAMILY_COMMON = 1;
   ERROR_FAMILY_INITIALIZATION = 2;
@@ -36,9 +42,7 @@ enum ErrorFamily {
   ERROR_FAMILY_COMMAND = 4;
   ERROR_FAMILY_PROCESS = 5;
   ERROR_FAMILY_OUTPUT = 6;
-  ERROR_FAMILY_STATE = 7;
   ERROR_FAMILY_SESSION = 8;
-  ERROR_FAMILY_NOTIFICATION = 9;
 }
 
 message EIPMethodOptions {
@@ -60,6 +64,7 @@ message EIPMessageOptions {
 
 message EIPEnumValueOptions {
   string json_name = 1;
+  optional sint32 error_code = 2;
 }
 
 enum EIPStringFormat {

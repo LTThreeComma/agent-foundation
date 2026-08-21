@@ -97,6 +97,7 @@ eip-verify: sync ## Verify checked EIP artifacts without modifying the repositor
 .PHONY: eip-test
 eip-test: sync ## Run EIP generator and shared Python/Rust wire-model tests
 	@uv run --locked python -m pytest scripts/tests/test_eip_codegen.py packages/agent-envd-client/tests/eip
+	@uv run --locked pyright packages/agent-envd-client/converge_agent_envd_client/eip/v1
 	@cargo test --locked --package converge-agent-envd --lib eip::tests
 
 .PHONY: eip-check
