@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Pydantic AI owns tool declarations, JSON-schema validation, tool-call correlation, Toolset composition, external and approval deferral, and result integration. Native Pydantic function tools and Toolsets run directly without adopting a Harness base class or metadata schema. Function tools that opt into Harness-managed identity, authorization, credentials, side-effect, retry, and result-safety behavior attach `HarnessToolMetadata`; the invocation-authorization Capability recognizes that metadata in an outer `WrapperToolset`.
+Pydantic AI owns function-tool schema validation, Toolset composition, the Tool Manager, native external and approval deferral, and result integration. Its public deferred contract validates message-level call identity and completeness, but it does not validate `ExternalToolset` arguments against the declaration's JSON Schema, preserve request categories in message history, authenticate results, or prove exact remounted surface identity. Native Pydantic function tools and Toolsets run directly without adopting a Harness base class or metadata schema. Function tools that opt into Harness-managed identity, authorization, credentials, side-effect, retry, and result-safety behavior attach `HarnessToolMetadata`; one Harness-owned outer `WrapperToolset` recognizes that metadata and performs the additional preparation and dispatch checks.
 
 Client-side tools use Pydantic AI `ToolDefinition`, `ExternalToolset`, `DeferredToolRequests.calls`, and `DeferredToolResults.calls` directly. They are model-visible schemas whose implementation and authority remain outside the Agent process. They do not pass through the function-tool invocation pipeline, execute through `agent-envd`, or reuse approval semantics.
 
@@ -10,17 +10,17 @@ The function-tool wrapper is an Agent invocation boundary, not Python isolation.
 
 ## Boundary
 
-| Concern                                                             | Owner                                                 |
-| ------------------------------------------------------------------- | ----------------------------------------------------- |
-| Tool definition, argument validation, tool manager, deferred values | Pydantic AI                                           |
-| Optional Harness tool metadata and managed invocation wrapper       | Harness                                               |
-| Agent policy and credential decisions for managed tools             | Invocation-authorization capability and its providers |
-| Remote operation and side-effect evidence                           | Tool provider                                         |
-| Grant signing and authenticated transport                           | Host security or provider adapter                     |
-| Direct I/O by trusted Python plugins                                | Plugin process trust boundary                         |
-| Client-side tool declaration and external deferral                  | Client Tools Capability and Pydantic AI               |
-| Client-side execution, authorization, and result production         | External executor or Foundation Client                |
-| Durable client-call waiting, delivery, and feedback correlation     | Host                                                  |
+| Concern                                                            | Owner                                                    |
+| ------------------------------------------------------------------ | -------------------------------------------------------- |
+| Function-tool definition/validation, tool manager, deferred values | Pydantic AI                                              |
+| Optional Harness tool metadata and managed invocation wrapper      | Harness                                                  |
+| Agent policy and credential decisions for managed tools            | Harness boundary plus fresh `InvocationPolicyCapability` |
+| Remote operation and side-effect evidence                          | Tool provider                                            |
+| Grant signing and authenticated transport                          | Host security or provider adapter                        |
+| Direct I/O by trusted Python plugins                               | Plugin process trust boundary                            |
+| Client-side tool declaration and external deferral                 | Client Tools Capability and Pydantic AI                  |
+| Client-side execution, authorization, and result production        | External executor or Foundation Client                   |
+| Durable client-call waiting, delivery, and feedback correlation    | Host                                                     |
 
 ## Tool Metadata
 
@@ -85,7 +85,9 @@ The value is stored under a reserved key in Pydantic AI `ToolDefinition.metadata
 
 An ordinary function-tool definition without the reserved metadata remains callable and is not assigned guessed metadata. When `resource_resolver` is absent, managed authorization is explicitly tool- and action-level and `resources` is empty; provider-specific resource enforcement still applies. The current run's `InvocationPolicyCapability` can select a strict profile that rejects unannotated model-visible function tools. Static, dynamic, and deferred definitions are checked at their run-time Toolset preparation boundary before they can enter a model request; strictness is not a hidden builder option or immutable executable field. This is an explicit run policy rather than the base behavior. Availability, tags, and instruction helpers do not define another tool lifecycle.
 
-The outer `InvocationAuthorizationCapability` and its `WrapperToolset` are fixed Harness core behavior. Host code does not replace that dispatcher. `InvocationPolicyCapability` is the public Host-integration base for the one reserved policy role, including the current run's optional strict-metadata decision, and has a fixed Harness-owned Capability ID; run assembly recognizes it with an explicit type check, not metadata or a model-authored ID. Exactly one authority-bearing instance can come from `RunBindings.capabilities`; it cannot be stored in `ResolvedAgentComponents`, and duplicate run providers fail before the Pydantic run. A shared policy client or evaluator may be retained outside the executable and captured by the fresh run Capability, but it grants nothing without the current run's Identity, ceiling, policy binding, and credential context. The dispatcher obtains policy, approval, credential, and result-safety collaborators through that run-bound typed Capability. When no Host provider is present, the Harness installs `DenyManagedToolsCapability`, which denies every metadata-aware invocation while unmanaged native tools retain their ordinary trusted semantics. `RunBindings.local()` uses the same deny default; an embedded caller explicitly adds `LocalBoundEnvironmentPolicyCapability` when it wants to allow selected managed Environment operations within the already supplied permission ceilings; other managed tools remain denied unless separately selected by that policy. An Agent-authored or build Capability cannot claim this reserved infrastructure role.
+The Harness always installs exactly one code-owned `InvocationAuthorizationCapability`. Its `get_wrapper_toolset()` contribution is ordered outermost around Pydantic's complete assembled non-output Toolset, after per-step preparation; Host code cannot replace its preparation or dispatch algorithm. It declares `CapabilityOrdering(position="outermost", wraps=(AbstractCapability,))`, so it sorts before AgentSpec, definition, plugin, run, instrumentation, and other same-tier Capabilities regardless of contribution order. An incompatible Capability that attempts to wrap this boundary creates an ordering cycle and fails run setup before tool exposure rather than weakening the boundary. The wrapper therefore sees function, unapproved, and external definitions, branches on `ToolDefinition.kind`, and never intercepts output or provider-native tools. It normalizes managed function metadata, enforces final client-tool names, and delegates ordinary external deferral to Pydantic without calling an external function body.
+
+Current managed authority enters through exactly one fresh `InvocationPolicyCapability` in `RunBindings.capabilities`; feature-specific setup and dispatch require its documented public type and stable Capability ID and reject incompatible values before model exposure. The policy Capability can retain a typed evaluator, approval broker, credential broker, and result-safety collaborator, but those grant nothing without the current run's Identity and invocation context. When no policy provider is supplied, managed metadata-aware tools are denied while unmanaged native tools retain their ordinary trusted semantics. An embedded caller can explicitly select `LocalBoundEnvironmentPolicyCapability` for allowed managed Environment operations within the already supplied binding ceilings. No class-free role registry, serialized component bundle, or model-authored ID can create this authority.
 
 Pydantic output tools remain part of output validation, not general side-effect dispatch, and provider-native server-side tools remain model/provider configuration. A deployment that needs Harness invocation policy for a provider-native operation exposes a metadata-aware function-tool adapter instead of pretending the function wrapper intercepts provider-internal execution.
 
@@ -93,7 +95,7 @@ Pydantic Toolset composition owns collision handling and final model-visible nam
 
 ## Client-Side External Tools
 
-Client-side tools are declared by a first-party Client Tools Capability under `AgentDefinition.agent.capabilities`. The Capability's portable argument model is conceptually:
+Client-side tools are declared by a concrete first-party `ClientToolsCapability` in `AgentDefinition.capabilities`. It is a code-first Harness Capability rather than a custom `AgentSpec.capabilities` serialization type, so the Harness needs no custom Capability registry or class-name resolution. The Capability's portable argument model is conceptually:
 
 ```python
 class ClientToolDefinition(BaseModel):
@@ -112,31 +114,39 @@ class ClientToolsetDefinition(BaseModel):
 class ClientToolsSpec(BaseModel):
     default_toolsets: tuple[ClientToolsetDefinition, ...] = ()
     allow_run_override: bool = False
+
+
+@dataclass(frozen=True)
+class ClientToolsRunCapability(AbstractCapability[AgentContext]):
+    toolsets: tuple[ClientToolsetDefinition, ...]
 ```
 
-This is a portable declaration codec, not a second executable Toolset API. For each run, the Harness converts each effective definition one-to-one into an upstream `ToolDefinition` and groups it in an upstream `ExternalToolset(id=toolset_id)`. Optional instructions become bounded per-run Pydantic instruction parts through the same native run call. The declared name is the exact model-visible name; no implicit prefixing, aliasing, or namespace concatenation occurs.
+`ClientToolsRunCapability` is a typed fresh run attachment carried in `RunBindings.capabilities`; it contributes no independent tools or authority. The definition-selected Client Tools Capability resolves exactly zero or one instance by its stable Capability ID and expected public type, applies the replacement policy below, and contributes the resulting native Toolsets. This uses Pydantic's finalized run Capability mapping rather than adding a feature field or class-free role registry to `RunBindings`.
 
-Toolset IDs and model-visible names are unique in the effective client surface. Argument schemas are bounded, valid JSON Schema objects with `type="object"`; descriptions, instructions, and metadata are bounded JSON-safe content. Final collision detection remains Pydantic-owned across the complete assembled surface, including native, Capability, MCP, Environment, external, discovered, and output tools. Client metadata is non-authoritative public data. It cannot contain a credential, invocation grant, policy claim, server-only correlation value, or reserved `HarnessToolMetadata`; external tools never masquerade as Harness-managed function tools.
+The declaration codec is not a second executable Toolset API. For each run, the Capability converts each effective definition one-to-one into an upstream `ToolDefinition` and groups it in an upstream `ExternalToolset(id=toolset_id)`. Optional instructions become bounded native Pydantic instruction parts. The declared name is the required final model-visible name; the outer Harness wrapper rejects another wrapper's attempted prefix or rename of a marked client definition instead of silently changing Host correlation.
 
-For each run, the public [`ClientToolRunBinding`](14-public-api-and-packaging.md#run-bindings) has deterministic whole-list semantics:
+Toolset IDs and model-visible names are unique in the effective client surface. The Harness validates bounded JSON Schema objects with `type="object"`, while upstream `ExternalToolset` deliberately uses an unconstrained local validator and treats that schema as model-facing guidance. Descriptions, instructions, and metadata are bounded JSON-safe content. Final collision detection remains Pydantic-owned across the complete assembled surface, including native, Capability, MCP, Environment, external, discovered, and output tools. Client metadata is non-authoritative public data. It cannot contain a credential, invocation grant, policy claim, server-only correlation value, or reserved `HarnessToolMetadata`; external tools never masquerade as Harness-managed function tools.
 
-| Definition and binding                          | Effective client surface                                                     |
-| ----------------------------------------------- | ---------------------------------------------------------------------------- |
-| Client Tools Capability absent; binding absent  | No client tools                                                              |
-| Client Tools Capability absent; binding present | Run setup fails                                                              |
-| Capability present; binding absent              | `default_toolsets`                                                           |
-| Binding present; `allow_run_override=false`     | Run setup fails                                                              |
-| Binding present; `allow_run_override=true`      | Binding toolsets replace the complete default list; an empty tuple clears it |
+For each run, `ClientToolsRunCapability` has deterministic whole-list semantics:
 
-A binding is trusted Host input for one run, but its descriptions, schemas, instructions, and metadata remain untrusted model content. It carries no Python handler, client credential, connection, callback, or side-effect authority. The effective surface is fixed before the first model request and cannot change through enqueue or topology updates. A child receives no client surface from its parent unless the child definition independently enables the Capability and the Host supplies the child's fresh binding.
+| Definition and run attachment                      | Effective client surface                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Client Tools Capability absent; attachment absent  | No client tools                                                                 |
+| Client Tools Capability absent; attachment present | Run setup fails                                                                 |
+| Capability present; attachment absent              | `default_toolsets`                                                              |
+| Attachment present; `allow_run_override=false`     | Run setup fails                                                                 |
+| Attachment present; `allow_run_override=true`      | Attachment toolsets replace the complete default list; an empty tuple clears it |
+| Duplicate or incompatible typed run attachments    | Run setup fails                                                                 |
 
-When the effective list is non-empty, the Harness passes the resulting `ExternalToolset` values and any declaration-owned instruction parts through Pydantic's native per-run `toolsets=` and `instructions=` arguments and widens that run's output type with `DeferredToolRequests`. Pydantic marks every definition `kind="external"`, performs complete Toolset composition, and places selected calls in `DeferredToolRequests.calls` without invoking a function body. The Harness does not recreate `CallDeferred`, an external-tool dispatcher, a prompt language, or a client callback protocol. The invocation-policy strict profile applies to function tools; it neither converts an external tool into a managed function tool nor authorizes its external side effect.
+The run attachment is trusted Host input for one run, but its descriptions, schemas, instructions, and metadata remain untrusted model content. It carries no Python handler, client credential, connection, callback, or side-effect authority. The effective surface is fixed before the first model request and cannot change through enqueue or topology updates. A child receives no client surface from its parent unless the child definition independently enables the Capability and the Host supplies the child's fresh typed run attachment.
+
+When the effective list is non-empty, the Client Tools Capability contributes the resulting `ExternalToolset` values and declaration-owned instruction parts through native Pydantic Capability/Toolset composition. Every Harness run widens the process-local Pydantic output contract with `DeferredToolRequests`, while retaining `AgentDefinition.output_type` as the business-output contract. Pydantic marks every external definition `kind="external"` and places selected calls in `DeferredToolRequests.calls` without invoking a function body. The Harness does not recreate `CallDeferred`, an external-tool dispatcher, a prompt language, or a client callback protocol. The invocation-policy strict profile applies to function tools; it neither converts an external tool into a managed function tool nor authorizes its external side effect.
 
 The resulting `HarnessRunResult` is suspended with `suspend_reason="deferred"`, complete `DeferredToolRequests`, and `HarnessState`. Ordinary tool-call and deferred events are observations only. The terminal result and any Host-accepted durable record determine whether external execution may proceed.
 
-Resume is a new run. The Host supplies the prior state, the exact effective client surface that produced the pending calls, fresh `RunBindings`, and `DeferredToolResults`. Before model or tool work, the Harness rejects duplicate, unknown, wrong-kind, already completed, or incomplete result correlation using the native pending request and Pydantic message contract. Host adapters construct results through `DeferredToolRequests.build_results(...)` rather than unchecked maps.
+Resume is a new run. The Host supplies the prior state, the exact effective client surface that produced the pending calls, fresh `RunBindings`, and a `DeferredToolResume` containing the authoritative terminal `DeferredToolRequests` plus its `DeferredToolResults`. Before model or tool work, the Harness rejects duplicate or category-overlapping pending IDs, unknown, wrong-kind, already completed, incomplete, or message-mismatched results and verifies that every pending external name is present as an external definition on the current assembled surface. Calling `DeferredToolRequests.build_results(...)` is the normal construction path but does not replace this preflight because native result objects remain directly constructible and partial.
 
-Exact surface identity is a Host obligation. Pydantic message history retains call identity and arguments, not the complete prior schema, instruction, metadata, or toolset declaration, and `HarnessState` intentionally excludes the client attachment. The Harness can detect call/result and current assembled-name inconsistencies but cannot prove that a same-named remounted declaration is byte-for-byte or semantically identical. A durable Host compares its frozen attachment or digest before calling the Harness; an embedded Host that wants this guarantee retains and compares the same value itself.
+Exact surface identity is a Host obligation. Pydantic message history retains call identity and arguments, not the complete prior schema, instruction, metadata, category, or toolset declaration, and `HarnessState` intentionally excludes the client attachment. The Harness detects request/result category and current assembled-name/kind inconsistencies from the supplied authoritative pending value, but cannot prove that a same-named remounted declaration is byte-for-byte or semantically identical. A durable Host compares its frozen attachment or digest before calling the Harness; an embedded Host that wants this guarantee retains and compares the same value itself.
 
 Argument schemas guide the model but do not authorize a client action. Because upstream `ExternalToolset` does not execute the function body, the external executor validates the received arguments against the accepted schema before any side effect and applies its own authentication, user confirmation, timeout, audit, and rollback policy. The Harness never claims that an external result proves how the client produced it.
 
@@ -240,7 +250,7 @@ Environment-variable projection is an explicit compatibility mode for a specific
 
 Local tools execute through the Pydantic AI toolset interface. Remote adapters receive validated input, the optional grant reference, a credential handle, cancellation, and deadline.
 
-Read and mutation retry behavior comes from declared provider semantics. A mutation repeats only when the provider supports the same idempotency key and semantic request. Timeout, cancellation, or transport loss after dispatch is unknown without provider evidence and is reconciled rather than assumed failed.
+Read and mutation retry behavior comes from declared provider semantics. A mutation repeats only when the provider supports the same idempotency key and semantic request. Timeout, cancellation, or transport loss after dispatch is unknown without provider evidence and is reconciled rather than assumed failed. A non-cancelled run receives a bounded safe `unknown_outcome` tool failure plus an `invocation` observation. When external task cancellation must propagate, the wrapper emits the same bounded observation before re-raising when the dispatch boundary is known, but that event remains best-effort process-local telemetry rather than a durable receipt. Provider receipts or a Host-owned dispatch/idempotency ledger are the durable reconciliation authority; cancellation and event loss never cause `HarnessState` to fabricate one.
 
 Parallel model tool calls do not imply safe parallel effects. Effect metadata, semantic resources, and provider limits determine concurrency.
 
@@ -271,16 +281,16 @@ Stable harness categories cover invalid input, unavailable tool, denied, approva
 ## Invariants
 
 01. Every model-selected function-tool call resolves to one Pydantic AI `ToolDefinition`; Harness metadata is optional and never inferred.
-02. Every function-tool call crosses the outer dispatcher, which preserves native semantics for unmanaged tools and applies the managed pipeline only when valid Harness metadata is present.
+02. Every valid Capability graph sorts the authorization boundary outside all other wrappers; every function-tool call therefore crosses that dispatcher, which preserves native semantics for unmanaged tools and applies the managed pipeline only when valid Harness metadata is present.
 03. Managed `tool_id` values are unique within one assembled run and are checked again whenever dynamic or deferred Toolsets prepare definitions.
-04. A host that requires all model-visible function tools to be managed rejects each unannotated definition before model exposure, during build for static definitions or Toolset preparation for dynamic definitions.
+04. A host that requires all model-visible function tools to be managed rejects each unannotated definition at the authoritative per-run or per-step Toolset preparation boundary before model exposure; eager checks of direct static `Tool` inputs are only an optimization.
 05. Approval for a managed tool binds effective input and never overrides live deny policy.
 06. Managed credentials are audience-bound and never fall back to ambient authority.
 07. Managed remote retry follows provider idempotency or reconciliation evidence.
 08. Trusted plugin code, unmanaged tool dispatch, and direct Python I/O are not represented as wrapper-enforced isolation.
-09. Every client-side tool is an upstream external tool: no handler runs in the Harness process, exact names are not prefixed, and external calls never share approval semantics.
+09. Every client-side tool is an upstream external tool: no handler runs in the Harness process, its declared name survives final assembly exactly, and external calls never share approval semantics.
 10. A run-specific client-tool replacement is accepted only when the materialized Client Tools Capability permits it; the effective whole surface is fixed for that run and remounted exactly for deferred resume.
-11. External results correlate to the authoritative pending `.calls` batch and start a new run with fresh bindings; the Host verifies exact surface identity, while stream events, metadata, and client-held history grant no result authority.
+11. External results correlate through `DeferredToolResume` to the authoritative pending `.calls` batch and start a new run with fresh bindings; the Host verifies exact surface identity, while stream events, metadata, and client-held history grant no result authority.
 12. Every managed output is subject to finite per-call inline and total bounds; producer-side streaming or retention applies those bounds before full materialization whenever the provider controls production.
 13. Every first-party retained-output facility also enforces finite aggregate bytes and object count with atomic reservation, release, expiry, and bounded exhaustion behavior.
 14. The adapter omits EIP `OutputPolicy` for the advertised default or maps an explicitly narrower Harness output decision without serializing `HarnessToolMetadata`, Pydantic objects, or managed redaction policy into protocol payloads.

@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-from converge_agent_harness.context import AgentContext, RunBindings, SubagentCollection
+from converge_agent_harness.context import AgentContext, BuiltSubagent, RunBindings, SubagentCollection
 from converge_agent_harness.environment import (
     BoundEnvironment,
     EnvironmentError,
@@ -22,7 +22,14 @@ from converge_agent_harness.errors import (
     StateError,
 )
 from converge_agent_harness.events import HarnessEvent, HarnessRunResultEvent, HarnessStreamItem
-from converge_agent_harness.execution import AgentDefinition, ExecutableAgent, HarnessBuilder, HarnessRunStream
+from converge_agent_harness.execution import (
+    AgentDefinition,
+    DelegationContextPolicy,
+    ExecutableAgent,
+    HarnessBuilder,
+    HarnessRunStream,
+    SubagentDefinition,
+)
 from converge_agent_harness.identity import AgentIdentityRef, AgentInstanceContext, AgentInstanceRef
 from converge_agent_harness.input import (
     NativeRunInput,
@@ -62,8 +69,10 @@ __all__ = [
     "AgentInstanceRef",
     "BoundEnvironment",
     "BoundPluginContext",
+    "BuiltSubagent",
     "CapabilityState",
     "DefinitionError",
+    "DelegationContextPolicy",
     "EnvironmentError",
     "EnvironmentRunBinding",
     "ExecutableAgent",
@@ -101,5 +110,6 @@ __all__ = [
     "SemanticRunInput",
     "StateError",
     "SubagentCollection",
+    "SubagentDefinition",
     "__version__",
 ]

@@ -2,169 +2,213 @@
 
 ## Design Position
 
-A harness run is one process-local ordered Harness plugin chain around at most one Pydantic AI Agent invocation. The normal inner path invokes the Agent exactly once; a valid plugin short-circuit invokes it zero times. Resume creates another run from exported `HarnessState`; durable execution identity, scheduling, recovery, and hosted lifecycle stay with the host.
+One Harness run is one process-local logical invocation of an `ExecutableAgent`. It creates one outer `AgentContext`, enters one Environment binding, binds one plugin chain, owns one shared `RunUsage` accumulator, and produces at most one terminal Harness result.
 
-Pydantic AI owns the model/tool loop, `RunContext`, `AgentRunEvents`, event iteration, enqueue behavior, cancellation, deferred-tool values, per-node Capability hooks, and message codecs. The harness wraps that native event handle as `HarnessRunStream`, its single-consumer observation and control facade, and contributes `HarnessRunResult` as the normalized terminal process-local outcome plus a high-cohesion `AgentContext` used as `RunContext` dependencies and as the center for run state and Capability interaction. The Harness also owns the first-class plugin lifecycle around that path: fresh run binding, one ordered `BoundPluginContext`, semantic-input middleware after optional `RunInputFactory` resolution, stream/result unwind, final validation, and cleanup before terminal delivery. Typed Environment readiness is awaited only by the input factory, Capability, or operation that requires it.
+A logical Harness run may contain several sequential Pydantic AI model attempts when `ModelRecoveryPolicy` is enabled. Those attempts are an internal recovery mechanism, not separate Harness runs, Host Attempts, plugin invocations, contexts, Environments, or usage ledgers. Each Pydantic attempt receives a unique upstream run ID while the public Harness `run_id` remains stable.
+
+Pydantic AI owns each inner Agent loop, model/tool execution, native deferred and approval boundaries, output validation retries, messages, and provider-suspended continuation. The Harness owns outer preparation, plugin middleware, bounded semantic attempt coordination, terminal normalization, and cleanup.
 
 ## Boundary
 
-| Concern                                                            | Owner                                                      |
-| ------------------------------------------------------------------ | ---------------------------------------------------------- |
-| Model and tool loop, enqueue, cancellation, deferred values        | Pydantic AI                                                |
-| Process-local plugin chain, run stream, `AgentContext`, and result | Harness                                                    |
-| Agent instance and resolved-definition inputs                      | Trusted host                                               |
-| Environment operations                                             | `BoundEnvironment` and its provider                        |
-| Durable acceptance, attempts, leases, retries, and recovery        | Host                                                       |
-| Continuation bytes                                                 | Harness defines `HarnessState`; host stores and selects it |
+| Concern                                          | Owner                                      |
+| ------------------------------------------------ | ------------------------------------------ |
+| Model/tool loop and native deferred values       | Pydantic AI                                |
+| Provider transport retry                         | Provider client and Pydantic `RetryConfig` |
+| Narrow provider-history repair                   | `SelfHealingModel`                         |
+| Logical run and interrupted-stream attempts      | Harness                                    |
+| Durable execution, worker Attempt, lease, replay | Host                                       |
+| Continuation persistence and selection           | Host                                       |
 
-Host definition records, durable executions, attempts, queues, scheduler records, and lease types do not enter this model except as opaque correlation attached by the host.
+A Host may map one logical Harness run to one durable worker Attempt. It does not create a new durable Attempt for every internal model attempt.
 
 ## RunBindings and AgentContext
 
-The public API accepts `RunBindings` from the trusted host. The harness combines them with run-local metadata and resolved capabilities to create one `AgentContext`, which becomes `RunContext[AgentContext].deps`.
-
-```mermaid
-flowchart LR
-    RB[RunBindings] --> CTX[AgentContext]
-    META[run ID] --> CTX
-    CHILDREN[Executable-owned SubagentCollection] --> CTX
-    CTX --> BPC[BoundPluginContext]
-    PLUGINS[Fresh run-bound Harness plugins] --> BPC
-    CAPS[Resolved AbstractCapability AgentContext instances] --> CTX
-    CTX --> RC[Pydantic AI RunContext]
-    ARGS[optional RunUsage and UsageLimits] --> RC
+```python
+@dataclass(frozen=True, slots=True)
+class RunBindings:
+    instance: AgentInstanceContext
+    environment: EnvironmentRunBinding
+    model_binding: ModelRunBinding | None = None
+    capabilities: tuple[
+        AbstractCapability[AgentContext], ...
+    ] = ()
+    metadata: Mapping[str, JsonValue] = {}
 ```
 
-[`Capability and Agent Context Model`](04-capability-model.md) owns the `AgentContext` fields and state API. The context derives `identity` from `instance.identity`; no second identity value can diverge from the instance binding.
+The trusted caller supplies fresh bindings for every logical run. The Harness:
 
-`AgentInstanceContext` is the only Identity and lineage carrier. The complete root `ResolvedAgentDefinition` is consumed while building the Pydantic Agent and is not copied into `AgentContext`. The one deliberate build-to-run projection is the current `ExecutableAgent`'s immutable immediate-child `SubagentCollection`: every run context borrows that exact collection so trusted Capabilities can implement definition-selected inline or Host-specific child behavior without another construction seam. The parent executable remains its sole lifecycle owner, and the collection grants no authority. A permitted `ClientToolRunBinding` is resolved during run assembly into native per-run external Toolsets and likewise does not become an `AgentContext` service or authority.
+1. allocates the public Harness `run_id`;
+2. binds and enters `EnvironmentRunBinding` with that ID and Agent instance;
+3. invokes an optional `RunInputFactory` exactly once;
+4. normalizes semantic input;
+5. creates one `AgentContext` with imported `AgentContextState`, the entered Environment, optional model binding, immutable metadata, and executable-owned child collection;
+6. binds fresh run plugin replacements and freezes `BoundPluginContext`;
+7. creates the outer plugin response.
 
-`AgentContextState` imports previous Capability state, accepts versioned state contributions, and exports every recoverable namespace alongside Pydantic AI `message_history`. Environment, working state, compaction, discovery, and inline delegation are state owners under their Capability IDs. Delegation State stores only bounded complete child snapshots and selectors; it contains no active task or partial parent tool batch. Host-managed asynchronous child lifecycle and delivery remain Host-owned. The state is part of `AgentContext`, not an independently injected persistence service.
+The same context is reused by every internal Pydantic attempt. Current Identity, Environment, plugins, Capability-state coordinator, model binding, and metadata therefore remain stable across recovery. `RunBindings.capabilities` are passed to every Pydantic attempt and follow upstream per-run Capability binding semantics.
 
-Core event, Environment, state, and active-run binding behavior is installed by `AbstractCapability[AgentContext]` implementations. Separately, the Harness creates the same `AgentContext` used by the Agent, sets `context.subagents` to the current executable's built collection, calls the ordered Agent-bound plugins' `for_run(context)` methods, freezes their replacements in `context.plugins`, and uses those same objects for the outer run middleware chain. Native enqueue, cancellation, usage, and limits remain on Pydantic `RunContext.enqueue()`, `RunContext.cancel()`, `AgentRunEvents.cancel()`, `RunContext.usage`, and `RunContext.usage_limits`. `metadata` is safe correlation and grants no authority. Long-lived credentials, provider clients, previous state, and host lifecycle objects are absent. Policy, credential, checkpoint, child execution, and other host integrations enter as Capabilities rather than generic services on the context.
+`RunBindings.local()` creates a process-local Agent instance, uses a no-operation Environment when none is supplied, and accepts the same optional model binding, Capabilities, and metadata. It does not create a model registry or hidden provider configuration.
 
-Capability-to-capability interaction uses Pydantic AI's public run-bound `RunContext.capabilities` mapping after binding completes; sibling `for_run()` methods never wait on one another. Run assembly validates each explicitly required Host-bound role against its fresh input, and the first ordered `before_run()` validation rechecks its finalized replacement before model work. A Capability reads built child topology directly from `AgentContext.subagents`, while the exact inline binder or Host-specific scheduler adapter remains an explicit fresh run Capability that owns any typed collaborator. A plugin-contributed Capability reaches its owning run-bound plugin through the separate typed `AgentContext.plugins` ID-and-type lookup. A host retains the typed Capability instances and collaborators it constructs; `HarnessRunStream` exposes neither registry.
-
-## Run Lifecycle
-
-The lifecycle exposes only process-local states that affect callers.
+## Logical Lifecycle
 
 ```mermaid
 stateDiagram-v2
     [*] --> created
-    created --> active: plugin chain starts
+    created --> active: stream context entered
+    active --> active: recoverable model attempt restarts
     active --> completed: validated output
-    active --> suspended: deferred work or safe pause
-    active --> failed: unrecovered execution error
-    active --> cancelled: cancellation observed
+    active --> suspended: native deferred or approval boundary
+    active --> failed: handled terminal execution failure
+    active --> cancelled: native or requested cancellation
     completed --> [*]
     suspended --> [*]
     failed --> [*]
     cancelled --> [*]
 ```
 
-Steering, provider dispatch, compaction, state export preparation, cleanup, and cancellation propagation are observations inside `active`, not additional public states. The host maps the final result into its own lifecycle.
+The public states describe the logical run. Internal attempt count, backoff, provider request retries, and self-healing replay are not additional lifecycle states.
 
 ## Execution Flow
 
 ```mermaid
 sequenceDiagram
-    participant Host
+    participant Caller
     participant Harness
+    participant Plugins
     participant PAI as Pydantic AI
     participant Provider
 
-    Host->>Harness: stream input or input factory, bindings, optional prior state, usage, and UsageLimits
-    Harness-->>Host: HarnessRunStream context
-    Host->>Harness: enter stream context
-    Harness->>Harness: allocate run ID and validate required Host run-role inputs
-    Harness->>Provider: bind and enter Environment
-    Harness->>Provider: restore compatible Environment state
-    Harness->>Harness: invoke optional input factory and normalize semantic input
-    Harness->>Harness: create AgentContext with built subagents, call ordered plugin for_run, and freeze context.plugins
-    Harness->>Harness: enter ordered plugin middleware chain
-    Harness->>Harness: transform input, then resolve content
-    Harness->>PAI: obtain lazy AgentRunEvents handle
-    Host->>Harness: request first stream item
-    Harness->>PAI: start execution with typed run context and messages
-    PAI->>PAI: bind run Capabilities concurrently
-    PAI->>Provider: await scoped readiness required by Capability for_run
-    PAI->>PAI: freeze run-bound model surface
-    PAI->>PAI: validate finalized required Host run roles before first request
-    loop Process-local execution
-        PAI->>Provider: model or authorized tool operation
-        Provider-->>PAI: result or typed failure
-        PAI-->>Harness: public events and messages
-        Harness->>Harness: unwind event middleware
-        Harness-->>Host: HarnessEvent with backpressure
+    Caller->>Harness: enter stream with input, bindings, and optional state
+    Harness->>Harness: enter Environment and create one AgentContext
+    Harness->>Plugins: bind one fresh middleware chain
+    Caller->>Harness: request first item
+    loop total semantic attempt budget
+        Harness->>PAI: run_stream_events with unique inner run ID
+        PAI->>Provider: model and tool work
+        Provider-->>PAI: events, response, or failure
+        PAI-->>Harness: public events and latest messages
+        alt completed or deferred
+            Harness->>Harness: build terminal candidate
+        else recoverable model interruption
+            Harness->>Harness: normalize interrupted history
+            Harness->>Harness: cancellation-aware backoff and continuation input
+        else hard stop
+            Harness->>Harness: cancel, fail, or propagate
+        end
     end
-    PAI-->>Harness: final output, deferred work, cancellation, or handled failure
-    Harness->>Harness: build candidate and unwind result or error middleware
-    Harness->>Harness: revalidate final result candidate
-    Harness->>PAI: close and drain run resources
-    Harness->>Harness: close plugin middleware in reverse order
-    Harness->>Provider: close Environment and remaining run resources
-    alt Cleanup succeeds
-        Harness-->>Host: one completed, suspended, cancelled, or failed HarnessRunResultEvent
-    else Cleanup fails
-        Harness-->>Host: raise RunCleanupError with primary candidate and no result event
-    end
-    Host->>Harness: idempotent stream-context exit
+    Harness->>Plugins: unwind result or error
+    Harness->>Harness: validate nearest candidate and close resources
+    Harness-->>Caller: terminal result event after cleanup
 ```
 
-## Preparation and Semantic Hooks
+The stream is lazy: entering it performs preparation but no model or tool work. First iteration drives the plugin response and, if middleware reaches the inner path, starts the first Pydantic attempt. A plugin short-circuit starts no Pydantic attempt.
 
-Entering `HarnessRunStream` establishes the trusted run binding after any Host adapter lifecycle attachment, validates every explicitly required Host-bound run role against the fresh Capability inputs, binds and enters run-scoped Environment resources, validates the state envelope and messages, installs pending Capability entries, and restores backend-local Environment state. Environment entry establishes trusted identity, descriptors, operation families, routing, and a readiness path; it need not wait for every provider operation to finish provisioning. The Harness then invokes the optional `RunInputFactory` exactly once and normalizes its result or the immediate value into canonical semantic input. It creates the one `AgentContext` with the current executable's immutable `SubagentCollection`, calls each Agent-bound plugin's `for_run(context)` sequentially in final chain order, freezes `context.plugins` with those replacements, and enters the ordered plugin chain. Only after input middleware calls the inner path does the Harness authorize content references, map Pydantic input, and enter `Agent.run_stream_events()` to obtain an `AgentRunEvents` handle. A valid plugin short-circuit skips those inner steps entirely. Factory and resolution use restricted `RunPreparationContext` with the entered Environment and no pending Capability state. A factory that requires a ready operation calls `BoundEnvironment.ensure_ready()` explicitly. A failure closes all resources already entered and no Pydantic Agent run is started.
+## Model Attempt Recovery
 
-The upstream handle remains lazy: no Pydantic `RunContext`, model request, or tool call exists until first iteration. At first iteration, Pydantic calls sibling Capability `for_run()` methods concurrently. An Environment-dependent Capability can await a scoped readiness requirement directly and return an immutable replacement containing its run-frozen model surface; Pydantic re-extracts that surface before the first request. `for_run()` never waits for sibling Capability setup, and ordinary provider operations retain their own lazy readiness checks. After all replacements exist, the mandatory Harness role validator runs first in ordered `before_run()` and uses the catalog's opaque validator to recheck each required role in finalized `RunContext.capabilities`; other non-Environment stateful Capabilities then validate their pending entries before model or tool work. This ordering lets pre-start cancellation delegate directly to `AgentRunEvents.cancel()` without a Harness cancellation token while preserving Environment-backed semantic input preparation.
+`ModelRecoveryPolicy` is disabled by default. When enabled, `max_attempts` is the total number of Pydantic attempts, including the first one. Its upper bound defaults to five. The policy owns:
 
-Harness plugin middleware is not a per-node hook. It wraps the canonical semantic-input, event, error, and complete-result path and can contribute Capabilities for behavior inside the Agent loop. Per-node behavior is not exposed as arguments on `run()` or `stream()`; a Capability that needs exact boundaries implements Pydantic AI's public node hooks. First-party checkpoint, authority, safe-pause, context, and usage Capabilities translate those nodes into their own semantic collaborator calls, so a host storage or policy adapter does not inspect node classes. Model and tool event observation uses the event stream rather than pre-event and post-event callbacks.
+- the total attempt budget;
+- a fixed continuation input or sync/async prompt factory;
+- full-jitter exponential backoff bounded by configured initial and maximum delays.
 
-## Steering, Safe Pause, and Cancellation
+On a recoverable model interruption, the Harness:
 
-`HarnessRunStream` wraps the canonical plugin response whose inner execution, when reached, directly wraps `AgentRunEvents` returned by `Agent.run_stream_events()`. This preserves lazy Pydantic start, one public event consumer, live messages and usage, cancellation, and deterministic `aclose()` cleanup. Plugin event transforms use the same backpressured path and do not create another public stream, background event task, replay buffer, or control authority.
+1. captures the latest complete public Pydantic message view;
+2. normalizes only an explicitly interrupted terminal tool-call boundary;
+3. leaves previously emitted Harness events visible because they cannot be retracted;
+4. waits using cancellation-aware backoff;
+5. builds the next semantic input;
+6. starts another Pydantic run with the normalized history, same outer context and bindings, same shared usage accumulator, and a fresh inner run ID.
 
-Steering is `HarnessRunStream.enqueue()` over Pydantic AI `RunContext.enqueue()`, not a separate Harness control path. Because `AgentRunEvents` exposes cancel but not enqueue, a run-specific `ActiveRunCapability` binds the live `RunContext` to a stream-owned run-local bridge only while the run is active; the bridge is invalid before the terminal outcome is exposed. The wrapper resolves and validates `RunInput`, then linearizes terminal revalidation and the synchronous native enqueue: terminal wins with `run_not_active`, while enqueue wins with an ID whose delivery remains separate. Pydantic AI owns its pending queue, priorities, drain boundaries, and `EnqueuedMessagesEvent`. The host owns durable acceptance, target selection, and deduplication. A Capability or tool steering its own run uses `RunContext.enqueue()` directly.
+The default continuation text says that the previous stream ended before completion, asks the model to continue from available history without repeating completed work, and warns that a side-effecting tool may have partially or fully completed even when no result was recorded.
 
-`HarnessRunStream.request_suspend()` sets the run-local bridge's idempotent safe-pause signal. Using the public `before_node_run` hook, `ActiveRunCapability` observes the signal only before executing a `ModelRequestNode` and is ordered before request-preparation hooks for that node. Pydantic does not reach this hook until the preceding node's complete `after_node_run` chain and any tool batch have finished. State export normally combines completed `RunContext.messages` with the public pending `ModelRequestNode.request`, preserving the initial input or completed tool returns without applying transient next-request preparation or starting the model request. Provider-suspended continuation is the explicit exception: when public history ends in `ModelResponse(state="suspended")` and the next public request has no parts, that request is a continuation placeholder and is not appended to the export view. This rule uses only public message and node fields and preserves the suspended response as the history tail. The Capability atomically commits that `HarnessState` and safe-suspend origin to the binding, then calls `RunContext.cancel()`. The resulting native `RunCancelled` becomes `status="suspended"` with `suspend_reason="host_pause"` only when that committed record is present.
+A tool call missing a result at an explicitly interrupted boundary receives a failed `ToolReturnPart` stating:
 
-A safe-suspend request received during a model response or tool-call batch waits for the entire batch, including inline children and parallel sibling tools, to finish. Inline child state can advance process-locally when that child returns, but the Harness does not export it as part of a resumable parent checkpoint while the parent batch remains incomplete. If Pydantic produces `End` instead of another `ModelRequestNode`, completion or deferred work wins and is not rewritten. No private exception, independent task cancellation, or persisted control state is involved. Pydantic deferred work produces `status="suspended"` with `suspend_reason="deferred"` and `DeferredToolRequests`, keeping the two reasons distinct while sharing the same new-run resume model. External client calls remain in `.calls`, approvals remain in `.approvals`, and neither retains a Python handler or task.
+> No tool result was recorded because execution was interrupted. The operation may have partially or fully completed. Check the current state before deciding whether to retry it.
 
-`HarnessRunStream.cancel()` delegates directly to `AgentRunEvents.cancel()`; authorization and durable command correlation remain host concerns. Native pre-start cancellation prevents the run from starting; active cancellation drains model, tool, and supported server-side work. Pre-start normalization has no bound context or exported state and snapshots the Harness-owned input accumulator. After start, the Harness observes `RunCancelled` without a committed safe-suspend record, exports the latest valid state from its complete messages, and emits the normalized `cancelled` result with terminal usage when the caller continues consuming. A Capability or tool cancels its own run with `RunContext.cancel()`. If native cancellation takes effect before safe-suspend commit it wins; after a terminal Harness result commits, later calls cannot rewrite it. External cancellation of the consumer task continues to raise normal async cancellation and takes precedence.
+This preserves a valid conversation shape without claiming rollback, non-execution, or exactly-once behavior.
 
-Neither native cancellation nor safe pause implies provider rollback after dispatch. When no authoritative provider receipt exists, the operation remains unknown and a later run relies on provider reconciliation.
+Recovery is limited to model-boundary failures. It does not restart after:
+
+- explicit or external cancellation;
+- `UsageLimitExceeded`;
+- exhausted Pydantic output-validation retries;
+- tool execution failure;
+- Harness, plugin, state, Environment, or input failure;
+- native deferred external-tool or approval output;
+- normal provider-suspended continuation.
+
+Provider transport retries remain below this layer. `SelfHealingModel` may replay one request after an exact history repair before the Harness attempt loop observes the failure. These budgets are independent and are not multiplied into a second unbounded retry framework.
+
+When the semantic attempt budget is exhausted, the logical run returns `status="failed"` with `failure.code="model_recovery_exhausted"`. When recovery is disabled, recognized Pydantic execution failure returns `failure.code="agent_run_failed"`.
+
+## Native Deferred and Provider Continuation
+
+A Pydantic result whose output is `DeferredToolRequests` ends the logical run with:
+
+- `status="suspended"`;
+- `suspend_reason="deferred"`;
+- the native deferred value;
+- complete current `HarnessState` and usage.
+
+External calls and approval requests retain their upstream distinct maps. The Harness does not execute them, convert one kind into the other, or start another semantic attempt.
+
+Provider-suspended continuation remains native Pydantic message behavior. The Harness preserves public message history and does not create a route-pin schema, duplicate provider job state, or reinterpret suspension as stream recovery. A later logical run receives fresh bindings and the Host-selected prior `HarnessState`; the selected model integration is responsible for any provider-specific ability to continue those public messages.
+
+## Cancellation
+
+`HarnessRunStream.cancel()` is idempotent. It records cancellation for pre-start and backoff phases and delegates to the active `AgentRunEvents.cancel()` when an inner attempt exists.
+
+Cancellation fences semantic recovery:
+
+- pre-start cancellation prevents model work;
+- cancellation during an attempt uses native Pydantic cancellation;
+- cancellation interrupts recovery backoff immediately;
+- cancellation observed after a recoverable failure prevents the next attempt;
+- calls after close or terminal delivery are no-ops.
+
+A normalized cancelled result uses the latest complete messages and usage available. External cancellation of the consumer task remains `asyncio.CancelledError`; it is not translated into a normal result and cannot be suppressed by cleanup.
+
+Cancellation does not prove provider rollback. Any dispatched side effect without authoritative completion evidence remains unknown.
 
 ## State Boundary
 
-[`Harness State and Resume`](10-snapshot-and-resume.md) owns the sole `HarnessState` schema. It contains Pydantic AI `message_history` plus versioned values collected by `AgentContext.state` from Capabilities that carry resumable state. Environment state is included through the Environment Capability, while topology, credentials, clients, live objects, bearer handles, sockets, and live async tasks are excluded.
+`HarnessState` combines the latest complete Pydantic message view with a detached snapshot of `AgentContextState`. The outer context and state coordinator remain shared across internal attempts. The previous state is copied when the stream is created, so caller mutation cannot change an active run.
 
-State export occurs only at a consistent semantic boundary. A suspended result carries the exported state needed for a later run; the host decides whether that value becomes durable and whether it is later selected.
+`export_state()` is valid only while the stream context is active. Before an inner attempt starts it returns imported messages plus the current Capability-state snapshot. During execution it returns the latest complete public message view; partial token deltas are not reconstructed into synthetic messages.
 
-On resume, the host supplies the selected state separately from `RunBindings`. The host selects the definition and any exact frozen client-tool surface to use, while the new run validates the message codec, configured capability state entries, and deferred result correlation before executing model or tool work.
+The detailed state schema and interrupted-history rules are owned by [Harness State and Resume](10-snapshot-and-resume.md).
 
 ## Result and Cleanup
 
-[`Public API and Packaging`](14-public-api-and-packaging.md) owns `HarnessRunStream`, `HarnessRunResultEvent`, and `HarnessRunResult`. The result's run correlation, terminal status, Pydantic output or deferred values, terminal usage snapshot, safe failure, and optional continuation state describe this process-local outcome. Usage normally covers only this run; explicit inline sharing also includes its complete inline descendant tree. Host-managed asynchronous children and later resumed runs remain separate Host-aggregated records.
+The inner path produces one `HarnessRunResult` candidate. Plugin middleware can replace it under the trusted-plugin contract. The Harness validates candidates at every response boundary so the nearest valid inner outcome remains available if an outer layer later fails.
 
-Cleanup follows one global reverse-acquisition order. The Harness first cancels, closes, and drains the innermost `AgentRunEvents`, Pydantic run resources, model streams, Capability and Toolset context managers, and inline child tasks when that inner path exists. It then calls idempotent `PluginRunResponse.aclose()` from inner to outer, followed by input-factory or resolver resources, temporary credential leases, the entered `EnvironmentRunBinding`, and remaining outer resources. A short-circuit has no inner Pydantic layer and starts at plugin-response cleanup. Leaving the stream context before its terminal item uses native quiet cancellation and drain before the remaining cleanup.
+Cleanup follows reverse acquisition order and stays in the task that entered the async scopes:
 
-For a normal consumed outcome, the inner path freezes output, state, usage, and failure data as a primary result candidate. Plugin middleware can replace the complete candidate during reverse unwind, after which the Harness revalidates status combinations, state provenance, the `HarnessState` envelope and message codec, run correlation, and limits. A fresh plugin state snapshot comes through `PluginRunExchange.export_current_state()`, which supplies the Harness-owned complete message view without exposing mutable history. Capability-private entry bytes can change only through their owning typed state path before a fresh context export; the Harness does not duplicate those codecs. It then completes plugin and all other run-scoped cleanup before publishing `HarnessRunResultEvent` or returning from `run()`. Cleanup success makes terminal delivery final and later context exit idempotent. Plugin or other cleanup failure raises `RunCleanupError` instead of publishing the result event; the exception retains the last immutable valid primary candidate when one exists plus bounded cleanup uncertainty. It neither rewrites a validated output nor lets the host mistake the run for a clean terminal boundary.
+1. close registered plugin responses from inner to outer;
+2. close the Environment and remaining outer resources;
+3. preserve any pending external task cancellation;
+4. publish the terminal result event only when cleanup succeeds.
 
-## Trade-offs
-
-- A class-based run stream gives embedded and hosted callers one API with natural backpressure and explicit cleanup without reproducing Pydantic graph state.
-- A new run on resume rebuilds providers and capabilities but keeps state portable.
-- Four public terminal states leave detailed retry, timeout, and interruption policy to the host that owns it.
+Every registered response is closed at most once. Cleanup continues after an individual close failure and collects secondary causes. A plugin or cleanup failure after a valid candidate raises `RunCleanupError` with that candidate and no terminal event. External cancellation takes precedence and receives cleanup failures as notes.
 
 ## Invariants
 
-01. One `HarnessRunStream` represents the observation and active-run control facade of one process-local Pydantic AI execution.
-02. The stream has one consumer and starts on first iteration; each Harness-handled outcome whose run-scoped teardown succeeds ends with exactly one result event, while early exit, cleanup failure, or an unhandled exception does not synthesize one.
-03. `AgentContext` is the single Pydantic AI dependency and run-state center; its `plugins` field indexes the same fresh bound instances used by the outer middleware chain, and its `subagents` field is the exact immutable collection owned by the current executable.
-04. Resume creates a new run from host-selected `HarnessState` and fresh bindings.
-05. Environment binding does not imply every operation is provisioned; scoped model-surface readiness completes before the dependent first request, while ordinary operation readiness remains lazy.
-06. Steering and cancellation delegate to `RunContext.enqueue()` and `AgentRunEvents.cancel()`; the Harness owns no duplicate queue, background event task, or cancellation token.
-07. Safe pause waits for a complete parent boundary, commits state, and uses `RunContext.cancel()` plus an internal origin marker to produce a suspended result; resume creates a new run.
-08. Cancellation does not imply provider rollback.
-09. The plugin chain cannot retract emitted events, bypass final result/state validation, or publish a terminal event before teardown succeeds.
-10. Public contracts contain no Pydantic AI private graph state.
+1. One public Harness `run_id`, context, Environment binding, plugin graph, and usage accumulator span the complete logical run.
+2. Every internal Pydantic attempt has a unique upstream run ID.
+3. Recovery never creates a new Host execution fact or rebinds current authority.
+4. Events already delivered by an earlier attempt remain observations and are never retracted.
+5. Explicit cancellation, usage limits, output retry exhaustion, tool failures, and deferred/HITL boundaries stop semantic recovery.
+6. Interrupted tool history records uncertainty rather than exactly-once claims.
+7. A terminal event is delivered only after successful cleanup.
+8. External async cancellation cannot be converted into success or suppressed by cleanup.
+
+## Trade-offs
+
+### One Logical Run with Several Pydantic Attempts
+
+Keeping recovery inside the existing outer context preserves plugin and Environment continuity and one usage budget. It means event consumers can observe activity from an attempt that later restarts, so terminal state rather than event absence determines completion.
+
+### Bounded Recovery vs. General Workflow Replay
+
+The Harness repairs narrow model interruption only. Durable replay, side-effect reconciliation, and worker recovery remain Host/provider concerns, preventing a local retry mechanism from becoming an orchestration engine.

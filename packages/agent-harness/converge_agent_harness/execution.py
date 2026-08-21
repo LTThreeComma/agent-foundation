@@ -7,11 +7,12 @@ import inspect
 import typing
 from collections.abc import AsyncIterator, Awaitable, Coroutine, Sequence
 from contextlib import AsyncExitStack
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import reduce
 from operator import or_
-from typing import Any, cast, get_args, get_origin, get_type_hints
+from typing import Any, Literal, cast, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
 from pydantic import ConfigDict, PydanticSchemaGenerationError, TypeAdapter, ValidationError
@@ -28,7 +29,7 @@ from pydantic_ai.tools import DeferredToolRequests, Tool, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from converge_agent_harness.context import EMPTY_SUBAGENTS, AgentContext, RunBindings, SubagentCollection
+from converge_agent_harness.context import AgentContext, BuiltSubagent, RunBindings, SubagentCollection
 from converge_agent_harness.errors import (
     DefinitionError,
     HarnessError,
@@ -67,6 +68,50 @@ _AGENT_EVENT_ADAPTER = TypeAdapter(AgentStreamEvent)
 
 
 @dataclass(frozen=True, slots=True)
+class DelegationContextPolicy:
+    """Portable ceilings on context and working-state sharing for one child edge."""
+
+    include_task: bool = True
+    history: Literal["none", "summary", "selected"] = "none"
+    task_state: Literal["shared", "isolated"] = "shared"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.include_task, bool):
+            raise DefinitionError("Subagent include_task policy must be a boolean.", code="subagent_context_invalid")
+        if self.history not in {"none", "summary", "selected"}:
+            raise DefinitionError("Unsupported subagent history policy.", code="subagent_context_invalid")
+        if self.task_state not in {"shared", "isolated"}:
+            raise DefinitionError("Unsupported subagent task-state policy.", code="subagent_context_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentDefinition:
+    """One named process-local child definition and authored edge ceilings."""
+
+    name: str
+    description: str
+    agent: AgentDefinition[Any]
+    context: DelegationContextPolicy = field(default_factory=DelegationContextPolicy)
+    usage_limits: UsageLimits | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise DefinitionError("Subagent name must be a non-blank string.", code="subagent_name_invalid")
+        if not isinstance(self.description, str) or not self.description.strip():
+            raise DefinitionError(
+                "Subagent description must be a non-blank string.",
+                code="subagent_description_invalid",
+            )
+        if not isinstance(self.agent, AgentDefinition):
+            raise DefinitionError("Subagent agent must be an AgentDefinition.", code="subagent_definition_invalid")
+        if not isinstance(self.context, DelegationContextPolicy):
+            raise DefinitionError("Subagent context must be DelegationContextPolicy.", code="subagent_context_invalid")
+        if self.usage_limits is not None and not isinstance(self.usage_limits, UsageLimits):
+            raise DefinitionError("Subagent usage_limits must be UsageLimits or None.", code="subagent_limits_invalid")
+        object.__setattr__(self, "usage_limits", deepcopy(self.usage_limits))
+
+
+@dataclass(frozen=True, slots=True)
 class AgentDefinition[OutputT]:
     """Immutable code-first inputs for one process-local executable Agent."""
 
@@ -78,24 +123,66 @@ class AgentDefinition[OutputT]:
     toolsets: tuple[AgentToolset[AgentContext], ...] = ()
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     plugins: tuple[AbstractHarnessPlugin, ...] = ()
+    subagents: tuple[SubagentDefinition, ...] = ()
     self_healing: bool = True
     model_recovery: ModelRecoveryPolicy = field(default_factory=ModelRecoveryPolicy)
 
     def __post_init__(self) -> None:
         if not self.definition_id.strip():
             raise DefinitionError("definition_id must not be blank.", code="definition_id_invalid")
+        if self.agent.output_schema is not None:
+            raise DefinitionError(
+                "AgentSpec.output_schema must be omitted because AgentDefinition.output_type owns business output.",
+                code="output_contract_conflict",
+            )
+        if _output_spec_contains_deferred_requests(self.output_type):
+            raise DefinitionError(
+                "DeferredToolRequests is reserved for Harness suspension and cannot be a business output.",
+                code="output_contract_reserved",
+            )
         object.__setattr__(self, "agent", self.agent.model_copy(deep=True))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "toolsets", tuple(self.toolsets))
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "plugins", tuple(self.plugins))
+        subagents = tuple(self.subagents)
+        if not all(isinstance(child, SubagentDefinition) for child in subagents):
+            raise DefinitionError(
+                "subagents must contain only SubagentDefinition values.",
+                code="subagent_definition_invalid",
+            )
+        names = [child.name for child in subagents]
+        if len(set(names)) != len(names):
+            raise DefinitionError("Subagent names must be unique within one parent.", code="subagent_name_duplicate")
+        object.__setattr__(self, "subagents", subagents)
 
 
 class HarnessBuilder:
     """Build executable Agents through one authoritative Agent.from_spec path."""
 
     def build[BuildOutputT](self, definition: AgentDefinition[BuildOutputT]) -> ExecutableAgent[BuildOutputT]:
-        """Validate code-first composition and construct a reusable executable."""
+        """Validate code-first composition and recursively construct a reusable executable."""
+        return self._build(definition, active_definition_ids=())
+
+    def _build[BuildOutputT](
+        self,
+        definition: AgentDefinition[BuildOutputT],
+        *,
+        active_definition_ids: tuple[int, ...],
+    ) -> ExecutableAgent[BuildOutputT]:
+        definition_object_id = id(definition)
+        if definition_object_id in active_definition_ids:
+            raise DefinitionError("Subagent definitions must form a finite acyclic graph.", code="subagent_cycle")
+        child_path = (*active_definition_ids, definition_object_id)
+        built_children = tuple(
+            BuiltSubagent(
+                declaration=child,
+                definition=child.agent,
+                executable=self._build(child.agent, active_definition_ids=child_path),
+            )
+            for child in definition.subagents
+        )
+        subagents = SubagentCollection({child.declaration.name: child for child in built_children})
         plugins, plugin_capabilities = bind_agent_plugins(definition.plugins)
 
         async def resolve_model(
@@ -138,9 +225,9 @@ class HarnessBuilder:
         return ExecutableAgent(
             definition=definition,
             agent=cast(Agent[AgentContext, BuildOutputT], agent),
-            output_adapter=_build_output_adapter(agent.output_type),
+            output_adapter=_build_output_adapter(definition.output_type),
             plugins=plugins,
-            subagents=EMPTY_SUBAGENTS,
+            subagents=subagents,
         )
 
     def build_code[BuildOutputT](
@@ -154,6 +241,7 @@ class HarnessBuilder:
         toolsets: Sequence[AgentToolset[AgentContext]] = (),
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         plugins: Sequence[AbstractHarnessPlugin] = (),
+        subagents: Sequence[SubagentDefinition] = (),
         self_healing: bool = True,
         model_recovery: ModelRecoveryPolicy | None = None,
     ) -> ExecutableAgent[BuildOutputT]:
@@ -168,6 +256,7 @@ class HarnessBuilder:
                 toolsets=tuple(toolsets),
                 capabilities=tuple(capabilities),
                 plugins=tuple(plugins),
+                subagents=tuple(subagents),
                 self_healing=self_healing,
                 model_recovery=model_recovery or ModelRecoveryPolicy(),
             )
@@ -254,8 +343,12 @@ class ExecutableAgent[OutputT]:
         await self.close()
 
     async def close(self) -> None:
-        """Idempotently prevent future runs; per-run resources own their cleanup."""
+        """Idempotently close recursively owned children and prevent future runs."""
+        if self._closed:
+            return
         self._closed = True
+        for child in reversed(tuple(self.subagents.values())):
+            await child.executable.close()
 
 
 class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
@@ -285,7 +378,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._response: PluginRunResponse[OutputT] | None = None
         self._responses: list[tuple[int, PluginRunResponse[OutputT]]] = []
         self._response_ids: set[int] = set()
-        self._pydantic_events: AgentRunEvents[OutputT] | None = None
+        self._pydantic_events: AgentRunEvents[OutputT | DeferredToolRequests] | None = None
         self._latest_messages: tuple[ModelMessage, ...] = self._previous_state.message_history
         self._new_message_index = len(self._latest_messages)
         self._source_sequence = 0
@@ -558,6 +651,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             next_attempt_index = attempt_index + 1
             manager = self._executable._agent.run_stream_events(
                 current_input.value,
+                output_type=[self._executable.definition.output_type, DeferredToolRequests],
                 message_history=current_history,
                 run_id=str(uuid4()),
                 deps=self.context,
@@ -846,6 +940,51 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 outcome=outcome,
                 causes=tuple(causes),
             )
+
+
+def _output_spec_contains_deferred_requests(output_spec: OutputSpec[Any]) -> bool:
+    """Return whether a business output spec directly or transitively reserves deferred control output."""
+    seen: set[int] = set()
+
+    def contains(value: Any) -> bool:
+        value_id = id(value)
+        if value_id in seen:
+            return False
+        seen.add(value_id)
+
+        if isinstance(value, type) and issubclass(value, DeferredToolRequests):
+            return True
+        if isinstance(value, typing.TypeAliasType):
+            return contains(value.__value__)
+        if get_origin(value) is typing.Annotated:
+            arguments = get_args(value)
+            return bool(arguments) and contains(arguments[0])
+        if isinstance(value, NativeOutput | PromptedOutput):
+            return contains(value.outputs)
+        if isinstance(value, ToolOutput):
+            return contains(value.output)
+        if isinstance(value, TextOutput):
+            return contains_callable(value.output_function)
+        if isinstance(value, Sequence):
+            return any(contains(item) for item in value)
+        if get_origin(value) in (typing.Union, type(str | int)):
+            return any(contains(item) for item in get_args(value))
+        if inspect.isfunction(value) or inspect.ismethod(value):
+            return contains_callable(value)
+        return False
+
+    def contains_callable(function: Any) -> bool:
+        return_type = get_type_hints(function).get("return", Any)
+        origin = get_origin(return_type)
+        if origin is Awaitable:
+            arguments = get_args(return_type)
+            return_type = arguments[0] if arguments else Any
+        elif origin is Coroutine:
+            arguments = get_args(return_type)
+            return_type = arguments[2] if len(arguments) == 3 else Any
+        return contains(return_type)
+
+    return contains(output_spec)
 
 
 def _build_output_adapter(output_spec: OutputSpec[Any]) -> TypeAdapter[Any]:

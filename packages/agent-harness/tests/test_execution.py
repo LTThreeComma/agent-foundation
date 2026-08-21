@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Coroutine
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from converge_agent_harness import (
+    AgentDefinition,
+    DefinitionError,
     HarnessBuilder,
     HarnessEvent,
     HarnessRunResultEvent,
     HarnessState,
     RunBindings,
     RunError,
+    SubagentDefinition,
 )
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.output import TextOutput
+from pydantic_ai.output import NativeOutput, PromptedOutput, TextOutput, ToolOutput
+from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 pytestmark = pytest.mark.anyio
@@ -124,6 +128,134 @@ async def test_output_functions_may_annotate_their_awaitable_result(annotation: 
     result = await executable.run("hello", bindings=RunBindings.local())
 
     assert result.output_or_raise() == "turn-1|parsed"
+
+
+class _DeferredSubclass(DeferredToolRequests):
+    pass
+
+
+type _DeferredAlias = DeferredToolRequests
+
+
+def _deferred_from_text(value: str) -> DeferredToolRequests:
+    del value
+    return DeferredToolRequests()
+
+
+@pytest.mark.parametrize(
+    "output_spec",
+    [
+        DeferredToolRequests,
+        _DeferredSubclass,
+        _DeferredAlias,
+        Annotated[DeferredToolRequests, "reserved"],
+        (str, DeferredToolRequests),
+        str | DeferredToolRequests,
+        NativeOutput(DeferredToolRequests),
+        NativeOutput(Annotated[DeferredToolRequests, "reserved"]),
+        PromptedOutput(DeferredToolRequests),
+        ToolOutput(DeferredToolRequests),
+        ToolOutput(_DeferredSubclass),
+        TextOutput(_deferred_from_text),
+    ],
+)
+async def test_deferred_requests_cannot_be_declared_as_business_output(output_spec: Any) -> None:
+    with pytest.raises(DefinitionError) as exc_info:
+        AgentDefinition(
+            agent=AgentSpec(model="logical:test"),
+            output_type=output_spec,
+            model=_turn_model([]),
+        )
+    assert exc_info.value.code == "output_contract_reserved"
+
+
+async def test_agent_spec_output_schema_cannot_override_business_output() -> None:
+    with pytest.raises(DefinitionError) as exc_info:
+        AgentDefinition(
+            agent=AgentSpec(
+                model="logical:test",
+                output_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            ),
+            output_type=str,
+            model=_turn_model([]),
+        )
+    assert exc_info.value.code == "output_contract_conflict"
+
+
+async def test_builder_recursively_builds_and_owns_authored_subagents() -> None:
+    child_definition = AgentDefinition(
+        agent=AgentSpec(model="logical:child", name="child-agent"),
+        output_type=str,
+        model=_turn_model([]),
+    )
+    edge = SubagentDefinition(
+        name="researcher",
+        description="Research a bounded question.",
+        agent=child_definition,
+        usage_limits=UsageLimits(request_limit=3),
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:parent", name="parent-agent"),
+        output_type=str,
+        model=_turn_model([]),
+        subagents=(edge,),
+    )
+
+    child = executable.subagents.require("researcher")
+    assert child.definition is child_definition
+    assert child.declaration is not edge
+    assert child.declaration.agent is child_definition
+    assert child.executable.definition is child_definition
+
+    assert edge.usage_limits is not None
+    edge.usage_limits.request_limit = 99
+    assert child.declaration.usage_limits is not None
+    assert child.declaration.usage_limits.request_limit == 3
+
+    detached_declaration = child.declaration
+    assert detached_declaration.usage_limits is not None
+    detached_declaration.usage_limits.request_limit = None
+    assert child.declaration.usage_limits is not None
+    assert child.declaration.usage_limits.request_limit == 3
+
+    async with executable.stream("parent", bindings=RunBindings.local()) as stream:
+        assert stream.context.subagents is executable.subagents
+        terminal = [item async for item in stream][-1]
+        assert isinstance(terminal, HarnessRunResultEvent)
+
+    child_result = await child.executable.run("child", bindings=RunBindings.local())
+    assert child_result.output_or_raise() == "turn-1"
+
+    await executable.close()
+    with pytest.raises(RunError) as exc_info:
+        child.executable.stream("closed", bindings=RunBindings.local())
+    assert exc_info.value.code == "executable_closed"
+
+
+async def test_duplicate_subagent_names_fail_before_build() -> None:
+    child_definition = AgentDefinition(
+        agent=AgentSpec(model="logical:child", name="child-agent"),
+        output_type=str,
+        model=_turn_model([]),
+    )
+    duplicate = SubagentDefinition(
+        name="child",
+        description="A child.",
+        agent=child_definition,
+    )
+
+    with pytest.raises(DefinitionError) as exc_info:
+        HarnessBuilder().build_code(
+            AgentSpec(model="logical:parent", name="parent-agent"),
+            output_type=str,
+            model=_turn_model([]),
+            subagents=(duplicate, duplicate),
+        )
+    assert exc_info.value.code == "subagent_name_duplicate"
 
 
 async def test_every_run_gets_a_fresh_context() -> None:

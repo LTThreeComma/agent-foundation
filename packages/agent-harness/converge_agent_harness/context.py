@@ -17,16 +17,53 @@ from converge_agent_harness.identity import AgentIdentityRef, AgentInstanceConte
 from converge_agent_harness.state import AgentContextState, HarnessState
 
 if TYPE_CHECKING:
-    from converge_agent_harness.execution import ExecutableAgent
+    from converge_agent_harness.execution import AgentDefinition, ExecutableAgent, SubagentDefinition
     from converge_agent_harness.models import ModelRunBinding
     from converge_agent_harness.plugins import BoundPluginContext
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentCollection:
-    """Immutable immediate-child collection; empty is the Block 1 zero value."""
+@dataclass(frozen=True, slots=True, init=False)
+class BuiltSubagent:
+    """One authored child edge and its recursively built executable."""
 
-    _items: Mapping[str, ExecutableAgent[Any]] = field(default_factory=dict, repr=False)
+    _declaration: SubagentDefinition = field(repr=False)
+    definition: AgentDefinition[Any]
+    executable: ExecutableAgent[Any]
+
+    def __init__(
+        self,
+        *,
+        declaration: SubagentDefinition,
+        definition: AgentDefinition[Any],
+        executable: ExecutableAgent[Any],
+    ) -> None:
+        object.__setattr__(self, "_declaration", _copy_subagent_declaration(declaration))
+        object.__setattr__(self, "definition", definition)
+        object.__setattr__(self, "executable", executable)
+
+    @property
+    def declaration(self) -> SubagentDefinition:
+        """Return a detached edge value so mutable native limits cannot widen the build."""
+        return _copy_subagent_declaration(self._declaration)
+
+
+def _copy_subagent_declaration(declaration: SubagentDefinition) -> SubagentDefinition:
+    from converge_agent_harness.execution import SubagentDefinition
+
+    return SubagentDefinition(
+        name=declaration.name,
+        description=declaration.description,
+        agent=declaration.agent,
+        context=declaration.context,
+        usage_limits=declaration.usage_limits,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentCollection(Mapping[str, BuiltSubagent]):
+    """Immutable immediate-child collection in authored order."""
+
+    _items: Mapping[str, BuiltSubagent] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_items", MappingProxyType(dict(self._items)))
@@ -37,8 +74,15 @@ class SubagentCollection:
     def __iter__(self) -> Iterator[str]:
         return iter(self._items)
 
-    def get(self, name: str) -> ExecutableAgent[Any] | None:
-        return self._items.get(name)
+    def __getitem__(self, name: str) -> BuiltSubagent:
+        return self._items[name]
+
+    def require(self, name: str) -> BuiltSubagent:
+        """Return a named immediate child or raise a clear lookup error."""
+        try:
+            return self._items[name]
+        except KeyError:
+            raise KeyError(f"Unknown subagent: {name!r}") from None
 
 
 EMPTY_SUBAGENTS = SubagentCollection()

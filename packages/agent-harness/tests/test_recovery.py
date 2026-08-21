@@ -25,7 +25,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.output import ToolOutput
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import DeferredToolRequests, RunContext
+from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import UsageLimits
 
 pytestmark = pytest.mark.anyio
@@ -452,7 +452,7 @@ async def test_deferred_tool_request_stays_suspended_and_is_not_closed_or_retrie
 
     executable = HarnessBuilder().build_code(
         AgentSpec(model="logical:test"),
-        output_type=[str, DeferredToolRequests],
+        output_type=str,
         model=FunctionModel(stream_function=stream),
         tools=(deferred_tool,),
         model_recovery=_recovery_policy(max_attempts=5),

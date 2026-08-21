@@ -2,7 +2,7 @@
 
 ## Design Position
 
-The Foundation Service durably records one idempotent `ModelUsageRecord` for each attributed `ModelUsageObservation` delivered by a Harness run. It selects a versioned pricing policy before that run and injects its pure `ModelCostCalculator` through `RunBindings`. On the normal response path, the calculator can override selected prices; declined responses fall back, while interrupted or hook-short-circuited responses explicitly report that custom pricing was not reached.
+The Foundation Service durably records one idempotent `ModelUsageRecord` for each attributed `ModelUsageObservation` delivered by a Harness run. It selects a versioned pricing policy before that run and injects its pure `ModelCostCalculator` through a fresh `ModelCostRunCapability` in `RunBindings.capabilities`. On the normal response path, the calculator can override selected prices; declined responses fall back, while interrupted or hook-short-circuited responses explicitly report that custom pricing was not reached.
 
 Pydantic AI `RunUsage` remains the sole process-local accumulator. Its terminal value is useful for live display and consistency checks, but it is not added to request records as another billable contribution. Retry, resume, and Host-managed asynchronous children produce new Harness runs and new response records; imported message history produces none.
 
@@ -31,14 +31,14 @@ For each root Harness run, the execution worker:
 
 1. selects an immutable pricing revision under deployment policy;
 2. constructs a ready, synchronous calculator over that revision;
-3. places it on `RunBindings.model_cost_calculator`;
+3. places it in one `ModelCostRunCapability` within `RunBindings.capabilities`;
 4. retains the selected revision when it stores model-usage records.
 
 The calculator sees the response's optional model name, provider identity, provider URL when safe and available, response timestamp, and a copy of `RequestUsage` with any existing cost cleared. It sees no prompt, response content, credential, or arbitrary provider payload. A finite non-negative USD amount overrides an existing provider value. `None`, an invalid amount, or a calculator failure declines the override, after which an existing provider cost or Pydantic AI's `genai-prices` lookup can supply the estimate.
 
 A pricing revision identifies the complete deployment policy, including the locked Pydantic AI and `genai-prices` fallback baseline. Hosted workers use bundled pricing data from their dependency lock and do not enable mutable process-global price auto-update during runs. A fallback-data update therefore creates another composite pricing revision rather than changing an active worker invisibly. Catalog refresh and external I/O happen outside the Harness model path. The selected calculator is immutable for one root-plus-inline run; inline descendants sharing `RunUsage` use the same selection. A Host-managed asynchronous child or later Attempt has another root run and records whichever revision its Host selects.
 
-Pydantic AI pricing is a best-effort compatibility fallback, not the Foundation Service catalog store. The service does not mutate the process-global `genai-prices` snapshot to emulate per-tenant catalogs. The current public Pydantic hook is not a universal response-commit seam: interrupted partial streams and earlier hook short-circuits can bypass the custom calculator, and continuation segments can be natively priced before their final logical response is merged. Their observations retain the actual cost and explicitly distinguish `not_reached` custom coverage. Exact segment-aware valuation is deferred until Pydantic exposes a unified segment-commit seam or a provider receipt extension supplies the evidence.
+Pydantic AI pricing is a best-effort compatibility fallback, not the Foundation Service catalog store. The service does not mutate the process-global `genai-prices` snapshot to emulate per-tenant catalogs. The current public Pydantic hook is not a universal response-commit seam: interrupted partial streams and earlier hook short-circuits can bypass the custom calculator, and continuation segments can be natively priced before their final logical response is merged. Their observations retain the actual cost and explicitly distinguish `not_reached` custom coverage. Exact segment-aware valuation requires provider receipt evidence and remains unavailable when that evidence is absent.
 
 ## Durable Model Usage
 
@@ -144,7 +144,7 @@ sequenceDiagram
 
     Worker->>Catalog: select immutable pricing revision
     Catalog-->>Worker: ready ModelCostCalculator
-    Worker->>Harness: run with calculator in RunBindings
+    Worker->>Harness: run with ModelCostRunCapability
     PAI-->>Harness: committed ModelResponse with RequestUsage
     Harness->>Harness: custom calculation when reached, otherwise native cost
     Harness-->>Worker: stable ModelUsageObservation with source and coverage

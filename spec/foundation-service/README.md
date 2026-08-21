@@ -2,55 +2,55 @@
 
 ## Overview
 
-This directory defines the current design of `foundation-service`, the optional hosted control and execution service that embeds `agent-harness`.
+This directory defines `foundation-service`, the optional hosted control and execution service that embeds `agent-harness`.
 
-The service owns hosted Agent definition revisions, typed Preset materialization, versioned model-integration selection and locks, durable root and asynchronous subagent Execution lifecycles, scheduling, worker coordination, durable continuation selection, provider-backed task coordination, subagent-result delivery, service APIs, and an optional built-in same-origin browser projection. It does not redefine the Harness plugin lifecycle, Pydantic Agent loop, Harness run/result semantics, or provider-native Environment-state semantics, and it does not deploy or persist a platform-owned Sandbox subsystem. It can keep encrypted, bounded opaque adapter lifecycle records and complete Harness checkpoints under generic storage custody while provider codecs retain semantic ownership.
+Foundation owns durable Agent authoring schemas, typed Presets, immutable definition revisions and dependency locks, process-local reconstruction adapters, durable root and asynchronous child Execution lifecycles, worker Attempts, scheduling, continuation selection, client-tool delivery, service APIs, durable events, and usage records.
+
+It does not redefine the code-first Harness `AgentDefinition`, plugin lifecycle, Pydantic Agent loop, Harness result/state semantics, or provider-native Environment state.
 
 ## Document Catalog
 
-| Document                                                                   | Owning contract                                                                                                                                                                            |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [00-overview.md](00-overview.md)                                           | Hosted service scope, architecture, authority, major flows, and completion boundaries                                                                                                      |
-| [01-agent-definitions-and-presets.md](01-agent-definitions-and-presets.md) | Definition sources and revisions, unified Agent/Model/Toolset Preset selection, model-integration/profile-construction locks, materialization, and provenance                              |
-| [02-client-side-tools.md](02-client-side-tools.md)                         | Frozen external client-tool surfaces, durable pending batches, authenticated delivery, idempotent feedback, and resume                                                                     |
-| [03-execution-lifecycle.md](03-execution-lifecycle.md)                     | Durable root and child Execution identity, Attempt fencing, provider-backed task scope, checkpoint selection, recovery, terminal commit, and child-result delivery                         |
-| [04-execution-api-and-events.md](04-execution-api-and-events.md)           | Foundation Client resources, first-party HTTP and browser boundaries, subagent and task operations and receipts, acceptance and commands, durable events, replay, webhooks, and connectors |
-| [05-usage-accounting.md](05-usage-accounting.md)                           | Per-response observation identity, normal-path custom pricing with explicit coverage, deduplication, projections, and limits                                                               |
+| Document                                                                   | Owning contract                                                                                                                 |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| [00-overview.md](00-overview.md)                                           | Hosted scope, architecture, authority, definition-to-execution flow, and completion boundaries                                  |
+| [01-agent-definitions-and-presets.md](01-agent-definitions-and-presets.md) | Foundation-owned authoring schemas, typed Presets, immutable revisions, dependency locks, and worker reconstruction             |
+| [02-client-side-tools.md](02-client-side-tools.md)                         | Frozen external tool surfaces, durable pending batches, authenticated delivery, idempotent feedback, and continuation           |
+| [03-execution-lifecycle.md](03-execution-lifecycle.md)                     | Durable Execution and Attempt identity, fencing, checkpoints, recovery, completion, and child delivery                          |
+| [04-execution-api-and-events.md](04-execution-api-and-events.md)           | Foundation Client resources, HTTP boundary, child/task operations, acceptance, commands, durable events, replay, and connectors |
+| [05-usage-accounting.md](05-usage-accounting.md)                           | Per-response observation identity, pricing coverage, deduplication, projections, and accounting boundary                        |
 
 ## Reading Paths
 
-### Understand hosted execution
+### Understand Hosted Execution
 
-Read `00`, then `03` for durable lifecycle and `04` for the Foundation Client and event boundary. Follow the owning Harness contract for process-local execution semantics.
+Read `00`, then `03` for durable lifecycle and `04` for public APIs and event delivery. Follow the owning Harness documents for process-local behavior.
 
-### Define or version an Agent
+### Define or Version an Agent
 
-Read `01`, then [Agent Definition and Build](../agent-harness/03-agent-definition-and-build.md) for the canonical materialized definition and process-local build plan.
+Read `01`, then [Harness Agent Definition and Build](../agent-harness/03-agent-definition-and-build.md). Foundation records are serializable Host schemas; workers reconstruct the process-local Harness definition.
 
-### Integrate Foundation Client tools
+### Integrate Client-side Tools
 
-Read `02`, then [Harness Tool Execution](../agent-harness/07-tool-execution.md#client-side-external-tools) for the process-local `ExternalToolset` and deferred-call semantics. Read `04` for acceptance, authentication, mutation receipts, and event replay.
+Read `02`, then [Harness Tool Execution](../agent-harness/07-tool-execution.md) for native external deferral.
 
-### Integrate accounting or billing
+### Integrate Usage
 
-Read `05`, then [Harness Events, Observability, and Usage](../agent-harness/12-events-observability-and-usage.md) for process-local usage semantics.
+Read `05`, then [Harness Events, Observability, and Usage](../agent-harness/12-events-observability-and-usage.md).
 
 ## Authority Rules
 
-- The control plane owns definition source acceptance, Preset selection, model-integration revision locks, immutable definition revisions, and durable execution records.
-- The control plane selects stable Harness export IDs, compiles definitions through an opaque Harness catalog, and stores the class-free catalog manifest plus exact export/artifact locks. The execution plane verifies that closure, reconstructs a matching opaque catalog, and resolves one selected definition revision into authority-neutral model-integration descriptors, any attested credential-free Model, native tools, Toolsets, and explicit reentrant non-model-selecting build Capability instances. Plugin and custom Capability classes never enter Foundation records or `ResolvedAgentDefinition`; the catalog-bound Harness constructs and stable-ID-orders plugins and internally calls `Agent.from_spec()`. Fresh run authority then lets the one locked integration Capability construct the native Model and effective `ModelProfile` or fail closed.
-- For each run, the execution plane obtains a fresh direct-local, EIP-backed, or mixed Environment binding and creates `RunBindings` containing Identity, model pricing, policy, credentials, provider-backed task state when configured, checkpointing, telemetry correlation, and other execution-scoped inputs and authority.
-- The Harness owns process-local plugin construction and fresh run binding, Agent construction, middleware execution, continuation state production, final result validation, and cleanup-before-terminal semantics. Default inline subagent identities and complete child continuation, including child message history, remain nested in the parent Delegation State. Inline shared tasks follow the Harness Working State contract: local mode has one parent snapshot owner, while provider mode keeps authoritative task data and scope outside Harness State.
-- The service owns accepted client-tool attachments, durable pending external-call batches, authenticated delivery and result submission, idempotency, and exact-parent continuation fencing; the external client owns its side effects.
-- The service also owns asynchronous subagent spawn acceptance, independent child Executions, durable task coordination, child control, result retention, wake-up, and duplicate-safe delivery. The definition-selected Foundation Subagent Capability reads immutable built topology from `AgentContext`, while a separate fresh run Capability owns current Attempt authority and its typed service collaborator; the adapter cannot inject undeclared model-visible tools. The same locked export registers both contracts; Foundation names the role in fresh `RunBindings`, and catalog-bound setup validates exactly one matching adapter both before Pydantic binding and after `for_run()` replacement, before model work. Each child worker resolves its exact revision path into the child's own complete locked definition, verifies the revision's graph-wide export closure and opaque Harness catalog, and creates fresh `RunBindings`; Host lifecycle records never become Harness deferred values.
-- One durable `Execution` owns one root or asynchronous child work item across fenced `Attempt` generations; stale workers cannot commit checkpoints, lifecycle events, or outcomes.
-- Durable acceptance and command receipts, lifecycle events, stream delivery, external delivery, usage recording, billing, and payment are distinct facts with their own owners.
-- Hosts and provider adapters own credentials, policy, deployment resources, and durable completion; provider adapters also own lifecycle-record and daemon-state schemas even when the service stores their opaque bytes.
-- A Preset contributes configuration but grants no identity, credential, Environment binding, or invocation authority.
+- The control plane owns source acceptance, typed Presets, model-integration revisions, immutable definition revisions, dependency locks, and durable Executions.
+- Foundation definition records contain only Foundation-owned serializable data. They contain no Python class, plugin instance, Model, Toolset, Capability, callable, client, or credential.
+- The worker verifies Host locks and uses trusted installed adapters to reconstruct a process-local Harness `AgentDefinition`.
+- Every logical run receives fresh `RunBindings`, including an explicit `ModelRunBinding` when hosted model aliases must fail closed rather than delegate to native inference.
+- One Foundation Attempt may contain several internal Harness model attempts; those inner attempts are not durable Attempt generations.
+- A stale worker cannot commit a checkpoint, lifecycle event, client feedback, child result, usage record, or terminal outcome.
+- Native deferred external calls and approvals remain distinct; Foundation owns durable pending state and authenticated feedback, while the external client owns its side effects.
+- Process-local Harness completion, durable Host completion, event delivery, external delivery, usage recording, billing, and payment are independent facts.
 
 ## Specification Conventions
 
-- Python-like schemas are conceptual typed contracts unless a document explicitly defines a wire format.
-- A definition revision is immutable; changing source, Presets, dependency locks, or materialized content creates another revision.
-- `Ref` values identify another entity or revision and grant no authority.
-- Process-local resolved objects never become durable definition payloads.
+- Python-like schemas are conceptual unless explicitly declared as API or storage formats.
+- A definition revision is immutable; changing materialized content or a dependency lock creates another revision.
+- `Ref` values identify entities or revisions and grant no authority.
+- Process-local Python objects are reconstructed and never become durable payloads.

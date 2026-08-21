@@ -14,7 +14,7 @@ This contract owns language-neutral service semantics. It fixes the first-party 
 | ----------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Execution and Attempt state                     | [Durable Execution Lifecycle](03-execution-lifecycle.md) | API projects the authoritative resource                                   |
 | Creation and command idempotency                | Foundation Service API                                   | Commits stable receipts before returning success                          |
-| Process-local enqueue, suspend, and cancel      | Harness `HarnessRunStream`                               | Attempt worker invokes after durable command acceptance                   |
+| Process-local cancellation                      | Harness `HarnessRunStream.cancel()`                      | Attempt worker invokes after durable command acceptance                   |
 | Durable lifecycle event log and replay cursor   | Foundation Service                                       | Authority for reconnect and downstream projection                         |
 | High-frequency model/tool stream                | Harness and live delivery adapter                        | Optional observation; not necessarily durable or replayable               |
 | Outbound webhook delivery                       | Hosted connector plugin                                  | At-least-once projection of committed durable events                      |
@@ -42,10 +42,10 @@ flowchart TB
     Revisions[revisions]
     Executions[executions]
     Core[create, get, attempts, events]
-    Commands[steer, request_suspend, cancel]
+    Commands[cancel]
     ClientTools[client_tool_feedback]
     Subagents[subagents]
-    SubagentOps[spawn, status, steer, cancel, result_deliveries]
+    SubagentOps[spawn, status, cancel, result_deliveries]
     Tasks[tasks]
     TaskOps[list, create, claim, update]
 
@@ -119,7 +119,7 @@ Authentication failure, policy denial, invalid input, unknown definition revisio
 
 ## Asynchronous Subagent Operations
 
-The Foundation Subagent Capability is definition-selected, artifact-locked model-visible behavior with a trusted Host adapter over typed service operations. The same locked Foundation extension export registers the behavior and declares the adapter's stable Host-bound run role, catalog-internal concrete type, and fixed Capability ID. Foundation run assembly names that role in `RunBindings.required_run_capability_roles` and supplies exactly one fresh adapter in `RunBindings.capabilities`. The catalog-bound Harness validates the input before Pydantic binding, then revalidates the finalized replacement in its first ordered `before_run()` after all concurrent `for_run()` calls; a missing, duplicate, or incompatible adapter fails before model work with no child submission. The behavior Capability reads the current executable's immutable immediate-child collection from `AgentContext.subagents` during the run lifecycle; no build integration captures that collection, and it does not inspect a sibling's final replacement during binding. The adapter supplies current authority and contributes no undeclared model-visible tools. Model-visible arguments select only an immediate child name from the built collection, bounded task input, an optional previously returned spawn ID for status/control, and Capability-defined presentation options. Each tool operation obtains the peer anew from finalized `RunContext.capabilities` by fixed ID and expected type. That adapter owns the typed service collaborator and current parent Execution, Attempt, Harness run, and invocation identity from trusted bindings, then applies the locked edge configuration to produce bounded child input, effective limits, and the task-sharing choice. The service independently derives the parent Agent instance, exact definition target, and applicable service policy from its immutable records and locked definition edge; the model cannot forge those values.
+The Foundation Subagent Capability is definition-selected, artifact-locked model-visible behavior reconstructed by the worker from the immutable Foundation revision. Foundation run assembly supplies exactly one fresh typed service adapter in `RunBindings.capabilities`. Feature-specific setup and each tool operation require its documented public type and stable Capability ID from finalized `RunContext.capabilities`; a missing, duplicate, or incompatible adapter fails before child submission. The behavior Capability reads the current executable's immutable immediate-child collection from `AgentContext.subagents`; topology supplies no authority. Model-visible arguments select only an immediate child name, bounded task input, and any Capability-defined presentation options. The fresh adapter owns the service collaborator and current parent Execution, Attempt, Harness run, and invocation identity, then applies the locked edge configuration to produce bounded child input, effective limits, and the task-sharing choice. The service independently derives the parent Agent instance, exact definition target, and policy from immutable records; the model cannot forge those values.
 
 ```python
 class SpawnSubagentRequest(BaseModel):
@@ -196,7 +196,7 @@ The receipt is an ordinary tool result. It is never `CallDeferred`, contains no 
 
 `status()` reads the authoritative child Execution and delivery ledger through the parent/spawn relationship. It never inspects a parent Harness State registry. A model-visible `wait` helper, when a product offers one, is bounded polling or notification over `status()` and does not place the original spawn call into deferred state.
 
-`steer()` and `cancel()` authorize the caller or parent Agent against the immutable subagent link, then use the child Execution's ordinary fixed-Attempt steer or Execution cancellation command. An Agent-originated operation must also present the still-current parent Attempt ID, generation, and lease fence through its fresh run adapter; a stale parent worker cannot control the child even if it still holds IDs or an old `AgentInstanceContext`. A separately authenticated product Principal follows its own current policy path. The operations return normal `CommandReceipt` values and inherit command idempotency, delivery uncertainty, and cancellation-without-rollback semantics. A parent cannot steer an unrelated child by presenting its ID.
+`cancel()` authorizes the caller or parent Agent against the immutable subagent link, then uses the child Execution's ordinary cancellation command. An Agent-originated operation must also present the still-current parent Attempt ID, generation, and lease fence through its fresh run adapter; a stale parent worker cannot cancel the child even if it still holds IDs or an old `AgentInstanceContext`. A separately authenticated product Principal follows its own policy path. The operation returns a normal `CommandReceipt` and inherits command idempotency and cancellation-without-rollback semantics. A parent cannot cancel an unrelated child by presenting its ID.
 
 ### Result Delivery Operations
 
@@ -204,26 +204,19 @@ The receipt is an ordinary tool result. It is never `CallDeferred`, contains no 
 class RouteSubagentResultRequest(BaseModel):
     delivery_id: str
     expected_version: int
-    route: Literal[
-        "active_parent", "retain", "continuation_execution"
-    ]
+    route: Literal["retain", "continuation_execution"]
 
 
 class SubagentDeliveryReceipt(BaseModel):
     delivery_id: str
     status: SubagentDeliveryStatus
     version: int
-    target_attempt_id: str | None
-    target_generation: int | None
-    accepted_input_sequence: int | None
     continuation_execution_id: str | None
 ```
 
-Child terminal commit creates the initial retained delivery entry before routing. `active_parent` selects one exact current parent Attempt and generation inside the service transaction; callers do not provide a live Harness handle. The service assigns the delivery an Execution-local input sequence in the same ordering domain as accepted steering. The worker does not let it overtake an earlier sequence whose delivery is unknown, converts the bounded child outcome into trusted semantic input, and calls the fixed run's enqueue path. `ExecutionCheckpoint.incorporated_input_sequences` proves later incorporation. Durable `delivered`, `incorporated`, and `delivery_unknown` evidence follows the steering receipt rules, but remains under the delivery ID rather than masquerading as a user steering command.
+Child terminal commit creates the initial retained delivery entry before routing. `retain` leaves the immutable child result available for status, later explicit route, or product retrieval. `continuation_execution` atomically consumes the delivery once, selects a compatible parent checkpoint or state under Host policy, and creates a new Execution targeting the parent Agent with typed `predecessor_execution_id` and `continuation_source_ref` lineage. It never changes the old parent Execution state or injects content into a live Harness run. Identical retries return the same route receipt; a conflicting expected version, route, target, or second continuation consumption fails closed.
 
-`retain` leaves the immutable child result available for status, later explicit route, or product retrieval. `continuation_execution` atomically consumes the delivery once, selects a compatible parent checkpoint or state under Host policy, and creates a new Execution targeting the parent Agent with typed `predecessor_execution_id` and `continuation_source_ref` lineage. It never changes the old parent Execution state. Identical retries return the same route receipt; a conflicting expected version, route, target, or second continuation consumption fails closed.
-
-Automatic policy can invoke the same operation after child terminal commit. An active parent is only eligible when its exact current Attempt can accept semantic enqueue. Otherwise automatic delivery retains the result or creates a new continuation only when explicit product policy authorizes that behavior. Once an active-parent route becomes `delivery_unknown`, policy preserves that uncertainty and cannot fall back to another Attempt or continuation without later authoritative non-delivery evidence. No route maps the child outcome to `DeferredToolResults` or the spawn tool-call ID.
+Automatic policy can invoke the same operation after child terminal commit. It retains the result by default and creates a continuation only when explicit product policy authorizes that behavior. No route maps the child outcome to `DeferredToolResults` or the spawn tool-call ID.
 
 ### Durable Task Operations
 
@@ -261,7 +254,7 @@ class TaskMutationReceipt(BaseModel):
     committed_at: datetime
 ```
 
-A `task_scope_ref` is selected by Host policy and is never a bearer capability. Agent-originated task operations travel through the fresh provider-backed `RunBindings.task_state` cell and carry the current Execution, Attempt ID, generation, lease fence, and the cell's bound stable `AgentInstanceRef`. Before honoring either a receipt replay or a new Agent operation, the service authenticates that originating Attempt ownership is still current and that the bound instance is either the Execution's root instance or an inline child authorized through that current run's trusted lineage; an old worker cannot retrieve a prior success as authority for another effect, refresh the scope revision, or win after takeover. A committed Agent operation retains that trusted provenance in the service's operation record even when the public receipt omits those fields. A separately authenticated product Principal uses another policy path rather than an Agent fence.
+A `task_scope_ref` is selected by Host policy and is never a bearer capability. Agent-originated task operations travel through the fresh provider-backed `TaskStateRunCapability` cell in `RunBindings.capabilities` and carry the current Execution, Attempt ID, generation, lease fence, and the cell's bound stable `AgentInstanceRef`. Before honoring either a receipt replay or a new Agent operation, the service authenticates that originating Attempt ownership is still current and that the bound instance is either the Execution's root instance or an inline child authorized through that current run's trusted lineage; an old worker cannot retrieve a prior success as authority for another effect, refresh the scope revision, or win after takeover. A committed Agent operation retains that trusted provenance in the service's operation record even when the public receipt omits those fields. A separately authenticated product Principal uses another policy path rather than an Agent fence.
 
 Every create, claim, and update has a stable operation ID and canonical request digest covering the selected scope, mutation, and identity-bound `AgentInstanceRef`; reusing an operation ID from another Agent instance conflicts. Within the authenticated operation's durable idempotency domain, the service checks a committed operation receipt before evaluating any expected revision: identical replay returns the original result, while conflicting ID reuse fails closed. A genuinely new create allocates or validates its task ID under the scope transaction and needs no prior scope revision. A claim may omit the revision because current status, dependencies, eligibility, and same-owner rules form its atomic conflict predicate. A general update, dependency edit, owner change, or status transition must carry the exact expected scope revision and conflicts when it is stale. Every path derives owner or actor from the identity-bound cell's stable trusted `AgentInstanceRef` and atomically stores the task mutation, receipt, new revision, and corresponding task event. This ordering makes same-owner claim retry idempotent after a lost response, prevents duplicate creates, and prevents a stale general update from overwriting newer state.
 
@@ -271,18 +264,15 @@ Every Foundation definition that exposes the durable task service uses explicit 
 
 ## Commands and Receipts
 
-Live steering, safe suspend, and cancellation are durable commands whose process-local effects remain separate facts.
+Cancellation is a durable command whose process-local request and durable lifecycle result remain separate facts. Foundation does not expose a Harness live-steering or safe-pause API.
 
 ```python
-type CommandKind = Literal["steer", "suspend", "cancel"]
+type CommandKind = Literal["cancel"]
 
 type CommandStatus = Literal[
     "accepted",
-    "delivered",
-    "incorporated",
     "applied",
     "terminal_without_effect",
-    "delivery_unknown",
     "rejected",
 ]
 
@@ -302,30 +292,11 @@ class CommandReceipt(BaseModel):
 
 A command mutation authenticates the caller, validates the expected Execution version when supplied, chooses its target under one lifecycle transaction, stores the receipt, and appends a durable command event. Repeating an identical idempotency key returns the same receipt; conflicting reuse fails.
 
-### Steering
-
-A steering command always targets one exact active Attempt and generation. It carries bounded `RunInput` content that passes the Harness live-enqueue allowlist; deferred results and client-tool schema changes are rejected. The service assigns each accepted root input and steerable input an Execution-local monotonic input sequence; the root input establishes the initial incorporated-set entry and a steering receipt records its `accepted_sequence`. `accepted` means the service durably owns the fixed-target command. It does not mean the worker called `enqueue()`, Pydantic delivered it, or a checkpoint incorporated it.
-
-For one Attempt, the worker dispatches accepted steering receipts serially in `accepted_sequence` order and uses native queue priority in a way that cannot let a later sequence overtake an earlier one. It does not invoke `enqueue()` for a later receipt while an earlier receipt's delivery is unknown. Across replacement Attempts, an older unknown can coexist with later accepted work, so `ExecutionCheckpoint.incorporated_input_sequences` records the exact proven set rather than a maximum. It never infers a missing lower sequence from a higher incorporated one.
-
-The worker transitions the receipt through these observations:
-
-1. `delivered` after the current fenced Attempt successfully invokes `HarnessRunStream.enqueue()` and durably records the native enqueue ID before dispatching the next sequence;
-2. `incorporated` after a committed checkpoint or terminal state includes that exact accepted sequence in its gap-aware incorporated-input set;
-3. `terminal_without_effect` only when durable routing evidence proves the command never reached the process-local enqueue boundary;
-4. `delivery_unknown` when the worker may have enqueued or consumed the input but no committed checkpoint or delivery receipt proves either outcome.
-
-Attempt loss or Execution terminality alone does not prove non-delivery. A steer command with unknown delivery never silently reroutes to a replacement Attempt, turns into a new Execution, or replays after recovery based only on a missing live event. A later committed checkpoint can still resolve it as incorporated; otherwise the receipt preserves uncertainty. A product that wants next-turn queuing creates another Execution or implements an explicit higher-level scheduler.
-
-### Safe Suspend
-
-A suspend command targets the current Attempt generation. It becomes `applied` only when the service commits `Execution(state="suspended")` with the complete safe-pause checkpoint. Completion, deferred waiting, cancellation, or Attempt replacement can instead resolve it as `terminal_without_effect`. It is not reinterpreted as cancellation.
-
 ### Cancellation
 
 A cancel command targets the Execution and fences future Attempt creation when accepted. The service asks a current worker to invoke native cancellation when one exists. When no current worker can advance state, the lifecycle authority can commit `cancelled` directly after invalidating any old fence and preserving unresolved-effect diagnostics. The receipt becomes `applied` only when the durable `cancelled` transition wins the Execution compare-and-swap. A previously committed terminal result resolves the command as `terminal_without_effect`. Cancellation never reports provider or client-side rollback.
 
-`rejected` records a stable policy, lifecycle, version, or validation refusal when the API chooses to retain a receipt for reconciliation. It never appears as if an accepted command later became unauthorized; a fresh live policy check can still prevent a privileged downstream action and produce an attributed terminal or waiting outcome.
+`rejected` records a stable policy, lifecycle, version, or validation refusal when the API retains a receipt for reconciliation. A fresh live policy check can still prevent downstream cancellation delivery; only the durable compare-and-swap determines whether cancellation became `applied`.
 
 ## Durable Event Log
 
@@ -351,7 +322,7 @@ The durable catalog includes at least:
 - root and asynchronous child Execution acceptance, lineage, and terminal transitions;
 - Attempt acquisition, Harness start correlation, abandonment, and completion;
 - checkpoint selection;
-- waiting, dependency resolution, and safe suspension;
+- deferred waiting and dependency resolution;
 - command acceptance and terminal receipt status;
 - subagent spawn acceptance, task-scope mutation, and child-result delivery routing or incorporation;
 - committed client-tool pending and feedback facts;
@@ -420,7 +391,7 @@ class ServiceError(BaseModel):
 
 Transport status codes and language exceptions map to this envelope without replacing it. Details can include current resource version, expected lifecycle state, retention watermark, or conflicting field identity. They exclude credentials, private URLs, lease fences, stack traces, SQL errors, and arbitrary object representations.
 
-Network timeout without a response is not a service error fact. The client retries or reads using the same idempotency key, command ID, Execution ID, or event cursor according to the operation. For steering, loss after possible process-local dispatch can surface as `delivery_unknown`; a client must not infer safe resubmission from the timeout.
+Network timeout without a response is not a service error fact. The client retries or reads using the same idempotency key, command ID, Execution ID, or event cursor according to the operation. A client never invents a new key merely because acknowledgement was lost.
 
 ## Compatibility
 
@@ -433,10 +404,6 @@ A cursor is opaque and can be invalidated only through the declared retention or
 ### Durable acceptance before streaming
 
 Committing first adds one persistence boundary before low-latency output. It lets clients recover from connection loss without guessing whether work exists and prevents an ephemeral stream from becoming the work owner.
-
-### Fixed-target steering vs. automatic rerouting
-
-A fixed Attempt makes non-delivery explicit and avoids injecting one input into both an old run and a replacement. Products that prefer convenience implement a higher-level policy using receipts rather than hiding the race in the core API.
 
 ### Independent Subagent Execution vs. Deferred Spawn
 
@@ -464,5 +431,5 @@ Execution identity remains stable across retries and deferred resumes without re
 10. Conversation, thread, queue, and workflow grouping remain optional product layers.
 11. Async subagent spawn atomically creates an independent child Execution and returns an ordinary idempotent receipt; it never suspends the parent through deferred tools.
 12. Subagent status and control are parent/link authorized and operate on the child Execution's durable state, not Harness inline State; Agent-originated mutations additionally require a current parent Attempt fence.
-13. One child result delivery is versioned, duplicate-safe, and routed only to a fixed active parent Attempt, retained, or consumed once into a new typed-predecessor continuation Execution; terminal parents never reopen.
+13. One child result delivery is versioned, duplicate-safe, retained, or consumed once into a new typed-predecessor continuation Execution; live and terminal parents never reopen.
 14. Cross-Execution task mutations derive a stable trusted `AgentInstanceRef`, require a fresh Attempt-fenced provider binding for Agent calls, and use operation receipts plus durable compare-and-swap rather than model-supplied ownership, stale snapshots, or shared Python memory.

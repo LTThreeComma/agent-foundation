@@ -14,7 +14,7 @@ from converge_agent_harness.errors import RetryHint, RunError
 from converge_agent_harness.state import HarnessState, decode_messages, encode_messages
 
 RunStatus = Literal["completed", "suspended", "failed", "cancelled"]
-SuspendReason = Literal["deferred", "host_pause"]
+SuspendReason = Literal["deferred"]
 
 _FAILURE_DETAILS_ADAPTER = TypeAdapter(dict[str, JsonValue])
 _EMPTY_FAILURE_DETAILS_JSON = _FAILURE_DETAILS_ADAPTER.dump_json({})
@@ -88,7 +88,7 @@ class HarnessRunResult[OutputT]:
             raise TypeError("usage must be RunUsage")
         if failure is not None and not isinstance(failure, SafeFailure):
             raise TypeError("failure must be SafeFailure or None")
-        if suspend_reason is not None and suspend_reason not in {"deferred", "host_pause"}:
+        if suspend_reason is not None and suspend_reason != "deferred":
             raise ValueError(f"Unsupported suspend reason: {suspend_reason!r}")
         if deferred is not None and not isinstance(deferred, DeferredToolRequests):
             raise TypeError("deferred must be DeferredToolRequests or None")
@@ -104,8 +104,8 @@ class HarnessRunResult[OutputT]:
                 state is not None
                 and output is None
                 and failure is None
-                and suspend_reason is not None
-                and (suspend_reason == "deferred") == (deferred is not None)
+                and suspend_reason == "deferred"
+                and deferred is not None
             )
         elif status == "failed":
             valid = output is None and failure is not None and suspend_reason is None and deferred is None

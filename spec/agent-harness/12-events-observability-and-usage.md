@@ -4,7 +4,7 @@
 
 `HarnessEvent` and `HarnessRunResultEvent` are stable process-local output seams. `AbstractCapability[AgentContext]` adapters produce Harness-owned observations, ordered Harness plugin middleware can transform or suppress non-terminal events and replace the complete result candidate, and one single-consumer `HarnessRunStream` preserves ordering and produces a terminal result event only after final validation and complete run-scoped teardown succeed.
 
-Pydantic AI public events remain the source for model and tool execution and enqueue delivery; its `RunCancelled` is the source terminal signal for both explicit native cancellation and complete-boundary safe pause. The Harness classifies it as suspended only when safe-pause state was committed before native cancellation; every other first-party `RunCancelled` remains cancelled. It adds only context, state, active-run wrapper, safe-suspend, delegation, model-usage observation, and diagnostic events that Pydantic AI does not own. Pydantic AI `RequestUsage`, `RunUsage`, and `UsageLimits` remain authoritative for model-request usage, accumulation, and supported limits.
+Pydantic AI public events remain the source for model and tool execution, and `RunCancelled` is the source terminal signal for native cancellation. The Harness adds only correlation, state, recovery, managed-invocation, delegation, usage-observation, and diagnostic events that Pydantic AI does not own. Pydantic AI `RequestUsage`, `RunUsage`, and `UsageLimits` remain authoritative for model-request usage, accumulation, and supported limits. When semantic recovery starts another inner attempt, events already delivered by the earlier attempt remain observations in the same logical Harness stream and cannot be retracted.
 
 OpenTelemetry uses Pydantic AI's `Instrumentation` Capability plus spans for Harness-owned operations. Durable event delivery, cross-run usage aggregation, valuation, billing, and lifecycle facts belong to the host.
 
@@ -32,7 +32,8 @@ class HarnessExtensionEvent(BaseModel):
     kind: Literal[
         "context",
         "state",
-        "control",
+        "recovery",
+        "invocation",
         "delegation",
         "usage",
         "diagnostic",
@@ -70,14 +71,15 @@ Model and tool events preserve their public Pydantic AI types. This includes nat
 
 `HarnessEventCapability` adapts Pydantic events and emits Harness extensions through the run-local emitter. Extensions cover:
 
-| Kind         | Meaning                                                                                                                                       |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `context`    | Context contribution, omission, compaction, or successfully applied Environment-topology observation                                          |
-| `state`      | State import or export observation, not durable snapshot status                                                                               |
-| `control`    | Wrapper acceptance, committed safe-suspend, or normalized cancellation observation; never a duplicate pending queue or cancellation lifecycle |
-| `delegation` | Inline child or Host-managed asynchronous submission observation                                                                              |
-| `usage`      | One bounded, attributed `ModelUsageObservation` for a newly committed response; not provider billing proof                                    |
-| `diagnostic` | Safe implementation/provider detail without lifecycle authority                                                                               |
+| Kind         | Meaning                                                                                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `context`    | Context contribution, omission, compaction, or successfully applied Environment-topology observation                                        |
+| `state`      | State import or export observation, not durable snapshot status                                                                             |
+| `recovery`   | Bounded inner-attempt interruption, backoff, restart, exhaustion, or normalized cancellation observation; never a durable Host retry fact   |
+| `invocation` | Managed-tool preparation, authorization, approval, dispatch, retry, result-safety, or unknown-outcome observation; never a grant or receipt |
+| `delegation` | Inline child or Host-managed asynchronous submission observation                                                                            |
+| `usage`      | One bounded, attributed `ModelUsageObservation` for a newly committed response; not provider billing proof                                  |
+| `diagnostic` | Safe implementation/provider detail without lifecycle authority                                                                             |
 
 ## Run Stream and Content
 
@@ -106,7 +108,7 @@ A state event or terminal `HarnessRunResultEvent` remains a process-local observ
 
 ## OpenTelemetry
 
-Pydantic AI's public `Instrumentation` Capability owns Agent-run, model-request, tool-execution, enqueue, and cancellation spans where provided. Harness observability capabilities add attributes to the active run span and create spans only for Harness-owned context, state, wrapper validation, safe suspend, and delegation operations.
+Pydantic AI's public `Instrumentation` Capability owns Agent-run, model-request, tool-execution, and cancellation spans where provided. Harness observability capabilities add attributes to the logical run and create spans only for Harness-owned context, state, plugin validation, semantic recovery, and delegation operations.
 
 ```mermaid
 flowchart LR
@@ -153,13 +155,18 @@ class ModelCostCalculator(Protocol):
     def revision(self) -> str: ...
 
     def calculate(self, value: ModelCostInput) -> Decimal | None: ...
+
+
+@dataclass(frozen=True)
+class ModelCostRunCapability(AbstractCapability[AgentContext]):
+    calculator: ModelCostCalculator
 ```
 
-`RunBindings.model_cost_calculator` optionally supplies a Host-owned calculator with a non-empty immutable `revision` identifying its complete custom-and-fallback policy. The core usage-pricing Capability occupies the final normal `after_model_request` position after declared response transforms and before native cost fill and `RunUsage` accumulation. It passes only pricing inputs; `usage` is a copy whose existing `cost` is cleared, and prompt, response content, credentials, and arbitrary provider payloads are absent.
+`ModelCostRunCapability` optionally carries one Host-owned calculator in `RunBindings.capabilities`. It contributes no independent model-facing behavior or authority. The definition-selected usage-pricing Capability resolves exactly zero or one value by stable Capability ID and expected public type; a duplicate, incompatible type, blank revision, or mutable invalid collaborator fails run setup. The calculator's non-empty immutable `revision` identifies its complete custom-and-fallback policy. The core usage-pricing Capability occupies the final normal `after_model_request` position after declared response transforms and before native cost fill and `RunUsage` accumulation. It passes only pricing inputs; `usage` is a copy whose existing `cost` is cleared, and prompt, response content, credentials, and arbitrary provider payloads are absent.
 
 A returned finite non-negative `Decimal` is the estimated USD cost for that complete logical response and replaces any provider-populated value. Returning `None` declines the response: an existing provider cost remains, otherwise Pydantic AI performs its normal `genai-prices` lookup and leaves the cost unknown when no price exists. Invalid numbers and calculator exceptions emit bounded diagnostics and follow the same decline path. This custom-first normal path lets a Foundation Service catalog override selected models while retaining broad built-in coverage. Timestamp-aware calculators can implement peak/off-peak rates without putting a pricing-table schema in the Harness.
 
-This hook is not misrepresented as a universal response-commit seam. An earlier sibling hook can reject with `ModelRetry`, a later incompatible hook can supersede the priced object, and Pydantic can finalize an interrupted partial stream without running `after_model_request`. Those responses retain provider or `genai-prices` pricing and their usage observation reports `custom_pricing_status="not_reached"`; the Harness does not rewrite an already accumulated cost after the fact. Provider continuation segments can also receive native pricing before Pydantic merges them; the custom calculator sees and can override only the final logical response, so segment-specific or cross-time-window valuation requires a future upstream segment-commit seam or provider receipts.
+This hook is not misrepresented as a universal response-commit seam. An earlier sibling hook can reject with `ModelRetry`, a later incompatible hook can supersede the priced object, and Pydantic can finalize an interrupted partial stream without running `after_model_request`. Those responses retain provider or `genai-prices` pricing and their usage observation reports `custom_pricing_status="not_reached"`; the Harness does not rewrite an already accumulated cost after the fact. Provider continuation segments can also receive native pricing before Pydantic merges them; the custom calculator sees and can override only the final logical response. Segment-specific or cross-time-window valuation therefore requires provider receipts or a separate Host reconciliation record and is outside this Harness hook.
 
 The calculator is synchronous, deterministic for its immutable selected catalog revision, and performs no network or storage I/O on the model path. A Host refreshes or resolves catalog data before the run and injects a ready calculator. The Harness validates but does not interpret the revision; a durable Host retains it with its usage records. Optional price estimation never fails model execution. Currency conversion, discounts, credits, invoices, and financially authoritative settlement stay outside this USD estimate.
 
@@ -211,7 +218,7 @@ Inline child observations retain the child's run ID, sequence, ordinal, and line
 
 `DelegationCapability` passes the parent's live `RunContext.usage` to every inline child. A nested inline tree therefore accumulates into one object, and the root result includes the root run plus all inline descendants. The internally consumed child result contains a cumulative snapshot at the child's terminal boundary, not a child-only delta; per-child durable attribution comes from forwarded child `ModelUsageObservation` values rather than subtraction from the shared total, while Pydantic messages and telemetry remain diagnostic observations.
 
-Because inline descendants share `RunUsage`, their fresh child bindings use the same `ModelCostCalculator` selection as the root; mixing catalog policies inside one shared accumulator is rejected. Host-managed asynchronous children have independent runs and can select another catalog revision. The child receives the fieldwise stricter intersection of the parent's effective `UsageLimits`, any explicit `SubagentDefinition.usage_limits`, and current delegation policy. Pydantic AI checks cumulative limit fields against the shared aggregate visible at that run's own request and tool boundaries; `per_request_input_tokens_limit` remains local to each request. The limits are not a fresh allowance measured from child entry, but the checks are also not atomic across independent inline runs. Parallel children can race before usage updates, and enclosing delegation tool calls can be counted after child work. Native enforcement therefore constrains each run from current shared usage without promising a hard tree-wide budget. Strict aggregate admission requires separate host serialization or reservation policy.
+Because inline descendants share `RunUsage`, their fresh child bindings carry a `ModelCostRunCapability` with the same calculator selection as the root; mixing catalog policies inside one shared accumulator is rejected. Host-managed asynchronous children have independent runs and can select another catalog revision. The child receives the fieldwise stricter intersection of the parent's effective `UsageLimits`, any explicit `SubagentDefinition.usage_limits`, and current delegation policy. Pydantic AI checks cumulative limit fields against the shared aggregate visible at that run's own request and tool boundaries; `per_request_input_tokens_limit` remains local to each request. The limits are not a fresh allowance measured from child entry, but the checks are also not atomic across independent inline runs. Parallel children can race before usage updates, and enclosing delegation tool calls can be counted after child work. Native enforcement therefore constrains each run from current shared usage without promising a hard tree-wide budget. Strict aggregate admission requires separate host serialization or reservation policy.
 
 ### Host-Managed Asynchronous Children and Resume
 

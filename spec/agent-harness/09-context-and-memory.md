@@ -122,12 +122,14 @@ class TaskStateCell(Protocol):
     ) -> Task: ...
 
 
-type TaskStateRunBindingSource = Literal["local_borrowed", "provider"]
+type TaskStateRunCapabilitySource = Literal[
+    "local_borrowed", "provider"
+]
 
 
 @dataclass(frozen=True)
-class TaskStateRunBinding:
-    source: TaskStateRunBindingSource
+class TaskStateRunCapability(AbstractCapability[AgentContext]):
+    source: TaskStateRunCapabilitySource
     cell: TaskStateCell
 ```
 
@@ -141,11 +143,11 @@ The Capability:
 - exposes a typed `TaskStateCell` for linearizable local or provider-backed task mutations;
 - defines the explicit child task projection without sharing a whole context or State map.
 
-The Working State Capability configuration fixes `task_mode` for the definition. `TaskStateRunBinding` is trusted run input carried by `RunBindings.task_state`; it is never built from model-authored configuration or restored from State. Its cell is already bound to the trusted Agent instance, so model tools call `claim()` and `update()` without supplying an owner or actor. The binding source distinguishes a Harness-borrowed local view from a Host provider view only so the owning Capability can reject a mode mismatch.
+The Working State Capability configuration fixes `task_mode` for the definition. `TaskStateRunCapability` is trusted fresh run input carried in `RunBindings.capabilities`; it is never built from model-authored configuration or restored from State. It contributes no independent model behavior. The definition-selected Working State Capability resolves exactly zero or one instance by stable Capability ID and expected public type before exposing provider-backed task tools. Its cell is already bound to the trusted Agent instance, so model tools call `claim()` and `update()` without supplying an owner or actor. The source distinguishes a Harness-borrowed local view from a Host provider view only so the owner can reject a mode mismatch.
 
-`local` is the default. A root or parent Working State Capability owns complete `TaskState` and a process-local cell without requiring a run binding. For a shared inline child, the parent Capability creates a child-identity-bound view over that same local cell and the Delegation Capability places it in the child's final `RunBindings.task_state` with `source="local_borrowed"`. An isolated local child receives no task binding and owns its own local cell. A `local_borrowed` binding is valid only for a child instance with explicit parent lineage: the Delegation Capability creates it for inline execution, while a process-local Host can create it for a Host-owned background child under that Host's lifetime and State rules. An independent root cannot select it.
+`local` is the default. A root or parent Working State Capability owns complete `TaskState` and a process-local cell without requiring a run attachment. For a shared inline child, the parent Capability creates a child-identity-bound view over that same local cell and the Delegation Capability places a `TaskStateRunCapability(source="local_borrowed", cell=...)` in the child's final `RunBindings.capabilities`. An isolated local child receives no task attachment and owns its own local cell. A `local_borrowed` attachment is valid only for a child instance with explicit parent lineage: the Delegation Capability creates it for inline execution, while a process-local Host can create it for a Host-owned background child under that Host's lifetime and State rules. An independent root cannot select it.
 
-In `provider` mode, `tasks` must be absent and every run requires one fresh Host-supplied `TaskStateRunBinding(source="provider")` whose API-backed cell is bound to that run's stable Agent instance. The trusted Host selects the provider scope according to the authored shared or isolated child policy, and that selection is authoritative for the run. A missing binding, source or mode mismatch, an imported local task map, or a Host binding that cannot serve the selected policy fails before task tools become available. The scope, provider client, credentials, Attempt fence, and authority stay behind the fresh cell and never enter `HarnessState`.
+In `provider` mode, `tasks` must be absent and every run requires one fresh Host-supplied `TaskStateRunCapability(source="provider")` whose API-backed cell is bound to that run's stable Agent instance. The trusted Host selects the provider scope according to the authored shared or isolated child policy, and that selection is authoritative for the run. A missing, duplicate, incompatible, source-mismatched, or mode-mismatched Capability, an imported local task map, or a cell that cannot serve the selected policy fails before task tools become available. The scope, provider client, credentials, Attempt fence, and authority stay behind the fresh cell and never enter `HarnessState`.
 
 `provider_cursor` is optional bounded non-authoritative continuation metadata. It can identify the provider codec and last observed revision for diagnostics or compatibility, but it cannot select a scope, seed or overwrite provider data, establish task ownership, or satisfy a provider read. On resume, the fresh provider binding is authoritative and every task operation reads its current state. The owning Capability validates or discards a compatible cursor without treating it as a task snapshot.
 

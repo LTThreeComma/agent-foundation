@@ -15,7 +15,7 @@ sequenceDiagram
 
     Client->>Service: accept execution with optional client-tool replacement
     Service->>Service: validate and freeze effective tool surface
-    Service->>Harness: run with ClientToolRunBinding
+    Service->>Harness: run with ClientToolsRunCapability
     Harness->>PAI: per-run ExternalToolset values
     PAI-->>Harness: DeferredToolRequests.calls
     Harness-->>Service: suspended result and HarnessState
@@ -23,8 +23,8 @@ sequenceDiagram
     Service-->>Client: project committed pending calls
     Client->>Client: validate and execute under client authority
     Client->>Service: idempotent exact-parent results
-    Service->>Service: authorize and build native DeferredToolResults
-    Service->>Harness: new run with prior state and fresh bindings
+    Service->>Service: authorize and build DeferredToolResume
+    Service->>Harness: new run with prior state, resume, and fresh bindings
 ```
 
 This contract reuses the [Harness client-tool contract](../agent-harness/07-tool-execution.md#client-side-external-tools) and Pydantic AI deferred values. It does not create a client callback runtime, a second tool loop, or another deferred state machine.
@@ -54,7 +54,7 @@ class ClientToolRunAttachment(BaseModel):
     toolsets: tuple[ClientToolsetDefinition, ...]
 ```
 
-After validation and durable acceptance, an execution worker converts that exact value to the Harness `ClientToolRunBinding`. The service attachment has no handler, callback endpoint, credential, connection, or bearer capability.
+After validation and durable acceptance, an execution worker converts that exact value to the Harness `ClientToolsRunCapability` and includes it in `RunBindings.capabilities`. The service attachment has no handler, callback endpoint, credential, connection, or bearer capability.
 
 For one newly accepted execution:
 
@@ -137,7 +137,7 @@ The transaction can also create the next Attempt and move the Execution to `runn
 - the same selected definition revision;
 - the exact frozen client-tool surface;
 - the accepted prior `HarnessState`;
-- native `DeferredToolResults` built from the authoritative pending request;
+- `DeferredToolResume` containing the authoritative pending request and its native results;
 - fresh Identity, Environment, policy, credential, checkpoint, telemetry, and other `RunBindings` values.
 
 The service never keeps the original Python task alive and never treats a client result as permission to reuse a prior credential or Environment binding.
