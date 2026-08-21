@@ -34,8 +34,8 @@ The Harness adds:
 - one synchronous `HarnessBuilder` that calls `Agent.from_spec()`;
 - trusted code-first plugins around the outer semantic-input-to-result boundary;
 - fresh `RunBindings` and one `AgentContext` per logical run;
-- an Environment binding entered before the Pydantic run;
-- portable messages plus Capability state in `HarnessState`;
+- an Environment lifecycle aggregate entered before input and Pydantic work, with a Host-retained controller active across the logical run;
+- portable messages, Capability state, and optional portable Environment state in `HarnessState`;
 - normalized process-local events and result combinations;
 - exact Model-history repair and bounded interrupted-execution recovery.
 
@@ -109,16 +109,17 @@ The same context is supplied to every Pydantic attempt inside one logical Harnes
 
 ## Run Flow
 
-01. Enter the fresh Environment binding.
-02. Invoke an optional input factory once and normalize input.
-03. Create `AgentContext` from fresh bindings and copied previous state.
-04. Bind run plugins and freeze `BoundPluginContext`.
-05. Start the plugin chain lazily on first iteration.
-06. Run one Pydantic attempt with a unique inner run ID.
-07. On a recoverable model interruption, normalize public history and repeat within the total attempt budget.
-08. On output, deferred work, cancellation, failure, or hard stop, build one terminal candidate.
-09. Unwind trusted result middleware.
-10. Close all run resources before terminal delivery.
+01. Enter the fresh Environment aggregate and activate its paired controller.
+02. Restore compatible portable Environment data into already selected bindings.
+03. Invoke an optional input factory once and normalize input.
+04. Create `AgentContext` from fresh bindings and copied Capability state.
+05. Bind run plugins and freeze `BoundPluginContext`.
+06. Start the plugin chain lazily on first iteration.
+07. Run one Pydantic attempt with a unique inner run ID.
+08. On a recoverable model interruption, normalize public history and repeat within the total attempt budget while the Environment controller remains active.
+09. On output, deferred work, cancellation, failure, or hard stop, build one terminal candidate.
+10. Unwind trusted result middleware.
+11. Establish the terminal fence and close all run resources before terminal delivery.
 
 Provider-suspended continuation and deferred/HITL values are native Pydantic boundaries and never trigger the Harness semantic attempt loop.
 
@@ -146,7 +147,7 @@ The repository selects a compatible Pydantic AI release and validates only docum
 - public messages, deferred values, output contracts, and usage;
 - interrupted-message states used by bounded recovery.
 
-Each Capability's state version is independent from the Pydantic package version and Harness envelope version.
+Each Capability state version and Environment provider-state codec version is independent from the Pydantic package version and Harness envelope version.
 
 ## Trade-offs
 

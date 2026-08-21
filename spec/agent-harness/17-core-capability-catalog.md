@@ -28,20 +28,20 @@ Model self-healing is a Model wrapper, not a Capability. Interrupted-stream sema
 
 ## Optional Capability Roles
 
-| Role                             | Preferred Pydantic primitive                                      | Owning document                                                          |
-| -------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Managed function policy          | Fresh typed policy Capability consumed by the core wrapper        | [Tool Execution](07-tool-execution.md)                                   |
-| Client-side external tools       | `ExternalToolset` and native deferred values                      | [Tool Execution](07-tool-execution.md)                                   |
-| Environment tools and context    | Capability-owned Toolsets over `BoundEnvironment`                 | [Environment Integration](08-environment-integration.md)                 |
-| Guidance and repository context  | Capability instructions or Toolsets                               | [Context and Memory](09-context-and-memory.md)                           |
-| Compaction                       | Native history/compaction Capability                              | [Context and Memory](09-context-and-memory.md)                           |
-| Working state                    | Capability using one `AgentContextState` namespace                | [Context and Memory](09-context-and-memory.md)                           |
-| Delegation                       | Capability-owned Toolsets over `SubagentCollection`               | [Delegation and Subagents](11-delegation-and-subagents.md)               |
-| Telemetry                        | Pydantic instrumentation and focused Capabilities                 | [Events, Observability, and Usage](12-events-observability-and-usage.md) |
-| Checkpoint observation           | Capability using public complete message boundaries               | [Harness State and Resume](10-snapshot-and-resume.md)                    |
-| Provider-specific Agent behavior | Capability public hooks only when profile/adapter is insufficient | [Input, Model, and Output](16-input-model-and-output.md)                 |
+| Role                             | Preferred Pydantic primitive                                        | Owning document                                                          |
+| -------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Managed function policy          | Fresh typed policy Capability consumed by the core wrapper          | [Tool Execution](07-tool-execution.md)                                   |
+| Client-side external tools       | `ExternalToolset` and native deferred values                        | [Tool Execution](07-tool-execution.md)                                   |
+| Environment tools and context    | Optional `EnvironmentToolsCapability` projecting `BoundEnvironment` | [Environment Integration](08-environment-integration.md)                 |
+| Guidance and repository context  | Capability instructions or Toolsets                                 | [Context and Memory](09-context-and-memory.md)                           |
+| Compaction                       | Native history/compaction Capability                                | [Context and Memory](09-context-and-memory.md)                           |
+| Working state                    | Capability using one `AgentContextState` namespace                  | [Context and Memory](09-context-and-memory.md)                           |
+| Delegation                       | Capability-owned Toolsets over `SubagentCollection`                 | [Delegation and Subagents](11-delegation-and-subagents.md)               |
+| Telemetry                        | Pydantic instrumentation and focused Capabilities                   | [Events, Observability, and Usage](12-events-observability-and-usage.md) |
+| Checkpoint observation           | Capability using public complete message boundaries                 | [Harness State and Resume](10-snapshot-and-resume.md)                    |
+| Provider-specific Agent behavior | Capability public hooks only when profile/adapter is insufficient   | [Input, Model, and Output](16-input-model-and-output.md)                 |
 
-Native tools and Toolsets remain valid code-first `AgentDefinition` inputs. A feature does not need a Harness Capability merely to wrap an existing Pydantic type one-to-one.
+Native tools and Toolsets remain valid code-first `AgentDefinition` inputs. A feature does not need a Harness Capability merely to wrap an existing Pydantic type one-to-one. `EnvironmentToolsCapability` is useful because it combines stable Toolsets with request-dynamic topology context and native notices; the Environment resource itself still enters through the fixed `RunBindings.environment` field.
 
 ## Composition
 
@@ -62,13 +62,13 @@ A Capability needing another run-bound Capability uses Pydantic's public run-bou
 
 ## State
 
-Stateful Capabilities use `AgentContextState.read()` and `write()` with a stable non-blank namespace ID, exact version, and typed Pydantic model. The Harness snapshots all namespaces but does not inspect a global list of active owners. Unknown entries can remain opaque across a run; only the owning read accepts their semantics.
+Stateful Capabilities use `AgentContextState.read()` and `write()` with a stable non-blank namespace ID, exact version, and typed Pydantic model. The Harness snapshots all namespaces but does not inspect a global list of active owners. Unknown entries can remain opaque across a run; only the owning read accepts their semantics. Environment portable state uses the explicit core-owned `HarnessState.environment_state` field and is never stored as an `EnvironmentToolsCapability` namespace.
 
 A trusted plugin can also transform the complete `HarnessState` at the result boundary. This does not create a second Capability lifecycle or provenance system.
 
 ## Authority
 
-Capability presence does not itself grant external authority. Current Identity and Environment enter through typed `RunBindings`; credentials, policy decisions, invocation grants, durable checkpoints, and provider sessions remain with their owning Host or provider adapter.
+Capability presence does not itself grant external authority. Current Identity and Environment enter through typed `RunBindings`; credentials, policy decisions, invocation grants, durable checkpoints, provider launch state, controllers, and provider sessions remain with their owning Host, Harness resource, or provider binding. `EnvironmentToolsCapability` can project only the current facade and cannot mount, refresh, remove, or restore a resource.
 
 A Host that requires a particular run Capability constructs and retains the typed instance it trusts. The Harness does not validate class-free role names against a private catalog. Feature-specific code performs any exact type, ID, policy, or collaborator checks required before side effects.
 
@@ -85,6 +85,7 @@ A Capability is appropriate only for actual Agent/run behavior exposed through p
 | Capability lifecycle and order    | Pydantic AI                                  |
 | Code-first contribution seams     | Harness                                      |
 | One Capability's behavior/state   | Owning Capability package                    |
+| Environment lifecycle/topology    | Harness core and trusted Host controller     |
 | Plugin middleware                 | [Harness Plugin System](05-plugin-system.md) |
 | External authority                | Host or provider                             |
 | Durable package and revision lock | Host                                         |

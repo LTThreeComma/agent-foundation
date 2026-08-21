@@ -37,7 +37,7 @@ class SemanticRunInput:
     value: str | tuple[UserContent, ...] | None
 ```
 
-`run()` and `stream()` accept either an immediate value or one async factory, never both. The factory runs exactly once after the Environment is entered and before plugin middleware or Pydantic execution. It can use trusted run identity, metadata, and the entered Environment but receives no live Pydantic run handle.
+`run()` and `stream()` accept either an immediate value or one async factory, never both. The factory runs exactly once after the Environment core has entered initial provider scopes, restored compatible portable Environment data against the fixed initial topology, and activated the Host-retained controller, but before plugin middleware or Pydantic execution. It can use trusted run identity, metadata, scoped readiness, and the entered Environment without depending on `EnvironmentToolsCapability` or receiving a live Pydantic run handle.
 
 Normalization rules are deliberately small:
 

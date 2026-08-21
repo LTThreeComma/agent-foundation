@@ -4,17 +4,19 @@
 
 Reusable behavior inside the Pydantic Agent loop uses native `AbstractCapability[AgentContext]`. The Harness does not define a second Capability base, lifecycle, ordering graph, or class registry. Trusted native Models, tools, Toolsets, and Capabilities enter `AgentDefinition` directly; fresh run Capabilities enter `RunBindings`.
 
+Environment itself is not a Capability. It is a Harness-entered run lifecycle resource exposed through the fixed `AgentContext.environment` field. The optional `EnvironmentToolsCapability` consumes that field to contribute model tools, stable guidance, dynamic context, and notices; its presence cannot create, activate, replace, authorize, or close an Environment binding.
+
 Harness plugins govern only the outer semantic-input-to-complete-result boundary and may contribute ordinary Pydantic Capabilities.
 
 ## Native Composition
 
-| Pydantic primitive                 | Harness use                                               |
-| ---------------------------------- | --------------------------------------------------------- |
-| `AbstractCapability`               | Core, Agent feature, provider, and Host integration       |
-| `CapabilityOrdering`               | Dependencies, order, and wrapper nesting                  |
-| `AbstractToolset`/`WrapperToolset` | Tool contribution and managed invocation                  |
-| `RunContext[AgentContext]`         | Messages, usage, limits, tools, run-bound peers, and deps |
-| Agent/run Capability binding       | Native reentrant and fresh invocation composition         |
+| Pydantic primitive                 | Harness use                                                 |
+| ---------------------------------- | ----------------------------------------------------------- |
+| `AbstractCapability`               | Agent-loop behavior, model projection, and Host integration |
+| `CapabilityOrdering`               | Dependencies, order, and wrapper nesting                    |
+| `AbstractToolset`/`WrapperToolset` | Tool contribution and managed invocation                    |
+| `RunContext[AgentContext]`         | Messages, usage, limits, tools, run-bound peers, and deps   |
+| Agent/run Capability binding       | Native reentrant and fresh invocation composition           |
 
 Pydantic AI owns `for_agent()`, `for_run()`, Toolset composition, lifecycle hooks, node hooks, and cleanup. Capability authors do not inspect private Agent graph state.
 
@@ -46,7 +48,7 @@ One fresh context is created for every logical Harness run and reused by that ru
 
 - `instance` is the trusted workload, actor, and lineage binding;
 - `state` coordinates detached Capability namespaces;
-- `environment` is the entered provider facade;
+- `environment` is the entered Harness lifecycle facade, independent of Capability composition;
 - `model_binding` is the optional fresh logical-model resolver;
 - `events` emits bounded Harness-owned observations into the one canonical run stream;
 - `plugins` indexes the complete fresh run-bound plugin graph after binding;
@@ -65,7 +67,8 @@ One fresh context is created for every logical Harness run and reused by that ru
 | Contribute instructions or tools      | Native Capability/Toolset                               |
 | Observe model, node, or tool behavior | Native hooks plus `AgentContext.events`                 |
 | Resolve a logical Model               | Thin `ResolveModelId` over `AgentContext.model_binding` |
-| Store continuation data               | `AgentContextState` namespace                           |
+| Store Capability continuation data    | `AgentContextState` namespace                           |
+| Operate on or observe Environment     | Fixed `AgentContext.environment` resource               |
 | Persist a checkpoint candidate        | Host adapter using exported `HarnessState`              |
 
 A Capability that needs another run-bound Capability uses Pydantic's public run-bound mapping after binding. A Capability contributed by a Harness plugin resolves the matching fresh plugin through `ctx.deps.plugins.require(id, ExpectedType)`.
@@ -108,11 +111,11 @@ The coordinator intentionally has no active-Capability registry. Imported entrie
 
 Trusted Python can intentionally read, replace, migrate, or transfer complete state. Namespace ownership is a composition contract, not a sandbox or cryptographic provenance mechanism.
 
-Pydantic messages live separately in `HarnessState.message_history`. Usage, clients, credentials, policy decisions, queues, locks, Host execution state, plugin objects, and provider sessions are not Capability state.
+Pydantic messages and portable Environment state live in separate `HarnessState` fields. Desired topology, Environment provider lifecycle or launch state, readiness, usage, clients, credentials, policy decisions, queues, locks, Host execution state, plugin objects, and provider sessions are not Capability state. A Capability cannot obtain lifecycle authority by copying an Environment selector or observation into its namespace.
 
 ## State Export
 
-`AgentContext.export_state()` creates a detached `HarnessState` from the supplied complete message view and current snapshot. It performs no persistence I/O and does not consult a Capability codec registry.
+`AgentContext.export_state()` creates a detached `HarnessState` from the supplied complete message view, current Capability snapshot, and portable Environment export. It performs no persistence I/O and does not consult a Capability codec registry; Environment collection is owned by the fixed core resource rather than a Capability namespace.
 
 The normal inner run exports aligned messages and state. Trusted result middleware may return a different well-formed state for handoff, migration, or caching. The Harness does not require equality with `HarnessRunResult.all_messages()`.
 
@@ -120,12 +123,12 @@ The normal inner run exports aligned messages and state. Trusted result middlewa
 
 The categories describe ownership, not subclasses:
 
-| Category             | Examples                                               |
-| -------------------- | ------------------------------------------------------ |
-| Agent feature        | Guidance, compaction, memory, working state            |
-| Provider integration | Environment tools, model behavior, MCP, skills         |
-| Host integration     | Policy, credentials, checkpoint observation, telemetry |
-| Tool behavior        | Managed invocation, external tools, discovery          |
+| Category             | Examples                                                  |
+| -------------------- | --------------------------------------------------------- |
+| Agent feature        | Guidance, compaction, memory, working state               |
+| Provider integration | `EnvironmentToolsCapability`, model behavior, MCP, skills |
+| Host integration     | Policy, credentials, checkpoint observation, telemetry    |
+| Tool behavior        | Managed invocation, external tools, discovery             |
 
 Each feature retains its own narrow collaborators and security checks. The Harness does not collect them into a generic map.
 
@@ -147,13 +150,14 @@ The Harness state API itself does not define `CheckpointStore`, choose a latest 
 
 ## Boundaries
 
-| Concern                              | Owner                                |
-| ------------------------------------ | ------------------------------------ |
-| Capability lifecycle and Toolsets    | Pydantic AI                          |
-| Shared context and state coordinator | Harness                              |
-| One feature's state and behavior     | Owning Capability package            |
-| Plugin middleware                    | [Plugin System](05-plugin-system.md) |
-| Durable checkpoint authority         | Host                                 |
+| Concern                                         | Owner                                |
+| ----------------------------------------------- | ------------------------------------ |
+| Capability lifecycle and Toolsets               | Pydantic AI                          |
+| Shared context and Capability-state coordinator | Harness                              |
+| Environment lifecycle and portable aggregate    | Harness Environment core             |
+| One feature's state and behavior                | Owning Capability package            |
+| Plugin middleware                               | [Plugin System](05-plugin-system.md) |
+| Durable checkpoint authority                    | Host                                 |
 
 ## Trade-offs
 

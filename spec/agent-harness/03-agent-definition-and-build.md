@@ -135,7 +135,7 @@ flowchart LR
 
 The Host may use typed Presets, plugin configuration, provider integration revisions, or artifact locks, but those are Host contracts. It is free to change their serialized representation without changing the Harness API as long as reconstruction produces the same accepted process-local values. The Harness neither verifies a Host artifact digest nor derives Python import paths from untrusted definition data.
 
-Fresh current-run authority does not belong in `AgentDefinition`. Identity, Environment, run-scoped model resolution, policy, credentials, and other invocation collaborators enter through `RunBindings` or their owning fresh Pydantic Capabilities.
+Fresh current-run authority does not belong in `AgentDefinition`. Identity, the Environment aggregate, run-scoped model resolution, policy, credentials, and other invocation collaborators enter through `RunBindings` or their narrowly owning fresh Pydantic Capabilities. `AgentDefinition` deliberately has no `environment`, provider selector, desired topology, or `environment.operations` field. Environment consumers declare and enforce scoped readiness at the operation or owning feature boundary; the optional `EnvironmentToolsCapability` configures only model projection.
 
 ## Failure Semantics
 

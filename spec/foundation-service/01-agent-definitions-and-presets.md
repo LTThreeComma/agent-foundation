@@ -41,7 +41,7 @@ class FoundationAgentSpec(BaseModel):
     capabilities: tuple[FoundationCapabilityConfig, ...] = ()
 ```
 
-Foundation owns these serializable configuration types. They describe enough behavior for trusted adapters to reconstruct a native Pydantic `AgentSpec`, process-local `OutputSpec`, concrete plugins, tools, Toolsets, and Capabilities. They do not attempt to serialize arbitrary Python objects or mirror every Pydantic constructor option.
+Foundation owns these serializable configuration types. They describe enough behavior for trusted adapters to reconstruct a native Pydantic `AgentSpec`, process-local `OutputSpec`, concrete plugins, tools, Toolsets, and Capabilities. `FoundationEnvironmentRequest` is the initial topology template and immutable authority ceiling owned by [Environment Provider Integrations](06-environment-providers.md#definition-configuration); it is not reconstructed into `AgentDefinition` and performs no allocation during materialization. These types do not attempt to serialize arbitrary Python objects or mirror every Pydantic constructor option.
 
 Plugin and Capability configuration uses Foundation-owned discriminated typed schemas selected from operator-approved installed integrations. A configuration type identifies a logical integration and its arguments, not a Python import path. Foundation validates it through that integration's authoring codec without constructing a run-bound object or resolving credentials.
 
@@ -133,7 +133,7 @@ At execution:
 - output configuration reconstructs the process-local `OutputSpec` and validates its schema agreement;
 - model configuration supplies a model name and fresh `ModelRunBinding` or a trusted concrete Model.
 
-Foundation business records never contain plugin or Capability classes, factories, live Toolsets, native Models, output Python types, or collaborators. The Harness has no catalog to reconstruct them on Foundation's behalf.
+Foundation business records never contain plugin or Capability classes, live factories, live Toolsets, native Models, output Python types, or collaborators. They can contain an operator-approved `provider_key`, strict typed canonical parameters, and an exact Environment integration dependency lock; those are selectors for worker reconstruction, not Python factories. The Harness has no catalog to reconstruct them on Foundation's behalf.
 
 Duplicate stable IDs, duplicate model-visible tool names, conflicting output schemas, and unsupported integration configurations fail during materialization or worker reconstruction at the earliest owning boundary.
 
@@ -162,9 +162,10 @@ Materialization:
 3. applies uniquely declared leaf parameters;
 4. selects one effective Model Preset and complete Toolset Preset tuple;
 5. resolves every logical integration to one exact compatible dependency revision;
-6. validates all typed configurations and canonical model settings;
-7. validates recursive child structure, stable IDs, and output schemas;
-8. canonically serializes the Foundation definition, computes its digest, and commits the revision and locks atomically.
+6. validates all typed configurations, canonical model settings, and Environment provider parameters and policy;
+7. locks every Environment provider key allowed by the definition, including dynamic-only keys;
+8. validates recursive child structure, stable IDs, and output schemas;
+9. canonically serializes the Foundation definition, computes its digest, and commits the revision and locks atomically.
 
 Materialization performs no package installation, secret lookup, provider-client construction, Environment allocation, or execution policy grant.
 
@@ -177,6 +178,7 @@ class DefinitionDependencyLock(BaseModel):
         "model_preset",
         "toolset_preset",
         "model_integration",
+        "environment_provider_integration",
         "plugin_integration",
         "capability_integration",
         "tool_integration",
@@ -214,9 +216,11 @@ After an Execution selects one revision, the worker:
 3. reconstructs native `AgentSpec`, `OutputSpec`, model selection, tools, Toolsets, Capabilities, and concrete plugins;
 4. constructs one process-local Harness `AgentDefinition` per executable node;
 5. calls `HarnessBuilder.build()`;
-6. creates fresh run authority separately in `RunBindings`.
+6. resolves locked Environment providers only through the operator-approved registry;
+7. materializes current desired topology and fresh provider bindings under the Attempt lifecycle;
+8. creates fresh run authority separately in `RunBindings`.
 
-Reconstruction cannot mutate the durable revision, add undeclared model-visible behavior, infer arbitrary Python imports, or fall back to an unlocked adapter. A reconstruction failure stops the Attempt before model or tool work.
+Reconstruction cannot mutate the durable revision, add undeclared model-visible behavior, infer arbitrary Python imports, or fall back to an unlocked adapter. Environment materialization is a later Attempt operation with provider I/O and a Host launch envelope; it never runs during pure Agent-definition reconstruction. A reconstruction or required Environment setup failure stops the Attempt before model or tool work.
 
 Self-healing and `ModelRecoveryPolicy` are part of the materialized behavior only when Foundation's definition schema explicitly selects them. Any change to those values creates another definition revision.
 
@@ -239,18 +243,19 @@ Errors identify stable logical integrations and fields without exposing credenti
 
 Changing the Foundation baseline, parameter schema, model/settings contribution, plugin/Capability/tool/output configuration, recovery policy, dependency lock, or reconstruction compatibility creates another immutable revision.
 
-Capability state compatibility remains independently owned by each Capability. Selecting a newer definition does not imply an older `HarnessState` can resume under it; Foundation chooses and applies any explicit migration before starting a run.
+Capability state, Environment portable-state, provider parameter, and provider launch-state compatibility remain independently owned by their respective codecs. Selecting a newer definition does not imply older Harness or launch state can resume under it; Foundation chooses and applies any explicit migration before starting a run.
 
 ## Boundaries
 
-| Concern                                            | Owner                                        |
-| -------------------------------------------------- | -------------------------------------------- |
-| Foundation source, Presets, revisions, locks       | Foundation control plane                     |
-| Native `AgentSpec`, Models, Toolsets, Capabilities | Pydantic AI                                  |
-| Process-local `AgentDefinition` and build          | Agent Harness                                |
-| Reconstruction codecs and adapter artifacts        | Foundation integration packages and operator |
-| Fresh Identity, Environment, model, policy         | Worker `RunBindings` and providers           |
-| Durable execution and state selection              | Foundation lifecycle                         |
+| Concern                                                              | Owner                                                            |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Foundation source, Presets, revisions, locks                         | Foundation control plane                                         |
+| Native `AgentSpec`, Models, Toolsets, Capabilities                   | Pydantic AI                                                      |
+| Process-local `AgentDefinition` and build                            | Agent Harness                                                    |
+| Reconstruction codecs and adapter artifacts                          | Foundation integration packages and operator                     |
+| Environment provider registry, desired topology, and launch envelope | [Environment Provider Integrations](06-environment-providers.md) |
+| Fresh Identity, Environment, model, policy                           | Worker `RunBindings` and providers                               |
+| Durable execution and state selection                                | Foundation lifecycle                                             |
 
 ## Invariants
 
@@ -259,9 +264,10 @@ Capability state compatibility remains independently owned by each Capability. S
 3. Process-local Python objects are reconstructed only inside the trusted worker.
 4. Foundation never relies on a Harness compiler, catalog, export manifest, or serialized plugin spec.
 5. Every logical hosted model locks one integration and receives a fresh required `ModelRunBinding`.
-6. Presets contain no live authority or secret material.
-7. Runtime reconstruction cannot silently add or remove authored Agent behavior.
-8. Changing materialized behavior or dependency locks creates another revision.
+6. Every allowed Environment provider key locks one integration; provider objects and credentials never enter the definition revision.
+7. Presets contain no live authority or secret material.
+8. Runtime reconstruction cannot silently add or remove authored Agent behavior.
+9. Changing materialized behavior or dependency locks creates another revision.
 
 ## Trade-offs
 

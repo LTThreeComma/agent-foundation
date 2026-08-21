@@ -21,19 +21,20 @@ This contract defines logical identities, states, fencing, and completion rules.
 
 ## Boundaries
 
-| Concern                                           | Owner                                                      | Relationship                                                                         |
-| ------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Durable Execution identity and state              | Foundation Service                                         | Sole public lifecycle authority                                                      |
-| Attempt lease, generation, and commit fence       | Foundation Service scheduler and execution lifecycle       | Prevent stale workers from advancing durable state                                   |
-| Process-local run, result, and `HarnessState`     | Harness                                                    | Candidate observations submitted by the current Attempt                              |
-| Provider-adapter lifecycle record                 | Environment provider adapter                               | Service has bounded opaque storage custody                                           |
-| Native Environment state and side-effect evidence | Selected Environment provider and affected external system | Provider-specific; EIP runtime evidence exists only in the current daemon generation |
-| Accepted input and command receipts               | [Execution API and Events](04-execution-api-and-events.md) | Inputs to lifecycle transitions, not Attempt state                                   |
-| Durable model-usage records and estimates         | [Usage Recording](05-usage-accounting.md)                  | Independent observation boundary                                                     |
-| Async child acceptance and lineage                | Foundation Service subagent lifecycle                      | Child is an independent Execution                                                    |
-| Shared async task coordination                    | Foundation durable task scope                              | CAS API, never shared Python memory                                                  |
-| Child-result retention and parent routing         | Foundation subagent delivery ledger                        | Later Host input, never a deferred spawn result                                      |
-| Product delivery or webhook completion            | Connector or product                                       | Never commits Execution completion retroactively                                     |
+| Concern                                           | Owner                                                            | Relationship                                                                         |
+| ------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Durable Execution identity and state              | Foundation Service                                               | Sole public lifecycle authority                                                      |
+| Attempt lease, generation, and commit fence       | Foundation Service scheduler and execution lifecycle             | Prevent stale workers from advancing durable state                                   |
+| Process-local run, result, and `HarnessState`     | Harness                                                          | Candidate observations submitted by the current Attempt                              |
+| Desired Environment topology and revision         | [Environment Provider Integrations](06-environment-providers.md) | Execution-owned Host state, distinct from Harness state                              |
+| Provider resource launch envelope                 | Foundation lifecycle and Environment integration                 | Foundation owns binding/incarnation fields; provider owns optional payload codec     |
+| Native Environment state and side-effect evidence | Selected Environment provider and affected external system       | Provider-specific; EIP runtime evidence exists only in the current daemon generation |
+| Accepted input and command receipts               | [Execution API and Events](04-execution-api-and-events.md)       | Inputs to lifecycle transitions, not Attempt state                                   |
+| Durable model-usage records and estimates         | [Usage Recording](05-usage-accounting.md)                        | Independent observation boundary                                                     |
+| Async child acceptance and lineage                | Foundation Service subagent lifecycle                            | Child is an independent Execution                                                    |
+| Shared async task coordination                    | Foundation durable task scope                                    | CAS API, never shared Python memory                                                  |
+| Child-result retention and parent routing         | Foundation subagent delivery ledger                              | Later Host input, never a deferred spawn result                                      |
+| Product delivery or webhook completion            | Connector or product                                             | Never commits Execution completion retroactively                                     |
 
 ## Core Model
 
@@ -74,6 +75,7 @@ class Execution(BaseModel):
     predecessor_execution_id: str | None
     continuation_source_ref: str | None
     task_scope_ref: str | None
+    desired_environment_topology_ref: str | None
     state: ExecutionState
     version: int
     current_attempt_id: str | None
@@ -97,6 +99,8 @@ class Attempt(BaseModel):
 `execution_id` remains stable across every retry and resume. It is the ordinary Foundation Client resource identity. `definition_target` fixes both one immutable revision and one authored-name path through that revision's complete child graph; the empty path selects the root. The accepted input identity and target never change within the Execution. An asynchronous child target is derived from its authenticated parent's target plus one immediate built child name, so its embedded bytes and dependency-lock slice cannot be substituted with an independent child revision. Compatibility migration can translate a durable value through declared codecs without changing semantic target selection; running under another revision creates another Execution with explicit lineage.
 
 `agent_instance_ref` is fixed for the Execution and is the durable non-authoritative root-Agent task-owner identity rebound into each fresh Attempt's root `AgentInstanceContext`; an Attempt or Harness run ID is never a task owner. An inline child has its own stable `AgentInstanceRef` under that root and remains a distinct task owner. An initially accepted top-level Execution has `root_execution_id == execution_id` and no parent, spawn, predecessor, or continuation source. An asynchronous child receives a new stable Agent instance ref, keeps the same root Execution ID, identifies its direct spawning parent Execution and immutable spawn record, has no predecessor, and owns its own acceptance, version, Attempts, state, result, and failure. A new sequential Execution created to incorporate retained child output keeps the lineage root and, when Host continuation policy preserves the logical Agent, its stable Agent instance ref; it targets the same Agent definition path as its predecessor, identifies that predecessor and the exact consumed delivery as `continuation_source_ref`, and has no `spawn_id`. These typed combinations distinguish Agent-hierarchy spawn from sequential continuation instead of overloading one parent field. `task_scope_ref` selects an optional Foundation-owned coordination scope and grants no task or execution authority by possession. When the selected root definition exposes the durable task service, Host policy fixes its scope during Execution acceptance. Child spawn applies the authored edge's `task_state` ceiling: `shared` selects the authorized parent scope, while `isolated` selects no scope or a distinct child-specific scope; product policy can narrow either choice but cannot turn isolated into shared. A continuation Execution preserves the predecessor's scope when it preserves that logical Agent. An Execution without provider-backed task tools has no task scope; the selection never comes from model input or Harness State and is immutable within that Execution.
+
+`desired_environment_topology_ref` selects the latest durably accepted desired Environment topology for this Execution. It is initialized from the immutable definition and can advance by authorized compare-and-swap without changing the definition or Execution identity. Selection does not prove that a live Harness run has applied it; [Environment Provider Integrations](06-environment-providers.md#active-run-reconciliation) owns desired/effective reconciliation.
 
 `version` is the monotonic compare-and-swap domain for lifecycle transitions. `current_attempt_id` identifies the only Attempt that can submit new checkpoints or outcomes. `wait_reason`, `result_ref`, and `failure` are state-constrained values rather than independent status flags.
 
@@ -130,7 +134,7 @@ stateDiagram-v2
 
 `running` means one current Attempt owns progress or that the service is replacing an expired Attempt without changing the public lifecycle. Internal states such as starting, leasing, recovering, or worker-crashed are diagnostics, not new public Execution states. `current_attempt_id` is cleared when a waiting or terminal transition releases worker ownership.
 
-`waiting` means no process-local Harness task remains and an external fact required by this Execution is still unresolved. Stable reason families include deferred external calls or approvals, dependency availability, and unknown-effect reconciliation. Asynchronous child spawn does not place the parent in `waiting`: spawn returns an ordinary receipt and parent work continues independently. Final dependency resolution atomically leaves `waiting` by creating durable resume eligibility or the next Attempt. The owning detail contract supplies typed reason data; [Client-Side Tools](02-client-side-tools.md) owns client-call pending batches.
+`waiting` means no process-local Harness task remains and an external fact required by this Execution is still unresolved. Stable reason families include deferred external calls or approvals, dependency availability, and unknown-effect reconciliation. Asynchronous child spawn does not place the parent in `waiting`: spawn returns an ordinary bounded model result while Foundation retains the durable receipt, and parent work continues independently. Final dependency resolution atomically leaves `waiting` by creating durable resume eligibility or the next Attempt. The owning detail contract supplies typed reason data; [Client-Side Tools](02-client-side-tools.md) owns client-call pending batches.
 
 `completed`, `failed`, and `cancelled` are terminal durable facts. A failed Execution has a bounded safe failure and can identify whether recovery was exhausted or reconciliation established a terminal outcome. A terminal state never reopens; another requested run, including continuation with an asynchronous child result, creates another Execution.
 
@@ -143,10 +147,10 @@ Spawn acceptance atomically:
 1. verifies the current parent Attempt fence, run and tool-call identity, and bounded input;
 2. resolves the exact immediate child edge from the immutable parent target, derives the child definition target, and validates context, limits, and task-sharing choice against that edge;
 3. checks idempotency for that exact parent tool dispatch and returns the prior result for an identical retry;
-4. allocates one stable child Agent instance with parent lineage and selects a compatible shared, isolated, or absent durable task scope; and
+4. allocates one stable child Agent instance with parent lineage, a collision-checked compact `subagent_ref` in the stable parent Agent instance's durable reference namespace, and a compatible shared, isolated, or absent durable task scope; and
 5. creates one immutable spawn link, child `Execution(state="accepted")`, acceptance record, and lifecycle events before making the child runnable.
 
-The parent tool call completes with that receipt and can continue model work. It does not produce `CallDeferred`, create `DeferredToolRequests`, satisfy itself with the eventual child result, or retain a Python task. Spawn identity and child continuation live in Foundation records; the operation neither reads nor updates the parent Delegation State used by blocking inline calls. Reusing the same operation ID with different child, input, limits, or task policy fails closed. An exact same-dispatch retry is idempotent, but a replacement Attempt is a different invocation domain. If an accepted spawn is newer than the selected parent checkpoint, recovery presents that durable fact for reconciliation and does not blindly replay a semantically similar spawn under a new operation ID.
+The parent tool call completes with a bounded ordinary projection containing the compact `subagent_ref` and can continue model work. Full `spawn_id`, child Execution and Agent identities, operation and delivery IDs, target, Attempt/run/tool-call correlation, and the trusted receipt remain Foundation records and do not enter model output by default. The compact reference is a durable parent-scoped selector mapped to the immutable spawn link, never a truncation of or substitute for those identities. It does not produce `CallDeferred`, create `DeferredToolRequests`, satisfy itself with the eventual child result, or retain a Python task. Spawn identity and child continuation live in Foundation records; the operation neither reads nor updates the parent Delegation State used by blocking inline calls. Reusing the same operation ID with different child, input, limits, or task policy fails closed. An exact same-dispatch retry is idempotent and returns the same compact reference, but a replacement Attempt is a different invocation domain. If an accepted spawn is newer than the selected parent checkpoint, recovery presents that durable fact for reconciliation and does not blindly replay a semantically similar spawn under a new operation ID.
 
 When the child Attempt starts, its worker verifies the exact target and dependency locks, then uses trusted reconstruction adapters to build the child's process-local `AgentDefinition`, including its model selection, tools, Toolsets, Capabilities, plugins, output contract, and nested graph. The ordinary Harness builder constructs that child's Agent-bound plugin graph and every invocation derives fresh run-bound instances; no live parent plugin or chain is inherited. The worker reconstructs `AgentInstanceContext` from the fixed child ref and lineage and obtains fresh Environment, policy, credentials, client-tool attachment, model binding, task-state binding, usage accumulator, and other `RunBindings`. No live parent object or ad hoc override substitutes for the child's own revision or binding. The child may itself use inline delegation or spawn further child Executions under the same rules. Parent completion, failure, cancellation, or worker loss does not implicitly cancel an accepted child; cascade cancellation is an explicit Host policy that submits and fences a cancellation against each child Execution. Likewise, child failure does not rewrite the parent outcome.
 
@@ -154,7 +158,7 @@ When the child Attempt starts, its worker verifies the exact target and dependen
 
 Foundation asynchronous parent/child coordination uses a durable task provider keyed by Host-owned `task_scope_ref`. Every Agent-run-originated list, create, claim, or update carries the originating Execution, current Attempt ID and generation, valid lease fence, and the cell's bound stable `AgentInstanceRef`; stale or revoked workers fail before provider mutation. For the root run, that instance equals `Execution.agent_instance_ref`; for an inline child, it is the distinct child ref authorized through the current root run's trusted lineage. The service retains that provenance with each committed Agent operation for stale-owner reconciliation, without requiring those fields in the public mutation receipt. A separately authenticated product or user task API follows its own Principal authorization path and never borrows an Agent run credential.
 
-Each mutation has a stable operation ID, canonical request digest, and immutable receipt. After authenticating current Attempt ownership, the provider first looks up that operation ID in its durable idempotency domain: an already committed matching digest returns the original receipt without re-evaluating the old expected revision, while reuse with different content fails closed. For a genuinely new operation, create allocates or validates its task ID without a prior scope revision; claim may omit the revision because current status, dependencies, eligibility, and same-owner rules are its atomic predicate; every general update, dependency edit, owner change, or status transition must compare the exact expected monotonic scope revision. All families derive owner or actor from the identity-bound cell's stable trusted `AgentInstanceRef` and commit the task change and receipt under one short transaction. Consequently a lost claim response is idempotent, a lost create response cannot create another task, and a stale general update cannot overwrite newer state.
+Each mutation has a stable operation ID, canonical request digest, and immutable receipt. After authenticating current Attempt ownership, the provider first looks up that operation ID in its durable idempotency domain: an already committed matching digest returns the original receipt without re-evaluating the old expected revision, while reuse with different content fails closed. For a genuinely new Agent operation, create allocates the next compact `task-{N}` reference under the scope transaction without a prior scope revision; claim may omit the revision because current status, dependencies, eligibility, and same-owner rules are its atomic predicate; every general update, dependency edit, owner change, or status transition must compare the exact expected monotonic scope revision. All families derive owner or actor from the identity-bound cell's stable trusted `AgentInstanceRef` and commit the task change, sequence allocation, and receipt under one short transaction. The compact task reference is unique only with the hidden `task_scope_ref`, grants no authority, and never replaces operation, receipt, or Agent identity. Consequently a lost claim response is idempotent, a lost create response cannot create another task, and a stale general update cannot overwrite newer state.
 
 Every Foundation definition that exposes the Foundation durable task service selects the Harness Working State Capability's explicit `task_mode="provider"`; definitions without that feature need not install Working State task tools. Each root Attempt receives a fresh `TaskStateRunCapability(source="provider")` whose API-backed cell is bound to `Execution.agent_instance_ref`, the Host-owned scope, and the current Attempt fence. Each inline child with provider-backed task tools receives another fresh cell bound to that child's stable ref and the same Attempt fence; shared policy selects the root scope, while isolated policy selects a distinct child scope. A child without task tools receives no task cell or scope. `WorkingState.tasks` must remain absent; imported local task contents are incompatible and can never seed or overwrite the provider. The optional Harness `ProviderTaskCursor` may retain only provider codec identity and an observed revision, not `task_scope_ref`, task data, mutation receipts, or authority.
 
@@ -188,7 +192,7 @@ class SubagentResultDelivery(BaseModel):
     continuation_execution_id: str | None
 ```
 
-A child terminal transition atomically freezes one bounded terminal-outcome reference containing validated output or a safe failed/cancelled classification, appends child lifecycle events, and creates exactly one delivery ledger entry for the spawn. The delivered semantic value contains no child `HarnessState`, credential, Environment handle, authority, raw exception, or unbounded private message history. Parent input policy revalidates its classification and size before continuation acceptance. This does not mutate or reopen the parent. The entry has two routes under parent and product policy:
+A child terminal transition atomically freezes one bounded terminal-outcome reference containing validated output or a safe failed/cancelled classification, appends child lifecycle events, and creates exactly one delivery ledger entry for the spawn. The delivered semantic value identifies the child to the model with the same compact `subagent_ref`; it contains no durable child or delivery ID, child `HarnessState`, credential, Environment handle, authority, raw exception, or unbounded private message history. Parent input policy revalidates its classification and size before continuation acceptance. This does not mutate or reopen the parent. The entry has two routes under parent and product policy:
 
 - **retained:** remain queryable through spawn/status APIs until authorized consumption, expiry, or cancellation policy wins its version fence;
 - **continuation Execution:** atomically consume the entry once into a newly accepted Execution targeting the predecessor parent Agent definition, with typed predecessor and continuation-source lineage, selected compatible parent checkpoint or state, and the child result as new Host input.
@@ -200,6 +204,7 @@ A live or terminal parent is never reopened or injected through an undocumented 
 Attempt acquisition atomically selects the input checkpoint, increments the generation, creates the Attempt, and makes it current. When acquisition follows a resolved dependency, the same transaction consumes one durable resume-eligibility fact keyed by its exact pending or reconciliation source; retrying acquisition cannot consume that fact into another Attempt. The scheduler then gives one worker an opaque lease fence. Only a request carrying the current Attempt and valid fence can:
 
 - acknowledge Harness start and bind its `run_id`;
+- atomically select a staged encrypted provider launch-envelope entry and a higher provider-incarnation desired Environment revision when materialization proves a new logical resource, and record initial or dynamic effective topology observations tied to this Attempt generation and exact Harness run ID;
 - accept a subagent spawn from that active run;
 - accept an Agent-run-originated durable task mutation or child-control command;
 - commit a checkpoint;
@@ -223,11 +228,14 @@ class ExecutionCheckpoint(BaseModel):
     generation: int
     sequence: int
     harness_state: HarnessState
+    effective_environment_topology_ref: str | None
     launch_state_ref: str | None
     incorporated_input_sequences: tuple[int, ...]
 ```
 
-`harness_state` is the complete portable Harness value for this Execution's root run. It can include nested inline child message histories and private Capability state, but it contains no Foundation asynchronous child Execution, durable task map, or result-delivery record. `launch_state_ref` identifies a bounded encrypted Host envelope containing definition provenance, provider-adapter lifecycle data, exact client-tool attachment, delivery/recovery correlation, and any provider-specific continuation selector required beyond public Pydantic messages. Referenced envelopes contain no live client, socket, task, plaintext credential, or provider object. Each provider adapter and feature codec retains semantic ownership of its typed portion; Foundation defines no universal model route-pin schema.
+`harness_state` is the complete portable Harness value for this Execution's root run. It can include nested inline child snapshots, private Capability state, and portable `environment_state`, but it contains no Foundation asynchronous child Execution, durable task map, desired Environment topology, provider launch authority, or result-delivery record.
+
+`effective_environment_topology_ref` identifies the complete Foundation desired-topology revision that this exact Harness run had actually published when the candidate was exported. The initial reference is selectable only after `EnvironmentTopologyController.wait_until_active()` proves initial publication and the current fenced Attempt records an effective observation with `harness_run_id`; later references require the corresponding dynamic apply receipt and fenced observation. A desired revision, Harness event, or model notice is not equivalent evidence. `launch_state_ref` identifies a bounded encrypted Host envelope containing definition provenance, provider resource-incarnation identity and binding revision for every selected Environment slot, optional provider launch/reattachment data partitioned by binding and codec revision, exact client-tool attachment, delivery/recovery correlation, and any model-provider-specific continuation selector required beyond public Pydantic messages. Referenced envelopes contain no live client, socket, task, controller, plaintext credential, readiness event, operation handle, or provider object. Each provider integration and feature codec retains semantic ownership of its typed portion; Foundation defines no universal model route-pin or Environment launch schema.
 
 `sequence` is monotonic within the Attempt. `incorporated_input_sequences` is a strictly sorted, duplicate-free, gap-aware set of Execution-local input sequences proven represented by this checkpoint's message history or a declared compaction of it. It includes the accepted root input once incorporated and can retain entries from prior Attempts. A later sequence can therefore be represented without falsely confirming an earlier `delivery_unknown` or `terminal_without_effect` command. Terminal-state selection applies the same rule. [Execution API and Events](04-execution-api-and-events.md) owns those receipts, ordered dispatch, and delivery states.
 
@@ -235,9 +243,10 @@ A `HarnessCheckpoint` is only a process-local candidate. The service commits it 
 
 1. the Attempt fence and expected Execution version remain current;
 2. the candidate is a complete semantic boundary;
-3. referenced Host launch state has passed every owning provider and feature validation and bound;
-4. checkpoint sequence does not move backward, and the incorporated-input set only adds sequences that authoritative receipts and this exact state prove incorporated;
-5. any immutable payload bytes are durable before the authority transaction, and checkpoint plus launch-state selection and its lifecycle event commit atomically.
+3. a current fenced effective observation ties the exact `attempt_id`, generation, `harness_run_id`, topology reference and version, and provider launch-state envelope to the compatible exported run snapshot, and any present `EnvironmentState.observed_topology_version` matches it;
+4. referenced Host launch state has passed every owning provider and feature validation and size bound;
+5. checkpoint sequence does not move backward, and the incorporated-input set only adds sequences that authoritative receipts and this exact state prove incorporated;
+6. any immutable payload bytes are durable before the authority transaction, and checkpoint plus effective-topology/launch-state selection and its lifecycle event commit atomically.
 
 A checkpoint is Execution-owned continuation state with producing-Attempt provenance. It can be emitted after a complete model, tool-batch, compaction, or terminal boundary, but it is not owned by a generic Step or Item and does not prove that an external side effect completed. The current model intentionally defines no durable `Step` resource.
 
@@ -249,16 +258,28 @@ A newer committed candidate can supersede the selected checkpoint, but old value
 sequenceDiagram
     participant Scheduler
     participant Worker
-    participant Provider
+    participant Provider as Environment provider integration
     participant Harness
     participant Store as Durable lifecycle
 
     Scheduler->>Store: atomically create current Attempt and fence
     Scheduler-->>Worker: Attempt, selected checkpoint, opaque fence
-    Worker->>Provider: attach or provision and create fresh binding
-    Provider-->>Worker: EnvironmentRunBinding
+    Worker->>Provider: materialize desired topology with selected launch-envelope entries
+    Provider-->>Worker: fresh unentered bindings, incarnation outcomes, and launch-envelope entries
+    opt replacement resource not represented by desired revision
+        Worker->>Store: fenced launch-envelope selection plus binding/topology revision bump
+    end
+    Worker->>Worker: recheck desired winner and build EnvironmentRunBinding
     Worker->>Harness: start with definition, fresh RunBindings, and selected state
+    Worker->>Worker: retain paired EnvironmentTopologyController
+    Worker->>Harness: wait_until_active proves initial publication and state restore
+    Worker->>Store: fenced initial effective-topology observation with Harness run ID
     Harness-->>Worker: process-local events and checkpoint candidates
+    opt newer authorized desired topology while run active
+        Worker->>Provider: materialize added or refreshed bindings
+        Worker->>Harness: apply complete topology through retained controller
+        Worker->>Store: fenced effective-topology observation
+    end
     Worker->>Store: fenced checkpoint proposals
     alt deferred external call or approval
         Harness-->>Worker: suspended result and state
@@ -290,7 +311,7 @@ Worker or transport loss does not by itself determine the Execution outcome. Aft
 | Possible external mutation without authoritative receipt              | Commit or retain `waiting` with reconciliation reason; do not replay the mutation blindly |
 | Incompatible state, exhausted policy, or established terminal failure | Commit `failed` with bounded reason                                                       |
 
-Recovery always creates a new Attempt and fresh Identity, Environment, policy, credential, model, telemetry, and client-executor bindings. Public provider-suspended history is passed through native Pydantic continuation. If a model integration requires provider-specific target or job data beyond those messages, its typed launch-state codec validates and reconstructs that state under fresh authority or fails explicitly; Foundation does not impose universal pinning or fallback semantics. Recovery never increments a counter on a live Attempt and pretends the old fence is valid.
+Recovery always creates a new Attempt and fresh Identity, Environment provider binding objects, topology controller, policy, credential, model, telemetry, and client-executor bindings. Recreating those process-local objects alone does not increment a durable Environment `binding_revision`. If materialization reaches the prior logical resource, the revision remains; if it creates or attaches another logical resource not already represented by a higher desired revision, the current Attempt must atomically select its staged launch-envelope entry and a higher binding/topology revision before Harness entry. The worker resolves current authorized desired topology and selected provider launch state through exact locked Environment integrations; it never reconstructs topology from `HarnessState`, reuses a prior controller, or treats portable backend data as attachment authority. Public provider-suspended model history is passed through native Pydantic continuation. If a model integration requires provider-specific target or job data beyond those messages, its typed launch-state codec validates and reconstructs that state under fresh authority or fails explicitly; Foundation does not impose universal pinning or fallback semantics. Recovery never increments a counter on a live Attempt and pretends the old fence is valid.
 
 "No unresolved effect" requires affirmative evidence that no dispatch boundary was reached, that replay is read-only or protected by the same provider idempotency key, or that an authoritative provider receipt established the outcome. A crash during an operation without such evidence enters reconciliation or an attributed terminal failure rather than automatic replay. In particular, unmanaged in-process tools and provider-native mutations without receipts cannot be classified as safely undispatched merely because the Host observed no result; the base service does not add a durable dispatch protocol for them.
 
@@ -329,7 +350,7 @@ For cancellation, the service fences new Attempt creation and asks any current w
 
 ## Compatibility
 
-Execution, Attempt, subagent-link, task-scope, result-delivery, checkpoint-envelope, durable-event, Harness-state, provider-lifecycle, and feature-specific continuation versions evolve independently. An upgrade reads old durable values only through declared codecs and migrations. Unknown required state fails before a new Attempt starts and never causes a fallback to accepted input that could replay completed side effects.
+Execution, Attempt, subagent-link, task-scope, result-delivery, checkpoint-envelope, durable-event, Harness-state, desired-Environment-topology, Environment-provider-launch, model-provider-continuation, and feature-specific versions evolve independently. An upgrade reads old durable values only through declared codecs and migrations. Unknown required state fails before a new Attempt starts and never causes a fallback to accepted input that could replay completed side effects.
 
 Public Execution states are stable semantic categories. Additive reason codes and diagnostics do not add new state transitions. Internal lease or scheduling implementations can change without altering Foundation Client behavior.
 
@@ -349,7 +370,7 @@ Giving each asynchronous child its own Execution reuses existing fencing, checkp
 
 ### Complete checkpoints vs. maximum restart progress
 
-Only complete semantic boundaries can be selected. More work may replay after a crash, but no checkpoint claims a partial tool batch or unknown side effect is safe. Durable child spawn acceptance can survive before the parent records its ordinary receipt, so identical invocation retries are idempotent while genuinely ambiguous replay still follows explicit reconciliation rather than guessing semantic equivalence.
+Only complete semantic boundaries can be selected. More work may replay after a crash, but no checkpoint claims a partial tool batch or unknown side effect is safe. Durable child spawn acceptance can survive before the parent records its ordinary compact-reference result, so identical invocation retries return the same receipt and reference while genuinely ambiguous replay still follows explicit reconciliation rather than guessing semantic equivalence.
 
 ## Invariants
 
@@ -359,11 +380,12 @@ Only complete semantic boundaries can be selected. More work may replay after a 
 04. A stale worker cannot accept a child spawn, mutate a durable task scope, control a child Execution, commit a checkpoint, waiting boundary, lifecycle event, or terminal outcome.
 05. A Harness result is a candidate until one fenced durable transition commits it.
 06. Checkpoint selection never moves backward; its gap-aware incorporated-input set never guesses across an unresolved receipt, and state never restores authority.
-07. Provider-specific continuation data beyond public Pydantic messages is selected only through the owning integration's typed launch-state codec and fresh authority.
+07. Provider-specific continuation data beyond public Pydantic messages is selected only through the owning model or Environment integration's typed launch-state codec and fresh authority.
 08. Deferred waiting retains no live Python task.
 09. Worker loss and cancellation never fabricate rollback or a provider side-effect outcome.
 10. Public lifecycle states exclude provider-specific and scheduler-internal recovery states.
 11. Execution completion, child-result delivery or incorporation, external delivery, telemetry export, durable usage recording, billing, and payment remain independent facts.
-12. Async spawn returns an ordinary receipt and never suspends the parent through Pydantic deferred values; every child has independent lifecycle and fresh authority, and parent termination does not silently cancel it.
+12. Async spawn returns an ordinary model projection with a compact parent-scoped `subagent_ref` and never suspends the parent through Pydantic deferred values; internal records retain canonical durable identities, every child has independent lifecycle and fresh authority, and parent termination does not silently cancel it.
 13. One child terminal result creates one versioned delivery entry that can target one active Attempt, remain retained, or be consumed once into a new typed-predecessor continuation Execution; it never reopens a terminal parent.
 14. Cross-worker task sharing uses a fresh Attempt-fenced provider binding, stable operation receipts, Foundation durable CAS semantics, and never shared Python memory or an authoritative task map in Harness State.
+15. Environment desired acceptance, initial or dynamic controller publication, Harness event delivery, model notice delivery, and checkpoint selection are distinct facts; only the current Attempt can record effective publication for its exact Harness run.

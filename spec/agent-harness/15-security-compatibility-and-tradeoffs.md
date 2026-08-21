@@ -41,7 +41,7 @@ flowchart LR
 
 `AgentInstanceContext` is supplied by the trusted Host before model-controlled work. User input, model output, tool arguments, plugin-transformed input/results, metadata, restored state, and environment variables cannot replace it.
 
-`BoundPluginContext` contains only the concrete plugin instances selected at build and freshly bound for the logical run. Plugin ID is lookup correlation, not authority. `HarnessState` cannot add a plugin, Capability, provider, or current-run collaborator.
+`BoundPluginContext` contains only the concrete plugin instances selected at build and freshly bound for the logical run. Plugin ID is lookup correlation, not authority. `HarnessState` cannot add a plugin, Capability, provider, Environment binding, topology entry, controller, or current-run collaborator.
 
 For an allowed managed operation, effective authority is the intersection of:
 
@@ -86,9 +86,11 @@ Client-side external tools have a separate boundary: the Harness produces native
 
 ## Environment Enforcement
 
-Routing selects a binding; it does not grant access. Environment providers own path normalization, mount policy, symlink behavior, resource ceilings, handle visibility, process ownership, port policy, generation fencing, output retention, and native command isolation.
+Routing selects a binding; it does not grant access. The Host alone retains the process-local topology controller, and model content cannot invoke it. Every added or refreshed entry is a fresh trusted provider binding prepared before atomic publication. Environment providers own logical resource authentication, path normalization, mount policy, symlink behavior, resource ceilings, handle visibility, process ownership, port policy, generation fencing, output retention, and native command isolation.
 
-Client-side validation improves errors but never replaces provider enforcement. Handles and references are revalidated against current binding, Identity, policy, and provider generation.
+Client-side validation improves errors but never replaces provider enforcement. Environment authorization intersects exact values from the selected action catalog; an operation family, prefix, wildcard, managed tool ID, EIP capability, or unknown provider string never grants a core action. Operations and handles are revalidated against current binding revision, Identity, policy, and provider generation. Removal or refresh never retargets an old handle; in-flight leases drain against the captured provider and unsafe active handles fence publication.
+
+Direct Local is an explicit embedding trust choice, not native command isolation. Its file operator enforces the configured canonical root, but an allowed child executable runs with the embedding OS account and can have ambient filesystem or network reach beyond its working directory. Direct Local therefore rejects `network="deny"` and rejects read-only roots combined with any shell profile or allowed executable rather than claiming enforcement it does not provide. A Host that needs command confinement uses an Environment provider, such as `agent-envd`, whose resource boundary enforces it.
 
 ## Credential Boundary
 
@@ -104,11 +106,11 @@ This does not prevent trusted Python from allocating an oversized object before 
 
 ## State Integrity
 
-`HarnessState` stores detached public Pydantic messages and detached JSON Capability entries. The envelope validates its version and message codec. Each Capability validates only the namespace it reads through exact ID, version, and typed model.
+`HarnessState` stores detached public Pydantic messages, detached JSON Capability entries, and optional detached provider-defined Environment data in an explicit aggregate field. The envelope validates its version and message codec. Each Capability validates only the namespace it reads through exact ID, version, and typed model; each selected Environment provider validates its own compatible binding entry after fresh binding authority exists.
 
-Unknown namespaces can remain opaque and survive a run. The Harness does not require every entry to belong to the active Capability set or to be accepted before unrelated model work. A Host or trusted plugin can migrate or remove entries before resume.
+Unknown Capability namespaces can remain opaque and survive a run. The Harness does not require every entry to belong to the active Capability set or to be accepted before unrelated model work. An Environment entry that is not selected by current Host topology cannot mount or authorize itself. A Host or trusted plugin can migrate or remove opaque data before resume.
 
-State restores no Identity, credential, policy decision, Environment binding, provider client, route authority, execution lease, pending command, or external side-effect fact. Hosts may encrypt, sign, content-address, bound, retain, or delete stored state without becoming the semantic owner of Capability data.
+State restores no Identity, credential, policy decision, desired topology, Environment binding, provider launch state, provider client, controller, route authority, readiness, execution lease, pending command, or external side-effect fact. Hosts may encrypt, sign, content-address, bound, retain, or delete stored state without becoming the semantic owner of Capability or provider payload data.
 
 ## Model and Recovery Safety
 
@@ -131,16 +133,17 @@ Telemetry export is an observation. Exporter availability does not determine run
 
 ## Compatibility Model
 
-| Axis                                     | Owner                     |
-| ---------------------------------------- | ------------------------- |
-| Harness public Python API                | Harness                   |
-| Native Agent/Model/Capability behavior   | Pydantic AI               |
-| Host definition/revision schema          | Host                      |
-| Reconstruction adapter and artifact lock | Host integration/operator |
-| Harness state envelope                   | Harness                   |
-| Capability state entry                   | Owning Capability         |
-| Provider state/continuation              | Owning provider           |
-| Durable lifecycle/events                 | Host                      |
+| Axis                                     | Owner                         |
+| ---------------------------------------- | ----------------------------- |
+| Harness public Python API                | Harness                       |
+| Native Agent/Model/Capability behavior   | Pydantic AI                   |
+| Host definition/revision schema          | Host                          |
+| Reconstruction adapter and artifact lock | Host integration/operator     |
+| Harness state envelope                   | Harness                       |
+| Capability state entry                   | Owning Capability             |
+| Portable Environment binding-state codec | Owning Environment provider   |
+| Provider launch/reattachment state       | Host and provider integration |
+| Durable lifecycle/events                 | Host                          |
 
 Matching logical IDs or definition digests do not prove artifact or state compatibility. A Host selects a mutually compatible revision and adapter set before construction and performs any explicit state migration before run creation.
 

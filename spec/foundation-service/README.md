@@ -4,7 +4,7 @@
 
 This directory defines `foundation-service`, the optional hosted control and execution service that embeds `agent-harness`.
 
-Foundation owns durable Agent authoring schemas, typed Presets, immutable definition revisions and dependency locks, process-local reconstruction adapters, durable root and asynchronous child Execution lifecycles, worker Attempts, scheduling, continuation selection, client-tool delivery, service APIs, durable events, and usage records.
+Foundation owns durable Agent authoring schemas, typed Presets, immutable definition revisions and dependency locks, process-local reconstruction adapters, Environment provider registry integration and desired topology, durable root and asynchronous child Execution lifecycles, worker Attempts, scheduling, continuation selection, client-tool delivery, service APIs, durable events, and usage records.
 
 It does not redefine the code-first Harness `AgentDefinition`, plugin lifecycle, Pydantic Agent loop, Harness result/state semantics, or provider-native Environment state.
 
@@ -18,6 +18,7 @@ It does not redefine the code-first Harness `AgentDefinition`, plugin lifecycle,
 | [03-execution-lifecycle.md](03-execution-lifecycle.md)                     | Durable Execution and Attempt identity, fencing, checkpoints, recovery, completion, and child delivery                          |
 | [04-execution-api-and-events.md](04-execution-api-and-events.md)           | Foundation Client resources, HTTP boundary, child/task operations, acceptance, commands, durable events, replay, and connectors |
 | [05-usage-accounting.md](05-usage-accounting.md)                           | Per-response observation identity, pricing coverage, deduplication, projections, and accounting boundary                        |
+| [06-environment-providers.md](06-environment-providers.md)                 | Provider registry and locks, desired topology, launch-envelope custody, Attempt materialization, and active-run reconciliation  |
 
 ## Reading Paths
 
@@ -37,12 +38,17 @@ Read `02`, then [Harness Tool Execution](../agent-harness/07-tool-execution.md) 
 
 Read `05`, then [Harness Events, Observability, and Usage](../agent-harness/12-events-observability-and-usage.md).
 
+### Integrate Environment Providers
+
+Read `06`, then [Harness Environment Integration](../agent-harness/08-environment-integration.md) and `03`. Foundation owns provider selection and durable reconciliation; Harness owns the entered resource and process-local topology controller.
+
 ## Authority Rules
 
 - The control plane owns source acceptance, typed Presets, model-integration revisions, immutable definition revisions, dependency locks, and durable Executions.
 - Foundation definition records contain only Foundation-owned serializable data. They contain no Python class, plugin instance, Model, Toolset, Capability, callable, client, or credential.
 - The worker verifies Host locks and uses trusted installed adapters to reconstruct a process-local Harness `AgentDefinition`.
-- Every logical run receives fresh `RunBindings`, including an explicit `ModelRunBinding` when hosted model aliases must fail closed rather than delegate to native inference.
+- Every logical run receives fresh `RunBindings`, including an Environment aggregate materialized from current desired topology and an explicit `ModelRunBinding` when hosted model aliases must fail closed rather than delegate to native inference.
+- The current worker retains the Environment controller only while its Harness run is entered; dynamic desired acceptance and effective topology publication are separately fenced facts.
 - One Foundation Attempt may contain several internal Harness model attempts; those inner attempts are not durable Attempt generations.
 - A stale worker cannot commit a checkpoint, lifecycle event, client feedback, child result, usage record, or terminal outcome.
 - Native deferred external calls and approvals remain distinct; Foundation owns durable pending state and authenticated feedback, while the external client owns its side effects.

@@ -4,30 +4,30 @@
 
 This directory defines `agent-harness`, the Pydantic AI-based process-local execution library used by embedded applications and hosted workers.
 
-The Harness owns code-first Agent construction, trusted outer plugins, fresh typed run context, Environment binding, optional run-scoped model resolution, bounded model-interruption recovery, native Pydantic execution, portable continuation state, normalized events, results, and cleanup. It does not own durable Agent schemas, Presets, artifact installation, execution records, queues, worker leases, delivery, or billing.
+The Harness owns code-first Agent construction, trusted outer plugins, fresh typed run context, the Environment aggregate lifecycle and dynamic topology core, optional run-scoped model resolution, bounded model-interruption recovery, native Pydantic execution, portable continuation state, normalized events, results, and cleanup. It does not own durable Agent schemas, Presets, artifact installation, execution records, queues, worker leases, delivery, or billing.
 
 ## Document Catalog
 
-| Document                                                                                 | Owning contract                                                                                          |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| [00-overview.md](00-overview.md)                                                         | Architecture, recovery layering, completion boundaries, and principles                                   |
-| [01-pydantic-ai-foundation.md](01-pydantic-ai-foundation.md)                             | Native Pydantic AI primitive mapping and compatibility                                                   |
-| [02-domain-model.md](02-domain-model.md)                                                 | Process-local identities, entities, and version boundaries                                               |
-| [03-agent-definition-and-build.md](03-agent-definition-and-build.md)                     | Code-first `AgentDefinition`, builder, executable ownership, and Host reconstruction                     |
-| [04-capability-model.md](04-capability-model.md)                                         | Native Capability composition, `AgentContext`, and namespaced state                                      |
-| [05-plugin-system.md](05-plugin-system.md)                                               | Trusted code-first plugins, ordering, binding, middleware, result/state composition, and cleanup         |
-| [06-execution-context-and-lifecycle.md](06-execution-context-and-lifecycle.md)           | Logical run lifecycle, inner model attempts, cancellation, terminal results, and cleanup                 |
-| [07-tool-execution.md](07-tool-execution.md)                                             | Native and managed function tools, client-side external tools, policy, credentials, and deferred results |
-| [08-environment-integration.md](08-environment-integration.md)                           | `BoundEnvironment`, provider operations, routing, state, and enforcement                                 |
-| [09-context-and-memory.md](09-context-and-memory.md)                                     | History, context assembly, working state, compaction, and memory boundary                                |
-| [10-snapshot-and-resume.md](10-snapshot-and-resume.md)                                   | `HarnessState`, interrupted-history normalization, import/export, and Host persistence boundary          |
-| [11-delegation-and-subagents.md](11-delegation-and-subagents.md)                         | Child topology, inline delegation, and Host asynchronous-child boundary                                  |
-| [12-events-observability-and-usage.md](12-events-observability-and-usage.md)             | Events, telemetry, native usage, and accounting boundary                                                 |
-| [13-hosting-contract.md](13-hosting-contract.md)                                         | Host-owned schemas/reconstruction, fresh bindings, durable lifecycle, and completion mapping             |
-| [14-public-api-and-packaging.md](14-public-api-and-packaging.md)                         | Public Python API, package boundary, errors, and compatibility                                           |
-| [15-security-compatibility-and-tradeoffs.md](15-security-compatibility-and-tradeoffs.md) | Trust boundaries, authority, data safety, compatibility, and trade-offs                                  |
-| [16-input-model-and-output.md](16-input-model-and-output.md)                             | Native input, thin model resolution, self-healing, semantic recovery, streaming, and output              |
-| [17-core-capability-catalog.md](17-core-capability-catalog.md)                           | Documentation catalog for mandatory and optional Capability composition roles                            |
+| Document                                                                                 | Owning contract                                                                                                                    |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| [00-overview.md](00-overview.md)                                                         | Architecture, recovery layering, completion boundaries, and principles                                                             |
+| [01-pydantic-ai-foundation.md](01-pydantic-ai-foundation.md)                             | Native Pydantic AI primitive mapping and compatibility                                                                             |
+| [02-domain-model.md](02-domain-model.md)                                                 | Process-local identities, entities, and version boundaries                                                                         |
+| [03-agent-definition-and-build.md](03-agent-definition-and-build.md)                     | Code-first `AgentDefinition`, builder, executable ownership, and Host reconstruction                                               |
+| [04-capability-model.md](04-capability-model.md)                                         | Native Capability composition, `AgentContext`, and namespaced state                                                                |
+| [05-plugin-system.md](05-plugin-system.md)                                               | Trusted code-first plugins, ordering, binding, middleware, result/state composition, and cleanup                                   |
+| [06-execution-context-and-lifecycle.md](06-execution-context-and-lifecycle.md)           | Logical run lifecycle, inner model attempts, cancellation, terminal results, and cleanup                                           |
+| [07-tool-execution.md](07-tool-execution.md)                                             | Native and managed function tools, client-side external tools, policy, credentials, and deferred results                           |
+| [08-environment-integration.md](08-environment-integration.md)                           | Environment lifecycle resource, provider bindings, dynamic topology, optional model projection, operations, state, and enforcement |
+| [09-context-and-memory.md](09-context-and-memory.md)                                     | History, context assembly, working state, compaction, and memory boundary                                                          |
+| [10-snapshot-and-resume.md](10-snapshot-and-resume.md)                                   | `HarnessState`, interrupted-history normalization, import/export, and Host persistence boundary                                    |
+| [11-delegation-and-subagents.md](11-delegation-and-subagents.md)                         | Child topology, inline delegation, and Host asynchronous-child boundary                                                            |
+| [12-events-observability-and-usage.md](12-events-observability-and-usage.md)             | Events, telemetry, native usage, and accounting boundary                                                                           |
+| [13-hosting-contract.md](13-hosting-contract.md)                                         | Host-owned schemas/reconstruction, fresh bindings, durable lifecycle, and completion mapping                                       |
+| [14-public-api-and-packaging.md](14-public-api-and-packaging.md)                         | Public Python API, package boundary, errors, and compatibility                                                                     |
+| [15-security-compatibility-and-tradeoffs.md](15-security-compatibility-and-tradeoffs.md) | Trust boundaries, authority, data safety, compatibility, and trade-offs                                                            |
+| [16-input-model-and-output.md](16-input-model-and-output.md)                             | Native input, thin model resolution, self-healing, semantic recovery, streaming, and output                                        |
+| [17-core-capability-catalog.md](17-core-capability-catalog.md)                           | Documentation catalog for mandatory and optional Capability composition roles                                                      |
 
 ## Reading Paths
 
@@ -45,7 +45,7 @@ Read `06`, `10`, and `16`. Provider transport retry, exact history repair, seman
 
 ### Integrate Tools or Environments
 
-Read `07`, `08`, `13`, and `15`. For durable client-tool delivery, also read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
+Read `07`, `08`, `13`, and `15`. Environment is a fixed run lifecycle resource; `EnvironmentToolsCapability` is only its optional model-facing projection. For durable client-tool delivery, also read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
 
 ### Implement Hosting or Persistence
 

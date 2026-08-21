@@ -95,7 +95,7 @@ The Harness is built directly on Pydantic AI 2:
 - `RunBindings` supplies fresh Agent instance, Environment, optional `ModelRunBinding`, run Capabilities, and metadata;
 - one logical Harness run owns one context, Environment, plugin graph, state coordinator, usage accumulator, and public run ID;
 - bounded model recovery can start several Pydantic inner attempts with unique inner run IDs inside that logical run;
-- `HarnessState` carries public messages and detached Capability JSON namespaces only;
+- `HarnessState` carries public messages, detached Capability JSON namespaces, and optional portable Environment backend data; desired topology, provider incarnation envelope, and launch payload remain Host-owned;
 - Pydantic AI owns native Model profiles, transport/output retries, provider-suspended continuation, deferred external calls/approvals, Toolsets, messages, events, and usage.
 
 Plugins are trusted code-first objects. The Harness does not compile serialized Agent definitions, discover packages, or maintain an extension catalog. A hosted Host owns serializable definition schemas and reconstructs process-local Python values through trusted locked adapters.
@@ -117,11 +117,11 @@ Recovery never converts missing evidence into rollback or exactly-once success. 
 
 ## Environment Foundation
 
-`BoundEnvironment` gives trusted tools and Capabilities a run- and Identity-bound facade over provider-neutral file, shell, process, port, and optional backend-state operations. Direct local implementations and EIP-backed implementations are first-class peers.
+Environment is a Harness-owned run lifecycle resource, not a Capability. `BoundEnvironment` gives trusted code and optional model-facing Capabilities a stable run- and Identity-bound facade over provider-neutral file, shell, process, and port operations. Its paired Host-retained controller activates after initial portable-state restore and supports atomic add, refresh, and removal throughout the active logical run. Direct local and EIP-backed implementations are first-class peers.
 
-The Harness adapts EIP through `converge-agent-envd-client`; other trusted consumers such as product file gateways can use that client independently. `agent-envd` implements JSON-RPC control plus raw bidirectional file transfer and owns daemon-generation resources, session-scoped transfer handles, receipts, cursors, output retention, and command containment. Product/browser authentication stays at the gateway, and the envd key never reaches the browser. The Host selects providers and topology. The Harness imports no vendor provisioning API, and Foundation Service does not persist a generic Sandbox resource.
+The Harness adapts EIP through `converge-agent-envd-client`; other trusted consumers such as product file gateways can use that client independently. `agent-envd` implements JSON-RPC control plus raw bidirectional file transfer and owns daemon-generation resources, session-scoped transfer handles, receipts, cursors, output retention, and command containment. Product/browser authentication stays at the gateway, and the envd key never reaches the browser. The Host selects providers and desired topology and materializes trusted process-local bindings. The Harness imports no vendor provisioning API, and Foundation Service does not persist a generic Sandbox resource.
 
-Provider state can enter `HarnessState` only through an owning Capability namespace and a provider-defined portable JSON codec. Live clients, sockets, credentials, process handles, and provider authority do not become Harness state.
+Provider-defined portable backend data can enter only the explicit `HarnessState.environment_state` field after fresh bindings are selected. Provider resource-incarnation evidence and optional launch/reattachment payload remain in a separate encrypted Host envelope. Live clients, sockets, credentials, process handles, readiness, controllers, and provider authority do not become Harness state. Optional `EnvironmentToolsCapability` contributes stable tools and dynamic model context but owns neither lifecycle nor state.
 
 ## Hosted Service Foundation
 
@@ -139,9 +139,9 @@ flowchart LR
     Candidate --> Durable
 ```
 
-Foundation definitions are Host-owned serializable documents, not Harness `AgentDefinition` wire values. A worker verifies exact dependency/artifact locks, reconstructs native Pydantic/Harness objects, supplies fresh `RunBindings`, and consumes the same public API as an embedded application.
+Foundation definitions are Host-owned serializable documents, not Harness `AgentDefinition` wire values. A worker verifies exact dependency/artifact locks, reconstructs native Pydantic/Harness objects, resolves operator-approved Environment providers, materializes current desired topology from encrypted launch-envelope entries, durably advances an unrepresented replacement resource's binding/topology incarnation revisions, and supplies fresh `RunBindings` to the same public API as an embedded application. The worker retains the paired Environment controller only for that active logical run.
 
-One durable Foundation Attempt starts one logical Harness run. Internal Harness model attempts are not durable Attempt generations. Worker or lease loss creates a new fenced Attempt and fresh Harness run from an authoritative selected checkpoint.
+One durable Foundation Attempt starts one logical Harness run. Internal Harness model attempts are not durable Attempt generations. Authorized desired Environment topology can advance during that run and is reconciled through the retained controller with separate effective publication. Worker or lease loss creates a new fenced Attempt, fresh provider bindings, and a fresh Harness run from authoritative selected Host and Harness state.
 
 Client-side tools use native Pydantic deferred values. Foundation durably commits pending calls and approvals, authenticates external feedback, and starts a later run with fresh bindings. Asynchronous children use independent Executions and result-delivery ledgers rather than Pydantic deferred spawn calls.
 
@@ -180,8 +180,10 @@ flowchart LR
     Adapter --> Capability[Pydantic Capability]
     Adapter --> Native[Model, tool, or Toolset]
     RunAuthority[Fresh RunBindings] --> Capability
+    RunAuthority --> Environment[Environment lifecycle resource]
     Plugin --> Harness[Harness run]
     Capability & Native --> Agent[Pydantic Agent]
+    Environment --> Harness
     Agent --> Provider[Feature provider]
 ```
 
@@ -240,3 +242,4 @@ Acceptance, inner attempt completion, Harness terminal delivery, Host durable co
 | Durable execution lifecycle           | [foundation-service/03-execution-lifecycle.md](foundation-service/03-execution-lifecycle.md)                           |
 | Foundation Client API and events      | [foundation-service/04-execution-api-and-events.md](foundation-service/04-execution-api-and-events.md)                 |
 | Usage accounting                      | [foundation-service/05-usage-accounting.md](foundation-service/05-usage-accounting.md)                                 |
+| Environment provider integrations     | [foundation-service/06-environment-providers.md](foundation-service/06-environment-providers.md)                       |

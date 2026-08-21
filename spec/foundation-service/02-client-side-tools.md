@@ -154,7 +154,7 @@ The versioned batch transition plus uniquely consumed resume fact prevents dupli
 
 ## Asynchronous Subagents Are Not Deferred Tools
 
-An asynchronous subagent spawn is an ordinary Host Capability tool call. Its successful result is a `SubagentSpawnReceipt`, the parent Harness run continues, and the independent child Execution later produces a Host-owned result delivery. The service never stores that child as `DeferredToolRequests`, maps its result into `DeferredToolResults`, or moves the parent Execution to `waiting` merely because the child remains active. Only external calls and approvals that suspend the current Pydantic run use the durable pending-batch contract in this document.
+An asynchronous subagent spawn is an ordinary Host Capability tool call. The trusted adapter receives a `SubagentSpawnReceipt`, the Capability returns only a bounded model projection with the compact `subagent_ref`, the parent Harness run continues, and the independent child Execution later produces a Host-owned result delivery. The service never stores that child as `DeferredToolRequests`, maps its result into `DeferredToolResults`, or moves the parent Execution to `waiting` merely because the child remains active. Only external calls and approvals that suspend the current Pydantic run use the durable pending-batch contract in this document.
 
 Client tools do not implicitly pass to inline or Host-managed asynchronous children. A child exposes them only when its own materialized definition contains the Client Tools Capability and its fresh child `RunBindings` receives an explicitly selected attachment under Host policy. Asynchronous children never inherit a parent client connection, caller Principal, or pending-batch authority.
 

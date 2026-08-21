@@ -5,11 +5,12 @@
 `HarnessState` is the complete portable continuation value understood by the process-local Harness. It contains only:
 
 - detached public Pydantic AI message history;
-- detached JSON state namespaced by stable Capability ID.
+- detached JSON state namespaced by stable Capability ID;
+- optional portable Environment backend state under one explicit aggregate field.
 
-It contains no executable definition, plugin object, model, Toolset, provider client, Environment binding, current authority, usage ledger, event log, Host execution record, lease, queue, or delivery state. A Host may persist the value or embed it in a larger durable record, but the Harness does not choose or commit a durable checkpoint.
+It contains no executable definition, plugin object, model, Toolset, provider client, Environment binding, desired topology, provider launch state, current authority, usage ledger, event log, Host execution record, lease, queue, or delivery state. A Host may persist the value or embed it in a larger durable record, but the Harness does not choose or commit a durable checkpoint.
 
-Resume creates a new logical Harness run with fresh `RunBindings`. State preserves conversation and explicitly stored Capability data; it never restores authority or a live Python resource.
+Resume creates a new logical Harness run with fresh `RunBindings`. State preserves conversation, explicitly stored Capability data, and provider-defined portable data for already authorized bindings; it never restores authority, topology, or a live Python resource.
 
 ```mermaid
 flowchart LR
@@ -36,11 +37,12 @@ class HarnessState(BaseModel):
     agent_context_state: AgentContextStateSnapshot = (
         AgentContextStateSnapshot()
     )
+    environment_state: EnvironmentState | None = None
 ```
 
-`HarnessState` and its nested values are frozen detached envelopes. Pydantic message history is round-tripped through `ModelMessagesTypeAdapter`; Capability data is round-tripped through Pydantic `JsonValue`. Public accessors decode fresh copies, so mutable aliases do not cross the state boundary.
+`HarnessState` and its nested values are frozen detached envelopes. Pydantic message history is round-tripped through `ModelMessagesTypeAdapter`; Capability and Environment payload data are round-tripped through Pydantic `JsonValue`. Public accessors decode fresh copies, so mutable aliases do not cross the state boundary.
 
-`schema_version` versions only the Harness envelope. Each Capability entry has an independent non-blank `version` owned by that Capability's codec.
+`schema_version` versions only the Harness envelope. `environment_state` is optional with a default of `None`, so an existing schema-version-1 value without that field remains valid. Each Capability entry has an independent non-blank version owned by that Capability's codec; each Environment binding entry has an independent provider-owned codec version. [Environment Integration](08-environment-integration.md#environment-state) owns its schema and authority boundary.
 
 ## AgentContextState
 
@@ -77,7 +79,7 @@ Namespace isolation is a composition convention backed by the typed API, not a s
 
 ## Export
 
-`AgentContext.export_state(message_history)` combines a detached message sequence with the current `AgentContextState` snapshot:
+`AgentContext.export_state(message_history)` combines a detached message sequence with the current `AgentContextState` snapshot and a fresh aggregate Environment export:
 
 ```python
 async def export_state(
@@ -86,9 +88,9 @@ async def export_state(
 ) -> HarnessState: ...
 ```
 
-The method performs no I/O and has no persistence side effect. `HarnessRunStream.export_state()` selects the latest complete message view owned by the stream and delegates to this method.
+The method can await provider-defined portable Environment-state collection but performs no persistence side effect. It linearizes that collection with topology publication, so the Environment value identifies one complete observed topology version rather than a mixture of binding sets. The Environment aggregate enforces its captured entry-count, canonical per-binding and aggregate encoded-byte, and deadline limits before returning; timeout, cancellation, provider failure, invalid JSON, or oversize fails the complete export rather than silently dropping a binding. `HarnessRunStream.export_state()` selects the latest complete message view owned by the stream and delegates to this method.
 
-State export does not require `HarnessState.message_history` to equal a result object's private message view. Normal inner execution produces aligned values, but trusted result middleware may intentionally transfer or replace state. Structural validity is enforced; semantic provenance is part of the trusted plugin contract.
+State export does not require `HarnessState.message_history` to equal a result object's private message view. Normal inner execution produces aligned values, but trusted result middleware may intentionally transfer or replace state. Structural validity is enforced; semantic provenance is part of the trusted plugin contract. A plugin that replaces `environment_state` remains trusted code but cannot make the value authorize or construct a binding on resume.
 
 ## Complete Message Boundaries
 
@@ -122,15 +124,18 @@ No normalization occurs for ordinary complete history or for a provider-suspende
 
 A new run receives `previous_state` separately from fresh `RunBindings`. Stream construction deep-copies the supplied state. Entry then:
 
-1. binds the new Environment;
-2. creates one `AgentContextState` initialized from the imported snapshot;
-3. creates the fresh `AgentContext` and plugin graph;
-4. passes imported messages to the first Pydantic attempt;
-5. lets each Capability read and validate only the namespaces it understands.
+1. binds and enters the new Environment from fresh Host authority, publishing its initial topology while the paired controller remains non-active;
+2. restores a present `environment_state` only into compatible, already selected bindings;
+3. activates the controller after successful restore or confirmation that no Environment state was supplied;
+4. invokes the optional `RunInputFactory` against that entered Environment;
+5. creates one `AgentContextState` initialized from the imported Capability snapshot;
+6. creates the fresh `AgentContext` and plugin graph;
+7. passes imported messages to the first Pydantic attempt;
+8. lets each Capability read and validate only the namespaces it understands.
 
-The Harness does not require every imported entry to be consumed before model work. A stateful Capability that requires validation before its own behavior must perform that validation in its Pydantic lifecycle or before invoking the dependent operation.
+Environment restore finishes before controller activation and input production, never overlaps `apply()`, and never creates a binding, chooses topology, consumes Host launch state, or grants access. An unmatched saved binding is ignored with a bounded diagnostic; an incompatible selected binding fails according to the Environment codec contract. The Harness does not require every Capability entry to be consumed before model work. A stateful Capability that requires validation before its own behavior must perform that validation in its Pydantic lifecycle or before invoking the dependent operation.
 
-Identity, policy, credentials, model resolution, Environment authority, tool grants, provider sessions, and Host ownership always come from fresh trusted bindings. Message metadata and Capability state grant none of them.
+Identity, policy, credentials, model resolution, Environment authority, topology, tool grants, provider sessions, and Host ownership always come from fresh trusted bindings. Message metadata, Capability state, and portable Environment state grant none of them.
 
 Omitting new input is valid when the selected message history is sufficient for native Pydantic continuation. Supplying deferred tool results uses Pydantic AI's own input contract and the exact pending call or approval correlation owned by the integrating Host.
 
@@ -146,7 +151,7 @@ class HostExecutionState(BaseModel):
     pending_delivery: HostDeliveryState | None
 ```
 
-This is an ownership illustration, not a Harness API. Definition selection, attempt generation, artifact locks, provider attachment, client-tool pending state, asynchronous child lifecycle, and delivery fencing remain Host-owned.
+This is an ownership illustration, not a Harness API. Definition selection, desired Environment topology, Attempt generation, artifact locks, provider provisioning and attachment, provider launch-state codecs, client-tool pending state, asynchronous child lifecycle, and delivery fencing remain Host-owned. `HostLaunchState` is separate from `HarnessState.environment_state`: the former makes a provider resource reachable, while the latter can restore only portable backend-local data after fresh reachability and authority already exist.
 
 The Harness does not define or require a provider route pin. Provider-specific continuation facts that are not public Pydantic messages belong to the selected model integration or Host envelope, not to a generic Harness schema.
 
@@ -156,24 +161,26 @@ State export records observations; it does not make a side effect exactly once. 
 
 ## Compatibility
 
-Three compatibility axes remain independent:
+Four compatibility axes remain independent:
 
-| Axis                     | Owner             |
-| ------------------------ | ----------------- |
-| Harness envelope version | Harness           |
-| Pydantic message codec   | Pydantic AI       |
-| Capability entry version | Owning Capability |
+| Axis                              | Owner                |
+| --------------------------------- | -------------------- |
+| Harness envelope version          | Harness              |
+| Pydantic message codec            | Pydantic AI          |
+| Capability entry version          | Owning Capability    |
+| Environment binding-state version | Environment provider |
 
-Invalid messages, unsupported envelope versions, blank namespace IDs, blank versions, and invalid Capability payloads fail without mutating the supplied value. A Host that changes its process-local Agent composition decides whether to retain, migrate, or remove opaque namespaces before resume.
+Invalid messages, unsupported envelope versions, blank namespace IDs or versions, and invalid Capability or Environment payloads fail without mutating the supplied value. A Host that changes process-local Agent composition or provider integration decides whether to retain, migrate, or remove incompatible opaque data before resume.
 
 ## Boundaries
 
 | Concern                                            | Owner                          |
 | -------------------------------------------------- | ------------------------------ |
 | Envelope, detached encoding, and state coordinator | Harness                        |
-| One namespace schema and semantic migration        | Owning Capability              |
+| One Capability namespace and semantic migration    | Owning Capability              |
+| Environment aggregate and per-binding codec        | Harness core and provider      |
 | Trusted complete-state transformation              | Harness plugin or Host adapter |
-| Durable selection, lineage, retention, fencing     | Host                           |
+| Durable selection, launch, retention, and fencing  | Host                           |
 | External effect reconciliation                     | Provider and Host              |
 
 ## Trade-offs
@@ -184,4 +191,4 @@ Preserving unknown namespaces supports code-first composition, plugin handoff, a
 
 ### Portable Continuation vs. Durable Recovery
 
-Messages plus JSON Capability state remain portable and small. Complete crash recovery still needs Host definition, launch, provider, pending-delivery, and reconciliation state outside the Harness.
+Messages, Capability JSON, and optional portable Environment JSON remain process-portable. Complete crash recovery still needs Host definition, desired topology, provider launch, pending-delivery, and reconciliation state outside the Harness.
