@@ -9,6 +9,7 @@ The service adds hosting, coordination, persistence, and policy around the Harne
 ```mermaid
 flowchart TB
     Product[Product or internal service] --> Control[Control plane]
+    Browser[Built-in same-origin web client] --> Control
     Control --> Definitions[Definition and Preset revisions]
     Control --> Executions[Durable executions]
     Executions --> Scheduler[Scheduler and coordination]
@@ -35,6 +36,7 @@ flowchart TB
 | Subagent hosting            | Idempotent spawn, exact child-path derivation, durable task coordination, child control, result retention, wake-up, and delivery ledger     | Spawn is an ordinary parent tool result; child completion is later Host input, never deferred completion                                                         |
 | Scheduler and coordination  | Runnable work, leases, wakeups, maintenance, and worker ownership                                                                           | Coordination delivery is not an independent durable execution authority                                                                                          |
 | Execution API and events    | Foundation Client resources, idempotent acceptance and commands, lifecycle event replay, and delivery projections                           | Streams, webhooks, and queues never replace the durable Execution authority                                                                                      |
+| Built-in web client         | Immutable browser assets and same-origin projection of control-plane APIs in the shared image                                               | Owns no durable lifecycle, authorization, persistence, or execution fact; execution-only processes do not serve it                                               |
 | Usage recording             | Idempotent per-response observation identity, lineage, actual cost source, pricing coverage and revision, and rebuildable estimates         | `RunUsage`, durable records, billing, and payment are distinct facts                                                                                             |
 | Execution worker            | Plugin catalog and provider selection, fresh run bindings, Harness consumption, checkpoints, and terminal commit proposals                  | Uses public Harness and EIP boundaries; defines no Sandbox domain and does not interpret provider-native state                                                   |
 | Hosted service plugins      | Ingress, storage, lifecycle projection, connectors, and hosted policy outside the Harness run                                               | Agent-affecting boundary middleware enters through definition-level Harness plugin specs and the selected catalog; inner behavior uses Capabilities and Toolsets |
@@ -124,9 +126,10 @@ Provider resolution can vary reentrant authority-neutral clients while preservin
 07. Durable acceptance and lifecycle event append commit before ephemeral scheduling or delivery can claim success.
 08. The execution plane consumes the public Harness contract and does not duplicate plugin construction, the Pydantic Agent loop, or result validation.
 09. Harness completion, Host durable completion, event or webhook delivery, telemetry, durable usage recording, billing, and payment remain separate facts.
-10. Minimal and distributed deployments use the same durable semantics; storage and coordination adapters can differ.
-11. Client-side tools use native external deferral; the service durably fences authenticated feedback, while Foundation Client owns local execution and `agent-envd` remains uninvolved.
-12. Asynchronous subagents use independent Foundation Executions and a durable delivery ledger; spawn returns normally and never reuses Pydantic deferred-tool continuation.
+10. The built-in web client is a replaceable control-plane projection over the first-party HTTP namespace and never becomes lifecycle authority.
+11. Minimal and distributed deployments use the same durable semantics; storage and coordination adapters can differ.
+12. Client-side tools use native external deferral; the service durably fences authenticated feedback, while Foundation Client owns local execution and `agent-envd` remains uninvolved.
+13. Asynchronous subagents use independent Foundation Executions and a durable delivery ledger; spawn returns normally and never reuses Pydantic deferred-tool continuation.
 
 ## Trade-offs
 

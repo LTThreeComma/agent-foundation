@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
 from converge_logging import LogFormat
 from pydantic import Field
@@ -33,6 +34,7 @@ class ServiceSettings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     build_version: str = "unknown"
+    web_dist_dir: Path | None = None
 
     database_url: str = Field(
         default="postgresql+psycopg://foundation:foundation@127.0.0.1:5432/foundation",

@@ -27,6 +27,7 @@ jobs:
       agent_envd_client: ${{ steps.filter.outputs.agent_envd_client }}
       agent_harness: ${{ steps.filter.outputs.agent_harness }}
       eip_protocol: ${{ steps.filter.outputs.eip_protocol }}
+      foundation_web: ${{ steps.filter.outputs.foundation_web }}
       automation: ${{ steps.filter.outputs.automation }}
       containers: ${{ steps.filter.outputs.containers }}
       python: ${{ steps.filter.outputs.python }}
@@ -93,15 +94,21 @@ jobs:
               - 'packages/logging/**'
               - 'pyproject.toml'
               - 'uv.lock'
+            foundation_web:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'apps/foundation-web/**'
             automation:
               - '.github/**'
               - 'scripts/check-release-version.py'
             containers:
               - '.github/workflows/ci.yml'
+              - '.dockerignore'
               - 'Makefile'
               - 'Dockerfile'
               - 'Dockerfile.sandbox'
               - 'scripts/docker-entrypoint.sh'
+              - 'apps/foundation-web/**'
               - 'packages/**'
               - 'crates/agent-envd/**'
               - 'pyproject.toml'
@@ -235,6 +242,27 @@ jobs:
 
       - name: Run Python checks and build distributions
         run: make typecheck test python-build
+
+  foundation-web:
+    name: Foundation Web
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.foundation_web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/foundation-web/package-lock.json
+
+      - name: Run complete Foundation Web checks
+        run: make foundation-web-check-all
 
   agent-harness:
     name: Agent Harness (${{ matrix.name }})

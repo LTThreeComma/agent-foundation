@@ -12,7 +12,7 @@ The project is currently in its architecture and specification phase. Public API
 - `logging`: shared pretty and structured logging, distributed as `converge-logging`
 - `agent-envd`: an Environment Interaction Protocol provider distributed as the `converge-agent-envd` Rust package
 - [`agent-envd-client`](packages/agent-envd-client/README.md): the matching low-level Python EIP client, distributed as `converge-agent-envd-client`
-- [`foundation-service`](packages/foundation-service/README.md): an optional hosted control and execution service distributed as `converge-foundation-service`
+- [`foundation-service`](packages/foundation-service/README.md): an optional hosted control and execution service distributed as `converge-foundation-service`, with private [Foundation Web](apps/foundation-web/README.md) assets bundled into its container image
 - [Foundation Service SDKs](sdk/README.md): standalone Python, Go, Rust, and TypeScript packages that will expose the hosted service API after its contract stabilizes
 
 Applications will be able to embed the harness directly, use the hosted service, or replace providers through documented capability and protocol boundaries.

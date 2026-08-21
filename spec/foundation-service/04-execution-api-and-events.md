@@ -6,7 +6,7 @@ The Foundation Service API exposes durable `Execution` resources, immutable defi
 
 A Foundation Client treats `Execution` as the ordinary logical work resource. An `Attempt` is a read-only worker-ownership child of that resource, not the primary application handle. A Codex-style product can project `Thread -> Turn -> Item`: one Turn maps to exactly one Execution, while Items project messages, reasoning, tool calls, commands, file changes, and outputs. Thread and Item grant no execution authority, and Attempt is not renamed to Step.
 
-This contract owns language-neutral service semantics. It does not fix REST paths, generated SDK shape, SSE or WebSocket libraries, broker technology, pagination syntax, or require a Thread product model.
+This contract owns language-neutral service semantics. It fixes the first-party HTTP namespace boundary but not individual REST resource layouts below that boundary, generated SDK shape, SSE or WebSocket libraries, broker technology, pagination syntax, or a required Thread product model.
 
 ## Boundaries
 
@@ -24,6 +24,14 @@ This contract owns language-neutral service semantics. It does not fix REST path
 | Durable task claim and update                   | Foundation task service                                  | Shared scope with trusted actor and CAS revision                          |
 | Child-result routing and incorporation          | Foundation subagent delivery ledger                      | Fixed Attempt, retention, or new continuation Execution                   |
 | Caller authentication and product authorization | Adopting product and service policy                      | Required before every read or mutation                                    |
+
+## HTTP Namespace and Built-in Web Client
+
+The first-party Foundation Service HTTP transport reserves `/api` for product-facing APIs, API schemas, and interactive API documentation. Every public HTTP resource defined by this contract is reachable below that prefix even though the exact resource paths and transport encodings can evolve independently. Process liveness at `/healthz` and dependency readiness at `/readyz` are operational endpoints outside the product API namespace. They do not become Foundation Client resources or application compatibility surfaces merely because they use HTTP.
+
+The shared service image includes an optional built-in browser application as a same-origin control-plane client. The `all` and `control` roles can serve its immutable production assets and browser routes from `/`; the `execution` role serves neither the browser application nor product-facing APIs. The browser application invokes relative `/api` paths and owns no lifecycle, persistence, authorization, or execution fact. A product can replace that experience while preserving the same Foundation Client semantics.
+
+Browser history fallback applies only to browser routes. It never converts an unknown `/api` request, `/healthz`, `/readyz`, or their responses into the application shell. Development may serve browser assets from a separate local origin, but that server proxies `/api` unchanged to Foundation Service so development and production use the same application paths.
 
 ## Foundation Client Resource Model
 

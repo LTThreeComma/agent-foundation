@@ -5,7 +5,9 @@
 ## What Is Ready
 
 - `foundation-service serve` starts FastAPI with `all`, `control`, or `execution` role selection.
+- Product-facing HTTP routes, OpenAPI, and interactive API docs use the `/api` namespace.
 - `/healthz` is process liveness; `/readyz` verifies database access.
+- The shared image serves the private Foundation Web application from `/` for `all` and `control` roles.
 - One lifespan-owned async engine and session factory are shared by the process.
 - Service HTTP integrations and ASGI tests use `httpx2`.
 - `short_session()` and `transaction()` provide short database scopes with bounded cancellation cleanup.
@@ -18,20 +20,25 @@ Business APIs, durable models, schedulers, queues, and execution workers are int
 
 ## Local Development
 
-Start PostgreSQL and Redis, apply migrations, and run the service:
+Start PostgreSQL and Redis, apply migrations, and run Foundation Service together with the Foundation Web development server:
 
 ```bash
 make dev
 ```
 
-`make dev` runs the setup and upgrade steps. Use `make setup` or `make db-upgrade` separately when only that operation is needed.
+`make dev` runs the setup and upgrade steps, then supervises both local processes until either exits or you press Ctrl-C. Use `make setup` or `make db-upgrade` separately when only that operation is needed.
 
-The default endpoints are:
+The default development endpoints are:
 
 ```text
-http://127.0.0.1:8000/healthz
-http://127.0.0.1:8000/readyz
+Foundation Web:    http://127.0.0.1:5173/
+API schema:         http://127.0.0.1:8000/api/openapi.json
+API documentation: http://127.0.0.1:8000/api/docs
+Liveness:          http://127.0.0.1:8000/healthz
+Readiness:         http://127.0.0.1:8000/readyz
 ```
+
+Browser code always uses relative `/api` URLs. Vite proxies that namespace and both probes to the backend during development; the production image serves the browser application and API from one origin.
 
 Stop local infrastructure and remove its volumes when a clean database is needed:
 
@@ -90,6 +97,8 @@ make db-downgrade
 make db-current
 make db-check
 make db-history
+make foundation-web-check
+make foundation-web-build
 make image-foundation-service
 ```
 
@@ -99,18 +108,19 @@ The underlying CLI is also available through `uv run foundation-service --help`.
 
 All settings use the `FOUNDATION_` prefix. See the root `.env.example` for a local template.
 
-| Setting                                                 | Default  | Purpose                                                    |
-| ------------------------------------------------------- | -------- | ---------------------------------------------------------- |
-| `FOUNDATION_ROLE`                                       | `all`    | `all`, `control`, or `execution` process role              |
-| `FOUNDATION_AUTO_MIGRATE`                               | `false`  | Allow a migration-owning container to upgrade before serve |
-| `FOUNDATION_DATABASE_CONNECT_TIMEOUT_SECONDS`           | `10`     | Maximum PostgreSQL connection establishment time           |
-| `FOUNDATION_DATABASE_STATEMENT_TIMEOUT_SECONDS`         | `30`     | Maximum normal application statement duration              |
-| `FOUNDATION_DATABASE_READINESS_TIMEOUT_SECONDS`         | `3`      | Maximum readiness database check duration                  |
-| `FOUNDATION_MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS`    | `900`    | Maximum wait to serialize migration runners                |
-| `FOUNDATION_MIGRATION_LOCK_TIMEOUT_SECONDS`             | `3`      | Maximum DDL lock wait                                      |
-| `FOUNDATION_MIGRATION_STATEMENT_TIMEOUT_SECONDS`        | `900`    | Maximum duration of a migration statement                  |
-| `FOUNDATION_MIGRATION_IDLE_TRANSACTION_TIMEOUT_SECONDS` | `30`     | Maximum idle time in a migration transaction               |
-| `FOUNDATION_LOG_FORMAT`                                 | `pretty` | Rich-backed `pretty` locally or `json` when deployed       |
+| Setting                                                 | Default  | Purpose                                                       |
+| ------------------------------------------------------- | -------- | ------------------------------------------------------------- |
+| `FOUNDATION_ROLE`                                       | `all`    | `all`, `control`, or `execution` process role                 |
+| `FOUNDATION_WEB_DIST_DIR`                               | unset    | Trusted production asset directory; the image uses `/app/web` |
+| `FOUNDATION_AUTO_MIGRATE`                               | `false`  | Allow a migration-owning container to upgrade before serve    |
+| `FOUNDATION_DATABASE_CONNECT_TIMEOUT_SECONDS`           | `10`     | Maximum PostgreSQL connection establishment time              |
+| `FOUNDATION_DATABASE_STATEMENT_TIMEOUT_SECONDS`         | `30`     | Maximum normal application statement duration                 |
+| `FOUNDATION_DATABASE_READINESS_TIMEOUT_SECONDS`         | `3`      | Maximum readiness database check duration                     |
+| `FOUNDATION_MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS`    | `900`    | Maximum wait to serialize migration runners                   |
+| `FOUNDATION_MIGRATION_LOCK_TIMEOUT_SECONDS`             | `3`      | Maximum DDL lock wait                                         |
+| `FOUNDATION_MIGRATION_STATEMENT_TIMEOUT_SECONDS`        | `900`    | Maximum duration of a migration statement                     |
+| `FOUNDATION_MIGRATION_IDLE_TRANSACTION_TIMEOUT_SECONDS` | `30`     | Maximum idle time in a migration transaction                  |
+| `FOUNDATION_LOG_FORMAT`                                 | `pretty` | Rich-backed `pretty` locally or `json` when deployed          |
 
 Database and Redis URLs are intentionally omitted from the table because they may contain credentials; use `.env.example` for their local forms and secret-backed deployment configuration for real environments.
 
@@ -122,7 +132,7 @@ Build the shared image from the root `Dockerfile`:
 make image-foundation-service
 ```
 
-The image installs Debian's CA bundle, verifies it during build, and sets `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` for `httpx2`. Keep that setting unless a replacement path provides the complete deployment trust set.
+A dedicated Node.js build stage installs the private Foundation Web application from its lock file and copies only immutable production assets into `/app/web`; Node.js and npm are absent from the runtime image. The Python wheel remains API-only and does not contain browser assets. The image installs Debian's CA bundle, verifies it during build, and sets `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` for `httpx2`. Keep that setting unless a replacement path provides the complete deployment trust set.
 
 The image defaults to `FOUNDATION_AUTO_MIGRATE=true` for `all` and `control`; PostgreSQL advisory locking serializes concurrent rollout replicas. Set it to `false` when a dedicated migration job owns schema changes. Configure the container port through `FOUNDATION_PORT` so the service and healthcheck use the same value. Startup behavior is fail-closed:
 

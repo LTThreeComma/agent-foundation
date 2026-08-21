@@ -11,9 +11,13 @@ from fastapi import FastAPI, HTTPException, Request, status
 from sqlalchemy import text
 
 from converge_foundation_service.db import SessionFactory, create_database_engine, create_session_factory, short_session
-from converge_foundation_service.settings import ServiceSettings, get_settings
+from converge_foundation_service.settings import ServiceRole, ServiceSettings, get_settings
+from converge_foundation_service.web import mount_web_application
 
 logger = logging.getLogger("converge_foundation_service.app")
+
+_API_METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+_CONTROL_PLANE_ROLES = {ServiceRole.all, ServiceRole.control}
 
 
 @asynccontextmanager
@@ -45,18 +49,23 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     """Create an application without opening external resources."""
     resolved_settings = settings or get_settings()
+    serves_control_plane = resolved_settings.role in _CONTROL_PLANE_ROLES
     app = FastAPI(
         title="Agent Foundation Service",
         version=resolved_settings.build_version,
         lifespan=_lifespan,
+        openapi_url="/api/openapi.json" if serves_control_plane else None,
+        docs_url="/api/docs" if serves_control_plane else None,
+        redoc_url="/api/redoc" if serves_control_plane else None,
+        swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect" if serves_control_plane else None,
     )
     app.state.settings = resolved_settings
 
-    @app.get("/healthz", tags=["system"])
+    @app.get("/healthz", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok", "role": resolved_settings.role.value}
 
-    @app.get("/readyz", tags=["system"])
+    @app.get("/readyz", include_in_schema=False)
     async def readiness(request: Request) -> dict[str, str]:
         factory: SessionFactory = request.app.state.db_session_factory
         try:
@@ -75,7 +84,18 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             ) from exc
         return {"status": "ready", "role": resolved_settings.role.value}
 
+    if serves_control_plane:
+
+        @app.api_route("/api", methods=_API_METHODS, include_in_schema=False)
+        async def unknown_api_root() -> None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API route not found")
+
+        @app.api_route("/api/{api_path:path}", methods=_API_METHODS, include_in_schema=False)
+        async def unknown_api_path(api_path: str) -> None:
+            del api_path
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API route not found")
+
+        if resolved_settings.web_dist_dir is not None:
+            mount_web_application(app, resolved_settings.web_dist_dir)
+
     return app
-
-
-app = create_app()

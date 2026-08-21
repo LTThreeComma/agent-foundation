@@ -13,6 +13,8 @@ install: ## Install locked dependencies and Git hooks
 	@uv sync --locked --all-packages
 	@echo "Synchronizing the standalone Python SDK"
 	@uv sync --project sdk/python --locked
+	@echo "Installing Foundation Web dependencies"
+	@npm --prefix apps/foundation-web ci
 	@echo "Installing TypeScript SDK dependencies"
 	@npm --prefix sdk/typescript ci
 	@echo "Installing pre-commit hooks"
@@ -27,21 +29,22 @@ setup: sync ## Start local PostgreSQL and Redis
 	@docker compose -f dev/compose.yaml up -d --wait
 
 .PHONY: dev
-dev: setup ## Upgrade the local schema and run foundation-service
+dev: setup foundation-web-sync ## Upgrade the schema and run Foundation Service with Foundation Web
 	@uv run --locked foundation-service db upgrade
-	@uv run --locked foundation-service serve
+	@bash scripts/dev.sh
 
 .PHONY: dev-down
 dev-down: ## Stop local infrastructure and remove its data volumes
 	@docker compose -f dev/compose.yaml down --volumes --remove-orphans
 
 .PHONY: format
-format: sync sdk-python-sync sdk-typescript-sync ## Format repository and standalone SDK sources
+format: sync foundation-web-sync sdk-python-sync sdk-typescript-sync ## Format repository and standalone SDK sources
 	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files || true
 	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files
 	@files="$$(find sdk/go -type f -name '*.go')"; gofmt -w $$files
 	@cargo fmt --all
 	@(cd sdk/rust && cargo fmt)
+	@npm --prefix apps/foundation-web run format
 	@npm --prefix sdk/typescript run format
 
 .PHONY: deps-check
@@ -227,6 +230,26 @@ sdk-rust-check: sdk-rust-isolation-check sdk-rust-format-check sdk-rust-lint sdk
 .PHONY: sdk-rust-check-all
 sdk-rust-check-all: sdk-rust-check sdk-rust-build sdk-rust-package ## Run the complete Rust SDK gate
 
+.PHONY: foundation-web-sync
+foundation-web-sync: ## Install locked Foundation Web dependencies
+	@npm --prefix apps/foundation-web ci
+
+.PHONY: foundation-web-format
+foundation-web-format: foundation-web-sync ## Format Foundation Web sources
+	@npm --prefix apps/foundation-web run format
+
+.PHONY: foundation-web-build
+foundation-web-build: foundation-web-sync ## Build Foundation Web production assets
+	@npm --prefix apps/foundation-web run build
+
+.PHONY: foundation-web-check
+foundation-web-check: foundation-web-sync ## Run the fast Foundation Web gate
+	@npm --prefix apps/foundation-web run check
+
+.PHONY: foundation-web-check-all
+foundation-web-check-all: foundation-web-sync ## Run the complete Foundation Web gate
+	@npm --prefix apps/foundation-web run check:all
+
 .PHONY: sdk-typescript-sync
 sdk-typescript-sync: ## Install locked TypeScript SDK dependencies
 	@npm --prefix sdk/typescript ci
@@ -253,7 +276,7 @@ sdk-check: sdk-python-check sdk-go-check sdk-rust-check sdk-typescript-check ## 
 sdk-check-all: sdk-python-check-all sdk-go-check-all sdk-rust-check-all sdk-typescript-check-all ## Run all complete standalone SDK gates
 
 .PHONY: build
-build: python-build rust-build sdk-build ## Build all workspace and standalone packages
+build: python-build rust-build foundation-web-build sdk-build ## Build all workspace, application, and SDK artifacts
 
 .PHONY: db-migrate
 db-migrate: sync ## Generate a migration (usage: make db-migrate msg="description")
@@ -300,6 +323,8 @@ images: image-foundation-service image-sandbox ## Build all local container imag
 image-check: images ## Build and smoke-check all container images
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(FOUNDATION_SERVICE_IMAGE)")" = "app"
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(SANDBOX_IMAGE)")" = "sandbox"
+	@docker run --rm --entrypoint sh "$(FOUNDATION_SERVICE_IMAGE)" -c 'test -r /app/web/index.html && ! command -v node'
+	@docker run --rm --entrypoint python "$(FOUNDATION_SERVICE_IMAGE)" -c 'from converge_foundation_service.asgi import app; assert str(app.state.settings.web_dist_dir) == "/app/web"'
 	@docker run --rm --entrypoint agent-envd "$(SANDBOX_IMAGE)"
 
 .PHONY: python-check
@@ -309,14 +334,15 @@ python-check: lint typecheck test ## Run the fast Python workspace gate
 python-check-all: python-check python-build docs-build ## Run the complete Python and documentation gate
 
 .PHONY: check
-check: eip-check python-check rust-check sdk-check ## Run the fast repository gate
+check: eip-check foundation-web-check python-check rust-check sdk-check ## Run the fast repository gate
 
 .PHONY: check-all
-check-all: eip-check python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
+check-all: eip-check foundation-web-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
 	@rm -rf .pytest_cache .ruff_cache dist site target sdk/python/dist sdk/rust/target
+	@npm --prefix apps/foundation-web run clean
 	@npm --prefix sdk/typescript run clean
 
 .PHONY: help
