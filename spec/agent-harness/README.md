@@ -4,7 +4,7 @@
 
 This directory defines the current design of `agent-harness`, the Pydantic AI-based harness used by embedded applications and hosted execution workers.
 
-The Harness is a process-local execution boundary. It owns the canonical materialized `AgentDefinition`, code-first materialization, resolved-plan validation and construction, first-class plugin construction and input-to-result middleware, Pydantic Capability composition, typed execution context, model and tool loop integration, dynamic multi-Environment access, context management, continuation state, delegation, normalized events, and native Pydantic usage exposure. Hosted definition sources, typed Presets, immutable revisions, durable acceptance, product policy, deployment coordination, and business billing remain Host concerns.
+The Harness is a process-local execution boundary. It owns the canonical materialized `AgentDefinition`, code-first materialization, resolved-plan validation and construction, first-class plugin construction and input-to-result middleware, Pydantic Capability composition, typed per-run execution context with executable-owned immutable child topology, model and tool loop integration, dynamic multi-Environment access, context management, continuation state, delegation, normalized events, and native Pydantic usage exposure. Hosted definition sources, typed Presets, immutable revisions, durable acceptance, product policy, deployment coordination, and business billing remain Host concerns.
 
 ## Document Catalog
 

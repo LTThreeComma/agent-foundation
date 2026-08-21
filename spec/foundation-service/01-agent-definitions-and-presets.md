@@ -2,7 +2,7 @@
 
 ## Design Position
 
-The hosted authoring surface produces one canonical, complete [`AgentDefinition`](../agent-harness/03-agent-definition-and-build.md#agentdefinition). Users submit either that definition inline or an exact typed Preset invocation. The control plane materializes the input once, validates it with the selected Harness plugin catalog and permitted Pydantic Capability types, and commits an immutable `AgentDefinitionRevision` containing the complete definition and its dependency provenance.
+The hosted authoring surface produces one canonical, complete [`AgentDefinition`](../agent-harness/03-agent-definition-and-build.md#agentdefinition). Users submit either that definition inline or an exact typed Preset invocation. The control plane materializes the input once through a catalog-bound Harness definition compiler and commits an immutable `AgentDefinitionRevision` containing the complete definition, a class-free Harness catalog manifest, exact extension export locks, and the remaining dependency provenance. Foundation Service selects stable artifact/export IDs but never constructs, transports, or interprets plugin or Capability Python classes.
 
 A Preset is an authoring mechanism. It does not survive as an unresolved runtime inheritance layer, grant authority, resolve credentials, or replace the canonical definition. Model and Toolset Presets contribute typed sections to an Agent Preset; the final effective view is always one materialized `AgentDefinition`.
 
@@ -13,8 +13,9 @@ flowchart LR
     ModelPreset[Exact Model Preset revision] --> AgentPreset
     ToolsetPreset[Exact Toolset Preset revisions] --> AgentPreset
     AgentPreset --> Validate
-    Catalog[Locked Capability and artifact catalog] --> Validate
-    Validate --> Revision[Immutable AgentDefinitionRevision]
+    Catalog[Operator-approved artifact and export catalog] --> Harness[Opaque Harness catalog and compiler]
+    Harness --> Validate
+    Validate --> Revision[Immutable AgentDefinitionRevision with export locks]
     Revision --> Resolve[Execution-time resolution]
     Resolve --> Build[ResolvedAgentDefinition]
 ```
@@ -30,7 +31,7 @@ class PresetRevisionRef(BaseModel):
 
 
 class InlineAgentDefinitionSource(BaseModel):
-    definition: AgentDefinition
+    definition: AgentDefinitionDocument
 
 
 class AgentPresetInvocation(BaseModel):
@@ -48,17 +49,17 @@ type AgentDefinitionSource = (
 
 Every stored `PresetRevisionRef` names one immutable revision. An API can accept a human-friendly selector, but the control plane resolves it to an exact revision before materialization and records that exact reference. `definition_id` becomes the final materialized definition identity and replaces the baseline's template-local identity; it is not a parameter target. `toolset_presets=None` selects the Agent Preset defaults, while an explicit tuple replaces the complete default Toolset Preset selection; it never performs an implicit list merge.
 
-Inline input already contains the complete logical definition and uses its `definition_id` unchanged. In every committed revision, `AgentDefinitionRevision.definition_id` equals `AgentDefinition.definition_id` and the identity selected by the source; materialization cannot alias one logical definition ID to another. Preset input contains only declared typed parameters and typed component-Preset selections. It has no generic `overrides`, JSON Merge Patch, arbitrary deep merge, inheritance chain, ambient environment substitution, or executable Python import path.
+Inline input already contains the complete logical definition as a raw JSON object document and uses its `definition_id` unchanged after Harness compilation. In every committed revision, `AgentDefinitionRevision.definition_id` equals `AgentDefinition.definition_id` and the identity selected by the source; materialization cannot alias one logical definition ID to another. The Foundation request envelope does not parse `InlineAgentDefinitionSource.definition` as the base `AgentDefinition` model before the Harness compiler; its OpenAPI/authoring schema embeds the compiler-produced definition schema and preserves the raw object until dynamic plugin dispatch completes. Preset input contains only declared typed parameters and typed component-Preset selections. It has no generic `overrides`, JSON Merge Patch, arbitrary deep merge, inheritance chain, ambient environment substitution, or executable Python import path.
 
 ## Preset Kinds
 
 All Preset kinds share immutable revision identity, provenance, compatibility metadata, and catalog lifecycle. Their payloads and materialization semantics remain typed by kind.
 
-| Kind           | Typed contribution                                                                                               | Excludes                                                                                                                                     |
-| -------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent Preset   | Complete valid baseline `AgentDefinition`, declared parameter targets, and default Model and Toolset Preset refs | Live clients, credentials, policy grants, Environment bindings, arbitrary patches, and multiple bases                                        |
-| Model Preset   | One logical model ID and complete canonical `DurableModelSettings` contribution                                  | Agent-level profile overrides, `ModelProfileSpec` callables, Python types, raw headers, clients, secrets, mutable health, and request policy |
-| Toolset Preset | Ordered Pydantic `CapabilitySpec` values with stable explicit Capability IDs                                     | Python objects, package installation, credentials, implicit tool authority, and generic config bags                                          |
+| Kind           | Typed contribution                                                                                                           | Excludes                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent Preset   | Complete canonical baseline `AgentDefinitionDocument`, declared parameter targets, and default Model and Toolset Preset refs | Live clients, credentials, policy grants, Environment bindings, arbitrary patches, and multiple bases                                        |
+| Model Preset   | One logical model ID and complete canonical `DurableModelSettings` contribution                                              | Agent-level profile overrides, `ModelProfileSpec` callables, Python types, raw headers, clients, secrets, mutable health, and request policy |
+| Toolset Preset | Ordered Pydantic `CapabilitySpec` values with stable explicit Capability IDs                                                 | Python objects, package installation, credentials, implicit tool authority, and generic config bags                                          |
 
 An Agent Preset has at most one baseline. Shared composition uses typed Model and Toolset Preset references rather than multiple Agent Preset inheritance. A Toolset Preset configures the owning Capability types; it does not recreate a parallel Toolset plugin lifecycle.
 
@@ -92,13 +93,13 @@ class AgentPresetParameter(BaseModel):
 
 class AgentPresetRevision(BaseModel):
     ref: PresetRevisionRef
-    baseline: AgentDefinition
+    baseline: AgentDefinitionDocument
     parameters: tuple[AgentPresetParameter, ...] = ()
     default_model_preset: PresetRevisionRef | None = None
     default_toolset_presets: tuple[PresetRevisionRef, ...] = ()
 ```
 
-The baseline is valid with its defaults. Parameter values can replace declared non-structural leaves such as a prompt, threshold, limit, feature flag, portable `PluginSpec` argument, or portable Capability argument, but cannot add undeclared paths, interpolate substrings, execute expressions, conditionally rewrite the document, or alter object or list structure. A parameter cannot target a Capability contributed by a separately selected Toolset Preset or a plugin absent from the Agent Preset baseline because that value is not part of the parameterized baseline.
+The baseline is `DefinitionCompilation.document` previously produced by a catalog-bound Harness compiler when the Agent Preset revision was accepted. Preset storage never attempts to parse that document through the static outer `AgentDefinition` field annotation; every later materialization preserves it as raw canonical JSON until the selected compiler performs dynamic plugin dispatch. The baseline is valid with its defaults. Parameter values can replace declared non-structural leaves such as a prompt, threshold, limit, feature flag, portable `PluginSpec` argument, or portable Capability argument, but cannot add undeclared paths, interpolate substrings, execute expressions, conditionally rewrite the document, or alter object or list structure. A parameter cannot target a Capability contributed by a separately selected Toolset Preset or a plugin absent from the Agent Preset baseline because that value is not part of the parameterized baseline.
 
 This restricted substitution is intentionally less expressive than a template language. It gives every accepted input a generated schema and deterministic target while keeping the materializer independent from Jinja, shell variables, Python evaluation, and undocumented merge precedence.
 
@@ -110,7 +111,7 @@ Each logical model ID in the complete materialized root-and-child graph resolves
 
 ### Model Integration Revisions
 
-A model integration revision is an immutable Host catalog entity, not a fourth Preset kind or an Agent field. Its installed integration type owns a discriminated, JSON-safe configuration schema for logical model membership, native model/provider/adapter construction, permitted route classes, the strict durable-settings schema for each logical model, and any declarative profile inputs or named trusted profile collaborators. The common catalog envelope owns integration identity, revision, artifact locks, digest, and lifecycle; it does not flatten every provider into one generic config mapping.
+A model integration revision is an immutable Host catalog entity, not a fourth Preset kind or an Agent field. Its installed integration type owns a discriminated, JSON-safe configuration schema for logical model membership, native model/provider/adapter construction, permitted route classes, the strict durable-settings schema for each logical model, and any declarative profile inputs or named trusted profile collaborators. It also names the stable Harness extension `export_id`, run-Capability registration name, and fixed Capability ID that realize its reserved fresh run role; the name and ID must equal that export manifest's class-free role entry, while the Python class remains catalog-internal. The common catalog envelope owns integration identity, revision, artifact locks, digest, and lifecycle; it does not flatten every provider into one generic config mapping.
 
 The durable configuration contains no client object, callable, Python type, credential, endpoint health, tenant route decision, or current policy result. The trusted integration artifact compiles the validated compatibility data and named collaborators into a stable native dict or callable `ModelProfileSpec` when needed. At resolution, it combines that construction contract with the permitted target and fresh run authority to construct the native Pydantic `Model`; current Identity or policy can select a route but cannot rewrite compatibility facts. Foundation Service does not interpret, merge, or partially override profile keys. A profile input invalid for that model/provider/adapter fails integration-revision validation or model construction instead of falling back to guessed defaults.
 
@@ -141,9 +142,9 @@ Validation recursively accepts only `JsonValue`, rejects unknown or misspelled k
 
 A hosted integration constructs every native Model with `Model.settings=None`. All durable static request defaults live in the materialized `AgentSpec.model_settings`; otherwise the Model Preset's whole-replacement and inspectability guarantees would be false. Typed Capabilities may still contribute documented dynamic request intent through Pydantic's normal merge order, but the hosted Harness API exposes no arbitrary per-run model-settings bag. Runtime headers and credentials enter through the fresh run-bound model integration, never through a logical secret reference embedded inside settings.
 
-A Toolset Preset contributes ordered `CapabilitySpec` entries to `AgentDefinition.agent.capabilities`. Harness plugin specs remain explicit fields of the complete Agent Preset baseline or inline `AgentDefinition`; Toolset Presets cannot silently add outer run middleware. The invocation-selected Toolset Preset tuple replaces the Agent Preset default tuple. Entries are appended in declared Preset order after baseline capabilities, and every contributed entry has an explicit stable Capability ID. This can include the first-party Client Tools Capability's portable default external-tool declarations and explicit run-replacement policy or the Foundation asynchronous-subagent Capability's presentation configuration. The latter consumes built children but does not add an execution mode to their declarations; current submission authority still enters through a fresh run adapter. Neither Capability spec includes a client handler, service credential, live connection, or execution grant. Duplicate IDs, conflicting serialization types for one ID, duplicate model-visible tool names, and duplicate managed tool IDs fail materialization or build at the earliest owning validation boundary; they are never resolved by last-writer-wins behavior.
+A Toolset Preset contributes ordered `CapabilitySpec` entries to `AgentDefinition.agent.capabilities`. Harness plugin specs remain explicit fields of the complete Agent Preset baseline or inline `AgentDefinition`; Toolset Presets cannot silently add outer run middleware. The invocation-selected Toolset Preset tuple replaces the Agent Preset default tuple. Entries are appended in declared Preset order after baseline capabilities, and every contributed entry has an explicit stable Capability ID. This can include the first-party Client Tools Capability's portable default external-tool declarations and explicit run-replacement policy or the Foundation asynchronous-subagent Capability's presentation configuration. The latter reads the immutable built collection from each fresh `AgentContext` and does not add an execution mode to child declarations; current submission authority still enters through a separate fresh run Capability that owns its typed service collaborator. The same locked Foundation extension export registers the definition-selectable behavior and its stable Host-bound adapter role, whose class-free manifest entry fixes the role name and Capability ID while keeping the concrete type catalog-internal. The definition stores neither the adapter nor its authority; Foundation execution assembly names the required role in fresh `RunBindings`. Neither Capability spec includes a client handler, service credential, live connection, or execution grant. Duplicate IDs, conflicting serialization types for one ID, duplicate model-visible tool names, and duplicate managed tool IDs fail materialization or build at the earliest owning validation boundary; they are never resolved by last-writer-wins behavior.
 
-Capability and plugin arguments contain portable behavior configuration and typed logical references. The selected Host catalogs supply the corresponding trusted Capability and Harness plugin types and lock their artifacts. Secrets and live provider collaborators are resolved only after an execution selects the definition revision. A plugin spec selects no Python import path and grants no run authority.
+Capability and plugin arguments contain portable behavior configuration and typed logical references. Foundation selects operator-approved stable Harness export IDs and exact artifact revisions; a Harness-owned loader retains the corresponding Capability and plugin classes behind an opaque catalog. The catalog-bound compiler returns the canonical definition and exact referenced export IDs. Foundation locks those IDs but never builds registration tuples, `custom_capability_types`, class refs, or configured plugins. Secrets and live provider collaborators are resolved only after an execution selects the definition revision. A plugin spec selects no Python import path and grants no run authority.
 
 ## Materialization
 
@@ -152,29 +153,31 @@ sequenceDiagram
     participant Caller
     participant Control
     participant Catalog
-    participant HarnessSchema as Harness definition schema
+    participant HarnessCompiler as Harness definition compiler
 
     Caller->>Control: inline definition or exact AgentPresetInvocation
     Control->>Catalog: load exact Agent, Model, and Toolset Preset revisions
     Catalog-->>Control: typed immutable contributions
     Control->>Control: select complete component refs
     Control->>Control: compose baseline, component contributions, and declared parameters
-    Control->>Catalog: resolve every logical model and plugin type in root and child graph
-    Catalog-->>Control: exact model-integration, plugin, and artifact locks
-    Control->>HarnessSchema: validate AgentDefinition with selected plugin catalog and Capability types
-    HarnessSchema-->>Control: canonical materialized definition
+    Control->>Catalog: select logical models and operator-approved Harness export IDs
+    Catalog-->>Control: exact model-integration and artifact candidates
+    Control->>HarnessCompiler: compile complete definition through opaque selected catalog
+    HarnessCompiler-->>Control: canonical definition, class-free manifest, required export IDs
+    Control->>Catalog: union definition and model-run export IDs; bind exact artifact locks
     Control->>Control: compute canonical digest and commit immutable revision
 ```
 
 Materialization proceeds in this order:
 
 1. Resolve every supplied selector to an exact Preset revision and validate the Preset-kind relationship.
-2. Start from the one complete Agent Preset baseline, or from the inline definition.
+2. Start from the one complete already compiled Agent Preset baseline, or preserve the inline raw definition document for compiler dispatch.
 3. For Preset input, select the invocation Model and Toolset Presets when present; otherwise use the Agent Preset defaults.
 4. Validate and apply every declared leaf-value parameter substitution to the Agent Preset baseline; reject missing or unknown parameters and any duplicate name or target in the Preset revision.
 5. Replace model and complete model settings, then append Toolset Preset Capability specs in selected order.
-6. Resolve every logical model ID and Harness plugin serialization name present in the complete root-and-child definition graph to exact compatible model-integration and plugin-artifact revisions; validate and canonicalize each model-settings value; then validate the complete `AgentDefinition` against the exact selected plugin catalog and built-in/custom Capability type set.
-7. Canonically serialize the definition, compute its digest, bind all Preset, model-integration, and artifact dependency locks, and atomically commit a new immutable definition revision.
+6. Resolve every logical model ID to one exact compatible model-integration revision, validate and canonicalize its model-settings value, and collect the stable Harness export ID and named run-Capability role declared by each integration. Select one operator-approved Harness catalog snapshot whose stable export IDs cover those roles plus the permitted plugin and declarative Capability names for the complete finite graph.
+7. Ask that catalog's `HarnessDefinitionCompiler` to parse and validate the complete definition. The compiler dynamically dispatches concrete plugin specs before base-model parsing can discard fields, preserves the nested native `AgentSpec` and `CapabilitySpec` values, recursively validates children, and returns the canonical definition, class-free manifest, and exact referenced export IDs.
+8. Union the compiler-referenced export IDs with every selected model integration's run-Capability export ID. Project the catalog manifest to that exact union, bind every ID to one installed artifact revision and digest, reject missing or ambiguous bindings, canonically serialize the definition, compute its digest, and atomically commit the revision with all Preset, model-integration, Harness export, and other artifact dependency locks.
 
 Materialization performs no package installation, network-backed secret lookup, provider-client construction, Environment allocation, or policy grant. Catalog reads needed to obtain already accepted immutable revisions complete before the database transaction that commits the new definition revision.
 
@@ -187,35 +190,43 @@ class DefinitionDependencyLock(BaseModel):
         "model_preset",
         "toolset_preset",
         "model_integration",
-        "plugin_artifact",
     ]
     logical_id: str
     revision: str
     digest: str | None = None
 
 
+class HarnessExportLock(BaseModel):
+    export_id: str
+    artifact_id: str
+    artifact_revision: str
+    artifact_digest: str
+
+
 class AgentDefinitionRevision(BaseModel):
     definition_id: str
     revision_id: str
     source: AgentDefinitionSource
-    definition: AgentDefinition
+    definition: AgentDefinitionDocument
+    harness_catalog: HarnessCatalogManifest
+    harness_exports: tuple[HarnessExportLock, ...]
     dependencies: tuple[DefinitionDependencyLock, ...]
     definition_digest: str
 ```
 
-A revision stores both source provenance and the complete materialized definition. Execution, retry, recovery, comparison, and export read `definition`; they never rematerialize the source against a newer Preset catalog. `source` explains how the definition was authored, while `dependencies` records the transitive exact Preset, model-integration, and executable plugin-artifact closure for every root and child Harness plugin, Capability, native Toolset, tool-adapter, and model-adapter realization. The model-integration locks fix compatibility/profile construction contracts while allowing fresh credentials and permitted live routing; neither field grants execution authority.
+A revision stores source provenance, the complete canonical materialized `AgentDefinitionDocument`, the class-free Harness catalog manifest projected to all definition-referenced and model-integration-required exports, exact Harness export locks, and remaining dependencies. Execution, retry, recovery, comparison, and export read the canonical `definition` document; they never rematerialize the source against a newer Preset or extension catalog. A process that needs the typed view first reconstructs the locked catalog and calls `HarnessDefinitionCompiler.compile(definition)`; no generic ORM or request model may deserialize this field directly as `AgentDefinition`. `source` explains how the definition was authored. `harness_exports` binds every compiler-reported or selected model-integration-required `export_id` exactly once to an installed artifact revision and digest covering root and child Harness plugins, declarative custom Capabilities, reserved run-Capability roles, and their declared executable closure. `dependencies` records exact Preset and model-integration revisions. The model-integration locks fix compatibility/profile construction contracts while allowing fresh credentials and permitted live routing; no manifest or lock grants execution authority.
 
-The digest covers the producing service's canonical serialization of the complete materialized definition. It is an opaque integrity and audit value within that service's schema-and-canonicalizer compatibility domain, not a protocol-wide content identity, revision ID, cache key, or cross-implementation equality claim. Consumers compare digests only when the producer declares the same canonicalization compatibility. Dependency locks remain explicit because two installations can provide different trusted Harness plugin, Capability, native Toolset, tool-adapter, model-adapter, or profile construction for identical declarative Agent bytes. Revision selection binds both the definition snapshot and its dependency lock set.
+The digest covers the producing service's canonical serialization of the complete materialized definition. It is an opaque integrity and audit value within that service's schema-and-canonicalizer compatibility domain, not a protocol-wide content identity, revision ID, cache key, or cross-implementation equality claim. Consumers compare digests only when the producer declares the same canonicalization compatibility. Dependency and export locks remain explicit because two installations can provide different trusted Harness plugin, Capability, native Toolset, tool-adapter, model-adapter, or profile construction for identical declarative Agent bytes. `HarnessCatalogManifest` names serialization-to-export availability but is not executable and carries no class. Revision selection binds the definition snapshot, exact export locks, and remaining dependency set.
 
-The materialized recursive definition contains complete children but no per-edge execution mode, hosted submission reference, or Harness `source_ref`. Foundation Service identifies any executable node with an exact `AgentDefinitionTarget` composed of this revision and an immutable authored-name path from its root; the root path is empty. When accepting an asynchronous child Execution, the service derives the next path from the authenticated current parent target and selected immediate child name, then validates the embedded child bytes and corresponding transitive dependency-lock slice. It never accepts a caller-supplied independent child revision as a substitute. Inline Harness execution and Foundation asynchronous execution therefore use identical Agent bytes and model-integration/artifact locks without encoding Host lifecycle in `SubagentDefinition`.
+The materialized recursive definition contains complete children but no per-edge execution mode, hosted submission reference, or Harness `source_ref`. Foundation Service identifies any executable node with an exact `AgentDefinitionTarget` composed of this revision and an immutable authored-name path from its root; the root path is empty. When accepting an asynchronous child Execution, the service derives the next path from the authenticated current parent target and selected immediate child name, then validates the embedded child bytes against the revision's graph-wide Harness export closure and the child path's model-integration dependencies. It never accepts a caller-supplied independent child revision as a substitute. Inline Harness execution and Foundation asynchronous execution therefore use identical Agent bytes and model-integration/artifact locks without encoding Host lifecycle in `SubagentDefinition`.
 
 The revision contains no plaintext secret, provider client, Python type, Toolset object, Environment binding, client handler, accepted run-specific client-tool attachment, policy decision, caller identity, execution state, or `ResolvedAgentDefinition`. Those values are selected or constructed at execution time. Client-tool defaults and `allow_run_override` remain ordinary typed Capability configuration in the complete definition; any exact replacement is stored with the accepted execution rather than patched back into this revision.
 
 ## Resolution Boundary
 
-After an Execution selects one immutable definition target, build resolution verifies every root and child plugin, model-integration, and artifact lock; selects an operator-approved `ResolvedPluginCatalog` that exactly covers the materialized plugin specs and can bind only authority-neutral provider collaborators into its process-local factories; compiles one authority-neutral `ResolvedModelIntegration` descriptor per node; constructs only credential-free Models whose possession grants no current-run authority; constructs trusted native tools and Toolsets; selects permitted custom Capability types; constructs reentrant non-model-selecting build Capabilities; derives the process-local output type; recursively resolves complete child plans; and produces the process-local [`ResolvedAgentDefinition`](../agent-harness/03-agent-definition-and-build.md#resolvedagentdefinition). The service remains authoritative for the durable revision, artifact closure, catalog selection, and target path outside that Harness plan and uses those facts for child acceptance and audit. The Harness remains authoritative for configured plugin construction, validation, ordering, run binding, and middleware execution. It may copy one opaque target provenance value into the selected plan root's optional `source_ref`; no authored or resolved child edge carries a separate Host submission reference.
+After an Execution selects one immutable definition target, build resolution verifies every root and child model-integration and artifact lock and reconstructs one live `HarnessCatalog` from the exact locked export IDs. It compares the catalog's runtime compatibility ID and class-free export manifest with the revision, calls that catalog's compiler on the durable definition document to recover one typed `AgentDefinition`, gives only that process-local typed value to the catalog-bound builder, and never extracts internal classes, spec decoders, registrations, or factories. It also compiles one authority-neutral `ResolvedModelIntegration` descriptor per node using a stable registered run-Capability name and fixed ID rather than a class; constructs only credential-free Models whose possession grants no current-run authority; constructs trusted native tools and Toolsets; accepts explicit authority-neutral integration-produced build Capability instances without selecting their classes; derives the process-local output type; recursively resolves complete child plans; and produces the process-local [`ResolvedAgentDefinition`](../agent-harness/03-agent-definition-and-build.md#resolvedagentdefinition). The service remains authoritative for the durable revision, export/artifact closure, stable export-ID selection, and target path outside that Harness plan and uses those facts for child acceptance and audit. The Harness remains authoritative for definition recompilation, custom Capability type resolution, configured plugin construction, validation, ordering, run binding, middleware execution, and the final internal `Agent.from_spec()` call. It may copy one opaque target provenance value into the selected plan root's optional `source_ref`; no authored or resolved child edge carries a separate Host submission reference.
 
-The selected plugin factories construct no configured plugin instance in Foundation Service and retain no current-run Identity, credential, policy result, or other authority; the Harness invokes them during build. A normal hosted provider Model is not constructed during that phase. A node that retains its logical ID is built with Pydantic's public `defer_model_check=True` and is not passed through native `Agent.__aenter__()` before a run, preventing eager ambient inference while the run resolver is absent. At each run, the Host supplies exactly one fresh Capability matching the node's reserved model-integration type and ID through `RunBindings`. After `AgentContext`, current policy, any continuation route pin, and credentials exist, that Capability returns an allowed native Pydantic `Model` with its effective `ModelProfile` or raises; it never declines to ambient inference. Other model ID resolvers, `get_model()` contributors, explicit run-model overrides, and hooks that replace the selected Model are prohibited in the hosted profile. Identity, Environment, policy, credentials, checkpointing, telemetry correlation, and every other execution-scoped authority remain fresh run inputs.
+Extension factories construct no configured plugin instance in Foundation Service and retain no current-run Identity, credential, policy result, or other authority; the Harness invokes them during build. A normal hosted provider Model is not constructed during that phase. A node that retains its logical ID is built with Pydantic's public `defer_model_check=True` and is not passed through native `Agent.__aenter__()` before a run, preventing eager ambient inference while the run resolver is absent. At each run, the Host supplies exactly one fresh Capability matching the node's stable registered model-integration name and fixed ID through `RunBindings`; the Harness verifies its concrete type through the private catalog. After `AgentContext`, current policy, any continuation route pin, and credentials exist, that Capability returns an allowed native Pydantic `Model` with its effective `ModelProfile` or raises; it never declines to ambient inference. Other model ID resolvers, `get_model()` contributors, explicit run-model overrides, and hooks that replace the selected Model are prohibited in the hosted profile. Identity, Environment, policy, credentials, checkpointing, telemetry correlation, and every other execution-scoped authority remain fresh run inputs.
 
 Resolution cannot mutate or silently patch the materialized definition, construct a configured plugin in Host code, activate an undeclared plugin, inject an undeclared model-visible component, omit a required declared component, or bypass the locked model integration. The only dynamic model-visible schema exception is an exact external client-tool whole-list replacement explicitly authorized by the materialized Client Tools Capability. The control plane validates and freezes that typed attachment with one accepted execution, and the Harness maps it only to per-run Pydantic `ExternalToolset` values; it cannot introduce server code or authority. If a compatibility repair changes model settings, plugin or Capability configuration, Environment requests, or child definitions, the control plane creates another definition revision. Rebinding a logical model to an allowed live provider client or refreshing short-lived credentials does not change the logical definition.
 
@@ -227,8 +238,9 @@ Resolution cannot mutate or silently patch the materialized definition, construc
 | Unknown, missing, duplicate, or invalid parameter                                                                         | Field-local validation failure; no partial definition is stored                                          |
 | Parameter target absent, duplicate, protected, or type-incompatible                                                       | Preset revision or invocation is rejected                                                                |
 | Unknown, non-JSON, passthrough, route-incompatible, or secret-bearing model setting                                       | Integration-owned validation fails before Preset or definition bytes are committed                       |
-| Duplicate Harness plugin or Capability identity, missing plugin type, or conflicting contribution                         | Materialization or Harness build fails deterministically; no last-writer-wins merge                      |
-| Missing or untrusted executable plugin artifact                                                                           | Definition revision is not accepted against that catalog                                                 |
+| Duplicate Harness plugin or Capability identity, unknown serialization name, or conflicting contribution                  | Compiler or Harness build fails deterministically; no last-writer-wins merge                             |
+| Missing, ambiguous, or untrusted Harness export/artifact binding                                                          | Definition revision is not accepted and no live class fallback is attempted                              |
+| Harness runtime compatibility ID differs from the committed manifest                                                      | Worker rejects the revision before compiler or extension construction                                    |
 | Definition validation failure                                                                                             | No revision is committed                                                                                 |
 | Commit conflict or database failure                                                                                       | No successful revision identity is returned and no partial revision becomes selectable                   |
 | Missing, duplicate, invalid, or incompatible locked model integration or reserved run Capability                          | Materialization, build, or run setup fails before provider dispatch; no profile or Model is guessed      |
@@ -240,26 +252,28 @@ Errors identify the owning Preset, parameter, target, Harness plugin, model inte
 
 ## Compatibility
 
-Preset revisions and Agent definition revisions are immutable. Changing a baseline, parameter schema or target, default component selection, Model Preset value, Harness plugin specs, Toolset Capability specs, model-integration profile construction, or dependency lock creates a new revision. A model-integration change first creates a new immutable integration revision; selecting its new lock creates a new Agent definition revision rather than changing existing executions in place.
+Preset revisions and Agent definition revisions are immutable. Changing a baseline, parameter schema or target, default component selection, Model Preset value, Harness plugin specs, Toolset Capability specs, model-integration profile construction, Harness runtime compatibility identity, or dependency lock creates a new revision. A model-integration change first creates a new immutable integration revision; selecting its new lock creates a new Agent definition revision rather than changing existing executions in place. Attempt scheduling selects a worker whose live catalog has the committed `runtime_compatibility_id`; an incompatible worker rejects rather than recompiling old bytes under new built-in semantics.
 
 Additive fields in a typed Preset schema are compatible only when old materialized snapshots remain valid without rematerialization. Capability state compatibility remains owned by each Capability; selecting a newer definition revision does not imply that an older `HarnessState` can resume under it. The host explicitly selects or performs any required state migration.
 
 ## Boundaries
 
-| Concern                                                                                                                                     | Owner                                                                                  |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Definition source, Preset revisions, materialization, revision identity, and dependency locks                                               | Foundation Service control plane                                                       |
-| Complete materialized `AgentDefinition`                                                                                                     | [Agent Harness definition contract](../agent-harness/03-agent-definition-and-build.md) |
-| Harness `PluginSpec`, catalog, construction, and ordering                                                                                   | [Harness Plugin System](../agent-harness/05-plugin-system.md)                          |
-| `AgentSpec`, native `ModelProfile`, and `CapabilitySpec` syntax                                                                             | Pydantic AI                                                                            |
-| Logical model integration revisions and profile construction configuration                                                                  | Host model-integration catalog                                                         |
-| Capability configuration schema                                                                                                             | Owning Capability type                                                                 |
-| Harness plugin, Capability, native Toolset, tool-adapter, and model-adapter artifact installation and trust                                 | Host catalog and operator                                                              |
-| Selected plugin catalog plus process-local model, native tools, Toolsets, custom Capability types, and reentrant build Capability instances | Execution-time definition resolver and Harness build contract                          |
-| Identity, Environment, policy, credentials, checkpointing, telemetry, and other run authority                                               | Host `RunBindings` and owning providers                                                |
-| Accepted run-specific external client-tool replacement and durable feedback lifecycle                                                       | [Client-Side Tools](02-client-side-tools.md)                                           |
-| Root/child target path derivation and asynchronous child Execution acceptance                                                               | Foundation Service execution lifecycle                                                 |
-| Definition migration and rollout                                                                                                            | Foundation Service control plane                                                       |
+| Concern                                                                                                                 | Owner                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Definition source, Preset revisions, materialization, revision identity, and dependency locks                           | Foundation Service control plane                                                       |
+| Canonical `AgentDefinitionDocument` and catalog-compiled typed `AgentDefinition`                                        | [Agent Harness definition contract](../agent-harness/03-agent-definition-and-build.md) |
+| Harness `PluginSpec`, extension export, opaque catalog/compiler, construction, and ordering                             | [Harness Plugin System](../agent-harness/05-plugin-system.md)                          |
+| `AgentSpec`, native `ModelProfile`, and `CapabilitySpec` syntax                                                         | Pydantic AI                                                                            |
+| Logical model integration revisions and profile construction configuration                                              | Host model-integration catalog                                                         |
+| Capability configuration schema                                                                                         | Owning Capability type                                                                 |
+| Harness extension, native Toolset, tool-adapter, and model-adapter artifact installation, exact export locks, and trust | Host catalog and operator                                                              |
+| Stable Harness export selection, class-free manifest, and exact artifact locks                                          | Foundation definition resolver and artifact catalog                                    |
+| Live plugin/Capability classes, spec decoders, registrations, and internal `custom_capability_types`                    | Opaque Harness catalog and catalog-bound compiler/builder                              |
+| Process-local model, native tools, Toolsets, and explicit reentrant build Capability instances                          | Execution-time integration resolver and Harness build contract                         |
+| Identity, Environment, policy, credentials, checkpointing, telemetry, and other run authority                           | Host `RunBindings` and owning providers                                                |
+| Accepted run-specific external client-tool replacement and durable feedback lifecycle                                   | [Client-Side Tools](02-client-side-tools.md)                                           |
+| Root/child target path derivation and asynchronous child Execution acceptance                                           | Foundation Service execution lifecycle                                                 |
+| Definition migration and rollout                                                                                        | Foundation Service control plane                                                       |
 
 ## Trade-offs
 
@@ -278,12 +292,12 @@ Model and Toolset Presets contribute only the fields they own. A Model Preset se
 ## Invariants
 
 01. Every durable execution selects one immutable `AgentDefinitionRevision` before process-local build.
-02. Every accepted revision contains one complete materialized `AgentDefinition`; execution never depends on re-evaluating its Preset source.
+02. Every accepted revision contains one complete canonical `AgentDefinitionDocument`; execution reconstructs its typed `AgentDefinition` only through the locked catalog's compiler and never re-evaluates the Preset source.
 03. Stored Preset dependencies name exact immutable revisions.
 04. Preset composition has one Agent baseline, whole Model selection, whole Toolset selection, and required, uniquely named non-structural leaf parameters with unique targets; it has no generic patch, defaults outside the baseline, or multiple inheritance.
 05. Presets and definition content contain no raw request-header map, plaintext secret, live client, binding, policy grant, or execution state.
 06. The revision, materialized definition, and source-selected logical `definition_id` agree.
-07. Runtime resolution selects the locked plugin catalog and can bind live resources but cannot construct configured plugins in Host code or change the selected logical Agent behavior in place; an external client-tool replacement exists only where the selected definition explicitly declares that run-level variability and is frozen with the accepted execution.
+07. Runtime resolution reconstructs an opaque catalog from exact locked Harness export IDs and can bind live resources, but Foundation cannot extract or pass plugin/Capability classes, construct configured plugins, or change selected logical Agent behavior in place; an external client-tool replacement exists only where the selected definition explicitly declares that run-level variability and is frozen with the accepted execution.
 08. Every root or child logical model selection is dependency-locked to one model-integration revision; exactly one reserved run Capability realizes each node, returns an allowed native Model or raises, and never permits ambient inference, an unrelated model contributor, or an Agent-level profile override.
 09. Every durable model-settings value is canonical JSON validated by the locked integration, and every hosted native Model has `Model.settings=None`; no integration contributes hidden static request intent.
 10. Child declarations contain no execution mode or Host submission reference; every asynchronous child target is derived from one selected revision and immutable authored-name path.

@@ -2,11 +2,11 @@
 
 ## Design Position
 
-Subagents are complete child Agent definitions built into an immutable `SubagentCollection`. The collection is authority-neutral build output: it describes the immediate children of one `ExecutableAgent` and gives trusted Harness or Host Capabilities access to their reusable executables without choosing how they are scheduled.
+Subagents are complete child Agent definitions built into an immutable `SubagentCollection`. The collection is authority-neutral build output: it describes the immediate children of one `ExecutableAgent` without choosing how they are scheduled. The parent executable owns it and its child executables; every fresh parent `AgentContext` borrows that exact collection so any trusted Capability can implement a definition-selected child presentation or execution scheme through the ordinary Pydantic run lifecycle.
 
 The first-party `DelegationCapability` provides the standard blocking inline tool-as-subagent execution path. It owns stable inline child identities and each child's latest complete `HarnessState` in its namespaced `DelegationState`. Every invocation still receives fresh run authority, and the parent waits for the ordinary tool result. Multiple delegation calls in one Pydantic tool batch can run concurrently when they target different child instances.
 
-Asynchronous or durable background subagents are Host behavior. A Host Capability can consume the same `SubagentCollection`, return an ordinary spawn receipt immediately, and own scheduling, tasks or workers, persistence, delivery, wake-up, retries, cancellation, and cross-run accounting. Background completion is later input, not a deferred result for the spawn tool call. Pydantic deferred values remain available for approvals and external tools whose current run must suspend, but they are not the Harness subagent protocol.
+Asynchronous or durable background subagents are Host behavior. A definition-selected Host Capability reads the same `SubagentCollection` from `AgentContext`, while a fresh Host run Capability that owns any typed collaborator supplies current scheduling and submission authority. The behavior Capability can return an ordinary spawn receipt immediately and the Host owns tasks or workers, persistence, delivery, wake-up, retries, cancellation, and cross-run accounting. Background completion is later input, not a deferred result for the spawn tool call. Pydantic deferred values remain available for approvals and external tools whose current run must suspend, but they are not the Harness subagent protocol.
 
 There is no separate subagent Agent builder, Agent loop, plugin system, hook system, event queue, or Capability inheritance mechanism. Every child uses the same `ResolvedAgentDefinition`, `ExecutableAgent`, fresh plugin binding, `RunBindings`, run stream, state, event, output, and cleanup contracts as a root Agent.
 
@@ -38,9 +38,9 @@ class SubagentCollection(Mapping[str, BuiltSubagent]):
 
 The materialized parent contains a unique finite set of named, complete child Agent definitions. Each child has its own model, instructions, output, Capabilities, Environment requirements, and nested subagents. Repeating parent configuration through inheritance flags is avoided. `context` and `usage_limits` are portable ceilings on work performed through that authored edge; any Host-specific execution policy can narrow but not widen them.
 
-Before Harness build, the Host recursively resolves every child's selected plugin catalog, model, native tool and Toolset, permitted custom Capability type, reentrant build Capability instance, output type, and process-local provenance. It produces exactly one `ResolvedSubagentDefinition` for each authored edge, in authored order. The resolved declaration equals the authored declaration, and the nested resolved definition's logical definition equals that declaration's `agent`; resolution cannot add, omit, replace, or mutate a child edge.
+Before Harness build, the Host verifies every child's definition against the same selected Harness export closure and recursively resolves its model, native tool and Toolset, explicit reentrant build Capability instances, output type, and process-local provenance. Plugin and Capability classes remain in the builder's one opaque catalog for the complete finite graph. The Host produces exactly one `ResolvedSubagentDefinition` for each authored edge, in authored order. The resolved declaration equals the authored declaration, and the nested resolved definition's logical definition equals that declaration's `agent`; resolution cannot add, omit, replace, or mutate a child edge.
 
-The Harness validates the finite resolved graph and builds children before their parent. The resulting `SubagentCollection` contains only immediate children; each child executable exposes its own collection recursively. The parent owns the built children and closes them in reverse acquisition order. The collection, entries, nested definitions, and values used as selectors are recursively immutable by behavior. Build takes defensive copies, normalizes Harness-owned containers to tuples and read-only mappings, and never exposes the mutable upstream `AgentSpec` object used internally by `Agent.from_spec()` through a `BuiltSubagent`. A public declaration or definition is an immutable projection or defensive copy, so mutating original input or an upstream nested object cannot change collection keys, child behavior, context ceilings, or usage limits after validation. `dataclass(frozen=True)`, `ConfigDict(frozen=True)`, and the read-only `Mapping` interface are not treated as sufficient on their own.
+The Harness validates the finite resolved graph and builds children before their parent. The resulting `SubagentCollection` contains only immediate children; each child executable exposes its own collection recursively. The parent owns the built children and closes them in reverse acquisition order. Every run of that parent receives `AgentContext.subagents is parent_executable.subagents`; an executable with no children supplies the canonical immutable empty collection. The context borrows the collection and cannot mutate or close it. The collection, entries, nested definitions, and values used as selectors are recursively immutable by behavior. Build takes defensive copies, normalizes Harness-owned containers to tuples and read-only mappings, and never exposes the mutable upstream `AgentSpec` object used internally by `Agent.from_spec()` through a `BuiltSubagent`. A public declaration or definition is an immutable projection or defensive copy, so mutating original input or an upstream nested object cannot change collection keys, child behavior, context ceilings, or usage limits after validation. `dataclass(frozen=True)`, `ConfigDict(frozen=True)`, and the read-only `Mapping` interface are not treated as sufficient on their own.
 
 The collection contains no current Identity, credential, Environment binding, policy decision, live state, scheduler, task, queue, Host job, receipt, or execution mode. A process-local child executable is reusable build output; it never becomes durable payload. A distributed Host persists its own target reference and reconstructs the exact child build on a worker instead of serializing the executable.
 
@@ -52,8 +52,8 @@ The collection and its execution presentation are separate. First-party helpers 
 
 - one unified `delegate` tool that selects a child by stable name;
 - one named tool per child for a small fixed roster;
-- a custom Capability or Toolset factory that consumes `SubagentCollection`;
-- no Harness delegation tool, leaving the collection available only to trusted Host composition.
+- a custom definition-selected Capability that reads `ctx.deps.subagents` and contributes its run-stable Toolset;
+- no Harness delegation tool, leaving the collection available only to trusted Capability or Host composition.
 
 The first-party Delegation Capability defaults to the unified form:
 
@@ -68,7 +68,7 @@ class DelegateInput(BaseModel):
 
 Separate named tools remove the `subagent` selector but preserve the same state, binding, authorization, usage, result, and concurrency semantics. A custom presentation must not claim first-party inline semantics unless it preserves those contracts. Tool discovery can hide children while retaining stable names; discovery grants no invocation authority.
 
-Portable model-visible presentation configuration belongs to the first-party Delegation Capability configuration. A Host that replaces it with a custom Capability locks and resolves that Capability like any other model-visible Agent behavior. `SubagentCollection` itself is not placed on `AgentContext`, exposed as a model tool, or recovered from state.
+Portable model-visible presentation configuration belongs to the first-party Delegation Capability configuration. A Host that replaces or complements it with a custom Capability locks and resolves that Capability like any other model-visible Agent behavior. `SubagentCollection` is placed on `AgentContext` as immutable authority-neutral build output; it is not itself a model tool, a `RunBindings` input, or recoverable state. A declarative Capability's `from_spec()` and Agent-bound `for_agent()` do not receive it. A child-dependent Capability reads it in `for_run()` or later run-time hooks and can return a replacement whose instructions and Toolsets are stable for that run.
 
 ## Inline Child State
 
@@ -117,6 +117,8 @@ Notes, TODOs, messages, and every non-task Capability state remain private to on
 For a Host-managed asynchronous child, a process-local Host may retain a local task store under its own lifetime rules. A distributed Host selects provider mode and gives each worker a fresh identity-bound cell for the selected durable scope with equivalent claim, operation-idempotency, compare-and-swap, and stale-owner fencing semantics; it cannot share a Python cell across workers. That Host state is not copied into parent or child Harness State.
 
 ## Context and Fresh Run Bindings
+
+The collection selects topology, not authority. A Capability can inspect or present a built edge directly through `AgentContext.subagents`, but every child invocation still obtains complete fresh bindings. The first-party blocking path uses the reserved binder below; a Host-specific asynchronous Capability uses a fresh Host run Capability that owns its typed collaborator and leaves durable lifecycle outside Harness State.
 
 ```python
 class DelegationContextPolicy(BaseModel):
@@ -206,9 +208,11 @@ If the process stops during child work or before the parent boundary is durably 
 
 ## Host-Managed Asynchronous Subagents
 
-`SubagentCollection` is the composition seam for Host-specific async behavior. A Host can construct an ordinary `AbstractCapability[AgentContext]` that captures the collection and a typed scheduler or service collaborator. Its tools can be named `spawn`, `status`, `wait`, `steer`, `cancel`, or use another Host-specific contract; the Harness does not standardize their wire schema or lifecycle.
+`SubagentCollection` is the topology seam for Host-specific async behavior. A Host package can register an ordinary declarative `AbstractCapability[AgentContext]` directly or contribute it from a definition-selected Harness plugin. The materialized definition and locked extension export make its model-visible instructions, Toolsets, configuration, and state semantics reproducible. In `for_run()` or later hooks, that Capability reads the current executable's collection from `ctx.deps.subagents`; it never captures a collection in `from_spec()`, depends on a Harness build-context factory, or receives an arbitrary child from `RunBindings`.
 
-A spawn tool completes normally when the Host accepts work:
+Current scheduling or submission authority enters separately through a fresh Host run Capability that owns any typed collaborator. The same locked package export can register both the definition-selectable behavior and a stable Host-bound run role with an expected concrete type and fixed Capability ID. When that behavior requires the role, the owning Host places its name in `RunBindings.required_run_capability_roles` and exactly one fresh instance in `RunBindings.capabilities`. Catalog-bound run setup validates the input instance before Pydantic binding and the finalized replacement after all sibling `for_run()` calls; a missing, duplicate, or incompatible instance fails before model work without submitting child work. The behavior Capability does not read a sibling's final replacement while binding. Its eventual tool handler obtains the peer anew from finalized `RunContext.capabilities` by fixed ID and expected type, selects only an exact `BuiltSubagent` from `ctx.deps.subagents`, and requests local or durable execution. The Harness defines no universal background-subagent adapter, tool schema, scheduler, receipt, or delivery protocol.
+
+Tools can be named `spawn`, `status`, `wait`, `steer`, `cancel`, or use another Host-specific contract. A spawn tool completes normally when the Host accepts work:
 
 ```mermaid
 sequenceDiagram
@@ -260,6 +264,7 @@ The successful inline result uses the child's Pydantic output contract and inclu
 | New child has a handled failure without result state         | Pre-start baseline and ID are retained; failed input is not claimed as incorporated     |
 | Native usage limit exceeded                                  | Failed child result with terminal usage; parent projection is `ToolFailed`              |
 | Child cleanup uncertainty                                    | Prior stored child state remains selected; provider task effects require reconciliation |
+| Required Host run role missing, duplicate, or incompatible   | Catalog-bound setup fails before model work; no child work is submitted                 |
 | Host background submission failure                           | Owning Host Capability returns its ordinary classified tool failure                     |
 | Host background child failure or delivery race               | Host lifecycle and delivery contract owns retention and later notification              |
 
@@ -268,13 +273,14 @@ The successful inline result uses the child's Pydantic output contract and inclu
 | Concern                                                                                            | Owner                                                                                |
 | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | Child declaration and recursive resolved build plan                                                | Agent definition contract and Host resolver                                          |
-| Immutable built child collection and executable ownership                                          | Harness build                                                                        |
+| Immutable built child collection, executable ownership, and `AgentContext` projection              | Harness build and run assembly                                                       |
 | Inline tool presentation, context shaping, child-private State, dispatch, and result normalization | Delegation Capability                                                                |
 | Shared task state, atomic claim, and parent export                                                 | Working State Capability                                                             |
 | Fresh child Identity, Environment, plugin graph, and run authority                                 | Child executable, Harness plugin binding, `DelegationRunCapability`, and Host policy |
 | Child Agent loop and native per-run checks                                                         | Same Harness and Pydantic AI path as a root Agent                                    |
 | Complete parent tool-batch checkpoint boundary                                                     | Pydantic AI and Harness                                                              |
-| Async scheduling, durable lifecycle, wake-up, and delivery                                         | Host Capability and Host services                                                    |
+| Definition-selected async tool presentation and portable configuration                             | Owning Host Capability or plugin-contributed Capability                              |
+| Fresh async submission authority, scheduling, durable lifecycle, wake-up, and delivery             | Owning Host run Capability, its typed collaborators, and Host services               |
 
 ## Trade-offs
 
@@ -296,17 +302,18 @@ Restarting from the last complete parent boundary can repeat inline work after p
 
 ### Host Capability vs. Core Async Protocol
 
-Leaving background scheduling with the Host preserves true parent/child parallelism and lets a CLI use in-process Host jobs while a service uses durable executions. Hosts must define delivery and wake-up behavior explicitly, but the Harness avoids imposing one queue, receipt, persistence, or session model.
+Leaving background scheduling with the Host preserves true parent/child parallelism and lets a CLI use in-process Host jobs while a service uses durable executions. A definition-selected Capability keeps model-visible behavior inspectable, while a fresh Host run adapter keeps authority out of build-time plugin and Capability instances. Hosts must define delivery and wake-up behavior explicitly, but the Harness avoids imposing one queue, receipt, persistence, or session model.
 
 ## Invariants
 
 01. Every built collection is a defensively copied, recursively immutable one-to-one realization of the immediate authored child definitions; no exposed nested value aliases mutable build input.
-02. The Harness defines one blocking inline subagent execution primitive and no hosted or deferred subagent mode.
-03. Every inline invocation receives fresh authority; stored child state restores no Identity, Environment, credential, or policy.
-04. Delegation State contains bounded complete reachable child `HarnessState` snapshots and selectors, including child message history, but never active work or Host lifecycle facts; a retained failed new child is reachable through the ID delivered in `ToolFailed`.
-05. Different child instances may run concurrently; one child instance has at most one active transition within a parent run, while cross-run continuation serialization or forking belongs to the Host.
-06. Inline parent and children can share only the Working State task cell; it has atomic trusted-identity claim semantics, while plugin instances, child messages, and every other Capability state remain private.
-07. Parent state is exported only at a complete parent semantic boundary, never from an unresolved child or sibling tool batch.
-08. Inline descendants share the parent usage accumulator but not mutable message lists, whole `AgentContext`, or run bindings.
-09. A Host async spawn returns an ordinary tool result; later completion is new Host-routed input and never a deferred result for the spawn call.
-10. Host-managed child execution obtains fresh authority and owns durability, delivery, wake-up, retries, cancellation, and cross-run accounting.
+02. Every fresh context borrows the exact collection owned by its executable; `RunBindings` cannot replace it, it is not state, and possession grants no child execution authority.
+03. The Harness defines one blocking inline subagent execution primitive and no hosted or deferred subagent mode.
+04. Every inline invocation receives fresh authority; stored child state restores no Identity, Environment, credential, or policy.
+05. Delegation State contains bounded complete reachable child `HarnessState` snapshots and selectors, including child message history, but never active work or Host lifecycle facts; a retained failed new child is reachable through the ID delivered in `ToolFailed`.
+06. Different child instances may run concurrently; one child instance has at most one active transition within a parent run, while cross-run continuation serialization or forking belongs to the Host.
+07. Inline parent and children can share only the Working State task cell; it has atomic trusted-identity claim semantics, while plugin instances, child messages, and every other Capability state remain private.
+08. Parent state is exported only at a complete parent semantic boundary, never from an unresolved child or sibling tool batch.
+09. Inline descendants share the parent usage accumulator but not mutable message lists, whole `AgentContext`, or run bindings.
+10. A Host async spawn returns an ordinary tool result; later completion is new Host-routed input and never a deferred result for the spawn call.
+11. Host-managed child execution obtains fresh authority and owns durability, delivery, wake-up, retries, cancellation, and cross-run accounting.
