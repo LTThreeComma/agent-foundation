@@ -34,7 +34,10 @@ message EIPCallContext {
   reserved 4;
   reserved "invocation_grant";
 
-  string operation_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string operation_id = 1 [
+    (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+    (eip_field).max_length = 128
+  ];
   optional google.protobuf.Timestamp deadline = 2;
   optional string idempotency_key = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
@@ -59,7 +62,10 @@ enum ReceiptOutcome {
 
 message OperationReceipt {
   ReceiptRef receipt_ref = 1;
-  string operation_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string operation_id = 2 [
+    (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+    (eip_field).max_length = 128
+  ];
   string method = 3;
   string environment_id = 4 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   uint64 generation = 5 [(eip_field).minimum = 1];
@@ -79,7 +85,10 @@ enum OperationCancelStatus {
 
 message OperationCancelParams {
   EIPCallContext context = 1;
-  string target_operation_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  string target_operation_id = 2 [
+    (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+    (eip_field).max_length = 128
+  ];
 }
 
 message OperationCancelResult {
@@ -90,7 +99,10 @@ message ReceiptGetParams {
   EIPCallContext context = 1;
   oneof selector {
     ReceiptRef receipt_ref = 2;
-    string operation_id = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+    string operation_id = 3 [
+      (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+      (eip_field).max_length = 128
+    ];
   }
 }
 

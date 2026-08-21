@@ -359,7 +359,7 @@ class CommandLimits(EIPModel):
 
 
 class EIPCallContext(EIPModel):
-    operation_id: Identifier
+    operation_id: Annotated[Identifier, Field(max_length=128)]
     deadline: EIPTimestamp | None = None
     idempotency_key: Identifier | None = None
 
@@ -482,7 +482,7 @@ class MountDescriptor(EIPModel):
 
 class OperationCancelParams(EIPModel):
     context: EIPCallContext
-    target_operation_id: Identifier
+    target_operation_id: Annotated[Identifier, Field(max_length=128)]
 
 
 class OperationCancelResult(EIPModel):
@@ -772,7 +772,7 @@ class InitializeResult(EIPModel):
 
 class OperationReceipt(EIPModel):
     receipt_ref: ReceiptRef
-    operation_id: Identifier
+    operation_id: Annotated[Identifier, Field(max_length=128)]
     method: StrictStr
     environment_id: Identifier
     generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
@@ -853,7 +853,7 @@ class ProcessWriteStdinResult(EIPModel):
 class ReceiptGetParams(EIPModel):
     context: EIPCallContext
     receipt_ref: ReceiptRef | None = None
-    operation_id: Identifier | None = None
+    operation_id: Annotated[Identifier, Field(max_length=128)] | None = None
 
     @model_validator(mode="after")
     def _validate_selector(self) -> ReceiptGetParams:
@@ -888,7 +888,7 @@ class EIPErrorData(EIPModel):
     error_type: ErrorType
     retry_hint: RetryHint
     dispatch_stage: DispatchStage
-    operation_id: Identifier | None = None
+    operation_id: Annotated[Identifier, Field(max_length=128)] | None = None
     environment_id: Identifier | None = None
     generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
     capability: StrictStr | None = None

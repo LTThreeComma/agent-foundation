@@ -265,6 +265,7 @@
           "title": "Idempotency Key"
         },
         "operation_id": {
+          "maxLength": 128,
           "minLength": 1,
           "title": "Operation Id",
           "type": "string"
@@ -479,6 +480,7 @@
         "operation_id": {
           "anyOf": [
             {
+              "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },
@@ -1972,6 +1974,7 @@
           "$ref": "#/$defs/EIPCallContext"
         },
         "target_operation_id": {
+          "maxLength": 128,
           "minLength": 1,
           "title": "Target Operation Id",
           "type": "string"
@@ -2031,6 +2034,7 @@
           "type": "string"
         },
         "operation_id": {
+          "maxLength": 128,
           "minLength": 1,
           "title": "Operation Id",
           "type": "string"
@@ -3265,6 +3269,7 @@
         "operation_id": {
           "anyOf": [
             {
+              "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },

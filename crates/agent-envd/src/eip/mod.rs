@@ -11,9 +11,9 @@ mod tests {
     use serde::{Serialize, de::DeserializeOwned};
 
     use super::{
-        CommandNetwork, EIP_DESCRIPTOR_SHA256, EIP_PROTO_PACKAGE, EIP_PROTOCOL_VERSION, EIPError,
-        EIPLimits, EIPServerInfo, EipValidate, ErrorType, FileFindParams, FileStatParams,
-        FileStatResult, InitializeParams, JsonRpcErrorResponse, JsonRpcRequest,
+        CommandNetwork, EIP_DESCRIPTOR_SHA256, EIP_PROTO_PACKAGE, EIP_PROTOCOL_VERSION,
+        EIPCallContext, EIPError, EIPLimits, EIPServerInfo, EipValidate, ErrorType, FileFindParams,
+        FileStatParams, FileStatResult, InitializeParams, JsonRpcErrorResponse, JsonRpcRequest,
         JsonRpcSuccessResponse, METHODS, OutputCapture, OutputOverflow, OutputPolicy,
         OutputReadParams, ProcessWriteStdinParams, ReceiptGetParams, ShellExecParams, decode,
         encode,
@@ -214,6 +214,16 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn rust_operation_ids_use_the_canonical_character_bound() {
+        let maximum = "🧪".repeat(128);
+        let valid = serde_json::json!({"operation_id": maximum});
+        assert!(decode::<EIPCallContext>(&valid.to_string()).is_ok());
+
+        let too_long = serde_json::json!({"operation_id": "🧪".repeat(129)});
+        assert!(decode::<EIPCallContext>(&too_long.to_string()).is_err());
     }
 
     #[test]

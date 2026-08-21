@@ -261,6 +261,18 @@ def test_eip_profile_rejects_out_of_range_numbers_and_non_utc_timestamps() -> No
     assert json.loads(encode_model(context))["deadline"] == "2026-08-20T14:00:00.123456789Z"
 
 
+def test_operation_ids_are_bounded_consistently() -> None:
+    maximum = "🧪" * 128
+    assert EIPCallContext(operation_id=maximum).operation_id == maximum
+    with pytest.raises(ValidationError):
+        EIPCallContext(operation_id=maximum + "x")
+
+    selector = {"context": {"operation_id": "lookup"}, "operation_id": maximum}
+    assert ReceiptGetParams.model_validate(selector).operation_id == maximum
+    with pytest.raises(ValidationError):
+        ReceiptGetParams.model_validate({**selector, "operation_id": maximum + "x"})
+
+
 def test_eip_profile_rejects_noncanonical_paths_and_base64() -> None:
     with pytest.raises(ValidationError):
         FileStatParams.model_validate(

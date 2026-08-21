@@ -63,7 +63,10 @@ message EIPErrorData {
   ErrorType error_type = 1;
   RetryHint retry_hint = 2;
   DispatchStage dispatch_stage = 3;
-  optional string operation_id = 4 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  optional string operation_id = 4 [
+    (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+    (eip_field).max_length = 128
+  ];
   optional string environment_id = 5 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   optional uint64 generation = 6 [(eip_field).minimum = 1];
   optional string capability = 7;

@@ -769,10 +769,15 @@ fn render_field_checks(
                 .get_field_by_name("min_length")
                 .and_then(|value| value.as_u32())
                 .ok_or_else(|| "min_length is not uint32".to_owned())?;
+            let measured_length = if matches!(field.kind(), Kind::String) {
+                format!("{target}.chars().count()")
+            } else {
+                format!("{target}.len()")
+            };
             let too_short = if minimum == 1 {
                 format!("{target}.is_empty()")
             } else {
-                format!("{target}.len() < {minimum}usize")
+                format!("{measured_length} < {minimum}usize")
             };
             output.push_str(&format!(
                 "{check_padding}if {too_short} {{ return Err(ValidationError(\"{} is shorter than its minimum length\".to_owned())); }}\n",
@@ -784,8 +789,13 @@ fn render_field_checks(
                 .get_field_by_name("max_length")
                 .and_then(|value| value.as_u32())
                 .ok_or_else(|| "max_length is not uint32".to_owned())?;
+            let measured_length = if matches!(field.kind(), Kind::String) {
+                format!("{target}.chars().count()")
+            } else {
+                format!("{target}.len()")
+            };
             output.push_str(&format!(
-                "{check_padding}if {target}.len() > {maximum}usize {{ return Err(ValidationError(\"{} exceeds its maximum length\".to_owned())); }}\n",
+                "{check_padding}if {measured_length} > {maximum}usize {{ return Err(ValidationError(\"{} exceeds its maximum length\".to_owned())); }}\n",
                 field.name()
             ));
         }

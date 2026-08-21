@@ -144,6 +144,17 @@ def _base_field_type(
     raise ValueError(f"unsupported field type for {field.name}: {field.type}")
 
 
+def _length_constraint(field_option: Any) -> str | None:
+    constraints: list[str] = []
+    if field_option is not None and field_option.HasField("min_length"):
+        constraints.append(f"min_length={field_option.min_length}")
+    if field_option is not None and field_option.HasField("max_length"):
+        constraints.append(f"max_length={field_option.max_length}")
+    if not constraints:
+        return None
+    return f"Field({', '.join(constraints)})"
+
+
 def _field_annotation(
     field: descriptor_pb2.FieldDescriptorProto,
     message: descriptor_pb2.DescriptorProto,
@@ -155,13 +166,16 @@ def _field_annotation(
     if field.label == descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED and not is_map:
         field_option = _field_option(field, options)
         annotation = f"tuple[{base_type}, ...]"
-        if field_option is not None and field_option.HasField("min_length") and field_option.min_length > 0:
-            return f"Annotated[{annotation}, Field(min_length={field_option.min_length})]", None
+        if constraint := _length_constraint(field_option):
+            return f"Annotated[{annotation}, {constraint}]", None
         return annotation, "()"
     if is_map:
         return base_type, "Field(default_factory=dict)"
 
     field_option = _field_option(field, options)
+    if field.type == descriptor_pb2.FieldDescriptorProto.TYPE_STRING:
+        if constraint := _length_constraint(field_option):
+            base_type = f"Annotated[{base_type}, {constraint}]"
     if field_option is not None:
         if field_option.HasField("default_bool"):
             return base_type, repr(field_option.default_bool)
