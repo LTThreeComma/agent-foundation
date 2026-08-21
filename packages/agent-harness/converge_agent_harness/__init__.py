@@ -21,7 +21,13 @@ from converge_agent_harness.errors import (
     RunError,
     StateError,
 )
-from converge_agent_harness.events import HarnessEvent, HarnessRunResultEvent, HarnessStreamItem
+from converge_agent_harness.events import (
+    HarnessEvent,
+    HarnessEventEmitter,
+    HarnessExtensionEvent,
+    HarnessRunResultEvent,
+    HarnessStreamItem,
+)
 from converge_agent_harness.execution import (
     AgentDefinition,
     DelegationContextPolicy,
@@ -55,6 +61,7 @@ from converge_agent_harness.state import (
     CapabilityState,
     HarnessState,
 )
+from converge_agent_harness.tools.deferred import DeferredToolResume
 
 __version__ = version("converge-agent-harness")
 
@@ -71,6 +78,7 @@ __all__ = [
     "BoundPluginContext",
     "BuiltSubagent",
     "CapabilityState",
+    "DeferredToolResume",
     "DefinitionError",
     "DelegationContextPolicy",
     "EnvironmentError",
@@ -79,6 +87,8 @@ __all__ = [
     "HarnessBuilder",
     "HarnessError",
     "HarnessEvent",
+    "HarnessEventEmitter",
+    "HarnessExtensionEvent",
     "HarnessRunResult",
     "HarnessRunResultEvent",
     "HarnessRunStream",

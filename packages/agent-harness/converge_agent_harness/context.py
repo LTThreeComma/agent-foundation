@@ -17,9 +17,11 @@ from converge_agent_harness.identity import AgentIdentityRef, AgentInstanceConte
 from converge_agent_harness.state import AgentContextState, HarnessState
 
 if TYPE_CHECKING:
+    from converge_agent_harness.events import HarnessEventEmitter
     from converge_agent_harness.execution import AgentDefinition, ExecutableAgent, SubagentDefinition
     from converge_agent_harness.models import ModelRunBinding
     from converge_agent_harness.plugins import BoundPluginContext
+    from converge_agent_harness.tools.deferred import DeferredToolResume
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -89,6 +91,14 @@ EMPTY_SUBAGENTS = SubagentCollection()
 
 
 @dataclass(frozen=True, slots=True)
+class _CapabilityProvenance:
+    """Reserved Capability IDs accepted from each trusted composition source."""
+
+    definition_ids: frozenset[str] = frozenset()
+    run_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class RunBindings:
     """Fresh trusted authority and run integrations supplied by the caller."""
 
@@ -137,7 +147,17 @@ class AgentContext:
     model_binding: ModelRunBinding | None
     plugins: BoundPluginContext
     subagents: SubagentCollection
+    events: HarnessEventEmitter
+    deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
+    _capability_provenance: _CapabilityProvenance = field(default_factory=_CapabilityProvenance, repr=False)
+    _managed_tool_ids: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}),
+        repr=False,
+    )
+
+    def _record_managed_tool_surface(self, tool_ids: Mapping[str, str]) -> None:
+        object.__setattr__(self, "_managed_tool_ids", MappingProxyType(dict(tool_ids)))
 
     @property
     def identity(self) -> AgentIdentityRef:

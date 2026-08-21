@@ -14,6 +14,7 @@ from converge_agent_harness import (
     EnvironmentRunBinding,
     HarnessBuilder,
     HarnessEvent,
+    HarnessExtensionEvent,
     HarnessRunResult,
     NoopBoundEnvironment,
     PluginError,
@@ -23,8 +24,10 @@ from converge_agent_harness import (
     PluginRunResponse,
     RunBindings,
     RunCleanupError,
+    RunError,
     SemanticRunInput,
 )
+from pydantic import ValidationError
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
@@ -320,8 +323,9 @@ async def test_outer_failure_retains_the_valid_replacement_from_the_inner_plugin
 
 
 class EventTransformPlugin(AbstractHarnessPlugin):
-    def __init__(self, *, invalid: bool = False) -> None:
+    def __init__(self, *, invalid: bool = False, foreign_run: bool = False) -> None:
         self.invalid = invalid
+        self.foreign_run = foreign_run
 
     @property
     def plugin_id(self) -> str:
@@ -337,6 +341,7 @@ class EventTransformPlugin(AbstractHarnessPlugin):
                 if isinstance(item, HarnessEvent):
                     yield replace(
                         item,
+                        run_id="forged-child" if self.foreign_run else item.run_id,
                         sequence=10_000 - item.sequence,
                         event=cast(Any, object()) if self.invalid else item.event,
                     )
@@ -373,6 +378,69 @@ async def test_plugin_cannot_emit_a_malformed_pydantic_event() -> None:
         await executable.run("hello", bindings=RunBindings.local())
 
     assert exc_info.value.code == "plugin_event_invalid"
+
+
+async def test_plugin_cannot_forge_an_unregistered_child_event() -> None:
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(EventTransformPlugin(foreign_run=True),),
+    )
+
+    with pytest.raises(PluginError) as exc_info:
+        await executable.run("hello", bindings=RunBindings.local())
+
+    assert exc_info.value.code == "plugin_event_run_mismatch"
+
+
+class EmitDuringBindingPlugin(AbstractHarnessPlugin):
+    @property
+    def plugin_id(self) -> str:
+        return "emit-during-binding"
+
+    async def for_run(self, context: AgentContext) -> EmitDuringBindingPlugin:
+        for index in range(65):
+            await context.events.emit(HarnessExtensionEvent(kind="diagnostic", payload={"index": index}))
+        return self
+
+
+async def test_pre_start_event_overflow_fails_without_waiting_for_a_consumer() -> None:
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(EmitDuringBindingPlugin(),),
+    )
+
+    with pytest.raises(RunError) as exc_info:
+        await asyncio.wait_for(
+            executable.run("hello", bindings=RunBindings.local()),
+            timeout=1,
+        )
+
+    assert exc_info.value.code == "event_buffer_full"
+
+
+def test_extension_events_redact_sensitive_content_and_reject_non_finite_numbers() -> None:
+    event = HarnessExtensionEvent(
+        kind="diagnostic",
+        payload={
+            "token": "plain-secret",
+            "message": "request used Bearer abc.def",
+            "nested": {"credential": "raw-value"},
+            "input_tokens": 42,
+        },
+    )
+
+    assert event.payload == {
+        "token": "[REDACTED]",
+        "message": "request used Bearer [REDACTED]",
+        "nested": {"credential": "[REDACTED]"},
+        "input_tokens": 42,
+    }
+    with pytest.raises(ValidationError):
+        HarnessExtensionEvent(kind="diagnostic", payload={"value": float("inf")})
 
 
 class ExchangeReplacementPlugin(AbstractHarnessPlugin):

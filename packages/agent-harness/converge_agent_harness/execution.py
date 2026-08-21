@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import typing
 from collections.abc import AsyncIterator, Awaitable, Coroutine, Sequence
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,7 +29,13 @@ from pydantic_ai.tools import DeferredToolRequests, Tool, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from converge_agent_harness.context import AgentContext, BuiltSubagent, RunBindings, SubagentCollection
+from converge_agent_harness.context import (
+    AgentContext,
+    BuiltSubagent,
+    RunBindings,
+    SubagentCollection,
+    _CapabilityProvenance,
+)
 from converge_agent_harness.errors import (
     DefinitionError,
     HarnessError,
@@ -38,7 +44,13 @@ from converge_agent_harness.errors import (
     RunError,
     StateError,
 )
-from converge_agent_harness.events import HarnessEvent, HarnessRunResultEvent, HarnessStreamItem
+from converge_agent_harness.events import (
+    HarnessEvent,
+    HarnessExtensionEvent,
+    HarnessRunResultEvent,
+    HarnessStreamItem,
+    _RunEventEmitter,
+)
 from converge_agent_harness.input import (
     RunInputFactory,
     RunInputValue,
@@ -63,8 +75,25 @@ from converge_agent_harness.recovery import (
 )
 from converge_agent_harness.result import HarnessRunResult, SafeFailure
 from converge_agent_harness.state import AgentContextState, HarnessState
+from converge_agent_harness.tools.client import (
+    CLIENT_TOOLS_CAPABILITY_ID,
+    CLIENT_TOOLS_RUN_CAPABILITY_ID,
+    ClientToolsCapability,
+    ClientToolsRunCapability,
+)
+from converge_agent_harness.tools.deferred import (
+    DeferredToolResume,
+    bind_managed_approval_identities,
+    preflight_deferred_resume,
+)
+from converge_agent_harness.tools.invocation import (
+    INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+    InvocationAuthorizationCapability,
+)
+from converge_agent_harness.tools.policy import INVOCATION_POLICY_CAPABILITY_ID, InvocationPolicyCapability
 
 _AGENT_EVENT_ADAPTER = TypeAdapter(AgentStreamEvent)
+_EXTENSION_EVENT_ADAPTER = TypeAdapter(HarnessExtensionEvent)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +213,8 @@ class HarnessBuilder:
         )
         subagents = SubagentCollection({child.declaration.name: child for child in built_children})
         plugins, plugin_capabilities = bind_agent_plugins(definition.plugins)
+        authored_capabilities = (*definition.capabilities, *plugin_capabilities)
+        definition_reserved_ids = _validate_capability_source(authored_capabilities, source="definition")
 
         async def resolve_model(
             context: ModelResolutionContext[AgentContext],
@@ -196,6 +227,7 @@ class HarnessBuilder:
             )
 
         capabilities = (
+            InvocationAuthorizationCapability(),
             ResolveModelId(resolve_model),
             *definition.capabilities,
             *plugin_capabilities,
@@ -228,6 +260,7 @@ class HarnessBuilder:
             output_adapter=_build_output_adapter(definition.output_type),
             plugins=plugins,
             subagents=subagents,
+            definition_reserved_capability_ids=definition_reserved_ids,
         )
 
     def build_code[BuildOutputT](
@@ -274,12 +307,14 @@ class ExecutableAgent[OutputT]:
         output_adapter: TypeAdapter[Any],
         plugins: tuple[AbstractHarnessPlugin, ...],
         subagents: SubagentCollection,
+        definition_reserved_capability_ids: frozenset[str],
     ) -> None:
         self.definition = definition
         self.subagents = subagents
         self._agent = agent
         self._output_adapter = output_adapter
         self._plugins = plugins
+        self._definition_reserved_capability_ids = definition_reserved_capability_ids
         self._closed = False
 
     async def run(
@@ -289,6 +324,7 @@ class ExecutableAgent[OutputT]:
         input_factory: RunInputFactory | None = None,
         bindings: RunBindings,
         previous_state: HarnessState | None = None,
+        deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> HarnessRunResult[OutputT]:
@@ -298,6 +334,7 @@ class ExecutableAgent[OutputT]:
             input_factory=input_factory,
             bindings=bindings,
             previous_state=previous_state,
+            deferred_resume=deferred_resume,
             usage=usage,
             usage_limits=usage_limits,
         ) as stream:
@@ -313,6 +350,7 @@ class ExecutableAgent[OutputT]:
         input_factory: RunInputFactory | None = None,
         bindings: RunBindings,
         previous_state: HarnessState | None = None,
+        deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> HarnessRunStream[OutputT]:
@@ -324,12 +362,20 @@ class ExecutableAgent[OutputT]:
                 "input and input_factory are mutually exclusive.",
                 code="input_source_conflict",
             )
+        run_reserved_ids = _validate_capability_source(bindings.capabilities, source="run")
+        normalized_resume = (
+            preflight_deferred_resume(deferred_resume, previous_state=previous_state)
+            if deferred_resume is not None
+            else None
+        )
         return HarnessRunStream(
             executable=self,
             input=input,
             input_factory=input_factory,
             bindings=bindings,
             previous_state=previous_state,
+            deferred_resume=normalized_resume,
+            run_reserved_capability_ids=run_reserved_ids,
             usage=usage,
             usage_limits=usage_limits,
         )
@@ -362,6 +408,8 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         input_factory: RunInputFactory | None,
         bindings: RunBindings,
         previous_state: HarnessState | None,
+        deferred_resume: DeferredToolResume | None,
+        run_reserved_capability_ids: frozenset[str],
         usage: RunUsage | None,
         usage_limits: UsageLimits | None,
     ) -> None:
@@ -371,9 +419,12 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._input_factory = input_factory
         self._bindings = bindings
         self._previous_state = previous_state.model_copy(deep=True) if previous_state is not None else HarnessState()
+        self._deferred_resume = deferred_resume
+        self._run_reserved_capability_ids = run_reserved_capability_ids
         self._usage = usage if usage is not None else RunUsage()
         self._usage_limits = usage_limits
         self._stack = AsyncExitStack()
+        self._emitter = _RunEventEmitter(self.run_id)
         self._context: AgentContext | None = None
         self._response: PluginRunResponse[OutputT] | None = None
         self._responses: list[tuple[int, PluginRunResponse[OutputT]]] = []
@@ -440,7 +491,13 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 model_binding=self._bindings.model_binding,
                 plugins=plugin_context,
                 subagents=self._executable.subagents,
+                events=self._emitter,
+                deferred_resume=self._deferred_resume,
                 metadata=self._bindings.metadata,
+                _capability_provenance=_CapabilityProvenance(
+                    definition_ids=self._executable._definition_reserved_capability_ids,
+                    run_ids=self._run_reserved_capability_ids,
+                ),
             )
             self._context = context
             run_plugins = await bind_run_plugins(self._executable._plugins, context)
@@ -508,15 +565,34 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                     result=result,
                 )
 
-            if not isinstance(item, HarnessEvent) or item.run_id != self.run_id:
+            if not isinstance(item, HarnessEvent) or item.sequence < 0:
                 raise PluginError("Plugin emitted an invalid stream item.", code="plugin_event_invalid")
             try:
-                event = _AGENT_EVENT_ADAPTER.validate_python(item.event, strict=True)
+                event = (
+                    _EXTENSION_EVENT_ADAPTER.validate_python(
+                        item.event.model_dump(),
+                        strict=True,
+                    )
+                    if isinstance(item.event, HarnessExtensionEvent)
+                    else _AGENT_EVENT_ADAPTER.validate_python(item.event, strict=True)
+                )
             except ValidationError as exc:
                 raise PluginError(
-                    "Plugin emitted an invalid Pydantic AI event.",
+                    "Plugin emitted an invalid Harness event.",
                     code="plugin_event_invalid",
                 ) from exc
+            if item.run_id != self.run_id:
+                if not self._emitter.is_registered_child(item.run_id):
+                    raise PluginError(
+                        "Plugin emitted an event for an unregistered child run.",
+                        code="plugin_event_run_mismatch",
+                    )
+                return HarnessEvent(
+                    run_id=item.run_id,
+                    sequence=item.sequence,
+                    occurred_at=item.occurred_at,
+                    event=event,
+                )
             return HarnessEvent(
                 run_id=self.run_id,
                 sequence=self._next_public_sequence(),
@@ -653,6 +729,9 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 current_input.value,
                 output_type=[self._executable.definition.output_type, DeferredToolRequests],
                 message_history=current_history,
+                deferred_tool_results=(
+                    self._deferred_resume.results if attempt_index == 0 and self._deferred_resume is not None else None
+                ),
                 run_id=str(uuid4()),
                 deps=self.context,
                 usage=self._usage,
@@ -665,19 +744,29 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                     if self._cancel_requested:
                         events.cancel()
                     try:
-                        async for event in events:
+                        async for event in self._merge_agent_events(events):
                             self._refresh_live_messages()
+                            if isinstance(event, HarnessEvent):
+                                yield event
+                                continue
+                            if isinstance(event, HarnessExtensionEvent):
+                                yield self._adapt_extension_event(event)
+                                continue
                             if isinstance(event, AgentRunResultEvent):
                                 result = event.result
                                 messages = tuple(result.all_messages())
                                 self._latest_messages = messages
                                 state = await exchange.context.export_state(messages)
                                 if isinstance(result.output, DeferredToolRequests):
+                                    deferred = bind_managed_approval_identities(
+                                        result.output,
+                                        exchange.context._managed_tool_ids,
+                                    )
                                     candidate = HarnessRunResult(
                                         run_id=self.run_id,
                                         status="suspended",
                                         output=None,
-                                        deferred=result.output,
+                                        deferred=deferred,
                                         suspend_reason="deferred",
                                         state=state,
                                         usage=result.usage,
@@ -861,6 +950,48 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._source_sequence += 1
         return envelope
 
+    def _adapt_extension_event(self, event: HarnessExtensionEvent) -> HarnessEvent:
+        envelope = self._emitter.envelope(event, sequence=self._source_sequence)
+        self._source_sequence += 1
+        return envelope
+
+    async def _merge_agent_events(
+        self,
+        events: AgentRunEvents[OutputT | DeferredToolRequests],
+    ) -> AsyncIterator[Any]:
+        self._emitter.start_consuming()
+        agent_task: asyncio.Task[Any] | None = asyncio.create_task(events.__anext__())
+        emitter_task: asyncio.Task[Any] | None = None
+        try:
+            while agent_task is not None:
+                emitter_task = asyncio.create_task(self._emitter.next())
+                done, _ = await asyncio.wait({agent_task, emitter_task}, return_when=asyncio.FIRST_COMPLETED)
+                if emitter_task in done:
+                    yield emitter_task.result()
+                    emitter_task = None
+                if agent_task in done:
+                    try:
+                        event = agent_task.result()
+                    except StopAsyncIteration:
+                        agent_task = None
+                    else:
+                        yield event
+                        agent_task = asyncio.create_task(events.__anext__())
+                if emitter_task is not None:
+                    emitter_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await emitter_task
+                    emitter_task = None
+            while not self._emitter.empty():
+                yield self._emitter.get_nowait()
+        finally:
+            self._emitter.stop_consuming()
+            for task in (agent_task, emitter_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
     def _next_public_sequence(self) -> int:
         sequence = self._public_sequence
         self._public_sequence += 1
@@ -927,6 +1058,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         responses = sorted(self._responses, key=lambda item: item[0], reverse=True)
         for _, response in responses:
             await finish_cleanup(response.aclose())
+        self._emitter.close()
         await finish_cleanup(self._stack.aclose())
         self._closed = True
 
@@ -940,6 +1072,62 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 outcome=outcome,
                 causes=tuple(causes),
             )
+
+
+def _validate_capability_source(
+    capabilities: Sequence[AbstractCapability[AgentContext]],
+    *,
+    source: Literal["definition", "run"],
+) -> frozenset[str]:
+    """Flatten Capability trees and preserve ownership of reserved Harness IDs."""
+    leaves: list[AbstractCapability[AgentContext]] = []
+    for capability in capabilities:
+        if not isinstance(capability, AbstractCapability):
+            raise DefinitionError(
+                "Configured Capabilities must inherit AbstractCapability.",
+                code="capability_type_invalid",
+                details={"source": source},
+            )
+        capability.apply(leaves.append)
+
+    reserved_ids = {
+        INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+        INVOCATION_POLICY_CAPABILITY_ID,
+        CLIENT_TOOLS_CAPABILITY_ID,
+        CLIENT_TOOLS_RUN_CAPABILITY_ID,
+    }
+    accepted: set[str] = set()
+    for capability in leaves:
+        if not isinstance(capability, AbstractCapability):
+            raise DefinitionError(
+                "Capability trees must contain only AbstractCapability leaves.",
+                code="capability_type_invalid",
+                details={"source": source},
+            )
+        allowed = (source == "definition" and isinstance(capability, ClientToolsCapability)) or (
+            source == "run" and isinstance(capability, InvocationPolicyCapability | ClientToolsRunCapability)
+        )
+        reserved_type = isinstance(
+            capability,
+            InvocationAuthorizationCapability
+            | InvocationPolicyCapability
+            | ClientToolsCapability
+            | ClientToolsRunCapability,
+        )
+        if reserved_type or capability.id in reserved_ids:
+            if not allowed:
+                raise DefinitionError(
+                    "A reserved Harness Capability is installed from the wrong source.",
+                    code="capability_scope_invalid",
+                    details={
+                        "capability_id": capability.id,
+                        "capability_type": type(capability).__name__,
+                        "source": source,
+                    },
+                )
+            if capability.id is not None:
+                accepted.add(capability.id)
+    return frozenset(accepted)
 
 
 def _output_spec_contains_deferred_requests(output_spec: OutputSpec[Any]) -> bool:
