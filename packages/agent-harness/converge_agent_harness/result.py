@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copy import copy, deepcopy
+from copy import deepcopy
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, computed_field, field_validator
@@ -217,6 +217,4 @@ class HarnessRunResult[OutputT]:
 
 
 def _copy_usage(usage: RunUsage) -> RunUsage:
-    value = copy(usage)
-    value.details = dict(usage.details)
-    return value
+    return deepcopy(usage)

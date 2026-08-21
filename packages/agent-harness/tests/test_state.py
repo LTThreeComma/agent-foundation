@@ -54,6 +54,7 @@ async def test_state_and_result_views_do_not_expose_mutable_aliases() -> None:
 
     source_output = {"items": [1]}
     source_usage = RunUsage(requests=1, details={"cached": 2})
+    cast(Any, source_usage).extension = {"nested": [1]}
     result = HarnessRunResult(
         run_id="run-1",
         status="completed",
@@ -65,15 +66,18 @@ async def test_state_and_result_views_do_not_expose_mutable_aliases() -> None:
     source_output["items"].append(2)
     source_usage.requests = 9
     source_usage.details["cached"] = 9
+    cast(Any, source_usage).extension["nested"].append(2)
     returned_output = result.output
     assert returned_output is not None
     returned_output["items"].append(3)
     returned_usage = result.usage
     returned_usage.details["cached"] = 4
+    cast(Any, returned_usage).extension["nested"].append(3)
 
     assert result.output == {"items": [1]}
     assert result.usage.requests == 1
     assert result.usage.details == {"cached": 2}
+    assert cast(Any, result.usage).extension == {"nested": [1]}
     assert len(result.all_messages()[0].parts) == 2
     returned_result_messages = result.all_messages()
     returned_result_messages[0].parts.append(UserPromptPart(content="result view mutation"))

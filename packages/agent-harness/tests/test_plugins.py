@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
@@ -285,6 +285,40 @@ async def test_invalid_or_failed_outer_result_retains_the_last_valid_inner_outco
     assert len(exc_info.value.causes) == 1
 
 
+class ReplaceResultPlugin(AbstractHarnessPlugin):
+    @property
+    def plugin_id(self) -> str:
+        return "replace-result"
+
+    def wrap_run(
+        self,
+        exchange: PluginRunExchange,
+        call_next: PluginRunNext,
+    ) -> PluginRunResponse:
+        async def iterate():
+            async for item in call_next(exchange):
+                if isinstance(item, HarnessRunResult):
+                    item = item.replace(output=f"{item.output}|inner")
+                yield item
+
+        return PluginRunResponse(iterate())
+
+
+async def test_outer_failure_retains_the_valid_replacement_from_the_inner_plugin_boundary() -> None:
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(RaiseAfterResultPlugin(), ReplaceResultPlugin()),
+    )
+
+    with pytest.raises(RunCleanupError) as exc_info:
+        await executable.run("hello", bindings=RunBindings.local())
+
+    assert exc_info.value.outcome is not None
+    assert exc_info.value.outcome.output == "output|inner"
+
+
 class EventTransformPlugin(AbstractHarnessPlugin):
     def __init__(self, *, invalid: bool = False) -> None:
         self.invalid = invalid
@@ -423,12 +457,97 @@ class CleanupTrackingPlugin(AbstractHarnessPlugin):
         return PluginRunResponse(iterate())
 
 
+class TaskAffineCleanupPlugin(AbstractHarnessPlugin):
+    @property
+    def plugin_id(self) -> str:
+        return "task-affine-cleanup"
+
+    def wrap_run(
+        self,
+        exchange: PluginRunExchange,
+        call_next: PluginRunNext,
+    ) -> PluginRunResponse:
+        async def iterate():
+            owner_task = asyncio.current_task()
+            try:
+                async for item in call_next(exchange):
+                    yield item
+            finally:
+                assert asyncio.current_task() is owner_task
+
+        return PluginRunResponse(iterate())
+
+
+async def test_normal_cleanup_stays_in_the_task_that_entered_the_plugin_iterator() -> None:
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(TaskAffineCleanupPlugin(),),
+    )
+
+    async with executable.stream("hello", bindings=RunBindings.local()) as stream:
+        response = cast(Any, stream)._response
+        first = await stream.__anext__()
+        assert isinstance(first, HarnessEvent)
+
+    assert response._item_validator is None
+
+
+class SuppressingCancellationPlugin(AbstractHarnessPlugin):
+    def __init__(self, cleanup_started: asyncio.Event) -> None:
+        self.cleanup_started = cleanup_started
+
+    @property
+    def plugin_id(self) -> str:
+        return "suppressing-cancellation"
+
+    def wrap_run(
+        self,
+        exchange: PluginRunExchange,
+        call_next: PluginRunNext,
+    ) -> PluginRunResponse:
+        async def iterate():
+            try:
+                async for item in call_next(exchange):
+                    yield item
+            finally:
+                self.cleanup_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pass
+
+        return PluginRunResponse(iterate())
+
+
+async def test_cleanup_cannot_suppress_external_cancellation() -> None:
+    cleanup_started = asyncio.Event()
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(SuppressingCancellationPlugin(cleanup_started),),
+    )
+    stream = executable.stream("hello", bindings=RunBindings.local())
+    await stream.__aenter__()
+    first = await stream.__anext__()
+    assert isinstance(first, HarnessEvent)
+
+    close_task = asyncio.create_task(stream.__aexit__(None, None, None))
+    await cleanup_started.wait()
+    close_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+
 class FailingTrackingEnvironment(EnvironmentRunBinding):
     def __init__(self, log: list[str]) -> None:
         self.log = log
 
     @asynccontextmanager
-    async def bind(self, *, run_id: str, instance) -> AsyncIterator[BoundEnvironment]:
+    async def bind(self, *, run_id: str, instance) -> AsyncGenerator[BoundEnvironment]:
         del run_id, instance
         try:
             yield NoopBoundEnvironment()
@@ -437,7 +556,7 @@ class FailingTrackingEnvironment(EnvironmentRunBinding):
             raise RuntimeError("environment cleanup failed")
 
 
-async def test_external_cancellation_finishes_all_cleanup_and_keeps_cancellation_primary() -> None:
+async def test_repeated_external_cancellation_attempts_remaining_cleanup_and_stays_primary() -> None:
     log: list[str] = []
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
@@ -476,7 +595,6 @@ async def test_external_cancellation_finishes_all_cleanup_and_keeps_cancellation
 
     assert log == [
         "start:cleanup-inner",
-        "done:cleanup-inner",
         "start:cleanup-outer",
         "done:cleanup-outer",
         "environment",

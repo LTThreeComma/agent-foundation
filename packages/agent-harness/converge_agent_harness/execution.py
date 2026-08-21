@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import typing
-from collections.abc import AsyncIterator, Awaitable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Coroutine, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,10 +18,10 @@ from pydantic import ConfigDict, PydanticSchemaGenerationError, TypeAdapter, Val
 from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunEvents
 from pydantic_ai.agent.spec import AgentSpec
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, ResolveModelId
 from pydantic_ai.exceptions import AgentRunError, RunCancelled, UsageLimitExceeded, UserError
 from pydantic_ai.messages import AgentStreamEvent, ModelMessage
-from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.models import KnownModelName, Model, ModelResolutionContext
 from pydantic_ai.output import NativeOutput, OutputSpec, PromptedOutput, TextOutput, ToolOutput
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import DeferredToolRequests, Tool, ToolFuncEither
@@ -45,6 +45,7 @@ from converge_agent_harness.input import (
     SemanticRunInput,
     normalize_input,
 )
+from converge_agent_harness.models import resolve_run_model, wrap_self_healing_model
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
     BoundPluginContext,
@@ -53,6 +54,11 @@ from converge_agent_harness.plugins import (
     PluginRunResponse,
     bind_agent_plugins,
     bind_run_plugins,
+)
+from converge_agent_harness.recovery import (
+    ModelRecoveryPolicy,
+    is_recoverable_model_failure,
+    normalize_interrupted_history,
 )
 from converge_agent_harness.result import HarnessRunResult, SafeFailure
 from converge_agent_harness.state import AgentContextState, HarnessState
@@ -72,6 +78,8 @@ class AgentDefinition[OutputT]:
     toolsets: tuple[AgentToolset[AgentContext], ...] = ()
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     plugins: tuple[AbstractHarnessPlugin, ...] = ()
+    self_healing: bool = True
+    model_recovery: ModelRecoveryPolicy = field(default_factory=ModelRecoveryPolicy)
 
     def __post_init__(self) -> None:
         if not self.definition_id.strip():
@@ -89,16 +97,35 @@ class HarnessBuilder:
     def build[BuildOutputT](self, definition: AgentDefinition[BuildOutputT]) -> ExecutableAgent[BuildOutputT]:
         """Validate code-first composition and construct a reusable executable."""
         plugins, plugin_capabilities = bind_agent_plugins(definition.plugins)
-        capabilities = (*definition.capabilities, *plugin_capabilities)
+
+        async def resolve_model(
+            context: ModelResolutionContext[AgentContext],
+            model_id: str,
+        ) -> Model | None:
+            return await resolve_run_model(
+                context,
+                model_id,
+                self_healing=definition.self_healing,
+            )
+
+        capabilities = (
+            ResolveModelId(resolve_model),
+            *definition.capabilities,
+            *plugin_capabilities,
+        )
+        model = definition.model
+        if isinstance(model, Model):
+            model = wrap_self_healing_model(model, enabled=definition.self_healing)
         try:
             agent = Agent.from_spec(
                 definition.agent.model_copy(deep=True),
                 deps_type=AgentContext,
-                model=definition.model,
+                model=model,
                 output_type=definition.output_type,
                 tools=definition.tools,
                 toolsets=definition.toolsets,
                 capabilities=capabilities,
+                defer_model_check=True,
             )
         except Exception as exc:
             if isinstance(exc, HarnessError):
@@ -127,6 +154,8 @@ class HarnessBuilder:
         toolsets: Sequence[AgentToolset[AgentContext]] = (),
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         plugins: Sequence[AbstractHarnessPlugin] = (),
+        self_healing: bool = True,
+        model_recovery: ModelRecoveryPolicy | None = None,
     ) -> ExecutableAgent[BuildOutputT]:
         """Convenience constructor retaining the same AgentDefinition build path."""
         return self.build(
@@ -139,6 +168,8 @@ class HarnessBuilder:
                 toolsets=tuple(toolsets),
                 capabilities=tuple(capabilities),
                 plugins=tuple(plugins),
+                self_healing=self_healing,
+                model_recovery=model_recovery or ModelRecoveryPolicy(),
             )
         )
 
@@ -266,6 +297,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._closed = False
         self._terminal_yielded = False
         self._cancel_requested = False
+        self._cancel_event = asyncio.Event()
         self._next_active = False
 
     @property
@@ -312,6 +344,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 instance=self._bindings.instance,
                 state=AgentContextState(self._previous_state.agent_context_state),
                 environment=environment,
+                model_binding=self._bindings.model_binding,
                 plugins=plugin_context,
                 subagents=self._executable.subagents,
                 metadata=self._bindings.metadata,
@@ -441,6 +474,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         if self._terminal_yielded or self._closed:
             return
         self._cancel_requested = True
+        self._cancel_event.set()
         if self._pydantic_events is not None:
             self._pydantic_events.cancel()
 
@@ -458,19 +492,32 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         exchange: PluginRunExchange,
     ) -> PluginRunResponse[OutputT]:
         if index == len(plugins):
-            return self._register_response(PluginRunResponse(self._agent_items(exchange)), depth=index)
-        plugin = plugins[index]
-        call_next = PluginRunNext[OutputT](
-            lambda next_exchange: self._build_response(plugins, index + 1, next_exchange)
-        )
-        response = plugin.wrap_run(exchange, call_next)
-        if not isinstance(response, PluginRunResponse):
-            raise PluginError(
-                "Plugin wrap_run must return PluginRunResponse.",
-                code="plugin_response_invalid",
-                details={"plugin_id": plugin.plugin_id},
+            response = PluginRunResponse(self._agent_items(exchange))
+        else:
+            plugin = plugins[index]
+            call_next = PluginRunNext[OutputT](
+                lambda next_exchange: self._build_response(plugins, index + 1, next_exchange)
             )
-        return self._register_response(cast(PluginRunResponse[OutputT], response), depth=index)
+            response = plugin.wrap_run(exchange, call_next)
+            if not isinstance(response, PluginRunResponse):
+                raise PluginError(
+                    "Plugin wrap_run must return PluginRunResponse.",
+                    code="plugin_response_invalid",
+                    details={"plugin_id": plugin.plugin_id},
+                )
+        typed_response = cast(PluginRunResponse[OutputT], response)
+        typed_response._bind_item_validator(self._validate_plugin_response_item)
+        return self._register_response(typed_response, depth=index)
+
+    def _validate_plugin_response_item(
+        self,
+        item: HarnessEvent | HarnessRunResult[OutputT],
+    ) -> HarnessEvent | HarnessRunResult[OutputT]:
+        if isinstance(item, HarnessRunResult):
+            validated = self._validate_result_candidate(item)
+            self._last_valid_outcome = validated
+            return validated
+        return item
 
     def _register_response(
         self,
@@ -496,84 +543,152 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         if not isinstance(exchange.input, SemanticRunInput):
             raise PluginError("Plugin middleware supplied an invalid input.", code="plugin_input_invalid")
         try:
-            semantic_input = normalize_input(exchange.input.value)
+            current_input = normalize_input(exchange.input.value)
         except HarnessError as exc:
             raise PluginError("Plugin middleware supplied an invalid input.", code="plugin_input_invalid") from exc
 
-        manager = self._executable._agent.run_stream_events(
-            semantic_input.value,
-            message_history=self._previous_state.message_history,
-            run_id=self.run_id,
-            deps=self.context,
-            usage=self._usage,
-            usage_limits=self._usage_limits,
-            capabilities=self._bindings.capabilities,
-        )
-        try:
-            async with manager as events:
-                self._pydantic_events = events
-                if self._cancel_requested:
-                    events.cancel()
-                try:
-                    async for event in events:
-                        self._refresh_live_messages()
-                        if isinstance(event, AgentRunResultEvent):
-                            result = event.result
-                            messages = tuple(result.all_messages())
-                            self._latest_messages = messages
-                            state = await exchange.context.export_state(messages)
-                            if isinstance(result.output, DeferredToolRequests):
-                                candidate = HarnessRunResult(
-                                    run_id=self.run_id,
-                                    status="suspended",
-                                    output=None,
-                                    deferred=result.output,
-                                    suspend_reason="deferred",
-                                    state=state,
-                                    usage=result.usage,
-                                    _messages=messages,
-                                    _new_message_index=self._new_message_index,
-                                )
-                            else:
-                                candidate = HarnessRunResult(
-                                    run_id=self.run_id,
-                                    status="completed",
-                                    output=result.output,
-                                    state=state,
-                                    usage=result.usage,
-                                    _messages=messages,
-                                    _new_message_index=self._new_message_index,
-                                )
-                            yield self._record_inner_candidate(candidate)
-                            return
-                        yield self._adapt_event(cast(AgentStreamEvent, event))
-                except RunCancelled as exc:
-                    messages = tuple(exc.all_messages())
-                    self._latest_messages = messages
-                    state = await exchange.context.export_state(messages) if exc.run_id is not None else None
-                    yield self._record_inner_candidate(
-                        HarnessRunResult(
-                            run_id=self.run_id,
-                            status="cancelled",
-                            output=None,
-                            state=state,
-                            usage=self._usage if exc.run_id is None else exc.usage,
-                            _messages=messages,
-                            _new_message_index=min(self._new_message_index, len(messages)),
+        policy = self._executable.definition.model_recovery
+        max_attempts = policy.max_attempts if policy.enabled else 1
+        attempt_index = 0
+        current_history, _ = normalize_interrupted_history(self._previous_state.message_history)
+        self._latest_messages = current_history
+
+        while True:
+            retry_error: BaseException | None = None
+            next_attempt_index = attempt_index + 1
+            manager = self._executable._agent.run_stream_events(
+                current_input.value,
+                message_history=current_history,
+                run_id=str(uuid4()),
+                deps=self.context,
+                usage=self._usage,
+                usage_limits=self._usage_limits,
+                capabilities=self._bindings.capabilities,
+            )
+            try:
+                async with manager as events:
+                    self._pydantic_events = events
+                    if self._cancel_requested:
+                        events.cancel()
+                    try:
+                        async for event in events:
+                            self._refresh_live_messages()
+                            if isinstance(event, AgentRunResultEvent):
+                                result = event.result
+                                messages = tuple(result.all_messages())
+                                self._latest_messages = messages
+                                state = await exchange.context.export_state(messages)
+                                if isinstance(result.output, DeferredToolRequests):
+                                    candidate = HarnessRunResult(
+                                        run_id=self.run_id,
+                                        status="suspended",
+                                        output=None,
+                                        deferred=result.output,
+                                        suspend_reason="deferred",
+                                        state=state,
+                                        usage=result.usage,
+                                        _messages=messages,
+                                        _new_message_index=self._new_message_index,
+                                    )
+                                else:
+                                    candidate = HarnessRunResult(
+                                        run_id=self.run_id,
+                                        status="completed",
+                                        output=result.output,
+                                        state=state,
+                                        usage=result.usage,
+                                        _messages=messages,
+                                        _new_message_index=self._new_message_index,
+                                    )
+                                yield self._record_inner_candidate(candidate)
+                                return
+                            yield self._adapt_event(cast(AgentStreamEvent, event))
+                    except RunCancelled as exc:
+                        messages, _ = normalize_interrupted_history(exc.all_messages())
+                        self._latest_messages = messages
+                        state = await exchange.context.export_state(messages) if exc.run_id is not None else None
+                        yield self._record_inner_candidate(
+                            HarnessRunResult(
+                                run_id=self.run_id,
+                                status="cancelled",
+                                output=None,
+                                state=state,
+                                usage=self._usage if exc.run_id is None else exc.usage,
+                                _messages=messages,
+                                _new_message_index=min(self._new_message_index, len(messages)),
+                            )
                         )
+                        return
+                    except UsageLimitExceeded:
+                        yield await self._failed_candidate(
+                            code="usage_limit_exceeded",
+                            message="Pydantic AI usage limit exceeded.",
+                        )
+                        return
+                    except Exception as error:
+                        self._refresh_live_messages()
+                        messages, _ = normalize_interrupted_history(self._latest_messages)
+                        self._latest_messages = messages
+                        if self._cancel_requested:
+                            state = await exchange.context.export_state(messages) if messages else None
+                            yield self._record_inner_candidate(
+                                HarnessRunResult(
+                                    run_id=self.run_id,
+                                    status="cancelled",
+                                    output=None,
+                                    state=state,
+                                    usage=self._current_usage(),
+                                    _messages=messages,
+                                    _new_message_index=min(self._new_message_index, len(messages)),
+                                )
+                            )
+                            return
+
+                        model_failure = is_recoverable_model_failure(error, messages)
+                        retryable = policy.enabled and model_failure
+                        if retryable and next_attempt_index < max_attempts:
+                            retry_error = error
+                        elif model_failure or isinstance(error, AgentRunError):
+                            exhausted = retryable
+                            yield await self._failed_candidate(
+                                code="model_recovery_exhausted" if exhausted else "agent_run_failed",
+                                message=(
+                                    "Model recovery attempts were exhausted."
+                                    if exhausted
+                                    else "Pydantic AI agent execution failed."
+                                ),
+                            )
+                            return
+                        else:
+                            raise
+            finally:
+                self._pydantic_events = None
+
+            assert retry_error is not None
+            delay = policy.delay(next_attempt_index)
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(self._cancel_event.wait(), timeout=delay)
+                except TimeoutError:
+                    pass
+            if self._cancel_requested:
+                state = await exchange.context.export_state(self._latest_messages) if self._latest_messages else None
+                yield self._record_inner_candidate(
+                    HarnessRunResult(
+                        run_id=self.run_id,
+                        status="cancelled",
+                        output=None,
+                        state=state,
+                        usage=self._usage,
+                        _messages=self._latest_messages,
+                        _new_message_index=min(self._new_message_index, len(self._latest_messages)),
                     )
-                except UsageLimitExceeded:
-                    yield await self._failed_candidate(
-                        code="usage_limit_exceeded",
-                        message="Pydantic AI usage limit was exceeded.",
-                    )
-                except AgentRunError:
-                    yield await self._failed_candidate(
-                        code="agent_run_failed",
-                        message="Pydantic AI agent execution failed.",
-                    )
-        finally:
-            self._pydantic_events = None
+                )
+                return
+            retry_input = await policy.build_prompt(retry_error, next_attempt_index, self._latest_messages)
+            current_input = normalize_input(retry_input)
+            current_history = self._latest_messages
+            attempt_index = next_attempt_index
 
     async def _failed_candidate(self, *, code: str, message: str) -> HarnessRunResult[OutputT]:
         self._refresh_live_messages()
@@ -688,30 +803,32 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             return
 
         current_task = asyncio.current_task()
-        if cancellation is not None and current_task is not None:
-            while current_task.cancelling():
-                current_task.uncancel()
         causes: list[BaseException] = []
 
-        async def finish_cleanup(awaitable: Awaitable[None]) -> None:
+        def capture_pending_cancellation(exc: asyncio.CancelledError | None = None) -> bool:
             nonlocal cancellation
-            cleanup_task = asyncio.ensure_future(awaitable)
-            while True:
-                try:
-                    await asyncio.shield(cleanup_task)
-                    return
-                except asyncio.CancelledError as exc:
-                    if current_task is not None and current_task.cancelling():
-                        if cancellation is None:
-                            cancellation = exc
-                        while current_task.cancelling():
-                            current_task.uncancel()
-                        continue
+            if current_task is None or not current_task.cancelling():
+                return False
+            if cancellation is None:
+                cancellation = exc or asyncio.CancelledError()
+            while current_task.cancelling():
+                current_task.uncancel()
+            return True
+
+        capture_pending_cancellation(cancellation)
+
+        async def finish_cleanup(awaitable: Awaitable[None]) -> None:
+            try:
+                # Cleanup normally stays in the task that entered plugin and AnyIO scopes.
+                await awaitable
+            except asyncio.CancelledError as exc:
+                if not capture_pending_cancellation(exc):
                     causes.append(exc)
-                    return
-                except BaseException as exc:
-                    causes.append(exc)
-                    return
+            except BaseException as exc:
+                causes.append(exc)
+            finally:
+                # Cleanup code may suppress or translate the injected CancelledError.
+                capture_pending_cancellation()
 
         responses = sorted(self._responses, key=lambda item: item[0], reverse=True)
         for _, response in responses:
@@ -757,6 +874,13 @@ def _build_output_adapter(output_spec: OutputSpec[Any]) -> TypeAdapter[Any]:
 
     def collect_callable(function: Any) -> None:
         return_type = get_type_hints(function).get("return", Any)
+        origin = get_origin(return_type)
+        if origin is Awaitable:
+            arguments = get_args(return_type)
+            return_type = arguments[0] if arguments else Any
+        elif origin is Coroutine:
+            arguments = get_args(return_type)
+            return_type = arguments[2] if len(arguments) == 3 else Any
         collect(return_type)
 
     collect(output_spec)

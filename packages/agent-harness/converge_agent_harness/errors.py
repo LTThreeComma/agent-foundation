@@ -46,6 +46,10 @@ class InputError(HarnessError):
     """Run input is invalid."""
 
 
+class ModelResolutionError(HarnessError):
+    """A logical model could not be resolved for the current run."""
+
+
 class StateError(HarnessError):
     """Harness continuation state is invalid."""
 

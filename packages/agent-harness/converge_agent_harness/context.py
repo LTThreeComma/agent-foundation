@@ -18,6 +18,7 @@ from converge_agent_harness.state import AgentContextState, HarnessState
 
 if TYPE_CHECKING:
     from converge_agent_harness.execution import ExecutableAgent
+    from converge_agent_harness.models import ModelRunBinding
     from converge_agent_harness.plugins import BoundPluginContext
 
 
@@ -49,6 +50,7 @@ class RunBindings:
 
     instance: AgentInstanceContext
     environment: EnvironmentRunBinding
+    model_binding: ModelRunBinding | None = None
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
@@ -62,6 +64,7 @@ class RunBindings:
         *,
         identity: AgentIdentityRef | None = None,
         environment: EnvironmentRunBinding | None = None,
+        model_binding: ModelRunBinding | None = None,
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         metadata: Mapping[str, JsonValue] | None = None,
     ) -> RunBindings:
@@ -73,6 +76,7 @@ class RunBindings:
                 agent_instance_id=instance_id,
             ),
             environment=environment or NoopEnvironmentRunBinding(),
+            model_binding=model_binding,
             capabilities=tuple(capabilities),
             metadata=metadata or {},
         )
@@ -86,6 +90,7 @@ class AgentContext:
     instance: AgentInstanceContext
     state: AgentContextState
     environment: BoundEnvironment
+    model_binding: ModelRunBinding | None
     plugins: BoundPluginContext
     subagents: SubagentCollection
     metadata: Mapping[str, JsonValue]

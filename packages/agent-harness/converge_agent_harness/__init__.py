@@ -15,6 +15,7 @@ from converge_agent_harness.errors import (
     HarnessError,
     IdentityError,
     InputError,
+    ModelResolutionError,
     PluginError,
     RunCleanupError,
     RunError,
@@ -30,6 +31,7 @@ from converge_agent_harness.input import (
     RunPreparationContext,
     SemanticRunInput,
 )
+from converge_agent_harness.models import ModelRecoveryRule, ModelRunBinding, SelfHealingModel
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
     BoundPluginContext,
@@ -38,6 +40,7 @@ from converge_agent_harness.plugins import (
     PluginRunNext,
     PluginRunResponse,
 )
+from converge_agent_harness.recovery import ModelRecoveryPolicy, RecoveryPromptFactory
 from converge_agent_harness.result import HarnessRunResult, SafeFailure
 from converge_agent_harness.state import (
     AgentContextState,
@@ -74,6 +77,10 @@ __all__ = [
     "HarnessStreamItem",
     "IdentityError",
     "InputError",
+    "ModelRecoveryPolicy",
+    "ModelRecoveryRule",
+    "ModelResolutionError",
+    "ModelRunBinding",
     "NativeRunInput",
     "NoopBoundEnvironment",
     "NoopEnvironmentRunBinding",
@@ -82,6 +89,7 @@ __all__ = [
     "PluginRunExchange",
     "PluginRunNext",
     "PluginRunResponse",
+    "RecoveryPromptFactory",
     "RunBindings",
     "RunCleanupError",
     "RunError",
@@ -89,6 +97,7 @@ __all__ = [
     "RunInputValue",
     "RunPreparationContext",
     "SafeFailure",
+    "SelfHealingModel",
     "SemanticRunInput",
     "StateError",
     "SubagentCollection",

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Coroutine
+from typing import Any
 
 import pytest
 from converge_agent_harness import (
@@ -16,6 +17,7 @@ from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.output import TextOutput
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 pytestmark = pytest.mark.anyio
@@ -99,6 +101,29 @@ async def test_run_consumes_the_canonical_stream_and_state_resumes_a_rebuilt_age
     assert second.state is not None
     assert second.state.message_history == second.all_messages()
     assert first_executable.definition is not rebuilt_executable.definition
+
+
+@pytest.mark.parametrize("annotation", ["awaitable", "coroutine"])
+async def test_output_functions_may_annotate_their_awaitable_result(annotation: str) -> None:
+    async def transform(value: str) -> str:
+        return f"{value}|parsed"
+
+    def awaitable_output(value: str) -> Awaitable[str]:
+        return transform(value)
+
+    def coroutine_output(value: str) -> Coroutine[Any, Any, str]:
+        return transform(value)
+
+    output_function = awaitable_output if annotation == "awaitable" else coroutine_output
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test", name="test-agent"),
+        output_type=TextOutput(output_function),
+        model=_turn_model([]),
+    )
+
+    result = await executable.run("hello", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "turn-1|parsed"
 
 
 async def test_every_run_gets_a_fresh_context() -> None:
@@ -241,7 +266,7 @@ async def test_usage_limit_has_a_specific_safe_failure() -> None:
     assert result.status == "failed"
     assert result.failure is not None
     assert result.failure.code == "usage_limit_exceeded"
-    assert result.failure.message == "Pydantic AI usage limit was exceeded."
+    assert result.failure.message == "Pydantic AI usage limit exceeded."
     assert result.failure.retry_hint == "dependency_change"
 
 

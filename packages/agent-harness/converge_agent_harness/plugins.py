@@ -18,6 +18,7 @@ from converge_agent_harness.state import HarnessState
 
 type PluginPosition = Literal["outermost", "innermost"]
 type PluginRunItem[OutputT] = HarnessEvent | HarnessRunResult[OutputT]
+type PluginRunItemValidator[OutputT] = Callable[[PluginRunItem[OutputT]], PluginRunItem[OutputT]]
 type StateExporter = Callable[[], Awaitable[HarnessState]]
 
 
@@ -60,6 +61,7 @@ class PluginRunResponse[OutputT](AsyncIterator[PluginRunItem[OutputT]]):
         self._iterator = iterator
         self._closed = False
         self._iterated = False
+        self._item_validator: PluginRunItemValidator[OutputT] | None = None
 
     def __aiter__(self) -> PluginRunResponse[OutputT]:
         if self._iterated:
@@ -73,15 +75,25 @@ class PluginRunResponse[OutputT](AsyncIterator[PluginRunItem[OutputT]]):
     async def __anext__(self) -> PluginRunItem[OutputT]:
         if self._closed:
             raise StopAsyncIteration
-        return await self._iterator.__anext__()
+        item = await self._iterator.__anext__()
+        if self._item_validator is not None:
+            item = self._item_validator(item)
+        return item
+
+    def _bind_item_validator(self, validator: PluginRunItemValidator[OutputT]) -> None:
+        """Bind Harness result validation to this response boundary."""
+        self._item_validator = validator
 
     async def aclose(self) -> None:
         """Close the underlying iterator once."""
         if self._closed:
             return
-        if isinstance(self._iterator, _AsyncClosable):
-            await self._iterator.aclose()
-        self._closed = True
+        try:
+            if isinstance(self._iterator, _AsyncClosable):
+                await self._iterator.aclose()
+        finally:
+            self._item_validator = None
+            self._closed = True
 
 
 class PluginRunNext[OutputT]:
