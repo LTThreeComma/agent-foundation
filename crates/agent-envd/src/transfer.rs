@@ -1458,7 +1458,7 @@ pub(crate) fn file_revision(metadata: &std::fs::Metadata) -> FileRevision {
     {
         hasher.update(metadata.len().to_be_bytes());
         if let Ok(modified) = metadata.modified()
-            && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH)
+            && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             hasher.update(duration.as_nanos().to_be_bytes());
         }
@@ -1561,29 +1561,29 @@ fn map_registry_error(_error: RegistryError) -> TransferError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        io::{Seek, Write},
-        path::PathBuf,
-    };
+    use std::{fs, path::PathBuf};
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::io::{Seek, Write};
 
     use sha2::{Digest, Sha256};
     use tokio::sync::mpsc;
 
     use crate::{
         config::{Config, TrustedMountConfig},
-        eip::{
-            DataFrame, DataFrameKind, EIPCallContext, EIPPath, FileReaderOpenParams, FileWriteMode,
-            FileWriterCommitParams, FileWriterOpenParams,
-        },
+        eip::{DataFrame, DataFrameKind, EIPCallContext, EIPPath, FileReaderOpenParams},
         mount::MountRegistry,
-        operation::{OperationRegistry, random_selector},
+        operation::random_selector,
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::{
+        eip::{FileWriteMode, FileWriterCommitParams, FileWriterOpenParams},
+        operation::OperationRegistry,
     };
 
-    use super::{
-        ContentDigest, FileWriterAbortStatus, TransferError, TransferRecord, TransferRegistry,
-        WriterPhase, file_revision,
-    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use super::{ContentDigest, FileWriterAbortStatus, TransferRecord, WriterPhase, file_revision};
+    use super::{TransferError, TransferRegistry};
 
     struct TempTree(PathBuf);
 
@@ -1622,17 +1622,8 @@ mod tests {
         }
     }
 
-    fn setup() -> (
-        TempTree,
-        Config,
-        MountRegistry,
-        TransferRegistry,
-        mpsc::Receiver<DataFrame>,
-    ) {
-        setup_with_idle_ttl(60_000)
-    }
-
-    fn setup_with_idle_ttl(
+    fn setup(
+        writable: bool,
         idle_ttl_ms: u64,
     ) -> (
         TempTree,
@@ -1643,15 +1634,20 @@ mod tests {
     ) {
         let tree = TempTree::new();
         let native_root = tree.child("native");
-        let staging_root = tree.child("staging");
         fs::create_dir(&native_root).expect("creates native root");
-        fs::create_dir(&staging_root).expect("creates staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging_root, fs::Permissions::from_mode(0o700))
-                .expect("makes staging private");
-        }
+        let staging_root = if writable {
+            let staging_root = tree.child("staging");
+            fs::create_dir(&staging_root).expect("creates staging root");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&staging_root, fs::Permissions::from_mode(0o700))
+                    .expect("makes staging private");
+            }
+            Some(staging_root)
+        } else {
+            None
+        };
 
         let mut config = Config::for_test("env-transfer-test");
         config.limits.max_staged_file_objects = 1;
@@ -1659,12 +1655,16 @@ mod tests {
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root,
-            staging_root: Some(staging_root),
-            writable: true,
-            exclusive_mutation_control: true,
+            staging_root,
+            writable,
+            exclusive_mutation_control: writable,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
-            allowed_operations: vec!["open_reader".to_owned(), "open_writer".to_owned()],
+            allowed_operations: if writable {
+                vec!["open_reader".to_owned(), "open_writer".to_owned()]
+            } else {
+                vec!["open_reader".to_owned()]
+            },
         });
         let mounts = MountRegistry::initialize(&config).expect("initializes mount registry");
         let transfers = TransferRegistry::new(&config).expect("initializes transfer registry");
@@ -1677,7 +1677,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_stream_requires_terminal_ack_before_complete_close() {
-        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let (tree, _config, mounts, transfers, mut outbound) = setup(false, 60_000);
         let content = b"reader-content";
         fs::write(tree.child("native/source.bin"), content).expect("writes source");
         let opened = transfers
@@ -1751,9 +1751,10 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn writer_commit_is_atomic_and_reset_releases_staging_quota() {
-        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let (tree, _config, mounts, transfers, mut outbound) = setup(true, 60_000);
         let missing_mount = transfers
             .open_writer(
                 &mounts,
@@ -1948,9 +1949,10 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn session_close_retains_commit_record_until_native_owner_finishes() {
-        let (tree, _config, mounts, transfers, _outbound) = setup();
+        let (tree, _config, mounts, transfers, _outbound) = setup(true, 60_000);
         let opened = transfers
             .open_writer(
                 &mounts,
@@ -2036,9 +2038,10 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn append_commit_rehashes_the_staged_prefix() {
-        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let (tree, _config, mounts, transfers, mut outbound) = setup(true, 60_000);
         let target = tree.child("native/append.bin");
         fs::write(&target, b"prefix").expect("writes append target");
         let mount = mounts.get("workspace").expect("workspace mount");
@@ -2153,7 +2156,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_reader_complete_close_becomes_terminal() {
-        let (tree, _config, mounts, transfers, _outbound) = setup_with_idle_ttl(1);
+        let (tree, _config, mounts, transfers, _outbound) = setup(false, 1);
         fs::write(tree.child("native/expired.bin"), b"expired").expect("writes reader source");
         let opened = transfers
             .open_reader(
@@ -2181,9 +2184,10 @@ mod tests {
         assert!(!transfers.is_live_reader(&opened.reader.0));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn expired_writer_cleanup_returns_staging_capacity() {
-        let (tree, _config, mounts, transfers, _outbound) = setup_with_idle_ttl(1);
+        let (tree, _config, mounts, transfers, _outbound) = setup(true, 1);
         let first = transfers
             .open_writer(
                 &mounts,

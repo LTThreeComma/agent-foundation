@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    ffi::CString,
     fmt, fs,
     path::{Component, Path, PathBuf},
     sync::{
@@ -11,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::ffi::CString;
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, io::AsRawFd};
 
@@ -435,14 +436,8 @@ impl Mount {
             )
             .map_err(MountPathError::from_io)?;
         }
-        destination_parent
-            .try_clone()
-            .and_then(|directory| directory.into_std_file().sync_all())
-            .map_err(|_| MountPathError::UnknownOutcome)?;
-        source_parent
-            .try_clone()
-            .and_then(|directory| directory.into_std_file().sync_all())
-            .map_err(|_| MountPathError::UnknownOutcome)
+        sync_directory(&destination_parent).map_err(|_| MountPathError::UnknownOutcome)?;
+        sync_directory(&source_parent).map_err(|_| MountPathError::UnknownOutcome)
     }
 
     pub(crate) fn open_parent(
@@ -542,10 +537,7 @@ impl Mount {
             rename_no_replace(staging, source, &parent, target).map_err(MountPathError::from_io)?;
         }
         candidate.mark_removed();
-        parent
-            .try_clone()
-            .and_then(|directory| directory.into_std_file().sync_all())
-            .map_err(|_| MountPathError::UnknownOutcome)?;
+        sync_directory(&parent).map_err(|_| MountPathError::UnknownOutcome)?;
         Ok(())
     }
 }
@@ -791,6 +783,8 @@ fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 fn validate_private_directory(path: &Path) -> Result<(), MountInitError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -928,15 +922,19 @@ fn set_private_file_permissions(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+fn sync_directory(directory: &Dir) -> std::io::Result<()> {
+    directory.open(".")?.sync_all()
+}
+
 #[cfg(unix)]
 fn candidate_identity_matches(opened: &std::fs::Metadata, named: &cap_std::fs::Metadata) -> bool {
     use cap_std::fs::MetadataExt as CapMetadataExt;
     use std::os::unix::fs::MetadataExt as StdMetadataExt;
-    let file_type_mask = u32::from(libc::S_IFMT);
+    let file_type_mask = u64::from(libc::S_IFMT);
     StdMetadataExt::dev(opened) == CapMetadataExt::dev(named)
         && StdMetadataExt::ino(opened) == CapMetadataExt::ino(named)
-        && (StdMetadataExt::mode(opened) & file_type_mask)
-            == (CapMetadataExt::mode(named) & file_type_mask)
+        && (u64::from(StdMetadataExt::mode(opened)) & file_type_mask)
+            == (u64::from(CapMetadataExt::mode(named)) & file_type_mask)
 }
 
 #[cfg(not(unix))]

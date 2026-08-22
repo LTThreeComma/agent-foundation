@@ -2119,12 +2119,11 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::eip::{EipHandler, FileWriterOpenParams};
     use crate::{
         config::{Config, TrustedMountConfig},
-        eip::{
-            EIPCallContext, EIPPath, EipHandler, FileWriteMode, FileWriteTextParams,
-            FileWriterOpenParams,
-        },
+        eip::{EIPCallContext, EIPPath, FileWriteMode, FileWriteTextParams},
         operation::{BeginOutcome, random_selector},
     };
 
@@ -2230,6 +2229,7 @@ mod tests {
         assert!(*daemon.subscribe_closed().borrow());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn session_teardown_serializes_transfer_and_mutation_admission() {
         let tree = TempTree::new();
@@ -2487,23 +2487,15 @@ mod tests {
     async fn operation_namespace_and_session_resource_replay_are_unified() {
         let tree = TempTree::new();
         let native = tree.child("native");
-        let staging = tree.child("staging");
         fs::create_dir(&native).expect("native root");
-        fs::create_dir(&staging).expect("staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                .expect("private staging root");
-        }
         fs::write(native.join("replay.txt"), "replay").expect("replay source");
         let mut config = Config::for_test("env-test");
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root: native.clone(),
-            staging_root: Some(staging),
-            writable: true,
-            exclusive_mutation_control: true,
+            staging_root: None,
+            writable: false,
+            exclusive_mutation_control: false,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
             allowed_operations: Vec::new(),
@@ -2594,6 +2586,7 @@ mod tests {
         assert_eq!(reopened["result"]["reader"], "reader-2");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn resource_and_transfer_candidates_share_one_staging_quota() {
         let tree = TempTree::new();
@@ -2695,6 +2688,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn configured_resource_handlers_return_receipts_and_reconcile() {
         let tree = TempTree::new();

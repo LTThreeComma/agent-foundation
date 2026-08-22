@@ -110,7 +110,7 @@ struct RemovePlanEntry {
 struct CapEntryIdentity {
     device: u64,
     inode: u64,
-    file_type: u32,
+    file_type: u64,
 }
 
 #[cfg(not(unix))]
@@ -186,17 +186,17 @@ impl ResourceRegistry {
         let mount = read_mount(mounts, &params.path, "read_text")?;
         let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
         let info = file_info(&params.path, &opened.metadata);
-        let revision = info.revision.clone().ok_or(ResourceError::Unsupported)?;
-        if params
-            .expected_revision
-            .as_ref()
-            .is_some_and(|expected| expected != &revision)
-        {
-            return Err(ResourceError::Conflict);
+        let revision = info.revision.clone();
+        if let Some(expected) = &params.expected_revision {
+            let current = revision.as_ref().ok_or(ResourceError::Unsupported)?;
+            if expected != current {
+                return Err(ResourceError::Conflict);
+            }
         }
 
         let (offset, start_line, start_column) = if let Some(cursor) = &params.cursor {
-            self.consume_text_cursor(cursor, &params.path, &revision)?
+            let current = revision.as_ref().ok_or(ResourceError::Unsupported)?;
+            self.consume_text_cursor(cursor, &params.path, current)?
         } else {
             let line = params.start_line.unwrap_or(1);
             let offset = find_line_offset(
@@ -230,7 +230,7 @@ impl ResourceRegistry {
         )?;
         let next_cursor = if page.complete {
             None
-        } else {
+        } else if let Some(revision) = revision {
             Some(self.insert_text_cursor(TextCursorRecord {
                 path: params.path.clone(),
                 revision,
@@ -239,6 +239,8 @@ impl ResourceRegistry {
                 byte_column: page.end.byte_column,
                 expires_at: Instant::now() + self.inner.ttl,
             })?)
+        } else {
+            None
         };
         Ok(FileReadTextResult {
             info,
@@ -1565,7 +1567,7 @@ fn cap_entry_identity(metadata: &cap_std::fs::Metadata) -> Result<CapEntryIdenti
     Ok(CapEntryIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
-        file_type: metadata.mode() & u32::from(libc::S_IFMT),
+        file_type: u64::from(metadata.mode()) & u64::from(libc::S_IFMT),
     })
 }
 
@@ -2328,13 +2330,16 @@ fn map_mount_error(error: MountPathError) -> ResourceError {
 mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::eip::{
+        FileCopyParams, FileMkdirParams, FileMoveParams, FilePatchTextParams, FileRemoveParams,
+        FileWriteMode, FileWriteTextParams,
+    };
     use crate::{
         config::{Config, TrustedMountConfig},
         eip::{
-            EIPCallContext, EIPPath, FileCopyParams, FileFindParams, FileKind, FileListParams,
-            FileMkdirParams, FileMoveParams, FilePatchTextParams, FileReadTextParams,
-            FileRemoveParams, FileSearchParams, FileStatParams, FileWriteMode, FileWriteTextParams,
-            FindMode, OutputOverflow, OutputPolicy, SearchMode,
+            EIPCallContext, EIPPath, FileFindParams, FileKind, FileListParams, FileReadTextParams,
+            FileSearchParams, FileStatParams, FindMode, OutputOverflow, OutputPolicy, SearchMode,
         },
         mount::MountRegistry,
         operation::{OperationRegistry, random_selector},
@@ -2373,31 +2378,46 @@ mod tests {
     }
 
     impl Fixture {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         fn new() -> Self {
-            Self::with_staging_limits(64 * 1024 * 1024, 64)
+            Self::with_mount(true, 64 * 1024 * 1024, 64)
         }
 
+        fn read_only() -> Self {
+            Self::with_mount(false, 64 * 1024 * 1024, 64)
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         fn with_staging_limits(max_bytes: u64, max_objects: u64) -> Self {
+            Self::with_mount(true, max_bytes, max_objects)
+        }
+
+        fn with_mount(writable: bool, max_bytes: u64, max_objects: u64) -> Self {
             let tree = TempTree::new();
             let native = tree.child("native");
-            let staging = tree.child("staging");
             fs::create_dir(&native).expect("native root");
-            fs::create_dir(&staging).expect("staging root");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                    .expect("private staging permissions");
-            }
+            let staging_root = if writable {
+                let staging = tree.child("staging");
+                fs::create_dir(&staging).expect("staging root");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                        .expect("private staging permissions");
+                }
+                Some(staging)
+            } else {
+                None
+            };
             let mut config = Config::for_test("env-resource-test");
             config.limits.max_staged_file_bytes = max_bytes;
             config.limits.max_staged_file_objects = max_objects;
             config.mounts.push(TrustedMountConfig {
                 mount_id: "workspace".to_owned(),
                 native_root: native.clone(),
-                staging_root: Some(staging),
-                writable: true,
-                exclusive_mutation_control: true,
+                staging_root,
+                writable,
+                exclusive_mutation_control: writable,
                 allow_command_execution: false,
                 max_file_bytes: 1024 * 1024,
                 allowed_operations: Vec::new(),
@@ -2451,6 +2471,7 @@ mod tests {
         assert_eq!(join_logical("/root", "a"), "/root/a");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn resource_candidates_enforce_and_release_shared_staging_quota() {
         let fixture = Fixture::with_staging_limits(8, 1);
@@ -2491,7 +2512,7 @@ mod tests {
 
     #[test]
     fn observes_text_and_structured_resources_with_stable_cursors() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::read_only();
         fs::create_dir(fixture.native.join("docs")).expect("docs directory");
         fs::write(fixture.native.join("docs/main.txt"), "alpha\nbeta\n").expect("text fixture");
         for index in 0..8 {
@@ -2514,7 +2535,7 @@ mod tests {
             )
             .expect("stat succeeds");
         assert_eq!(stat.info.kind, FileKind::File);
-        assert!(stat.info.revision.is_some());
+        assert_eq!(stat.info.revision.is_some(), cfg!(unix));
 
         let first = fixture
             .resources
@@ -2533,23 +2554,47 @@ mod tests {
             .expect("first text page");
         assert_eq!(first.text, "alpha");
         assert!(!first.content_complete);
-        let second = fixture
-            .resources
-            .read_text(
-                &fixture.mounts,
-                &FileReadTextParams {
-                    context: context("text-2"),
-                    path: path("/docs/main.txt"),
-                    cursor: first.next_cursor,
-                    start_line: None,
-                    max_lines: None,
-                    max_bytes: Some(64),
-                    expected_revision: None,
-                },
-            )
-            .expect("second text page");
-        assert_eq!(second.text, "\nbeta\n");
-        assert!(second.content_complete);
+        #[cfg(unix)]
+        {
+            let second = fixture
+                .resources
+                .read_text(
+                    &fixture.mounts,
+                    &FileReadTextParams {
+                        context: context("text-2"),
+                        path: path("/docs/main.txt"),
+                        cursor: first.next_cursor,
+                        start_line: None,
+                        max_lines: None,
+                        max_bytes: Some(64),
+                        expected_revision: None,
+                    },
+                )
+                .expect("second text page");
+            assert_eq!(second.text, "\nbeta\n");
+            assert!(second.content_complete);
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(first.next_cursor.is_none());
+            let restarted = fixture
+                .resources
+                .read_text(
+                    &fixture.mounts,
+                    &FileReadTextParams {
+                        context: context("text-2"),
+                        path: path("/docs/main.txt"),
+                        cursor: None,
+                        start_line: None,
+                        max_lines: None,
+                        max_bytes: Some(64),
+                        expected_revision: None,
+                    },
+                )
+                .expect("separate text observation");
+            assert_eq!(restarted.text, "alpha\nbeta\n");
+            assert!(restarted.content_complete);
+        }
 
         let policy = OutputPolicy {
             max_inline_bytes: 700,
@@ -2644,6 +2689,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn mutations_preserve_preconditions_and_publish_complete_candidates() {
         let fixture = Fixture::new();
@@ -2759,6 +2805,7 @@ mod tests {
         assert!(!fixture.native.join("work/moved.txt").exists());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn rejects_unbounded_search_lines_and_preflights_recursive_remove() {
         let fixture = Fixture::new();
@@ -2835,7 +2882,7 @@ mod tests {
         assert_eq!(hunks, 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn staged_replacement_refuses_symlink_leaf_but_patch_follows_contained_target() {
         use std::os::unix::fs::symlink;

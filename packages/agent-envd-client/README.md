@@ -1,17 +1,18 @@
 # Agent Envd Client
 
-`converge-agent-envd-client` is the low-level Python client for the Agent Environment Interaction Protocol (EIP). It belongs to the agent-envd release group and is versioned and published together with `converge-agent-envd`.
+`converge-agent-envd-client` is the Python client for the Agent Environment Interaction Protocol (EIP). It belongs to the agent-envd release group and is versioned and published together with `converge-agent-envd`.
 
 ## Available surface
 
 The package currently provides:
 
-- generated EIP 1.0 Pydantic wire models, canonical codecs, method metadata, and typed `EIPClient` methods;
-- `RequestCoordinator` for bounded request IDs, concurrent response correlation, typed errors, and no automatic ambiguous retry;
-- `StdioTransport` for content-length framing over trusted parent-supplied asyncio process pipes;
-- `EIPSession` for initialization, descriptor and generation validation, refresh, and session close.
+- generated EIP 1.0 Pydantic wire models, canonical codecs, method metadata, and typed `EIPClient` methods for the complete protocol surface;
+- `RequestCoordinator` for bounded request IDs, concurrent response correlation, data-frame routing, typed errors, and no automatic ambiguous retry;
+- `StdioTransport` for multiplexed content-length control and binary data frames over trusted parent-supplied asyncio process pipes;
+- `EIPSession` for initialization, capability and generation validation, descriptor refresh, and session close;
+- high-level `EIPFileReader` and `EIPFileWriter` async context managers, exposed by `EIPSession.open_reader()` and `EIPSession.open_writer()`, for bounded streaming file transfer.
 
-HTTP and WebSocket transports are not implemented yet. Provider process creation and lifecycle policy remain outside this package; a Host adapter or test fixture launches `agent-envd` and supplies its private pipes.
+Configured daemons can expose resource reads, atomic mutations, find, search, receipts, and port observation through the generated client. HTTP and WebSocket transports are not implemented yet. Provider process creation and lifecycle policy remain outside this package; a Host adapter or test fixture launches `agent-envd` and supplies its private pipes.
 
 ## Example
 
@@ -51,7 +52,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-An `EIPMethodError` contains the generated typed `EIPError`. Transport timeouts and cancellation never claim that an already sent operation failed or was absent; the client does not retry a possibly dispatched mutation automatically.
+An `EIPMethodError` contains the generated typed `EIPError`. Transport timeouts and cancellation never claim that an already sent operation failed or was absent; the client does not retry a possibly dispatched mutation automatically. Mutation callers can use operation receipts and idempotency keys to reconcile an ambiguous outcome explicitly.
 
 ## Versioning
 

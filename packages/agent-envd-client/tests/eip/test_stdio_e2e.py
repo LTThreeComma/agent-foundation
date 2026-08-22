@@ -22,10 +22,15 @@ from converge_agent_envd_client.eip.v1 import (
     EIPPath,
     EnvironmentDescribeParams,
     EnvironmentDescribeResult,
+    FileFindParams,
+    FileKind,
     FileListParams,
     FileReadTextParams,
+    FileSearchParams,
     FileStatParams,
     FileWriteMode,
+    FileWriteTextParams,
+    FindMode,
     InitializeParams,
     MethodSpec,
     OperationCancelParams,
@@ -36,6 +41,7 @@ from converge_agent_envd_client.eip.v1 import (
     PortTarget,
     PortWaitParams,
     ReceiptGetParams,
+    SearchMode,
     SessionCloseParams,
 )
 
@@ -249,7 +255,29 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         assert reader.completion.complete is True
 
         text_path = EIPPath(mount_id="workspace", path="/notes.txt")
-        (native / "notes.txt").write_text("alpha\nbeta\n")
+        write_params = FileWriteTextParams(
+            context=EIPCallContext(
+                operation_id="write-text-e2e",
+                idempotency_key="write-text-e2e-key",
+            ),
+            path=text_path,
+            mode=FileWriteMode.CREATE,
+            text="alpha\nbeta\n",
+        )
+        written = await session.client.file_write_text(write_params)
+        replayed = await session.client.file_write_text(
+            FileWriteTextParams(
+                context=EIPCallContext(
+                    operation_id="write-text-replay-e2e",
+                    idempotency_key="write-text-e2e-key",
+                ),
+                path=text_path,
+                mode=FileWriteMode.CREATE,
+                text="alpha\nbeta\n",
+            )
+        )
+        assert replayed == written
+        assert (native / "notes.txt").read_text() == "alpha\nbeta\n"
         text = await session.client.file_read_text(
             FileReadTextParams(
                 context=EIPCallContext(operation_id="text-e2e"),
@@ -273,13 +301,34 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
             )
         )
         assert [entry.relative_path for entry in listed.entries] == ["binary.dat", "notes.txt"]
+        found = await session.client.file_find(
+            FileFindParams(
+                context=EIPCallContext(operation_id="find-e2e"),
+                root=EIPPath(mount_id="workspace", path="/"),
+                pattern="*.txt",
+                mode=FindMode.GLOB,
+                kind=FileKind.FILE,
+                max_depth=2,
+            )
+        )
+        assert [entry.relative_path for entry in found.entries] == ["notes.txt"]
+        searched = await session.client.file_search(
+            FileSearchParams(
+                context=EIPCallContext(operation_id="search-e2e"),
+                root=EIPPath(mount_id="workspace", path="/"),
+                query="beta",
+                mode=SearchMode.LITERAL,
+                max_depth=2,
+            )
+        )
+        assert [(match.path, match.line_number) for match in searched.matches] == [(text_path, 2)]
         receipt = await session.client.receipt_get(
             ReceiptGetParams(
                 context=EIPCallContext(operation_id="receipt-e2e"),
-                receipt_ref=committed.receipt.receipt_ref,
+                receipt_ref=written.receipt.receipt_ref,
             )
         )
-        assert receipt.receipt.operation_id == committed.receipt.operation_id
+        assert receipt.receipt.operation_id == written.receipt.operation_id
         await session.close()
         assert_disabled_isolation_warning(await wait_for_exit(process))
 
