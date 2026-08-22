@@ -43,6 +43,14 @@ message EIPLimits {
   uint64 session_idle_ttl_ms = 14 [(eip_field).minimum = 1];
   uint64 max_process_records = 15 [(eip_field).minimum = 1];
   uint64 terminal_process_record_ttl_ms = 16 [(eip_field).minimum = 1];
+  uint64 max_transfer_frame_bytes = 17 [(eip_field).minimum = 25];
+  uint64 max_concurrent_file_transfers = 18 [(eip_field).minimum = 1];
+  uint64 max_file_transfer_records = 19 [(eip_field).minimum = 1];
+  uint64 file_transfer_record_ttl_ms = 20 [(eip_field).minimum = 1];
+  uint64 max_staged_file_bytes = 21 [(eip_field).minimum = 1];
+  uint64 max_staged_file_objects = 22 [(eip_field).minimum = 1];
+  uint64 file_transfer_idle_ttl_ms = 23 [(eip_field).minimum = 1];
+  uint64 max_file_transfer_duration_ms = 24 [(eip_field).minimum = 1];
 }
 
 enum IsolationMode {

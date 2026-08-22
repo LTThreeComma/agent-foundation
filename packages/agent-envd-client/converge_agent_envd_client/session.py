@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from types import TracebackType
 from typing import Never
@@ -11,12 +12,17 @@ from converge_agent_envd_client.eip.v1 import (
     EIPCallContext,
     EIPClient,
     EIPClientInfo,
+    EIPPath,
     EnvironmentDescribeParams,
     EnvironmentDescriptor,
+    FileByteRange,
+    FileRevision,
+    FileWriteMode,
     InitializeParams,
     SessionCloseParams,
 )
 from converge_agent_envd_client.errors import EIPProtocolError, EIPSessionStateError
+from converge_agent_envd_client.file_transfer import EIPFileReader, EIPFileWriter
 from converge_agent_envd_client.requester import RequestCoordinator
 from converge_agent_envd_client.transport import EIPTransport
 
@@ -84,6 +90,8 @@ class EIPSession:
                 max_in_flight=min(max_in_flight, descriptor.limits.max_concurrent_operations),
                 max_request_bytes=descriptor.limits.max_request_bytes,
                 max_response_bytes=descriptor.limits.max_response_bytes,
+                max_transfer_frame_bytes=descriptor.limits.max_transfer_frame_bytes,
+                max_concurrent_file_transfers=descriptor.limits.max_concurrent_file_transfers,
             )
             return cls(requester, descriptor)
         except BaseException:
@@ -103,6 +111,48 @@ class EIPSession:
     @property
     def generation(self) -> int:
         return self._descriptor.generation
+
+    def open_reader(
+        self,
+        path: EIPPath,
+        *,
+        byte_range: FileByteRange | None = None,
+        expected_revision: FileRevision | None = None,
+        transfer_deadline: datetime | None = None,
+    ) -> EIPFileReader:
+        self._ensure_open()
+        self._require_capability("file.read")
+        return EIPFileReader(
+            self._requester,
+            self._client,
+            path,
+            byte_range=byte_range,
+            expected_revision=expected_revision,
+            transfer_deadline=transfer_deadline,
+        )
+
+    def open_writer(
+        self,
+        path: EIPPath,
+        *,
+        mode: FileWriteMode | str,
+        expected_revision: FileRevision | None = None,
+        executable: bool | None = None,
+        transfer_deadline: datetime | None = None,
+    ) -> EIPFileWriter:
+        self._ensure_open()
+        self._require_capability("file.write")
+        resolved_mode = mode if isinstance(mode, FileWriteMode) else FileWriteMode(mode)
+        return EIPFileWriter(
+            self._requester,
+            self._client,
+            path,
+            resolved_mode,
+            expected_revision=expected_revision,
+            executable=executable,
+            transfer_deadline=transfer_deadline,
+            max_transfer_frame_bytes=self._descriptor.limits.max_transfer_frame_bytes,
+        )
 
     async def describe(self) -> EnvironmentDescriptor:
         self._ensure_open()
@@ -124,6 +174,8 @@ class EIPSession:
                 max_in_flight=descriptor.limits.max_concurrent_operations,
                 max_request_bytes=descriptor.limits.max_request_bytes,
                 max_response_bytes=descriptor.limits.max_response_bytes,
+                max_transfer_frame_bytes=descriptor.limits.max_transfer_frame_bytes,
+                max_concurrent_file_transfers=descriptor.limits.max_concurrent_file_transfers,
             )
             self._descriptor = descriptor
             return descriptor
@@ -171,9 +223,13 @@ class EIPSession:
         if self._closed:
             raise EIPSessionStateError("EIP session is closed")
 
+    def _require_capability(self, capability: str) -> None:
+        if capability not in self._descriptor.capabilities:
+            raise EIPSessionStateError(f"EIP capability is not available: {capability}")
+
 
 def _operation_id() -> str:
-    return f"op-{secrets.token_urlsafe(18)}"
+    return f"op-{secrets.token_urlsafe(9)}"
 
 
 def _distribution_version() -> str:

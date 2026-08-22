@@ -1,7 +1,6 @@
 {
-  "descriptor_sha256": "04f2f65327235a7b1cfb97d1a5ecfc50f5b2e95a61a8a48a8f3321ca86f24112",
   "generated": true,
-  "method_count": 30,
+  "method_count": 35,
   "methods": [
     {
       "capability": "environment.describe",
@@ -13,7 +12,51 @@
       "kind": "request_response",
       "params_type": "EnvironmentDescribeParams",
       "result_type": "EnvironmentDescribeResult",
-      "rpc_name": "EnvironmentDescribe"
+      "rpc_name": "EnvironmentDescribe",
+      "transfer_action": null,
+      "transfer_direction": null
+    },
+    {
+      "capability": "file.write",
+      "error_family": "resource",
+      "idempotency": "state_idempotent_control",
+      "idempotency_key": "optional",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.abort_writer",
+      "kind": "request_response",
+      "params_type": "FileWriterAbortParams",
+      "result_type": "FileWriterAbortResult",
+      "rpc_name": "FileAbortWriter",
+      "transfer_action": "abort",
+      "transfer_direction": "client_to_server"
+    },
+    {
+      "capability": "file.read",
+      "error_family": "resource",
+      "idempotency": "state_idempotent_control",
+      "idempotency_key": "optional",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.close_reader",
+      "kind": "request_response",
+      "params_type": "FileReaderCloseParams",
+      "result_type": "FileReaderCloseResult",
+      "rpc_name": "FileCloseReader",
+      "transfer_action": "close",
+      "transfer_direction": "server_to_client"
+    },
+    {
+      "capability": "file.write",
+      "error_family": "resource",
+      "idempotency": "provider_key_replay",
+      "idempotency_key": "optional",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.commit_writer",
+      "kind": "request_response",
+      "params_type": "FileWriterCommitParams",
+      "result_type": "FileWriterCommitResult",
+      "rpc_name": "FileCommitWriter",
+      "transfer_action": "commit",
+      "transfer_direction": "client_to_server"
     },
     {
       "capability": "file.write",
@@ -25,7 +68,9 @@
       "kind": "request_response",
       "params_type": "FileCopyParams",
       "result_type": "FileCopyResult",
-      "rpc_name": "FileCopy"
+      "rpc_name": "FileCopy",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.find",
@@ -37,7 +82,9 @@
       "kind": "request_response",
       "params_type": "FileFindParams",
       "result_type": "FileFindResult",
-      "rpc_name": "FileFind"
+      "rpc_name": "FileFind",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.read",
@@ -49,7 +96,9 @@
       "kind": "request_response",
       "params_type": "FileListParams",
       "result_type": "FileListResult",
-      "rpc_name": "FileList"
+      "rpc_name": "FileList",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.write",
@@ -61,7 +110,9 @@
       "kind": "request_response",
       "params_type": "FileMkdirParams",
       "result_type": "FileMkdirResult",
-      "rpc_name": "FileMkdir"
+      "rpc_name": "FileMkdir",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.write",
@@ -73,7 +124,37 @@
       "kind": "request_response",
       "params_type": "FileMoveParams",
       "result_type": "FileMoveResult",
-      "rpc_name": "FileMove"
+      "rpc_name": "FileMove",
+      "transfer_action": null,
+      "transfer_direction": null
+    },
+    {
+      "capability": "file.read",
+      "error_family": "resource",
+      "idempotency": "session_resource_replay",
+      "idempotency_key": "optional",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.open_reader",
+      "kind": "request_response",
+      "params_type": "FileReaderOpenParams",
+      "result_type": "FileReaderOpenResult",
+      "rpc_name": "FileOpenReader",
+      "transfer_action": "open",
+      "transfer_direction": "server_to_client"
+    },
+    {
+      "capability": "file.write",
+      "error_family": "resource",
+      "idempotency": "session_resource_replay",
+      "idempotency_key": "optional",
+      "introduced": "1.0",
+      "jsonrpc_method": "file.open_writer",
+      "kind": "request_response",
+      "params_type": "FileWriterOpenParams",
+      "result_type": "FileWriterOpenResult",
+      "rpc_name": "FileOpenWriter",
+      "transfer_action": "open",
+      "transfer_direction": "client_to_server"
     },
     {
       "capability": "file.write",
@@ -81,11 +162,13 @@
       "idempotency": "provider_key_replay",
       "idempotency_key": "optional",
       "introduced": "1.0",
-      "jsonrpc_method": "file.patch",
+      "jsonrpc_method": "file.patch_text",
       "kind": "request_response",
-      "params_type": "FilePatchParams",
-      "result_type": "FilePatchResult",
-      "rpc_name": "FilePatch"
+      "params_type": "FilePatchTextParams",
+      "result_type": "FilePatchTextResult",
+      "rpc_name": "FilePatchText",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.read",
@@ -93,11 +176,13 @@
       "idempotency": "read_only_retry",
       "idempotency_key": "disallowed",
       "introduced": "1.0",
-      "jsonrpc_method": "file.read",
+      "jsonrpc_method": "file.read_text",
       "kind": "request_response",
-      "params_type": "FileReadParams",
-      "result_type": "FileReadResult",
-      "rpc_name": "FileRead"
+      "params_type": "FileReadTextParams",
+      "result_type": "FileReadTextResult",
+      "rpc_name": "FileReadText",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.write",
@@ -109,7 +194,9 @@
       "kind": "request_response",
       "params_type": "FileRemoveParams",
       "result_type": "FileRemoveResult",
-      "rpc_name": "FileRemove"
+      "rpc_name": "FileRemove",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.search",
@@ -121,7 +208,9 @@
       "kind": "request_response",
       "params_type": "FileSearchParams",
       "result_type": "FileSearchResult",
-      "rpc_name": "FileSearch"
+      "rpc_name": "FileSearch",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.read",
@@ -133,7 +222,9 @@
       "kind": "request_response",
       "params_type": "FileStatParams",
       "result_type": "FileStatResult",
-      "rpc_name": "FileStat"
+      "rpc_name": "FileStat",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "file.write",
@@ -141,11 +232,13 @@
       "idempotency": "provider_key_replay",
       "idempotency_key": "optional",
       "introduced": "1.0",
-      "jsonrpc_method": "file.write",
+      "jsonrpc_method": "file.write_text",
       "kind": "request_response",
-      "params_type": "FileWriteParams",
-      "result_type": "FileWriteResult",
-      "rpc_name": "FileWrite"
+      "params_type": "FileWriteTextParams",
+      "result_type": "FileWriteTextResult",
+      "rpc_name": "FileWriteText",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": null,
@@ -157,7 +250,9 @@
       "kind": "request_response",
       "params_type": "InitializeParams",
       "result_type": "InitializeResult",
-      "rpc_name": "Initialize"
+      "rpc_name": "Initialize",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "operation.cancel",
@@ -169,7 +264,9 @@
       "kind": "request_response",
       "params_type": "OperationCancelParams",
       "result_type": "OperationCancelResult",
-      "rpc_name": "OperationCancel"
+      "rpc_name": "OperationCancel",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "output.read",
@@ -181,7 +278,9 @@
       "kind": "request_response",
       "params_type": "OutputReadParams",
       "result_type": "OutputReadResult",
-      "rpc_name": "OutputRead"
+      "rpc_name": "OutputRead",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "output.read",
@@ -193,7 +292,9 @@
       "kind": "request_response",
       "params_type": "OutputReleaseParams",
       "result_type": "OutputReleaseResult",
-      "rpc_name": "OutputRelease"
+      "rpc_name": "OutputRelease",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "port.observe",
@@ -205,7 +306,9 @@
       "kind": "request_response",
       "params_type": "PortInspectParams",
       "result_type": "PortInspectResult",
-      "rpc_name": "PortInspect"
+      "rpc_name": "PortInspect",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "port.observe",
@@ -217,7 +320,9 @@
       "kind": "request_response",
       "params_type": "PortWaitParams",
       "result_type": "PortWaitResult",
-      "rpc_name": "PortWait"
+      "rpc_name": "PortWait",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -229,7 +334,9 @@
       "kind": "request_response",
       "params_type": "ProcessCloseStdinParams",
       "result_type": "ProcessCloseStdinResult",
-      "rpc_name": "ProcessCloseStdin"
+      "rpc_name": "ProcessCloseStdin",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -241,7 +348,9 @@
       "kind": "request_response",
       "params_type": "ProcessInspectParams",
       "result_type": "ProcessInspectResult",
-      "rpc_name": "ProcessInspect"
+      "rpc_name": "ProcessInspect",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -253,7 +362,9 @@
       "kind": "request_response",
       "params_type": "ProcessKillParams",
       "result_type": "ProcessKillResult",
-      "rpc_name": "ProcessKill"
+      "rpc_name": "ProcessKill",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -265,7 +376,9 @@
       "kind": "request_response",
       "params_type": "ProcessReadOutputParams",
       "result_type": "ProcessReadOutputResult",
-      "rpc_name": "ProcessReadOutput"
+      "rpc_name": "ProcessReadOutput",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -277,7 +390,9 @@
       "kind": "request_response",
       "params_type": "ProcessReleaseParams",
       "result_type": "ProcessReleaseResult",
-      "rpc_name": "ProcessRelease"
+      "rpc_name": "ProcessRelease",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -289,7 +404,9 @@
       "kind": "request_response",
       "params_type": "ProcessSignalParams",
       "result_type": "ProcessSignalResult",
-      "rpc_name": "ProcessSignal"
+      "rpc_name": "ProcessSignal",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -301,7 +418,9 @@
       "kind": "request_response",
       "params_type": "ProcessStartParams",
       "result_type": "ProcessStartResult",
-      "rpc_name": "ProcessStart"
+      "rpc_name": "ProcessStart",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -313,7 +432,9 @@
       "kind": "request_response",
       "params_type": "ProcessWaitParams",
       "result_type": "ProcessWaitResult",
-      "rpc_name": "ProcessWait"
+      "rpc_name": "ProcessWait",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "process.manage",
@@ -325,7 +446,9 @@
       "kind": "request_response",
       "params_type": "ProcessWriteStdinParams",
       "result_type": "ProcessWriteStdinResult",
-      "rpc_name": "ProcessWriteStdin"
+      "rpc_name": "ProcessWriteStdin",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "receipt.read",
@@ -337,7 +460,9 @@
       "kind": "request_response",
       "params_type": "ReceiptGetParams",
       "result_type": "ReceiptGetResult",
-      "rpc_name": "ReceiptGet"
+      "rpc_name": "ReceiptGet",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "session.close",
@@ -349,7 +474,9 @@
       "kind": "request_response",
       "params_type": "SessionCloseParams",
       "result_type": "SessionCloseResult",
-      "rpc_name": "SessionClose"
+      "rpc_name": "SessionClose",
+      "transfer_action": null,
+      "transfer_direction": null
     },
     {
       "capability": "shell.exec",
@@ -361,7 +488,9 @@
       "kind": "request_response",
       "params_type": "ShellExecParams",
       "result_type": "ShellExecResult",
-      "rpc_name": "ShellExec"
+      "rpc_name": "ShellExec",
+      "transfer_action": null,
+      "transfer_direction": null
     }
   ],
   "protocol": {

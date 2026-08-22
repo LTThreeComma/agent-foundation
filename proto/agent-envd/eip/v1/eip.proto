@@ -9,6 +9,21 @@ import "agent-envd/eip/v1/output.proto";
 import "agent-envd/eip/v1/process.proto";
 import "agent-envd/eip/v1/resource.proto";
 
+option (eip_data_frame_profile) = {
+  magic: "EIPD"
+  profile_version: 1
+  eip_major: 1
+  header_bytes: 24
+  magic_bytes: 4
+  version_bytes: 1
+  kind_bytes: 1
+  status_bytes: 2
+  handle_length_bytes: 2
+  reserved_bytes: 2
+  stream_offset_bytes: 8
+  payload_length_bytes: 4
+};
+
 service EnvironmentInteractionProtocol {
   rpc Initialize(InitializeParams) returns (InitializeResult) {
     option (eip_method) = { jsonrpc_method: "initialize" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_INITIALIZATION idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_INITIALIZATION };
@@ -19,8 +34,14 @@ service EnvironmentInteractionProtocol {
   rpc FileStat(FileStatParams) returns (FileStatResult) {
     option (eip_method) = { jsonrpc_method: "file.stat" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
   }
-  rpc FileRead(FileReadParams) returns (FileReadResult) {
-    option (eip_method) = { jsonrpc_method: "file.read" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  rpc FileReadText(FileReadTextParams) returns (FileReadTextResult) {
+    option (eip_method) = { jsonrpc_method: "file.read_text" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileOpenReader(FileReaderOpenParams) returns (FileReaderOpenResult) {
+    option (eip_method) = { jsonrpc_method: "file.open_reader" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_SESSION_RESOURCE_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE transfer_action: TRANSFER_ACTION_OPEN transfer_direction: TRANSFER_DIRECTION_SERVER_TO_CLIENT };
+  }
+  rpc FileCloseReader(FileReaderCloseParams) returns (FileReaderCloseResult) {
+    option (eip_method) = { jsonrpc_method: "file.close_reader" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE transfer_action: TRANSFER_ACTION_CLOSE transfer_direction: TRANSFER_DIRECTION_SERVER_TO_CLIENT };
   }
   rpc FileList(FileListParams) returns (FileListResult) {
     option (eip_method) = { jsonrpc_method: "file.list" capability: "file.read" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
@@ -31,14 +52,23 @@ service EnvironmentInteractionProtocol {
   rpc FileSearch(FileSearchParams) returns (FileSearchResult) {
     option (eip_method) = { jsonrpc_method: "file.search" capability: "file.search" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_READ_ONLY_RETRY idempotency_key: IDEMPOTENCY_KEY_MODE_DISALLOWED introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
   }
-  rpc FileWrite(FileWriteParams) returns (FileWriteResult) {
-    option (eip_method) = { jsonrpc_method: "file.write" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  rpc FileWriteText(FileWriteTextParams) returns (FileWriteTextResult) {
+    option (eip_method) = { jsonrpc_method: "file.write_text" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  }
+  rpc FileOpenWriter(FileWriterOpenParams) returns (FileWriterOpenResult) {
+    option (eip_method) = { jsonrpc_method: "file.open_writer" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_SESSION_RESOURCE_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE transfer_action: TRANSFER_ACTION_OPEN transfer_direction: TRANSFER_DIRECTION_CLIENT_TO_SERVER };
+  }
+  rpc FileCommitWriter(FileWriterCommitParams) returns (FileWriterCommitResult) {
+    option (eip_method) = { jsonrpc_method: "file.commit_writer" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE transfer_action: TRANSFER_ACTION_COMMIT transfer_direction: TRANSFER_DIRECTION_CLIENT_TO_SERVER };
+  }
+  rpc FileAbortWriter(FileWriterAbortParams) returns (FileWriterAbortResult) {
+    option (eip_method) = { jsonrpc_method: "file.abort_writer" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE transfer_action: TRANSFER_ACTION_ABORT transfer_direction: TRANSFER_DIRECTION_CLIENT_TO_SERVER };
   }
   rpc FileMkdir(FileMkdirParams) returns (FileMkdirResult) {
     option (eip_method) = { jsonrpc_method: "file.mkdir" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
   }
-  rpc FilePatch(FilePatchParams) returns (FilePatchResult) {
-    option (eip_method) = { jsonrpc_method: "file.patch" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
+  rpc FilePatchText(FilePatchTextParams) returns (FilePatchTextResult) {
+    option (eip_method) = { jsonrpc_method: "file.patch_text" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };
   }
   rpc FileCopy(FileCopyParams) returns (FileCopyResult) {
     option (eip_method) = { jsonrpc_method: "file.copy" capability: "file.write" kind: METHOD_KIND_REQUEST_RESPONSE idempotency: IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY idempotency_key: IDEMPOTENCY_KEY_MODE_OPTIONAL introduced_major: 1 introduced_minor: 0 error_family: ERROR_FAMILY_RESOURCE };

@@ -1,0 +1,59 @@
+{
+  "profile_version": 1,
+  "cases": [
+    {
+      "name": "attach",
+      "kind": "attach",
+      "handle": "reader-1",
+      "offset": 0,
+      "payload_hex": "",
+      "reset_status": null,
+      "frame_hex": "4549504401010000000800000000000000000000000000007265616465722d31"
+    },
+    {
+      "name": "attached",
+      "kind": "attached",
+      "handle": "writer-1",
+      "offset": 0,
+      "payload_hex": "",
+      "reset_status": null,
+      "frame_hex": "4549504401020000000800000000000000000000000000007772697465722d31"
+    },
+    {
+      "name": "chunk",
+      "kind": "chunk",
+      "handle": "reader-1",
+      "offset": 3,
+      "payload_hex": "00ff",
+      "reset_status": null,
+      "frame_hex": "4549504401030000000800000000000000000003000000027265616465722d3100ff"
+    },
+    {
+      "name": "end",
+      "kind": "end",
+      "handle": "reader-1",
+      "offset": 5,
+      "payload_hex": "",
+      "reset_status": null,
+      "frame_hex": "4549504401040000000800000000000000000005000000007265616465722d31"
+    },
+    {
+      "name": "end_ack",
+      "kind": "end_ack",
+      "handle": "writer-1",
+      "offset": 5,
+      "payload_hex": "",
+      "reset_status": null,
+      "frame_hex": "4549504401050000000800000000000000000005000000007772697465722d31"
+    },
+    {
+      "name": "reset",
+      "kind": "reset",
+      "handle": "reader-1",
+      "offset": 3,
+      "payload_hex": "",
+      "reset_status": "source",
+      "frame_hex": "4549504401060004000800000000000000000003000000007265616465722d31"
+    }
+  ]
+}

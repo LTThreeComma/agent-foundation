@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from converge_agent_envd_client.eip.v1 import EIPError
+from converge_agent_envd_client.eip.v1 import DataResetStatus, EIPError
 
 
 class EIPClientError(Exception):
@@ -37,3 +37,18 @@ class EIPMethodError(EIPClientError):
 
 class EIPSessionStateError(EIPClientError):
     """The initialized-session API was used in an invalid local state."""
+
+
+class EIPTransferError(EIPClientError):
+    """One typed file transfer reset or failed without becoming carrier-terminal."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: DataResetStatus | None = None,
+        offset: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.offset = offset

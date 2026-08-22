@@ -44,6 +44,7 @@ Follow these service invariants; the complete contract and rationale live in [DE
 - Generate migration revisions through the repository Make target against disposable PostgreSQL, then review the generated operations and rollout safety. Never create a revision file from scratch.
 - Execution-only processes never migrate. The shared image lets compatible control or all-in-one replicas auto-migrate under bounded PostgreSQL advisory locking; deployments with a dedicated migration job disable replica auto migration.
 - Build one non-root service image for all-in-one, control-plane, and execution-plane roles; select the role at runtime.
+- Keep identifiers that may reach model context or user-facing traces concise and kind-prefixed (for example, `process-1` or a short kind-prefixed hash). Do not shorten identifiers whose unpredictability or entropy is part of their security or protocol contract.
 
 ```bash
 make install

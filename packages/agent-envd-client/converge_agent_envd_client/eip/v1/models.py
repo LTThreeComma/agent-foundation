@@ -97,6 +97,7 @@ Base64Unpadded = Annotated[
     AfterValidator(_validate_base64_unpadded),
 ]
 ProtocolVersion = Annotated[StrictStr, Field(pattern=r"^[1-9][0-9]*\.[0-9]+$")]
+Sha256Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 EIPTimestamp = Annotated[
     StrictStr,
     Field(json_schema_extra={"format": "date-time"}),
@@ -161,6 +162,12 @@ class ErrorType(StrEnum):
     CLEANUP_FAILED = "cleanup_failed"
     COMMAND_START_FAILED = "command_start_failed"
     CONFLICT = "conflict"
+    INTEGRITY_MISMATCH = "integrity_mismatch"
+
+
+class FileCopySourceStability(StrEnum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
 
 
 class FileKind(StrEnum):
@@ -168,6 +175,26 @@ class FileKind(StrEnum):
     DIRECTORY = "directory"
     SYMLINK = "symlink"
     OTHER = "other"
+
+
+class FileReadStability(StrEnum):
+    VERIFIED = "verified"
+    CHANGED = "changed"
+    UNVERIFIED = "unverified"
+
+
+class FileWriteMode(StrEnum):
+    CREATE = "create"
+    REPLACE = "replace"
+    UPSERT = "upsert"
+    APPEND = "append"
+
+
+class FileWriterAbortStatus(StrEnum):
+    ABORTED = "aborted"
+    ALREADY_ABORTED = "already_aborted"
+    COMMIT_IN_PROGRESS = "commit_in_progress"
+    ALREADY_COMMITTED = "already_committed"
 
 
 class FindMode(StrEnum):
@@ -298,14 +325,6 @@ class TerminationReason(StrEnum):
     BACKEND_LOST = "backend_lost"
 
 
-class WriteMode(StrEnum):
-    CREATE = "create"
-    REPLACE = "replace"
-    UPSERT = "upsert"
-    APPEND = "append"
-    WRITE_AT = "write_at"
-
-
 EIP_ERROR_CODES: Final[Mapping[ErrorType, int]] = MappingProxyType(
     {
         ErrorType.PARSE_ERROR: -32700,
@@ -335,6 +354,7 @@ EIP_ERROR_CODES: Final[Mapping[ErrorType, int]] = MappingProxyType(
         ErrorType.CLEANUP_FAILED: -32052,
         ErrorType.COMMAND_START_FAILED: -32053,
         ErrorType.CONFLICT: -32060,
+        ErrorType.INTEGRITY_MISMATCH: -32061,
     }
 )
 
@@ -356,6 +376,11 @@ class CommandLimits(EIPModel):
     process_count: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
     memory_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
     cpu_time_ms: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+
+
+class ContentDigest(EIPModel):
+    algorithm: Literal["sha256"]
+    value: Sha256Digest
 
 
 class EIPCallContext(EIPModel):
@@ -385,6 +410,14 @@ class EIPLimits(EIPModel):
     session_idle_ttl_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     max_process_records: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     terminal_process_record_ttl_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_transfer_frame_bytes: Annotated[StrictInt, Field(ge=25, le=18446744073709551615)]
+    max_concurrent_file_transfers: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_file_transfer_records: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    file_transfer_record_ttl_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_staged_file_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_staged_file_objects: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    file_transfer_idle_ttl_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_file_transfer_duration_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
 
     @model_validator(mode="after")
     def _validate_limit_relationships(self) -> EIPLimits:
@@ -394,6 +427,8 @@ class EIPLimits(EIPModel):
             raise ValueError("max_processes cannot exceed max_process_records")
         if self.max_concurrent_operations > self.max_operation_records:
             raise ValueError("max_concurrent_operations cannot exceed max_operation_records")
+        if self.max_concurrent_file_transfers > self.max_file_transfer_records:
+            raise ValueError("max_concurrent_file_transfers cannot exceed max_file_transfer_records")
         return self
 
 
@@ -416,11 +451,47 @@ class EnvironmentDescribeParams(EIPModel):
     context: EIPCallContext
 
 
+class FileByteRange(EIPModel):
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+    length: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+
+
 class FileMkdirParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
     parents: StrictBool = False
     exist_ok: StrictBool = False
+
+
+class FileReadCompletion(EIPModel):
+    range_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    range_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    digest: ContentDigest | None = None
+    source_eof_at_end: StrictBool
+    stability: FileReadStability
+    complete: StrictBool
+
+    @model_validator(mode="after")
+    def _validate_completion(self) -> FileReadCompletion:
+        if self.range_start > self.range_end:
+            raise ValueError("range_start cannot exceed range_end")
+        expected = self.range_end - self.range_start
+        if self.complete:
+            if self.digest is None or self.produced_bytes != expected:
+                raise ValueError("complete reads require exact bytes and digest")
+        elif self.digest is not None:
+            raise ValueError("incomplete reads cannot expose a digest")
+        return self
+
+
+class FileReaderCloseResult(EIPModel):
+    completion: FileReadCompletion
+
+
+class FileReaderHandle(RootModel[Identifier]):
+    model_config = ConfigDict(frozen=True)
+    root: Identifier
 
 
 class FileRevision(RootModel[Identifier]):
@@ -441,15 +512,42 @@ class FileStatParams(EIPModel):
     follow_symlinks: StrictBool = True
 
 
-class FileWriteParams(EIPModel):
+class FileTextCursor(RootModel[Identifier]):
+    model_config = ConfigDict(frozen=True)
+    root: Identifier
+
+
+class FileWriteTextParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
-    mode: WriteMode
-    data: EncodedBytes
-    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    mode: FileWriteMode
+    text: StrictStr
     expected_revision: FileRevision | None = None
-    create_parents: StrictBool = False
     executable: StrictBool | None = None
+
+
+class FileWriterAbortResult(EIPModel):
+    status: FileWriterAbortStatus
+
+
+class FileWriterHandle(RootModel[Identifier]):
+    model_config = ConfigDict(frozen=True)
+    root: Identifier
+
+
+class FileWriterOpenParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    mode: FileWriteMode
+    expected_revision: FileRevision | None = None
+    executable: StrictBool | None = None
+    transfer_deadline: EIPTimestamp | None = None
+
+
+class FileWriterOpenResult(EIPModel):
+    writer: FileWriterHandle
+    max_transfer_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    expires_at: EIPTimestamp
 
 
 class InitializeParams(EIPModel):
@@ -642,6 +740,11 @@ class StructuredOutputDisposition(EIPModel):
     expires_at: EIPTimestamp | None = None
 
 
+class TextPosition(EIPModel):
+    line: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    byte_column: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+
+
 type CommandSpec = Annotated[
     ArgvCommand | ShellCommand,
     Field(discriminator="kind"),
@@ -666,6 +769,7 @@ class FileCopyParams(EIPModel):
     expected_destination_revision: FileRevision | None = None
     replace: StrictBool = False
     require_atomic_destination: StrictBool = False
+    require_stable_source: StrictBool = False
 
 
 class FileFindParams(EIPModel):
@@ -716,7 +820,7 @@ class FileMoveParams(EIPModel):
     replace: StrictBool = False
 
 
-class FilePatchParams(EIPModel):
+class FilePatchTextParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
     patch_format: Literal["unified_diff"]
@@ -724,13 +828,53 @@ class FilePatchParams(EIPModel):
     expected_revision: FileRevision
 
 
-class FileReadParams(EIPModel):
+class FileReadTextParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
-    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
-    length: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    cursor: FileTextCursor | None = None
+    start_line: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
+    max_lines: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
+    max_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
     expected_revision: FileRevision | None = None
-    output_policy: OutputPolicy | None = None
+
+    @model_validator(mode="after")
+    def _validate_position(self) -> FileReadTextParams:
+        if self.cursor is not None and self.start_line is not None:
+            raise ValueError("cursor and start_line are mutually exclusive")
+        return self
+
+
+class FileReadTextResult(EIPModel):
+    info: FileInfo
+    text: StrictStr
+    start: TextPosition
+    end: TextPosition
+    next_cursor: FileTextCursor | None = None
+    content_complete: StrictBool
+    truncated: StrictBool
+
+
+class FileReaderCloseParams(EIPModel):
+    context: EIPCallContext
+    reader: FileReaderHandle
+    accept_complete: StrictBool
+
+
+class FileReaderOpenParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    byte_range: FileByteRange | None = None
+    expected_revision: FileRevision | None = None
+    transfer_deadline: EIPTimestamp | None = None
+
+
+class FileReaderOpenResult(EIPModel):
+    reader: FileReaderHandle
+    info: FileInfo
+    range_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    range_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    source_eof_at_end: StrictBool
+    expires_at: EIPTimestamp
 
 
 class FileRemoveParams(EIPModel):
@@ -764,6 +908,18 @@ class FileStatResult(EIPModel):
     info: FileInfo
 
 
+class FileWriterAbortParams(EIPModel):
+    context: EIPCallContext
+    writer: FileWriterHandle
+
+
+class FileWriterCommitParams(EIPModel):
+    context: EIPCallContext
+    writer: FileWriterHandle
+    transferred_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    transfer_digest: ContentDigest
+
+
 class InitializeResult(EIPModel):
     protocol_version: ProtocolVersion
     server: EIPServerInfo
@@ -776,7 +932,7 @@ class OperationReceipt(EIPModel):
     method: StrictStr
     environment_id: Identifier
     generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    request_digest: StrictStr
+    request_digest: Sha256Digest
     stage: ReceiptStage
     outcome: ReceiptOutcome | None = None
     observed_at: EIPTimestamp
@@ -929,6 +1085,7 @@ class FileCopyResult(EIPModel):
     bytes_copied: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
     atomic_destination: StrictBool
     receipt: OperationReceipt
+    source_stability: FileCopySourceStability
 
 
 class FileFindResult(EIPModel):
@@ -947,7 +1104,7 @@ class FileMoveResult(EIPModel):
     receipt: OperationReceipt
 
 
-class FilePatchResult(EIPModel):
+class FilePatchTextResult(EIPModel):
     info: FileInfo
     hunks_applied: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
     receipt: OperationReceipt
@@ -958,9 +1115,16 @@ class FileRemoveResult(EIPModel):
     receipt: OperationReceipt
 
 
-class FileWriteResult(EIPModel):
+class FileWriteTextResult(EIPModel):
     info: FileInfo
     bytes_written: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    receipt: OperationReceipt
+
+
+class FileWriterCommitResult(EIPModel):
+    info: FileInfo
+    transferred_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    transfer_digest: ContentDigest
     receipt: OperationReceipt
 
 
@@ -1060,13 +1224,6 @@ class EIPError(EIPModel):
         return self
 
 
-class FileReadResult(EIPModel):
-    info: FileInfo
-    range_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    range_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    output: OutputCapture
-
-
 class ProcessOutputSnapshot(EIPModel):
     stdout: ProcessStreamSnapshot
     stderr: ProcessStreamSnapshot
@@ -1120,6 +1277,7 @@ class ProcessWaitResult(EIPModel):
 ArgvCommand.model_rebuild()
 CommandEnvironment.model_rebuild()
 CommandLimits.model_rebuild()
+ContentDigest.model_rebuild()
 EIPCallContext.model_rebuild()
 EIPClientInfo.model_rebuild()
 EIPLimits.model_rebuild()
@@ -1127,10 +1285,16 @@ EIPPath.model_rebuild()
 EIPServerInfo.model_rebuild()
 EncodedBytes.model_rebuild()
 EnvironmentDescribeParams.model_rebuild()
+FileByteRange.model_rebuild()
 FileMkdirParams.model_rebuild()
+FileReadCompletion.model_rebuild()
+FileReaderCloseResult.model_rebuild()
 FileSearchMatch.model_rebuild()
 FileStatParams.model_rebuild()
-FileWriteParams.model_rebuild()
+FileWriteTextParams.model_rebuild()
+FileWriterAbortResult.model_rebuild()
+FileWriterOpenParams.model_rebuild()
+FileWriterOpenResult.model_rebuild()
 InitializeParams.model_rebuild()
 IsolationPosture.model_rebuild()
 MountDescriptor.model_rebuild()
@@ -1154,6 +1318,7 @@ SessionCloseResult.model_rebuild()
 ShellCommand.model_rebuild()
 ShellProfileDescriptor.model_rebuild()
 StructuredOutputDisposition.model_rebuild()
+TextPosition.model_rebuild()
 EnvironmentDescriptor.model_rebuild()
 FileCopyParams.model_rebuild()
 FileFindParams.model_rebuild()
@@ -1162,12 +1327,18 @@ FileListEntry.model_rebuild()
 FileListParams.model_rebuild()
 FileListResult.model_rebuild()
 FileMoveParams.model_rebuild()
-FilePatchParams.model_rebuild()
-FileReadParams.model_rebuild()
+FilePatchTextParams.model_rebuild()
+FileReadTextParams.model_rebuild()
+FileReadTextResult.model_rebuild()
+FileReaderCloseParams.model_rebuild()
+FileReaderOpenParams.model_rebuild()
+FileReaderOpenResult.model_rebuild()
 FileRemoveParams.model_rebuild()
 FileSearchParams.model_rebuild()
 FileSearchResult.model_rebuild()
 FileStatResult.model_rebuild()
+FileWriterAbortParams.model_rebuild()
+FileWriterCommitParams.model_rebuild()
 InitializeResult.model_rebuild()
 OperationReceipt.model_rebuild()
 OutputPreview.model_rebuild()
@@ -1189,9 +1360,10 @@ FileCopyResult.model_rebuild()
 FileFindResult.model_rebuild()
 FileMkdirResult.model_rebuild()
 FileMoveResult.model_rebuild()
-FilePatchResult.model_rebuild()
+FilePatchTextResult.model_rebuild()
 FileRemoveResult.model_rebuild()
-FileWriteResult.model_rebuild()
+FileWriteTextResult.model_rebuild()
+FileWriterCommitResult.model_rebuild()
 OutputCapture.model_rebuild()
 OutputReadResult.model_rebuild()
 PortInspectResult.model_rebuild()
@@ -1200,7 +1372,6 @@ ProcessStreamRead.model_rebuild()
 ProcessStreamSnapshot.model_rebuild()
 ShellExecParams.model_rebuild()
 EIPError.model_rebuild()
-FileReadResult.model_rebuild()
 ProcessOutputSnapshot.model_rebuild()
 ShellExecResult.model_rebuild()
 ProcessInfo.model_rebuild()
@@ -1220,6 +1391,7 @@ __all__ = [
     "CommandNetwork",
     "CommandRequest",
     "CommandSpec",
+    "ContentDigest",
     "DesiredPortStatus",
     "DispatchStage",
     "EIPCallContext",
@@ -1234,8 +1406,10 @@ __all__ = [
     "EnvironmentDescribeResult",
     "EnvironmentDescriptor",
     "ErrorType",
+    "FileByteRange",
     "FileCopyParams",
     "FileCopyResult",
+    "FileCopySourceStability",
     "FileFindParams",
     "FileFindResult",
     "FileInfo",
@@ -1247,10 +1421,17 @@ __all__ = [
     "FileMkdirResult",
     "FileMoveParams",
     "FileMoveResult",
-    "FilePatchParams",
-    "FilePatchResult",
-    "FileReadParams",
-    "FileReadResult",
+    "FilePatchTextParams",
+    "FilePatchTextResult",
+    "FileReadCompletion",
+    "FileReadStability",
+    "FileReadTextParams",
+    "FileReadTextResult",
+    "FileReaderCloseParams",
+    "FileReaderCloseResult",
+    "FileReaderHandle",
+    "FileReaderOpenParams",
+    "FileReaderOpenResult",
     "FileRemoveParams",
     "FileRemoveResult",
     "FileRevision",
@@ -1259,8 +1440,18 @@ __all__ = [
     "FileSearchResult",
     "FileStatParams",
     "FileStatResult",
-    "FileWriteParams",
-    "FileWriteResult",
+    "FileTextCursor",
+    "FileWriteMode",
+    "FileWriteTextParams",
+    "FileWriteTextResult",
+    "FileWriterAbortParams",
+    "FileWriterAbortResult",
+    "FileWriterAbortStatus",
+    "FileWriterCommitParams",
+    "FileWriterCommitResult",
+    "FileWriterHandle",
+    "FileWriterOpenParams",
+    "FileWriterOpenResult",
     "FindMode",
     "InitializeParams",
     "InitializeResult",
@@ -1338,5 +1529,5 @@ __all__ = [
     "ShellProfileDescriptor",
     "StructuredOutputDisposition",
     "TerminationReason",
-    "WriteMode",
+    "TextPosition",
 ]

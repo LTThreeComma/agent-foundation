@@ -49,20 +49,78 @@ message FileStatResult {
   FileInfo info = 1;
 }
 
-message FileReadParams {
-  EIPCallContext context = 1;
-  EIPPath path = 2;
-  optional uint64 offset = 3 [(eip_field).default_uint = 0];
-  optional uint64 length = 4;
-  optional FileRevision expected_revision = 5;
-  optional OutputPolicy output_policy = 6;
+message TextPosition {
+  uint64 line = 1 [(eip_field).minimum = 1];
+  uint64 byte_column = 2;
 }
 
-message FileReadResult {
+message FileReadTextParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional FileTextCursor cursor = 3;
+  optional uint64 start_line = 4 [(eip_field).minimum = 1];
+  optional uint64 max_lines = 5 [(eip_field).minimum = 1];
+  optional uint64 max_bytes = 6 [(eip_field).minimum = 1];
+  optional FileRevision expected_revision = 7;
+}
+
+message FileReadTextResult {
   FileInfo info = 1;
-  uint64 range_start = 2;
-  uint64 range_end = 3;
-  OutputCapture output = 4;
+  string text = 2;
+  TextPosition start = 3;
+  TextPosition end = 4;
+  optional FileTextCursor next_cursor = 5;
+  bool content_complete = 6;
+  bool truncated = 7;
+}
+
+message FileByteRange {
+  optional uint64 offset = 1 [(eip_field).default_uint = 0];
+  optional uint64 length = 2;
+}
+
+message FileReaderOpenParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  optional FileByteRange byte_range = 3;
+  optional FileRevision expected_revision = 4;
+  optional google.protobuf.Timestamp transfer_deadline = 5;
+}
+
+message FileReaderOpenResult {
+  FileReaderHandle reader = 1;
+  FileInfo info = 2;
+  uint64 range_start = 3;
+  uint64 range_end = 4;
+  bool source_eof_at_end = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+enum FileReadStability {
+  FILE_READ_STABILITY_UNSPECIFIED = 0;
+  FILE_READ_STABILITY_VERIFIED = 1 [(eip_enum_value).json_name = "verified"];
+  FILE_READ_STABILITY_CHANGED = 2 [(eip_enum_value).json_name = "changed"];
+  FILE_READ_STABILITY_UNVERIFIED = 3 [(eip_enum_value).json_name = "unverified"];
+}
+
+message FileReadCompletion {
+  uint64 range_start = 1;
+  uint64 range_end = 2;
+  uint64 produced_bytes = 3;
+  optional ContentDigest digest = 4;
+  bool source_eof_at_end = 5;
+  FileReadStability stability = 6;
+  bool complete = 7;
+}
+
+message FileReaderCloseParams {
+  EIPCallContext context = 1;
+  FileReaderHandle reader = 2;
+  bool accept_complete = 3;
+}
+
+message FileReaderCloseResult {
+  FileReadCompletion completion = 1;
 }
 
 message FileListParams {
@@ -140,30 +198,76 @@ message FileSearchResult {
   StructuredOutputDisposition output = 2;
 }
 
-enum WriteMode {
-  WRITE_MODE_UNSPECIFIED = 0;
-  WRITE_MODE_CREATE = 1 [(eip_enum_value).json_name = "create"];
-  WRITE_MODE_REPLACE = 2 [(eip_enum_value).json_name = "replace"];
-  WRITE_MODE_UPSERT = 3 [(eip_enum_value).json_name = "upsert"];
-  WRITE_MODE_APPEND = 4 [(eip_enum_value).json_name = "append"];
-  WRITE_MODE_WRITE_AT = 5 [(eip_enum_value).json_name = "write_at"];
+enum FileWriteMode {
+  reserved 5;
+  reserved "FILE_WRITE_MODE_WRITE_AT";
+
+  FILE_WRITE_MODE_UNSPECIFIED = 0;
+  FILE_WRITE_MODE_CREATE = 1 [(eip_enum_value).json_name = "create"];
+  FILE_WRITE_MODE_REPLACE = 2 [(eip_enum_value).json_name = "replace"];
+  FILE_WRITE_MODE_UPSERT = 3 [(eip_enum_value).json_name = "upsert"];
+  FILE_WRITE_MODE_APPEND = 4 [(eip_enum_value).json_name = "append"];
 }
 
-message FileWriteParams {
+message FileWriteTextParams {
   EIPCallContext context = 1;
   EIPPath path = 2;
-  WriteMode mode = 3;
-  EncodedBytes data = 4;
-  optional uint64 offset = 5;
-  optional FileRevision expected_revision = 6;
-  optional bool create_parents = 7 [(eip_field).default_bool = false];
-  optional bool executable = 8;
+  FileWriteMode mode = 3;
+  string text = 4;
+  optional FileRevision expected_revision = 5;
+  optional bool executable = 6;
 }
 
-message FileWriteResult {
+message FileWriteTextResult {
   FileInfo info = 1;
   uint64 bytes_written = 2;
   OperationReceipt receipt = 3;
+}
+
+message FileWriterOpenParams {
+  EIPCallContext context = 1;
+  EIPPath path = 2;
+  FileWriteMode mode = 3;
+  optional FileRevision expected_revision = 4;
+  optional bool executable = 5;
+  optional google.protobuf.Timestamp transfer_deadline = 6;
+}
+
+message FileWriterOpenResult {
+  FileWriterHandle writer = 1;
+  uint64 max_transfer_bytes = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message FileWriterCommitParams {
+  EIPCallContext context = 1;
+  FileWriterHandle writer = 2;
+  uint64 transferred_bytes = 3;
+  ContentDigest transfer_digest = 4;
+}
+
+message FileWriterCommitResult {
+  FileInfo info = 1;
+  uint64 transferred_bytes = 2;
+  ContentDigest transfer_digest = 3;
+  OperationReceipt receipt = 4;
+}
+
+enum FileWriterAbortStatus {
+  FILE_WRITER_ABORT_STATUS_UNSPECIFIED = 0;
+  FILE_WRITER_ABORT_STATUS_ABORTED = 1 [(eip_enum_value).json_name = "aborted"];
+  FILE_WRITER_ABORT_STATUS_ALREADY_ABORTED = 2 [(eip_enum_value).json_name = "already_aborted"];
+  FILE_WRITER_ABORT_STATUS_COMMIT_IN_PROGRESS = 3 [(eip_enum_value).json_name = "commit_in_progress"];
+  FILE_WRITER_ABORT_STATUS_ALREADY_COMMITTED = 4 [(eip_enum_value).json_name = "already_committed"];
+}
+
+message FileWriterAbortParams {
+  EIPCallContext context = 1;
+  FileWriterHandle writer = 2;
+}
+
+message FileWriterAbortResult {
+  FileWriterAbortStatus status = 1;
 }
 
 message FileMkdirParams {
@@ -179,7 +283,7 @@ message FileMkdirResult {
   OperationReceipt receipt = 3;
 }
 
-message FilePatchParams {
+message FilePatchTextParams {
   EIPCallContext context = 1;
   EIPPath path = 2;
   string patch_format = 3 [(eip_field).const_string = "unified_diff"];
@@ -187,7 +291,7 @@ message FilePatchParams {
   FileRevision expected_revision = 5;
 }
 
-message FilePatchResult {
+message FilePatchTextResult {
   FileInfo info = 1;
   uint64 hunks_applied = 2;
   OperationReceipt receipt = 3;
@@ -201,6 +305,13 @@ message FileCopyParams {
   optional FileRevision expected_destination_revision = 5;
   optional bool replace = 6 [(eip_field).default_bool = false];
   optional bool require_atomic_destination = 7 [(eip_field).default_bool = false];
+  optional bool require_stable_source = 8 [(eip_field).default_bool = false];
+}
+
+enum FileCopySourceStability {
+  FILE_COPY_SOURCE_STABILITY_UNSPECIFIED = 0;
+  FILE_COPY_SOURCE_STABILITY_VERIFIED = 1 [(eip_enum_value).json_name = "verified"];
+  FILE_COPY_SOURCE_STABILITY_UNVERIFIED = 2 [(eip_enum_value).json_name = "unverified"];
 }
 
 message FileCopyResult {
@@ -208,6 +319,7 @@ message FileCopyResult {
   uint64 bytes_copied = 2;
   bool atomic_destination = 3;
   OperationReceipt receipt = 4;
+  FileCopySourceStability source_stability = 5;
 }
 
 message FileMoveParams {

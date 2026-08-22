@@ -3,7 +3,12 @@ use std::{error::Error, sync::Arc};
 mod config;
 mod daemon;
 pub mod eip;
+mod mount;
+mod operation;
+mod resource;
+mod retention;
 mod stdio;
+mod transfer;
 
 /// Runs one stdio agent-envd instance from trusted process configuration.
 pub async fn run_from_environment() -> Result<(), Box<dyn Error + Send + Sync>> {

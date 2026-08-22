@@ -9,14 +9,19 @@ from typing import Any
 import converge_agent_envd_client.requester as requester_module
 import pytest
 from converge_agent_envd_client import (
+    ControlFrame,
     EIPMethodError,
     EIPProtocolError,
     EIPRequestTimeoutError,
     EIPSession,
     EIPSessionStateError,
+    EIPTransportFrame,
     RequestCoordinator,
 )
 from converge_agent_envd_client.eip.v1 import (
+    DataFrame,
+    DataFrameKind,
+    DataResetStatus,
     DispatchStage,
     EIPCallContext,
     EIPClient,
@@ -43,25 +48,31 @@ from converge_agent_envd_client.eip.v1 import (
 
 class FakeTransport:
     def __init__(self) -> None:
-        self.sent: asyncio.Queue[bytes] = asyncio.Queue()
-        self.responses: asyncio.Queue[bytes | BaseException] = asyncio.Queue()
+        self.sent: asyncio.Queue[EIPTransportFrame] = asyncio.Queue()
+        self.responses: asyncio.Queue[EIPTransportFrame | bytes | BaseException] = asyncio.Queue()
         self.closed = False
-        self.limits: tuple[int, int] | None = None
+        self.limits: tuple[int, int, int] | None = None
 
-    async def send(self, payload: bytes) -> None:
-        await self.sent.put(payload)
+    async def send(self, frame: EIPTransportFrame) -> None:
+        await self.sent.put(frame)
 
-    async def receive(self) -> bytes:
+    async def receive(self) -> EIPTransportFrame:
         response = await self.responses.get()
         if isinstance(response, BaseException):
             raise response
-        return response
+        return ControlFrame(response) if isinstance(response, bytes) else response
 
     async def close(self) -> None:
         self.closed = True
 
-    def set_limits(self, *, max_request_bytes: int, max_response_bytes: int) -> None:
-        self.limits = (max_request_bytes, max_response_bytes)
+    def set_limits(
+        self,
+        *,
+        max_request_bytes: int,
+        max_response_bytes: int,
+        max_transfer_frame_bytes: int,
+    ) -> None:
+        self.limits = (max_request_bytes, max_response_bytes, max_transfer_frame_bytes)
 
 
 class BlockingCloseTransport(FakeTransport):
@@ -74,6 +85,11 @@ class BlockingCloseTransport(FakeTransport):
         self.close_started.set()
         await self.allow_close.wait()
         self.closed = True
+
+
+def decode_sent_request(frame: EIPTransportFrame) -> JsonRpcRequest:
+    assert isinstance(frame, ControlFrame)
+    return decode_model(frame.payload, JsonRpcRequest)
 
 
 def descriptor(generation: int) -> EnvironmentDescriptor:
@@ -97,6 +113,14 @@ def descriptor(generation: int) -> EnvironmentDescriptor:
             session_idle_ttl_ms=1000,
             max_process_records=1,
             terminal_process_record_ttl_ms=1,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+            max_file_transfer_records=1,
+            file_transfer_record_ttl_ms=1,
+            max_staged_file_bytes=1,
+            max_staged_file_objects=1,
+            file_transfer_idle_ttl_ms=1,
+            max_file_transfer_duration_ms=1,
         ),
         isolation=IsolationPosture(
             mode=IsolationMode.DISABLED,
@@ -137,8 +161,8 @@ def test_request_coordinator_correlates_out_of_order_responses() -> None:
             client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="second")))
         )
 
-        first_request = decode_model(await transport.sent.get(), JsonRpcRequest)
-        second_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        first_request = decode_sent_request(await transport.sent.get())
+        second_request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(second_request.id, 2))
         await transport.responses.put(success_response(first_request.id, 1))
 
@@ -158,7 +182,7 @@ def test_request_coordinator_raises_typed_method_error() -> None:
         call = asyncio.create_task(
             client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="describe")))
         )
-        request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        request = decode_sent_request(await transport.sent.get())
         error = EIPError(
             code=-32012,
             message="unsupported",
@@ -206,7 +230,7 @@ def test_cancelled_wait_keeps_correlation_until_late_response() -> None:
         cancelled = asyncio.create_task(
             client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="cancelled")))
         )
-        first_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        first_request = decode_sent_request(await transport.sent.get())
         cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await cancelled
@@ -218,7 +242,7 @@ def test_cancelled_wait_keeps_correlation_until_late_response() -> None:
         assert transport.sent.empty()
 
         await transport.responses.put(success_response(first_request.id, 1))
-        second_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        second_request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(second_request.id, 2))
         assert (await next_call).descriptor.generation == 2
         await requester.close()
@@ -234,7 +258,7 @@ def test_deadline_covers_waiting_for_admission() -> None:
         first = asyncio.create_task(
             client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="first")))
         )
-        first_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        first_request = decode_sent_request(await transport.sent.get())
 
         deadline = datetime.now(UTC) + timedelta(milliseconds=20)
         with pytest.raises(EIPRequestTimeoutError) as captured:
@@ -318,10 +342,10 @@ def test_descriptor_refresh_narrows_limits_and_identity_violation_is_terminal() 
         )
         narrowed = descriptor(1).model_copy(update={"limits": narrowed_limits})
         refresh = asyncio.create_task(session.describe())
-        request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(request.id, 1, narrowed))
         assert (await refresh).limits.max_concurrent_operations == 1
-        assert transport.limits == (512, 512)
+        assert transport.limits == (512, 512, 1024)
 
         first = asyncio.create_task(
             session.client.environment_describe(
@@ -333,12 +357,12 @@ def test_descriptor_refresh_narrows_limits_and_identity_violation_is_terminal() 
                 EnvironmentDescribeParams(context=EIPCallContext(operation_id="after-narrow-2"))
             )
         )
-        first_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        first_request = decode_sent_request(await transport.sent.get())
         await asyncio.sleep(0)
         assert transport.sent.empty()
         await transport.responses.put(success_response(first_request.id, 1, narrowed))
         await first
-        second_request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        second_request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(second_request.id, 1, narrowed))
         await second
         await session.abort()
@@ -348,7 +372,7 @@ def test_descriptor_refresh_narrows_limits_and_identity_violation_is_terminal() 
         requester = RequestCoordinator(transport, request_timeout=1)
         session = EIPSession(requester, descriptor(1))
         refresh = asyncio.create_task(session.describe())
-        request = decode_model(await transport.sent.get(), JsonRpcRequest)
+        request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(request.id, 2))
         with pytest.raises(EIPProtocolError, match="generation changed"):
             await refresh
@@ -371,5 +395,144 @@ def test_session_rejects_invalid_local_admission_before_initialize() -> None:
             )
         assert transport.sent.empty()
         assert not transport.closed
+
+    asyncio.run(scenario())
+
+
+def test_request_coordinator_demultiplexes_data_without_blocking_control() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport, max_in_flight=1, request_timeout=1)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        channel = requester.register_transfer("reader-test", inbound_frames=2)
+        call = asyncio.create_task(
+            EIPClient(requester).environment_describe(
+                EnvironmentDescribeParams(context=EIPCallContext(operation_id="interleaved"))
+            )
+        )
+        request = decode_sent_request(await transport.sent.get())
+
+        attached = DataFrame(kind=DataFrameKind.ATTACHED, handle=channel.handle)
+        await transport.responses.put(attached)
+        await transport.responses.put(success_response(request.id, 7))
+
+        assert await channel.receive() == attached
+        assert (await call).descriptor.generation == 7
+        requester.unregister_transfer(channel)
+        await requester.close()
+
+    asyncio.run(scenario())
+
+
+def test_slow_transfer_consumer_applies_backpressure_without_reset() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        channel = requester.register_transfer("reader-full", inbound_frames=1)
+        first = DataFrame(kind=DataFrameKind.CHUNK, handle=channel.handle, payload=b"a")
+        second = DataFrame(kind=DataFrameKind.CHUNK, handle=channel.handle, offset=1, payload=b"b")
+        await transport.responses.put(first)
+        await transport.responses.put(second)
+        await asyncio.sleep(0)
+
+        assert transport.sent.empty()
+        assert await channel.receive() == first
+        assert await channel.receive() == second
+        assert transport.sent.empty()
+
+        requester.unregister_transfer(channel)
+        await requester.close()
+
+    asyncio.run(scenario())
+
+
+def test_peer_reset_bypasses_a_full_transfer_inbox() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        channel = requester.register_transfer("reader-reset", inbound_frames=1)
+        chunk = DataFrame(kind=DataFrameKind.CHUNK, handle=channel.handle, payload=b"queued")
+        reset = DataFrame(
+            kind=DataFrameKind.RESET,
+            handle=channel.handle,
+            reset_status=DataResetStatus.SOURCE,
+        )
+        await channel.deliver(chunk)
+        await asyncio.wait_for(channel.deliver(reset), timeout=1)
+        assert channel.peer_reset_received
+        channel.fail(RuntimeError("carrier also failed"))
+        assert await channel.receive() == chunk
+        assert await channel.receive() == reset
+
+        requester.unregister_transfer(channel)
+        await requester.close()
+
+    asyncio.run(scenario())
+
+
+def test_retired_transfer_ignores_already_queued_terminal_frames() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        channel = requester.register_transfer("reader-retired", inbound_frames=1)
+        await channel.deliver(DataFrame(kind=DataFrameKind.CHUNK, handle=channel.handle, payload=b"queued"))
+        blocked_delivery = asyncio.create_task(
+            channel.deliver(
+                DataFrame(
+                    kind=DataFrameKind.CHUNK,
+                    handle=channel.handle,
+                    offset=6,
+                    payload=b"blocked",
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        assert not blocked_delivery.done()
+        requester.retire_transfer(channel)
+        await asyncio.wait_for(blocked_delivery, timeout=1)
+        await transport.responses.put(DataFrame(kind=DataFrameKind.CHUNK, handle=channel.handle, payload=b"late"))
+        await transport.responses.put(DataFrame(kind=DataFrameKind.END, handle=channel.handle, offset=6))
+        await transport.responses.put(DataFrame(kind=DataFrameKind.END_ACK, handle=channel.handle, offset=6))
+        await asyncio.sleep(0)
+        assert channel.handle in requester._retired_transfers
+        assert requester._terminal_error is None
+        await transport.responses.put(
+            DataFrame(
+                kind=DataFrameKind.RESET,
+                handle=channel.handle,
+                reset_status=DataResetStatus.CANCELLED,
+            )
+        )
+        await asyncio.sleep(0)
+        assert channel.handle not in requester._retired_transfers
+        assert requester._terminal_error is None
+        await requester.close()
 
     asyncio.run(scenario())

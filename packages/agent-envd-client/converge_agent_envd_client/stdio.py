@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 
+from converge_agent_envd_client.eip.v1 import (
+    DataFrame,
+    DataFrameCodecError,
+    decode_data_frame,
+    encode_data_frame,
+)
 from converge_agent_envd_client.errors import EIPProtocolError, EIPTransportClosedError, EIPTransportError
+from converge_agent_envd_client.transport import ControlFrame, EIPTransportFrame
 
 _MAX_HEADER_BYTES = 8 * 1024
-_CONTENT_TYPE = "application/json; charset=utf-8"
+_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+_DATA_CONTENT_TYPE = "application/vnd.converge.eip-data"
 _SECURITY_SENSITIVE_HEADERS = {"authorization", "content-encoding", "eip-session", "transfer-encoding"}
+
+
+class _FrameContentType(Enum):
+    JSON = "json"
+    DATA = "data"
 
 
 class StdioTransport:
@@ -20,14 +34,17 @@ class StdioTransport:
         process: asyncio.subprocess.Process | None = None,
         max_request_bytes: int = 1024 * 1024,
         max_response_bytes: int = 1024 * 1024,
+        max_transfer_frame_bytes: int = 1024 * 1024,
     ) -> None:
         _validate_limit("max_request_bytes", max_request_bytes)
         _validate_limit("max_response_bytes", max_response_bytes)
+        _validate_limit("max_transfer_frame_bytes", max_transfer_frame_bytes)
         self._reader = reader
         self._writer = writer
         self._process = process
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
+        self._max_transfer_frame_bytes = max_transfer_frame_bytes
         self._write_lock = asyncio.Lock()
         self._read_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -40,6 +57,7 @@ class StdioTransport:
         *,
         max_request_bytes: int = 1024 * 1024,
         max_response_bytes: int = 1024 * 1024,
+        max_transfer_frame_bytes: int = 1024 * 1024,
     ) -> StdioTransport:
         if process.stdin is None or process.stdout is None:
             raise ValueError("process must have asyncio stdin and stdout pipes")
@@ -49,25 +67,35 @@ class StdioTransport:
             process=process,
             max_request_bytes=max_request_bytes,
             max_response_bytes=max_response_bytes,
+            max_transfer_frame_bytes=max_transfer_frame_bytes,
         )
 
     @property
     def process(self) -> asyncio.subprocess.Process | None:
         return self._process
 
-    def set_limits(self, *, max_request_bytes: int, max_response_bytes: int) -> None:
+    def set_limits(
+        self,
+        *,
+        max_request_bytes: int,
+        max_response_bytes: int,
+        max_transfer_frame_bytes: int,
+    ) -> None:
         _validate_limit("max_request_bytes", max_request_bytes)
         _validate_limit("max_response_bytes", max_response_bytes)
+        _validate_limit("max_transfer_frame_bytes", max_transfer_frame_bytes)
         self._max_request_bytes = min(self._max_request_bytes, max_request_bytes)
         self._max_response_bytes = min(self._max_response_bytes, max_response_bytes)
+        self._max_transfer_frame_bytes = min(self._max_transfer_frame_bytes, max_transfer_frame_bytes)
 
-    async def send(self, payload: bytes) -> None:
+    async def send(self, frame: EIPTransportFrame) -> None:
         if self._closed:
             raise EIPTransportClosedError("stdio transport is closed")
-        if len(payload) > self._max_request_bytes:
-            raise EIPTransportError("EIP request exceeds the negotiated request byte limit")
+        content_type, payload, maximum = self._encode_outbound(frame)
+        if len(payload) > maximum:
+            raise EIPTransportError("EIP frame exceeds its negotiated byte limit")
 
-        task = asyncio.create_task(self._send_frame(payload))
+        task = asyncio.create_task(self._send_frame(content_type, payload))
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -84,14 +112,24 @@ class StdioTransport:
                 raise error
             raise
 
-    async def receive(self) -> bytes:
+    async def receive(self) -> EIPTransportFrame:
         if self._closed:
             raise EIPTransportClosedError("stdio transport is closed")
         async with self._read_lock:
             try:
                 headers = await self._read_headers()
-                content_length = _parse_headers(headers, self._max_response_bytes)
-                return await self._reader.readexactly(content_length)
+                content_length, content_type = _parse_headers(
+                    headers,
+                    self._max_response_bytes,
+                    self._max_transfer_frame_bytes,
+                )
+                payload = await self._reader.readexactly(content_length)
+                if content_type is _FrameContentType.JSON:
+                    return ControlFrame(payload)
+                try:
+                    return decode_data_frame(payload, max_frame_bytes=self._max_transfer_frame_bytes)
+                except DataFrameCodecError as error:
+                    raise EIPProtocolError("invalid EIP stdio data frame") from error
             except asyncio.IncompleteReadError as error:
                 returncode = self._process.returncode if self._process is not None else None
                 detail = "stdio response stream reached EOF"
@@ -118,17 +156,30 @@ class StdioTransport:
             except (BrokenPipeError, ConnectionError, OSError):
                 pass
 
-    async def _send_frame(self, payload: bytes) -> None:
+    async def _send_frame(self, content_type: str, payload: bytes) -> None:
         async with self._write_lock:
             if self._closed:
                 raise EIPTransportClosedError("stdio transport is closed")
-            header = f"Content-Length: {len(payload)}\r\nContent-Type: {_CONTENT_TYPE}\r\n\r\n".encode("ascii")
+            header = (f"Content-Length: {len(payload)}\r\nContent-Type: {content_type}\r\n\r\n").encode("ascii")
             try:
                 self._writer.write(header)
                 self._writer.write(payload)
                 await self._writer.drain()
             except (BrokenPipeError, ConnectionError, OSError) as error:
-                raise EIPTransportError("failed to write an EIP stdio request") from error
+                raise EIPTransportError("failed to write an EIP stdio frame") from error
+
+    def _encode_outbound(self, frame: EIPTransportFrame) -> tuple[str, bytes, int]:
+        if isinstance(frame, ControlFrame):
+            if not isinstance(frame.payload, bytes):
+                raise TypeError("control frame payload must be bytes")
+            return _JSON_CONTENT_TYPE, frame.payload, self._max_request_bytes
+        if isinstance(frame, DataFrame):
+            try:
+                payload = encode_data_frame(frame, max_frame_bytes=self._max_transfer_frame_bytes)
+            except DataFrameCodecError as error:
+                raise EIPProtocolError("invalid outbound EIP data frame") from error
+            return _DATA_CONTENT_TYPE, payload, self._max_transfer_frame_bytes
+        raise TypeError("unsupported EIP transport frame")
 
     async def _read_headers(self) -> bytes:
         header = bytearray()
@@ -139,7 +190,11 @@ class StdioTransport:
         return bytes(header)
 
 
-def _parse_headers(header: bytes, max_body_bytes: int) -> int:
+def _parse_headers(
+    header: bytes,
+    max_control_bytes: int,
+    max_data_bytes: int,
+) -> tuple[int, _FrameContentType]:
     try:
         text = header.decode("ascii")
     except UnicodeDecodeError as error:
@@ -166,19 +221,26 @@ def _parse_headers(header: bytes, max_body_bytes: int) -> int:
     if not length_text.isascii() or not length_text.isdecimal() or (length_text != "0" and length_text.startswith("0")):
         raise EIPProtocolError("Content-Length must be canonical decimal")
     content_length = int(length_text)
-    if content_length > max_body_bytes:
-        raise EIPProtocolError("stdio response body exceeds its byte limit")
+    content_type = _classify_content_type(values.get("content-type"))
+    maximum = max_control_bytes if content_type is _FrameContentType.JSON else max_data_bytes
+    if content_length > maximum:
+        raise EIPProtocolError("stdio response body exceeds its applicable byte limit")
 
-    if content_type := values.get("content-type"):
-        if not _valid_content_type(content_type):
-            raise EIPProtocolError("Content-Type must identify UTF-8 JSON")
     for name in values:
         if name in _SECURITY_SENSITIVE_HEADERS or name.startswith("eip-"):
             raise EIPProtocolError("security-sensitive stdio response header is forbidden")
-    return content_length
+    return content_length, content_type
 
 
-def _valid_content_type(value: str) -> bool:
+def _classify_content_type(value: str | None) -> _FrameContentType:
+    if value is None or _valid_json_content_type(value):
+        return _FrameContentType.JSON
+    if value.lower() == _DATA_CONTENT_TYPE:
+        return _FrameContentType.DATA
+    raise EIPProtocolError("unsupported stdio Content-Type")
+
+
+def _valid_json_content_type(value: str) -> bool:
     parts = [part.strip().lower() for part in value.split(";")]
     return parts in [["application/json"], ["application/json", "charset=utf-8"]]
 

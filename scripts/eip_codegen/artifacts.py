@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from .model import OptionReader, SchemaIndex, real_oneofs, short_name
+from .model import DataFrameProfile, OptionReader, SchemaIndex, real_oneofs, short_name
 from .python_renderer import method_records
 
 
@@ -113,6 +113,8 @@ def build_openrpc(records: list[dict[str, Any]], schema: dict[str, object]) -> d
             "x-eip-idempotency-key": record["idempotency_key"],
             "x-eip-introduced": record["introduced"],
             "x-eip-error-family": record["error_family"],
+            "x-eip-transfer-action": record["transfer_action"],
+            "x-eip-transfer-direction": record["transfer_direction"],
             "x-eip-params-schema": {"$ref": f"schema.json#/$defs/{params_type}"},
         }
         if record["result_type"] is not None:
@@ -128,18 +130,47 @@ def build_openrpc(records: list[dict[str, Any]], schema: dict[str, object]) -> d
     }
 
 
+def build_data_frame_artifact(profile: DataFrameProfile) -> dict[str, object]:
+    fields: list[dict[str, object]] = []
+    offset = 0
+    for name, width in (
+        ("magic", profile.magic_bytes),
+        ("profile_version", profile.version_bytes),
+        ("frame_kind", profile.kind_bytes),
+        ("terminal_status", profile.status_bytes),
+        ("handle_byte_length", profile.handle_length_bytes),
+        ("reserved", profile.reserved_bytes),
+        ("stream_offset", profile.stream_offset_bytes),
+        ("payload_byte_length", profile.payload_length_bytes),
+    ):
+        fields.append({"name": name, "offset": offset, "width": width})
+        offset += width
+    return {
+        "generated": True,
+        "protocol": {"package": "converge.agent_envd.eip.v1", "eip_major": profile.eip_major},
+        "magic_ascii": profile.magic.decode("ascii"),
+        "profile_version": profile.profile_version,
+        "header_bytes": profile.header_bytes,
+        "byte_order": "network",
+        "fields": fields,
+        "kinds": profile.kinds,
+        "reset_statuses": profile.reset_statuses,
+        "maximum_handle_bytes": profile.maximum_handle_bytes,
+        "maximum_payload_bytes": profile.maximum_payload_bytes,
+    }
+
+
 def write_artifacts(
     output_dir: Path,
     index: SchemaIndex,
     options: OptionReader,
-    descriptor_sha256: str,
     models_path: Path,
+    data_frame_profile: DataFrameProfile,
 ) -> list[Path]:
     records = method_records(index, options)
     inventory = {
         "generated": True,
         "protocol": {"package": "converge.agent_envd.eip.v1", "version": "1.0"},
-        "descriptor_sha256": descriptor_sha256,
         "method_count": len(records),
         "methods": records,
     }
@@ -148,6 +179,7 @@ def write_artifacts(
         "methods.json": inventory,
         "schema.json": schema,
         "openrpc.json": build_openrpc(records, schema),
+        "data-frame-profile.json": build_data_frame_artifact(data_frame_profile),
     }
     paths: list[Path] = []
     for name, value in outputs.items():

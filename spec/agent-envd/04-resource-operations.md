@@ -30,12 +30,15 @@ class TrustedMountConfig(BaseModel):
     native_root: str
     staging_root: str | None = None
     writable: bool
+    exclusive_mutation_control: bool
     allow_command_execution: bool = True
     max_file_bytes: int
     allowed_operations: frozenset[str]
 ```
 
 `native_root` and `staging_root` are operator-only secret-adjacent configuration: envd canonicalizes and identity-checks them but never returns them in EIP. `allowed_operations` is a subset of the file-read, file-write, search, command-cwd, and executable-source families supported by the daemon. `writable=false` is an absolute ceiling for file methods and required-isolation command grants.
+
+`exclusive_mutation_control=true` is a trusted provider assertion that, for the daemon generation, no process can mutate entries beneath `native_root` except through envd operations participating in that mount's mutation coordinator. A provider may satisfy it through namespace ownership, a provider-held exclusive lease, or equivalent mediation that also covers command payloads and external tooling. A process-local mutex alone does not satisfy this contract because ordinary pathname mutation can bypass envd. Envd rejects a writable mount without this assertion and advertises no write or atomic-replace capability for it; read-only mounts do not require the assertion. Losing exclusive control while the daemon is running is a provider isolation failure, not a compare-and-swap conflict that envd can safely infer.
 
 A mount that permits any staged file mutation or binary writer requires one private `staging_root` on the same native filesystem as every writable destination covered by that mount. The staging root is outside every logical EIP mount, command filesystem grant, execution home, temporary root, retained-output root, and other caller-reachable namespace. Envd owns it with restrictive permissions and opens candidates relative to a pinned root identity. Its layout is flat: only bounded-name regular candidate files and fixed-size envd ownership metadata are valid; symlinks, nested directories, hard-link surprises, and unknown entries fail startup rather than triggering recursive traversal. A writable mount cannot cross into another native filesystem; such a destination returns `unsupported` before staging. If configured policy allows staged writes but same-filesystem atomic rename, root privacy, or payload exclusion cannot be enforced, startup fails for that configuration. A mount can deliberately omit staged-write operations and advertise no atomic replacement support, but envd never falls back to a visible temporary file or direct write. In explicit `disabled` isolation, the outer provider must hide and protect the staging root from payloads even when payload and daemon native identities would otherwise overlap.
 
@@ -63,7 +66,7 @@ class FileRevision(BaseModel):
 
 `mount_id` is a bounded stable logical ID within one Environment generation. `logical_root` is a display-only EIP path such as `/`; it is not a host path. `path` is absolute within that logical mount, begins with `/`, uses `/` separators on the wire, contains no NUL, and is validated lexically before native resolution. `/` is the mount root; otherwise empty interior segments, a trailing separator, `.`, and `..` are rejected instead of normalized into another request.
 
-A trusted mount configuration binds the logical ID to one canonical native directory, read-only or read-write ceiling, protected-path checks, allowed operation families, file-size bounds, and platform semantics. `supports_atomic_replace=true` requires the configured private staging boundary, same-filesystem destination coverage, candidate revalidation, and atomic rename contract above; a native rename primitive alone is insufficient. The descriptor reports observed behavior but cannot widen the configuration.
+A trusted mount configuration binds the logical ID to one canonical native directory, read-only or read-write ceiling, exclusive mutation-control assertion, protected-path checks, allowed operation families, file-size bounds, and platform semantics. `supports_atomic_replace=true` requires exclusive mutation control, the configured private staging boundary, same-filesystem destination coverage, candidate revalidation, and atomic rename contract above; a native rename primitive or daemon-local mutex alone is insufficient. The descriptor reports observed behavior but cannot widen the configuration.
 
 Native mount roots are non-overlapping after canonicalization unless they are exact aliases with identical policy intentionally represented as one mount. Ancestor/descendant roots with competing policies are rejected at startup. This avoids backend-specific precedence and accidental widening.
 
@@ -519,7 +522,7 @@ class FileRemoveResult(BaseModel):
     receipt: OperationReceipt
 ```
 
-Removal requires the expected kind and optional expected revision. Directory removal is non-recursive by default. Recursive removal has finite depth and entry limits, never follows symlinks, and is rejected when the implementation cannot preserve protected-path and race guarantees. A recursive partial failure returns a receipt describing known progress; it never claims rollback.
+Removal requires the expected kind and optional expected revision. Directory removal is non-recursive by default. Recursive removal has finite depth and entry limits, never follows symlinks, and is rejected when the implementation cannot preserve protected-path and race guarantees. A recursive partial failure returns a typed error with its failed receipt and the exact successfully removed prefix in `EIPErrorData.emitted_items`; it sets `retry_hint=reconcile_first` and never claims rollback.
 
 ## Local Port Observation
 

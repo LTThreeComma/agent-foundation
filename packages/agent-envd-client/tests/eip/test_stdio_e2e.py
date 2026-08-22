@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,13 +15,27 @@ from converge_agent_envd_client import (
     StdioTransport,
 )
 from converge_agent_envd_client.eip.v1 import (
+    DesiredPortStatus,
     EIPCallContext,
     EIPClient,
     EIPClientInfo,
+    EIPPath,
     EnvironmentDescribeParams,
     EnvironmentDescribeResult,
+    FileListParams,
+    FileReadTextParams,
+    FileStatParams,
+    FileWriteMode,
     InitializeParams,
     MethodSpec,
+    OperationCancelParams,
+    OperationCancelStatus,
+    PortAddress,
+    PortInspectParams,
+    PortStatus,
+    PortTarget,
+    PortWaitParams,
+    ReceiptGetParams,
     SessionCloseParams,
 )
 
@@ -39,9 +54,16 @@ def assert_disabled_isolation_warning(stderr: bytes) -> None:
     assert any(record.get("event") == "agent-envd.execution_isolation.disabled" for record in records)
 
 
-async def start_daemon(binary: Path, environment_id: str = "env-e2e") -> asyncio.subprocess.Process:
+async def start_daemon(
+    binary: Path,
+    environment_id: str = "env-e2e",
+    config_path: Path | None = None,
+) -> asyncio.subprocess.Process:
+    arguments = [str(binary)]
+    if config_path is not None:
+        arguments.extend(("--config", str(config_path)))
     return await asyncio.create_subprocess_exec(
-        str(binary),
+        *arguments,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -81,6 +103,8 @@ async def initialize_direct(process: asyncio.subprocess.Process) -> tuple[Reques
         max_in_flight=result.descriptor.limits.max_concurrent_operations,
         max_request_bytes=result.descriptor.limits.max_request_bytes,
         max_response_bytes=result.descriptor.limits.max_response_bytes,
+        max_transfer_frame_bytes=result.descriptor.limits.max_transfer_frame_bytes,
+        max_concurrent_file_transfers=result.descriptor.limits.max_concurrent_file_transfers,
     )
     return requester, client
 
@@ -96,10 +120,64 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
         )
         descriptor = await session.describe()
         assert descriptor.environment_id == "env-e2e"
-        assert descriptor.capabilities == ("environment.describe", "session.close")
+        assert descriptor.capabilities == (
+            "environment.describe",
+            "operation.cancel",
+            "port.observe",
+            "receipt.read",
+            "session.close",
+        )
 
         concurrent = await asyncio.gather(*(session.describe() for _ in range(8)))
         assert all(item.generation == descriptor.generation for item in concurrent)
+
+        listener = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        target = PortTarget(protocol="tcp", address=PortAddress.LOOPBACK, port=port)
+        listening = await session.client.port_inspect(
+            PortInspectParams(
+                context=EIPCallContext(operation_id="port-inspect-e2e"),
+                target=target,
+            )
+        )
+        assert listening.observation.status is PortStatus.LISTENING
+        listener.close()
+        await listener.wait_closed()
+        not_listening = await session.client.port_wait(
+            PortWaitParams(
+                context=EIPCallContext(
+                    operation_id="port-wait-e2e",
+                    deadline=datetime.now(UTC) + timedelta(seconds=2),
+                ),
+                target=target,
+                desired_status=DesiredPortStatus.NOT_LISTENING,
+            )
+        )
+        assert not_listening.observation.status is PortStatus.NOT_LISTENING
+
+        waiting = asyncio.create_task(
+            session.client.port_wait(
+                PortWaitParams(
+                    context=EIPCallContext(
+                        operation_id="port-cancel-target-e2e",
+                        deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    ),
+                    target=target,
+                    desired_status=DesiredPortStatus.LISTENING,
+                )
+            )
+        )
+        await asyncio.sleep(0.1)
+        cancelled = await session.client.operation_cancel(
+            OperationCancelParams(
+                context=EIPCallContext(operation_id="port-cancel-request-e2e"),
+                target_operation_id="port-cancel-target-e2e",
+            )
+        )
+        assert cancelled.status is OperationCancelStatus.CANCELLATION_REQUESTED
+        with pytest.raises(EIPMethodError) as cancellation_error:
+            await waiting
+        assert cancellation_error.value.error.code == -32041
         await session.close()
         assert_disabled_isolation_warning(await wait_for_exit(process))
         return descriptor.generation
@@ -108,6 +186,102 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
         first = await one_run()
         second = await one_run()
         assert first != second
+
+    asyncio.run(scenario())
+
+
+def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
+    native = tmp_path / "native"
+    staging = tmp_path / "staging"
+    native.mkdir()
+    staging.mkdir(mode=0o700)
+    config_path = tmp_path / "agent-envd.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mounts": [
+                    {
+                        "mount_id": "workspace",
+                        "native_root": str(native),
+                        "staging_root": str(staging),
+                        "writable": True,
+                        "exclusive_mutation_control": True,
+                        "allow_command_execution": False,
+                        "max_file_bytes": 1024 * 1024,
+                    }
+                ]
+            }
+        )
+    )
+
+    async def scenario() -> None:
+        process = await start_daemon(agent_envd_binary(), config_path=config_path)
+        session = await EIPSession.initialize(
+            StdioTransport.from_process(process),
+            expected_environment_id="env-e2e",
+            required_capabilities=(
+                "file.read",
+                "file.write",
+                "file.find",
+                "file.search",
+                "receipt.read",
+            ),
+            request_timeout=5,
+        )
+        assert session.descriptor.mounts[0].mount_id == "workspace"
+        file_path = EIPPath(mount_id="workspace", path="/binary.dat")
+        payload = bytes(range(256)) * 8
+        async with session.open_writer(file_path, mode=FileWriteMode.CREATE) as writer:
+            await writer.write(payload[:777])
+            await writer.write(payload[777:])
+            committed = await writer.commit()
+        assert committed.transferred_bytes == len(payload)
+        assert (native / "binary.dat").read_bytes() == payload
+
+        downloaded = bytearray()
+        async with session.open_reader(
+            file_path,
+            expected_revision=committed.info.revision,
+        ) as reader:
+            async for chunk in reader:
+                downloaded.extend(chunk)
+        assert bytes(downloaded) == payload
+        assert reader.completion.complete is True
+
+        text_path = EIPPath(mount_id="workspace", path="/notes.txt")
+        (native / "notes.txt").write_text("alpha\nbeta\n")
+        text = await session.client.file_read_text(
+            FileReadTextParams(
+                context=EIPCallContext(operation_id="text-e2e"),
+                path=text_path,
+                max_bytes=64,
+            )
+        )
+        assert text.text == "alpha\nbeta\n"
+        assert text.content_complete is True
+        stat = await session.client.file_stat(
+            FileStatParams(
+                context=EIPCallContext(operation_id="stat-e2e"),
+                path=text_path,
+            )
+        )
+        assert stat.info.revision == text.info.revision
+        listed = await session.client.file_list(
+            FileListParams(
+                context=EIPCallContext(operation_id="list-e2e"),
+                path=EIPPath(mount_id="workspace", path="/"),
+            )
+        )
+        assert [entry.relative_path for entry in listed.entries] == ["binary.dat", "notes.txt"]
+        receipt = await session.client.receipt_get(
+            ReceiptGetParams(
+                context=EIPCallContext(operation_id="receipt-e2e"),
+                receipt_ref=committed.receipt.receipt_ref,
+            )
+        )
+        assert receipt.receipt.operation_id == committed.receipt.operation_id
+        await session.close()
+        assert_disabled_isolation_warning(await wait_for_exit(process))
 
     asyncio.run(scenario())
 

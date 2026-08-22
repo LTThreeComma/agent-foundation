@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -18,6 +17,8 @@ from scripts.eip_codegen.__main__ import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 OPENRPC_PATH = REPOSITORY_ROOT / "proto/agent-envd/eip/v1/artifacts/openrpc.json"
 SCHEMA_PATH = REPOSITORY_ROOT / "proto/agent-envd/eip/v1/artifacts/schema.json"
+DATA_FRAME_PROFILE_PATH = REPOSITORY_ROOT / "proto/agent-envd/eip/v1/artifacts/data-frame-profile.json"
+METHODS_PATH = REPOSITORY_ROOT / "proto/agent-envd/eip/v1/artifacts/methods.json"
 
 
 def write_generated_tree(root: Path) -> None:
@@ -30,7 +31,6 @@ def write_generated_tree(root: Path) -> None:
     manifest_files = sorted([*(path.as_posix() for path in files), MANIFEST_PATH.as_posix()])
     manifest = {
         "generated": True,
-        "descriptor_sha256": hashlib.sha256(descriptor).hexdigest(),
         "files": manifest_files,
     }
     files[MANIFEST_PATH] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -69,6 +69,31 @@ def test_checked_inspection_artifacts_follow_eip_json_profile() -> None:
     assert all(item["required"] is True for item in shell_exec["params"])
     receipt_get = next(method for method in openrpc["methods"] if method["name"] == "receipt.get")
     assert receipt_get["x-eip-params-schema"] == {"$ref": "schema.json#/$defs/ReceiptGetParams"}
+
+    methods = json.loads(METHODS_PATH.read_text(encoding="utf-8"))
+    assert methods["method_count"] == 35
+    transfers = [method for method in methods["methods"] if method["transfer_action"] is not None]
+    assert {method["jsonrpc_method"] for method in transfers} == {
+        "file.open_reader",
+        "file.close_reader",
+        "file.open_writer",
+        "file.commit_writer",
+        "file.abort_writer",
+    }
+
+    profile = json.loads(DATA_FRAME_PROFILE_PATH.read_text(encoding="utf-8"))
+    assert profile["magic_ascii"] == "EIPD"
+    assert profile["profile_version"] == 1
+    assert profile["header_bytes"] == 24
+    assert profile["kinds"] == {
+        "attach": 1,
+        "attached": 2,
+        "chunk": 3,
+        "end": 4,
+        "end_ack": 5,
+        "reset": 6,
+    }
+    assert sum(field["width"] for field in profile["fields"]) == 24
 
 
 def test_verify_generated_does_not_modify_checked_tree(tmp_path: Path) -> None:

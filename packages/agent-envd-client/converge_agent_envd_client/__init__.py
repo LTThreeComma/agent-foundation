@@ -8,13 +8,15 @@ from .errors import (
     EIPProtocolError,
     EIPRequestTimeoutError,
     EIPSessionStateError,
+    EIPTransferError,
     EIPTransportClosedError,
     EIPTransportError,
 )
+from .file_transfer import EIPFileReader, EIPFileWriter
 from .requester import RequestCoordinator
 from .session import EIPSession
 from .stdio import StdioTransport
-from .transport import EIPTransport
+from .transport import ControlFrame, EIPTransport, EIPTransportFrame
 
 try:
     __version__ = version("converge-agent-envd-client")
@@ -22,15 +24,20 @@ except PackageNotFoundError:  # pragma: no cover - source-tree imports without i
     __version__ = "0.0.0"
 
 __all__ = [
+    "ControlFrame",
     "EIPClientError",
+    "EIPFileReader",
+    "EIPFileWriter",
     "EIPMethodError",
     "EIPProtocolError",
     "EIPRequestTimeoutError",
     "EIPSession",
     "EIPSessionStateError",
+    "EIPTransferError",
     "EIPTransport",
     "EIPTransportClosedError",
     "EIPTransportError",
+    "EIPTransportFrame",
     "RequestCoordinator",
     "StdioTransport",
     "__version__",

@@ -4,14 +4,26 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
-    time::timeout,
+    time::{MissedTickBehavior, timeout},
 };
 
-use crate::{config::Config, daemon::Daemon};
+use crate::{
+    config::Config,
+    daemon::Daemon,
+    eip::{DataFrame, DataFrameKind, DataResetStatus, decode_data_frame, encode_data_frame},
+    transfer::TransferError,
+};
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
-const CONTENT_TYPE: &str = "application/json; charset=utf-8";
+const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+const DATA_CONTENT_TYPE: &str = "application/vnd.converge.eip-data";
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_CONTROL_BURST: usize = 8;
+
+enum InboundFrame {
+    Control(Vec<u8>),
+    Data(DataFrame),
+}
 
 pub(crate) async fn serve(daemon: Arc<Daemon>, config: &Config) -> io::Result<()> {
     let reader = BufReader::new(tokio::io::stdin());
@@ -35,22 +47,69 @@ where
         .map_err(|_| invalid_data("max_request_bytes does not fit this platform"))?;
     let max_response_bytes = usize::try_from(config.limits.max_response_bytes)
         .map_err(|_| invalid_data("max_response_bytes does not fit this platform"))?;
+    let max_data_bytes = usize::try_from(config.limits.max_transfer_frame_bytes)
+        .map_err(|_| invalid_data("max_transfer_frame_bytes does not fit this platform"))?;
     let max_concurrency = usize::try_from(config.limits.max_concurrent_operations)
         .map_err(|_| invalid_data("max_concurrent_operations does not fit this platform"))?;
+    let max_transfers = usize::try_from(config.limits.max_concurrent_file_transfers)
+        .map_err(|_| invalid_data("max_concurrent_file_transfers does not fit this platform"))?;
 
-    let (responses, mut response_rx) = mpsc::channel::<Vec<u8>>(max_concurrency);
+    let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(max_concurrency);
+    let data_capacity = max_transfers.saturating_mul(2).max(2);
+    let (data_tx, data_rx) = mpsc::channel::<DataFrame>(data_capacity);
+    let (inbound_data_tx, mut inbound_data_rx) = mpsc::channel::<DataFrame>(data_capacity);
+    daemon
+        .install_data_sender(data_tx.clone())
+        .map_err(|error| invalid_data_owned(error.to_string()))?;
+
     let (writer_stopped, mut writer_stopped_rx) = watch::channel(false);
     let mut writer_task = tokio::spawn(async move {
-        let result = async {
-            let mut writer = writer;
-            while let Some(response) = response_rx.recv().await {
-                write_frame(&mut writer, &response, max_response_bytes).await?;
-            }
-            writer.flush().await
-        }
+        let result = writer_loop(
+            writer,
+            control_rx,
+            data_rx,
+            max_response_bytes,
+            max_data_bytes,
+        )
         .await;
         writer_stopped.send_replace(true);
         result
+    });
+
+    let inbound_daemon = Arc::clone(&daemon);
+    let inbound_responses = data_tx.clone();
+    let mut inbound_data_task = tokio::spawn(async move {
+        while let Some(frame) = inbound_data_rx.recv().await {
+            if let Err(error) = inbound_daemon.handle_data_frame(frame.clone()).await {
+                let reset = DataFrame {
+                    kind: DataFrameKind::Reset,
+                    handle: frame.handle,
+                    offset: frame.offset,
+                    payload: Vec::new(),
+                    reset_status: Some(reset_status(error)),
+                };
+                if inbound_responses.send(reset).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let maintenance_daemon = Arc::clone(&daemon);
+    let mut maintenance_closed = daemon.subscribe_closed();
+    let maintenance_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                changed = maintenance_closed.changed() => {
+                    if changed.is_err() || *maintenance_closed.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => maintenance_daemon.maintenance().await,
+            }
+        }
     });
 
     let admission = Arc::new(Semaphore::new(max_concurrency));
@@ -63,89 +122,131 @@ where
         if *closed.borrow() {
             break;
         }
-        let permit = tokio::select! {
-            biased;
-            changed = closed.changed() => {
-                match changed {
-                    Ok(()) | Err(_) => break,
-                }
-            }
-            changed = writer_stopped_rx.changed() => {
-                match changed {
-                    Ok(()) | Err(_) => break,
-                }
-            }
-            signal = &mut shutdown => {
-                signal?;
-                break;
-            }
-            permit = admission.clone().acquire_owned() => {
-                match permit {
-                    Ok(permit) => permit,
-                    Err(_) => break,
-                }
-            }
-        };
         let read_timeout = if first_frame {
             config.initialization_timeout
+        } else if daemon.has_active_file_transfers() {
+            Duration::from_millis(config.limits.max_file_transfer_duration_ms)
         } else {
             config.session_idle_timeout
         };
         let frame = tokio::select! {
             biased;
             changed = closed.changed() => {
-                drop(permit);
                 match changed {
                     Ok(()) | Err(_) => break,
                 }
             }
             changed = writer_stopped_rx.changed() => {
-                drop(permit);
                 match changed {
                     Ok(()) | Err(_) => break,
                 }
             }
             signal = &mut shutdown => {
-                drop(permit);
                 signal?;
                 break;
             }
-            frame = timeout(read_timeout, read_frame(&mut reader, max_request_bytes)) => {
+            frame = timeout(
+                read_timeout,
+                read_frame(&mut reader, max_request_bytes, max_data_bytes),
+            ) => {
                 match frame {
                     Ok(frame) => frame?,
-                    Err(_) => {
-                        drop(permit);
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
         };
         let Some(frame) = frame else {
-            drop(permit);
             break;
         };
-        let payload = String::from_utf8(frame)
-            .map_err(|_| invalid_data("stdio frame body must be UTF-8 JSON"))?;
+
         if first_frame {
+            let InboundFrame::Control(frame) = frame else {
+                return Err(invalid_data("initialize must be the first stdio frame"));
+            };
             first_frame = false;
+            let payload = String::from_utf8(frame)
+                .map_err(|_| invalid_data("stdio control body must be UTF-8 JSON"))?;
             let response = daemon.handle_payload(&payload).await;
-            if responses.send(response).await.is_err() {
-                drop(permit);
+            if control_tx.send(response).await.is_err() {
                 break;
             }
-            drop(permit);
             continue;
         }
 
-        let daemon = Arc::clone(&daemon);
-        let responses = responses.clone();
-        requests.spawn(async move {
-            let response = daemon.handle_payload(&payload).await;
-            let _ = responses.send(response).await;
-            drop(permit);
-        });
+        match frame {
+            InboundFrame::Control(frame) => {
+                let payload = String::from_utf8(frame)
+                    .map_err(|_| invalid_data("stdio control body must be UTF-8 JSON"))?;
+                let permit = tokio::select! {
+                    biased;
+                    changed = closed.changed() => {
+                        match changed {
+                            Ok(()) | Err(_) => break,
+                        }
+                    }
+                    changed = writer_stopped_rx.changed() => {
+                        match changed {
+                            Ok(()) | Err(_) => break,
+                        }
+                    }
+                    signal = &mut shutdown => {
+                        signal?;
+                        break;
+                    }
+                    permit = admission.clone().acquire_owned() => {
+                        match permit {
+                            Ok(permit) => permit,
+                            Err(_) => break,
+                        }
+                    }
+                };
+                let daemon = Arc::clone(&daemon);
+                let responses = control_tx.clone();
+                requests.spawn(async move {
+                    let response = daemon.handle_payload(&payload).await;
+                    let _ = responses.send(response).await;
+                    drop(permit);
+                });
+            }
+            InboundFrame::Data(frame) => {
+                if inbound_data_tx.send(frame).await.is_err() {
+                    break;
+                }
+            }
+        }
     }
 
+    maintenance_task.abort();
+    let _ = maintenance_task.await;
+    drop(inbound_data_tx);
+    let inbound_data_result = match timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut inbound_data_task).await {
+        Ok(result) => {
+            result.map_err(|error| io::Error::other(format!("stdio data task failed: {error}")))
+        }
+        Err(_) => {
+            inbound_data_task.abort();
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stdio data drain exceeded its shutdown deadline",
+            ))
+        }
+    };
+    let session_result = if daemon.transport_closed(SHUTDOWN_DRAIN_TIMEOUT).await {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "session transfer drain exceeded its shutdown deadline",
+        ))
+    };
+    let operation_result = if daemon.drain_owned_operations(SHUTDOWN_DRAIN_TIMEOUT).await {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "owned operation drain exceeded its shutdown deadline",
+        ))
+    };
     let request_result = match timeout(SHUTDOWN_DRAIN_TIMEOUT, async {
         while let Some(result) = requests.join_next().await {
             result
@@ -166,7 +267,8 @@ where
         while requests.join_next().await.is_some() {}
     }
 
-    drop(responses);
+    drop(control_tx);
+    drop(data_tx);
     let writer_result = match timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut writer_task).await {
         Ok(result) => result
             .map_err(|error| io::Error::other(format!("stdio writer task failed: {error}")))?,
@@ -178,11 +280,71 @@ where
             ))
         }
     };
+    inbound_data_result?;
+    session_result?;
+    operation_result?;
     request_result?;
     writer_result
 }
 
-async fn read_frame<R>(reader: &mut R, max_body_bytes: usize) -> io::Result<Option<Vec<u8>>>
+async fn writer_loop<W>(
+    mut writer: W,
+    mut controls: mpsc::Receiver<Vec<u8>>,
+    mut data: mpsc::Receiver<DataFrame>,
+    max_control_bytes: usize,
+    max_data_bytes: usize,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut control_open = true;
+    let mut data_open = true;
+    let mut control_burst = 0_usize;
+    while control_open || data_open {
+        if control_burst >= MAX_CONTROL_BURST {
+            match data.try_recv() {
+                Ok(frame) => {
+                    write_data_frame(&mut writer, &frame, max_data_bytes).await?;
+                    control_burst = 0;
+                    continue;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => data_open = false,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+        if !control_open && !data_open {
+            break;
+        }
+        tokio::select! {
+            biased;
+            control = controls.recv(), if control_open => {
+                match control {
+                    Some(payload) => {
+                        write_outer_frame(&mut writer, JSON_CONTENT_TYPE, &payload, max_control_bytes).await?;
+                        control_burst = control_burst.saturating_add(1);
+                    }
+                    None => control_open = false,
+                }
+            }
+            frame = data.recv(), if data_open => {
+                match frame {
+                    Some(frame) => {
+                        write_data_frame(&mut writer, &frame, max_data_bytes).await?;
+                        control_burst = 0;
+                    }
+                    None => data_open = false,
+                }
+            }
+        }
+    }
+    writer.flush().await
+}
+
+async fn read_frame<R>(
+    reader: &mut R,
+    max_control_bytes: usize,
+    max_data_bytes: usize,
+) -> io::Result<Option<InboundFrame>>
 where
     R: AsyncRead + Unpin,
 {
@@ -216,6 +378,7 @@ where
 
     let mut names = HashSet::new();
     let mut content_length = None;
+    let mut content_type = None;
     for line in header[..header.len() - 4].split("\r\n") {
         let (name, value) = line
             .split_once(':')
@@ -236,19 +399,13 @@ where
                 if !canonical_decimal(value) {
                     return Err(invalid_data("Content-Length must be canonical decimal"));
                 }
-                let length = value
-                    .parse::<usize>()
-                    .map_err(|_| invalid_data("Content-Length does not fit this platform"))?;
-                if length > max_body_bytes {
-                    return Err(invalid_data("stdio frame body exceeds its byte limit"));
-                }
-                content_length = Some(length);
+                content_length = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| invalid_data("Content-Length does not fit this platform"))?,
+                );
             }
-            "content-type" => {
-                if !valid_content_type(value) {
-                    return Err(invalid_data("Content-Type must identify UTF-8 JSON"));
-                }
-            }
+            "content-type" => content_type = Some(classify_content_type(value)?),
             "authorization" | "content-encoding" | "eip-session" | "transfer-encoding" => {
                 return Err(invalid_data("security-sensitive stdio header is forbidden"));
             }
@@ -261,25 +418,75 @@ where
 
     let content_length =
         content_length.ok_or_else(|| invalid_data("Content-Length header is required"))?;
+    let kind = content_type.unwrap_or(FrameContentType::Json);
+    let maximum = match kind {
+        FrameContentType::Json => max_control_bytes,
+        FrameContentType::Data => max_data_bytes,
+    };
+    if content_length > maximum {
+        return Err(invalid_data(
+            "stdio frame body exceeds its applicable byte limit",
+        ));
+    }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body).await?;
-    Ok(Some(body))
+    match kind {
+        FrameContentType::Json => Ok(Some(InboundFrame::Control(body))),
+        FrameContentType::Data => decode_data_frame(&body, max_data_bytes)
+            .map(InboundFrame::Data)
+            .map(Some)
+            .map_err(|_| invalid_data("invalid EIP data frame")),
+    }
 }
 
-async fn write_frame<W>(writer: &mut W, payload: &[u8], max_body_bytes: usize) -> io::Result<()>
+async fn write_data_frame<W>(
+    writer: &mut W,
+    frame: &DataFrame,
+    max_body_bytes: usize,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let payload = encode_data_frame(frame, max_body_bytes)
+        .map_err(|_| invalid_data("outbound EIP data frame is invalid"))?;
+    write_outer_frame(writer, DATA_CONTENT_TYPE, &payload, max_body_bytes).await
+}
+
+async fn write_outer_frame<W>(
+    writer: &mut W,
+    content_type: &str,
+    payload: &[u8],
+    max_body_bytes: usize,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     if payload.len() > max_body_bytes {
-        return Err(invalid_data("stdio response exceeds its byte limit"));
+        return Err(invalid_data("stdio outbound frame exceeds its byte limit"));
     }
     let header = format!(
-        "Content-Length: {}\r\nContent-Type: {CONTENT_TYPE}\r\n\r\n",
+        "Content-Length: {}\r\nContent-Type: {content_type}\r\n\r\n",
         payload.len()
     );
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(payload).await?;
     writer.flush().await
+}
+
+#[derive(Clone, Copy)]
+enum FrameContentType {
+    Json,
+    Data,
+}
+
+fn classify_content_type(value: &str) -> io::Result<FrameContentType> {
+    if valid_json_content_type(value) {
+        return Ok(FrameContentType::Json);
+    }
+    if value.eq_ignore_ascii_case(DATA_CONTENT_TYPE) {
+        return Ok(FrameContentType::Data);
+    }
+    Err(invalid_data("unsupported stdio Content-Type"))
 }
 
 fn canonical_decimal(value: &str) -> bool {
@@ -295,7 +502,7 @@ fn valid_header_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn valid_content_type(value: &str) -> bool {
+fn valid_json_content_type(value: &str) -> bool {
     let mut parts = value.split(';').map(str::trim);
     if !parts
         .next()
@@ -310,7 +517,32 @@ fn valid_content_type(value: &str) -> bool {
     }
 }
 
+fn reset_status(error: TransferError) -> DataResetStatus {
+    match error {
+        TransferError::Denied
+        | TransferError::NotFound
+        | TransferError::InvalidHandle
+        | TransferError::WrongKind => DataResetStatus::Denied,
+        TransferError::Expired => DataResetStatus::Expired,
+        TransferError::Source => DataResetStatus::Source,
+        TransferError::Busy | TransferError::Quota | TransferError::Limit => DataResetStatus::Limit,
+        TransferError::Protocol | TransferError::WrongState | TransferError::Conflict => {
+            DataResetStatus::Protocol
+        }
+        TransferError::Cancelled | TransferError::SessionClosed => DataResetStatus::Cancelled,
+        TransferError::Timeout => DataResetStatus::Expired,
+        TransferError::IntegrityMismatch
+        | TransferError::Unsupported
+        | TransferError::UnknownOutcome
+        | TransferError::Internal => DataResetStatus::Internal,
+    }
+}
+
 fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn invalid_data_owned(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
@@ -338,7 +570,7 @@ mod tests {
 
     use crate::{config::Config, daemon::Daemon};
 
-    use super::{read_frame, serve_io, write_frame};
+    use super::{InboundFrame, read_frame, serve_io, write_outer_frame};
 
     #[tokio::test]
     async fn initialization_timeout_closes_an_idle_transport() {
@@ -366,7 +598,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_content_length_frame() {
+    async fn reads_content_length_control_frame() {
         let (mut client, mut server) = duplex(1024);
         client
             .write_all(
@@ -375,11 +607,11 @@ mod tests {
             .await
             .expect("fixture writes");
 
-        let body = read_frame(&mut server, 16)
+        let frame = read_frame(&mut server, 16, 64)
             .await
             .expect("frame is valid")
             .expect("frame is present");
-        assert_eq!(body, b"{}");
+        assert!(matches!(frame, InboundFrame::Control(body) if body == b"{}"));
     }
 
     #[tokio::test]
@@ -390,31 +622,40 @@ mod tests {
         ] {
             let (mut client, mut server) = duplex(1024);
             client.write_all(header).await.expect("fixture writes");
-            assert!(read_frame(&mut server, 16).await.is_err());
+            assert!(read_frame(&mut server, 16, 64).await.is_err());
         }
     }
 
     #[tokio::test]
-    async fn rejects_body_length_above_limit_before_body_allocation() {
+    async fn enforces_independent_control_and_data_limits() {
         let (mut client, mut server) = duplex(1024);
         client
-            .write_all(b"Content-Length: 17\r\n\r\n")
+            .write_all(b"Content-Length: 17\r\nContent-Type: application/json\r\n\r\n")
             .await
             .expect("fixture writes");
+        assert!(read_frame(&mut server, 16, 64).await.is_err());
 
-        assert!(read_frame(&mut server, 16).await.is_err());
+        let (mut client, mut server) = duplex(1024);
+        client
+            .write_all(
+                b"Content-Length: 65\r\nContent-Type: application/vnd.converge.eip-data\r\n\r\n",
+            )
+            .await
+            .expect("fixture writes");
+        assert!(read_frame(&mut server, 128, 64).await.is_err());
     }
 
     #[tokio::test]
-    async fn writes_canonical_frame() {
+    async fn writes_canonical_control_frame() {
         let (mut client, mut server) = duplex(1024);
-        write_frame(&mut client, b"{}", 16)
+        write_outer_frame(&mut client, super::JSON_CONTENT_TYPE, b"{}", 16)
             .await
             .expect("response writes");
         client.shutdown().await.expect("writer shuts down");
 
         let mut bytes = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut server, &mut bytes)
+        server
+            .read_to_end(&mut bytes)
             .await
             .expect("response reads");
         assert_eq!(

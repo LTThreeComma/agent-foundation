@@ -11,12 +11,12 @@ mod tests {
     use serde::{Serialize, de::DeserializeOwned};
 
     use super::{
-        CommandNetwork, EIP_DESCRIPTOR_SHA256, EIP_PROTO_PACKAGE, EIP_PROTOCOL_VERSION,
-        EIPCallContext, EIPError, EIPLimits, EIPServerInfo, EipValidate, ErrorType, FileFindParams,
-        FileStatParams, FileStatResult, InitializeParams, JsonRpcErrorResponse, JsonRpcRequest,
-        JsonRpcSuccessResponse, METHODS, OutputCapture, OutputOverflow, OutputPolicy,
-        OutputReadParams, ProcessWriteStdinParams, ReceiptGetParams, ShellExecParams, decode,
-        encode,
+        CommandNetwork, DataFrame, DataFrameKind, DataResetStatus, EIP_PROTO_PACKAGE,
+        EIP_PROTOCOL_VERSION, EIPCallContext, EIPError, EIPLimits, EIPServerInfo, EipValidate,
+        ErrorType, FileFindParams, FileStatParams, FileStatResult, InitializeParams,
+        JsonRpcErrorResponse, JsonRpcRequest, JsonRpcSuccessResponse, METHODS, OutputCapture,
+        OutputOverflow, OutputPolicy, OutputReadParams, ProcessWriteStdinParams, ReceiptGetParams,
+        ShellExecParams, decode, decode_data_frame, encode, encode_data_frame,
     };
 
     fn assert_golden<T>(value: serde_json::Value)
@@ -40,14 +40,24 @@ mod tests {
     fn generated_registry_has_complete_v1_surface() {
         assert_eq!(EIP_PROTOCOL_VERSION, "1.0");
         assert_eq!(EIP_PROTO_PACKAGE, "converge.agent_envd.eip.v1");
-        assert_eq!(METHODS.len(), 30);
+        assert_eq!(METHODS.len(), 35);
         assert!(
             METHODS
                 .iter()
                 .all(|method| method.kind == "request_response")
         );
-        assert_eq!(EIP_DESCRIPTOR_SHA256.len(), 64);
         assert_eq!(ErrorType::RetentionGap.code(), -32022);
+        assert_eq!(ErrorType::IntegrityMismatch.code(), -32061);
+        let transfer_methods = METHODS
+            .iter()
+            .filter(|method| method.transfer_action.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(transfer_methods.len(), 5);
+        assert!(
+            transfer_methods
+                .iter()
+                .all(|method| method.transfer_direction.is_some())
+        );
     }
 
     #[test]
@@ -129,7 +139,15 @@ mod tests {
             "operation_record_ttl_ms": 1,
             "session_idle_ttl_ms": 1,
             "max_process_records": 1,
-            "terminal_process_record_ttl_ms": 1
+            "terminal_process_record_ttl_ms": 1,
+            "max_transfer_frame_bytes": 25,
+            "max_concurrent_file_transfers": 1,
+            "max_file_transfer_records": 1,
+            "file_transfer_record_ttl_ms": 1,
+            "max_staged_file_bytes": 1,
+            "max_staged_file_objects": 1,
+            "file_transfer_idle_ttl_ms": 1,
+            "max_file_transfer_duration_ms": 1
         })
     }
 
@@ -143,6 +161,7 @@ mod tests {
             ("max_inline_output_bytes", 2),
             ("max_processes", 2),
             ("max_concurrent_operations", 2),
+            ("max_concurrent_file_transfers", 2),
         ] {
             let mut invalid = limits.clone();
             invalid[field] = value.into();
@@ -256,5 +275,119 @@ mod tests {
 
         let duplicate_map_key = r#"{"context":{"operation_id":"op"},"request":{"command":{"kind":"argv","executable":"true"},"cwd":{"mount_id":"workspace","path":"/repo"},"environment":{"set":{"PATH":"one","PATH":"two"}},"output_policy":{"max_inline_bytes":1,"max_output_bytes":1,"overflow":"truncate"}}}"#;
         assert!(decode::<ShellExecParams>(duplicate_map_key).is_err());
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0);
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = char::from(pair[0]).to_digit(16).expect("hex digit");
+                let low = char::from(pair[1]).to_digit(16).expect("hex digit");
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rust_data_frame_codec_matches_shared_golden_frames() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../protocol/eip/v1/testdata/data-frame-golden.json"
+        ))
+        .expect("data-frame fixture is valid JSON");
+        for case in fixture["cases"].as_array().expect("cases is an array") {
+            let kind = match case["kind"].as_str().expect("kind is a string") {
+                "attach" => DataFrameKind::Attach,
+                "attached" => DataFrameKind::Attached,
+                "chunk" => DataFrameKind::Chunk,
+                "end" => DataFrameKind::End,
+                "end_ack" => DataFrameKind::EndAck,
+                "reset" => DataFrameKind::Reset,
+                other => panic!("unknown fixture kind: {other}"),
+            };
+            let reset_status = case["reset_status"].as_str().map(|value| match value {
+                "source" => DataResetStatus::Source,
+                other => panic!("unknown fixture reset status: {other}"),
+            });
+            let frame = DataFrame {
+                kind,
+                handle: case["handle"]
+                    .as_str()
+                    .expect("handle is a string")
+                    .to_owned(),
+                offset: case["offset"].as_u64().expect("offset is uint64"),
+                payload: decode_hex(case["payload_hex"].as_str().expect("payload is hex")),
+                reset_status,
+            };
+            let expected = decode_hex(case["frame_hex"].as_str().expect("frame is hex"));
+            assert_eq!(
+                encode_data_frame(&frame, 1024).expect("fixture frame encodes"),
+                expected
+            );
+            assert_eq!(
+                decode_data_frame(&expected, 1024).expect("fixture frame decodes"),
+                frame
+            );
+        }
+    }
+
+    #[test]
+    fn rust_data_frame_codec_rejects_structural_violations() {
+        let valid = encode_data_frame(
+            &DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: "reader-1".to_owned(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            },
+            1024,
+        )
+        .expect("valid frame encodes");
+
+        for (index, value) in [(0, b'X'), (4, 2), (5, 99), (10, 1), (7, 1)] {
+            let mut invalid = valid.clone();
+            invalid[index] = value;
+            assert!(decode_data_frame(&invalid, 1024).is_err());
+        }
+        assert!(decode_data_frame(&valid[..valid.len() - 1], 1024).is_err());
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert!(decode_data_frame(&trailing, 1024).is_err());
+        assert!(decode_data_frame(&valid, valid.len() - 1).is_err());
+
+        for frame in [
+            DataFrame {
+                kind: DataFrameKind::End,
+                handle: "reader-1".to_owned(),
+                offset: 1,
+                payload: vec![1],
+                reset_status: None,
+            },
+            DataFrame {
+                kind: DataFrameKind::Reset,
+                handle: "reader-1".to_owned(),
+                offset: 1,
+                payload: Vec::new(),
+                reset_status: None,
+            },
+            DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: String::new(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            },
+            DataFrame {
+                kind: DataFrameKind::Chunk,
+                handle: "reader-1".to_owned(),
+                offset: u64::MAX,
+                payload: vec![1],
+                reset_status: None,
+            },
+        ] {
+            assert!(encode_data_frame(&frame, 1024).is_err());
+        }
     }
 }

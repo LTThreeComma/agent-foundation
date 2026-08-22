@@ -19,6 +19,32 @@ class SchemaIndex:
     methods: tuple[descriptor_pb2.MethodDescriptorProto, ...]
 
 
+@dataclass(frozen=True)
+class DataFrameProfile:
+    magic: bytes
+    profile_version: int
+    eip_major: int
+    header_bytes: int
+    magic_bytes: int
+    version_bytes: int
+    kind_bytes: int
+    status_bytes: int
+    handle_length_bytes: int
+    reserved_bytes: int
+    stream_offset_bytes: int
+    payload_length_bytes: int
+    kinds: dict[str, int]
+    reset_statuses: dict[str, int]
+
+    @property
+    def maximum_handle_bytes(self) -> int:
+        return 2 ** (8 * self.handle_length_bytes) - 1
+
+    @property
+    def maximum_payload_bytes(self) -> int:
+        return 2 ** (8 * self.payload_length_bytes) - 1
+
+
 def build_index(descriptor_set: descriptor_pb2.FileDescriptorSet) -> SchemaIndex:
     files = tuple(file for file in descriptor_set.file if file.package == EIP_PACKAGE)
     messages: dict[str, descriptor_pb2.DescriptorProto] = {}
@@ -59,6 +85,11 @@ class OptionReader:
     def __init__(self, module: ModuleType) -> None:
         self._module = module
 
+    def file(self, file: descriptor_pb2.FileDescriptorProto) -> Any | None:
+        if not file.options.HasExtension(self._module.eip_data_frame_profile):
+            return None
+        return file.options.Extensions[self._module.eip_data_frame_profile]
+
     def method(self, method: descriptor_pb2.MethodDescriptorProto) -> Any:
         if not method.options.HasExtension(self._module.eip_method):
             raise ValueError(f"method {method.name} has no eip_method option")
@@ -81,6 +112,72 @@ class OptionReader:
 
     def enum_name(self, enum_type: str, value: int) -> str:
         return getattr(self._module, enum_type).Name(value)
+
+
+def data_frame_profile(index: SchemaIndex, options: OptionReader) -> DataFrameProfile:
+    candidates = [option for file in index.files if (option := options.file(file)) is not None]
+    if len(candidates) != 1:
+        raise ValueError(f"expected exactly one EIP data-frame profile, found {len(candidates)}")
+    option = candidates[0]
+
+    def enum_values(name: str, prefix: str) -> dict[str, int]:
+        enum = index.enums.get(f"{EIP_PREFIX}{name}")
+        if enum is None:
+            raise ValueError(f"descriptor is missing {name}")
+        return {value.name.removeprefix(prefix).lower(): value.number for value in enum.value if value.number != 0}
+
+    profile = DataFrameProfile(
+        magic=option.magic.encode("ascii"),
+        profile_version=option.profile_version,
+        eip_major=option.eip_major,
+        header_bytes=option.header_bytes,
+        magic_bytes=option.magic_bytes,
+        version_bytes=option.version_bytes,
+        kind_bytes=option.kind_bytes,
+        status_bytes=option.status_bytes,
+        handle_length_bytes=option.handle_length_bytes,
+        reserved_bytes=option.reserved_bytes,
+        stream_offset_bytes=option.stream_offset_bytes,
+        payload_length_bytes=option.payload_length_bytes,
+        kinds=enum_values("EIPDataFrameKind", "EIP_DATA_FRAME_KIND_"),
+        reset_statuses=enum_values("EIPDataResetStatus", "EIP_DATA_RESET_STATUS_"),
+    )
+    widths = (
+        profile.magic_bytes,
+        profile.version_bytes,
+        profile.kind_bytes,
+        profile.status_bytes,
+        profile.handle_length_bytes,
+        profile.reserved_bytes,
+        profile.stream_offset_bytes,
+        profile.payload_length_bytes,
+    )
+    if profile.magic != b"EIPD" or len(profile.magic) != profile.magic_bytes:
+        raise ValueError("EIP data-frame magic must be four-byte ASCII EIPD")
+    if profile.profile_version != 1 or profile.eip_major != 1:
+        raise ValueError("EIP major 1 must select data-frame profile 1")
+    if widths != (4, 1, 1, 2, 2, 2, 8, 4) or sum(widths) != profile.header_bytes:
+        raise ValueError("EIP data-frame profile has an incompatible header layout")
+    if profile.kinds != {
+        "attach": 1,
+        "attached": 2,
+        "chunk": 3,
+        "end": 4,
+        "end_ack": 5,
+        "reset": 6,
+    }:
+        raise ValueError("EIP data-frame kind mapping is incompatible with profile 1")
+    if profile.reset_statuses != {
+        "protocol": 1,
+        "denied": 2,
+        "expired": 3,
+        "source": 4,
+        "limit": 5,
+        "cancelled": 6,
+        "internal": 7,
+    }:
+        raise ValueError("EIP data-frame reset mapping is incompatible with profile 1")
+    return profile
 
 
 def short_name(full_name: str) -> str:

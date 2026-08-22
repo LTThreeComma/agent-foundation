@@ -6,8 +6,6 @@ use std::{env, fs, path::PathBuf};
 use prost::Message;
 use prost_reflect::DescriptorPool;
 use prost_types::FileDescriptorSet;
-use sha2::{Digest, Sha256};
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const DESCRIPTOR_PATH: &str = "protocol/eip/v1/descriptor.pb";
     println!("cargo:rerun-if-changed={DESCRIPTOR_PATH}");
@@ -23,11 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prost_config.compile_fds(descriptor_set)?;
 
     let pool = DescriptorPool::decode(descriptor_bytes.as_slice())?;
-    let digest = Sha256::digest(&descriptor_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let wire = build_support::render(&pool, &digest).map_err(std::io::Error::other)?;
+    let wire = build_support::render(&pool).map_err(std::io::Error::other)?;
     fs::write(output_dir.join("eip_wire.rs"), wire)?;
     Ok(())
 }

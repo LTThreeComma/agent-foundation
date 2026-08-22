@@ -38,6 +38,7 @@ enum ErrorType {
   ERROR_TYPE_CLEANUP_FAILED = 25 [(eip_enum_value).json_name = "cleanup_failed", (eip_enum_value).error_code = -32052];
   ERROR_TYPE_COMMAND_START_FAILED = 26 [(eip_enum_value).json_name = "command_start_failed", (eip_enum_value).error_code = -32053];
   ERROR_TYPE_CONFLICT = 27 [(eip_enum_value).json_name = "conflict", (eip_enum_value).error_code = -32060];
+  ERROR_TYPE_INTEGRITY_MISMATCH = 29 [(eip_enum_value).json_name = "integrity_mismatch", (eip_enum_value).error_code = -32061];
 }
 
 enum RetryHint {

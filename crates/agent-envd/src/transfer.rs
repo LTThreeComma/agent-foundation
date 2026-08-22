@@ -1,0 +1,2243 @@
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io::{Read, Seek, SeekFrom},
+    sync::{Arc, Mutex as StdMutex, PoisonError},
+    time::{Duration, Instant},
+};
+
+use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    sync::{Mutex, mpsc, watch},
+};
+
+use crate::{
+    eip::{
+        ContentDigest, DataFrame, DataFrameKind, DataResetStatus, EIPPath, FileInfo, FileKind,
+        FileReadCompletion, FileReadStability, FileReaderCloseResult, FileReaderHandle,
+        FileReaderOpenParams, FileReaderOpenResult, FileRevision, FileWriteMode,
+        FileWriterAbortStatus, FileWriterCommitParams, FileWriterHandle, FileWriterOpenParams,
+        FileWriterOpenResult,
+    },
+    mount::{Mount, MountPathError, MountRegistry, StagedCandidate},
+    operation::{OperationInterruption, OperationRegistry, RegistryError, ShortIdAllocator},
+};
+
+#[derive(Clone)]
+pub(crate) struct TransferRegistry {
+    inner: Arc<TransferInner>,
+}
+
+struct TransferInner {
+    state: StdMutex<TransferState>,
+    outbound: StdMutex<Option<mpsc::Sender<DataFrame>>>,
+    max_frame_bytes: usize,
+    max_records: usize,
+    max_active: usize,
+    terminal_ttl: Duration,
+    idle_ttl: Duration,
+    max_duration: Duration,
+    max_operation_duration: Duration,
+    selector_ids: ShortIdAllocator,
+}
+
+#[derive(Default)]
+struct TransferState {
+    records: BTreeMap<String, TransferRecord>,
+    terminal_order: VecDeque<(String, Instant)>,
+    session_closed: bool,
+}
+
+#[derive(Clone)]
+enum TransferRecord {
+    Reader(Arc<Mutex<ReaderRecord>>),
+    Writer(Arc<Mutex<WriterRecord>>),
+}
+
+struct ReaderRecord {
+    handle: String,
+    file: Option<std::fs::File>,
+    range_start: u64,
+    range_end: u64,
+    source_eof_at_end: bool,
+    open_revision: Option<FileRevision>,
+    final_revision: Option<FileRevision>,
+    phase: ReaderPhase,
+    produced: u64,
+    digest: Option<ContentDigest>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    last_progress: Instant,
+    cancellation: watch::Sender<bool>,
+    close_result: Option<(bool, FileReaderCloseResult)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReaderPhase {
+    Open,
+    Streaming,
+    AwaitingAck,
+    Acknowledged,
+    Reset,
+    Closed,
+}
+
+struct WriterRecord {
+    handle: String,
+    path: EIPPath,
+    mode: FileWriteMode,
+    open_revision: Option<FileRevision>,
+    executable: Option<bool>,
+    candidate: Option<StagedCandidate>,
+    file: Option<tokio::fs::File>,
+    phase: WriterPhase,
+    transferred: u64,
+    prefix_bytes: u64,
+    prefix_digest: Option<ContentDigest>,
+    hasher: Sha256,
+    digest: Option<ContentDigest>,
+    max_transfer_bytes: u64,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    last_progress: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriterPhase {
+    Open,
+    Receiving,
+    Sealed,
+    Committing,
+    Committed,
+    UnknownOutcome,
+    Aborted,
+}
+
+pub(crate) struct WriterCommit {
+    registry: TransferRegistry,
+    record: Arc<Mutex<WriterRecord>>,
+    handle: String,
+    path: EIPPath,
+    mode: FileWriteMode,
+    open_revision: Option<FileRevision>,
+    executable: Option<bool>,
+    candidate: StagedCandidate,
+    transferred: u64,
+    prefix_bytes: u64,
+    prefix_digest: Option<ContentDigest>,
+    transfer_digest: ContentDigest,
+}
+
+pub(crate) struct WriterCommitOutput {
+    pub(crate) info: FileInfo,
+    pub(crate) transferred_bytes: u64,
+    pub(crate) transfer_digest: ContentDigest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferError {
+    InvalidHandle,
+    WrongKind,
+    WrongState,
+    Conflict,
+    IntegrityMismatch,
+    Expired,
+    Busy,
+    Quota,
+    Unsupported,
+    Denied,
+    NotFound,
+    Limit,
+    Source,
+    Protocol,
+    Cancelled,
+    Timeout,
+    UnknownOutcome,
+    SessionClosed,
+    Internal,
+}
+
+impl TransferRegistry {
+    pub(crate) fn new(config: &crate::config::Config) -> Result<Self, TransferError> {
+        Ok(Self {
+            inner: Arc::new(TransferInner {
+                state: StdMutex::new(TransferState::default()),
+                outbound: StdMutex::new(None),
+                max_frame_bytes: usize::try_from(config.limits.max_transfer_frame_bytes)
+                    .map_err(|_| TransferError::Internal)?,
+                max_records: usize::try_from(config.limits.max_file_transfer_records)
+                    .map_err(|_| TransferError::Internal)?,
+                max_active: usize::try_from(config.limits.max_concurrent_file_transfers)
+                    .map_err(|_| TransferError::Internal)?,
+                terminal_ttl: Duration::from_millis(config.limits.file_transfer_record_ttl_ms),
+                idle_ttl: Duration::from_millis(config.limits.file_transfer_idle_ttl_ms),
+                max_duration: Duration::from_millis(config.limits.max_file_transfer_duration_ms),
+                max_operation_duration: Duration::from_millis(
+                    config.limits.max_operation_duration_ms,
+                ),
+                selector_ids: ShortIdAllocator::default(),
+            }),
+        })
+    }
+
+    pub(crate) fn begin_session_close(&self) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .session_closed = true;
+    }
+
+    pub(crate) fn install_outbound(
+        &self,
+        sender: mpsc::Sender<DataFrame>,
+    ) -> Result<(), TransferError> {
+        let mut outbound = self
+            .inner
+            .outbound
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if outbound.is_some() {
+            return Err(TransferError::Conflict);
+        }
+        *outbound = Some(sender);
+        Ok(())
+    }
+
+    pub(crate) async fn open_reader(
+        &self,
+        mounts: &MountRegistry,
+        params: &FileReaderOpenParams,
+    ) -> Result<FileReaderOpenResult, TransferError> {
+        self.expire().await;
+        self.reserve_record()?;
+        let mount = mounts
+            .get(&params.path.mount_id)
+            .ok_or(TransferError::Denied)?;
+        if !mount.allows("open_reader") {
+            return Err(TransferError::Denied);
+        }
+        let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
+        let info = file_info(&params.path, &opened.metadata);
+        if let Some(expected) = &params.expected_revision
+            && info.revision.as_ref() != Some(expected)
+        {
+            return Err(TransferError::Conflict);
+        }
+        let size = opened.metadata.len();
+        let range_start = params.byte_range.as_ref().map_or(0, |range| range.offset);
+        if range_start > size {
+            return Err(TransferError::Protocol);
+        }
+        let range_end = match params.byte_range.as_ref().and_then(|range| range.length) {
+            Some(length) => range_start
+                .checked_add(length)
+                .ok_or(TransferError::Limit)?
+                .min(size),
+            None => size,
+        };
+        if range_end - range_start > mount.max_file_bytes {
+            return Err(TransferError::Limit);
+        }
+        let expires_at = self.transfer_expiry(params.transfer_deadline)?;
+        let handle = self
+            .inner
+            .selector_ids
+            .next("reader")
+            .map_err(map_registry_error)?;
+        let (cancellation, _) = watch::channel(false);
+        let record = Arc::new(Mutex::new(ReaderRecord {
+            handle: handle.clone(),
+            file: Some(opened.file),
+            range_start,
+            range_end,
+            source_eof_at_end: range_end == size,
+            open_revision: info.revision.clone(),
+            final_revision: None,
+            phase: ReaderPhase::Open,
+            produced: 0,
+            digest: None,
+            expires_at,
+            last_progress: Instant::now(),
+            cancellation,
+            close_result: None,
+        }));
+        self.insert_record(handle.clone(), TransferRecord::Reader(record))?;
+        Ok(FileReaderOpenResult {
+            reader: FileReaderHandle(handle),
+            info,
+            range_start,
+            range_end,
+            source_eof_at_end: range_end == size,
+            expires_at,
+        })
+    }
+
+    pub(crate) async fn close_reader(
+        &self,
+        handle: &FileReaderHandle,
+        accept_complete: bool,
+    ) -> Result<FileReaderCloseResult, TransferError> {
+        let record = match self.record(&handle.0)? {
+            TransferRecord::Reader(record) => record,
+            TransferRecord::Writer(_) => return Err(TransferError::WrongKind),
+        };
+        let mut reader = record.lock().await;
+        if let Some((choice, result)) = &reader.close_result {
+            return if *choice == accept_complete {
+                Ok(result.clone())
+            } else {
+                Err(TransferError::Conflict)
+            };
+        }
+        if expired(reader.expires_at, reader.last_progress, self.inner.idle_ttl) {
+            reader.cancellation.send_replace(true);
+            reader.phase = ReaderPhase::Reset;
+            let result = FileReaderCloseResult {
+                completion: FileReadCompletion {
+                    range_start: reader.range_start,
+                    range_end: reader.range_end,
+                    produced_bytes: reader.produced,
+                    digest: None,
+                    source_eof_at_end: reader.source_eof_at_end,
+                    stability: FileReadStability::Unverified,
+                    complete: false,
+                },
+            };
+            reader.close_result = Some((false, result.clone()));
+            let handle = reader.handle.clone();
+            drop(reader);
+            self.mark_terminal(&handle);
+            return if accept_complete {
+                Err(TransferError::Expired)
+            } else {
+                Ok(result)
+            };
+        }
+        let complete = accept_complete
+            && reader.phase == ReaderPhase::Acknowledged
+            && reader.produced == reader.range_end - reader.range_start;
+        if accept_complete && !complete {
+            return Err(TransferError::WrongState);
+        }
+        if !accept_complete {
+            reader.cancellation.send_replace(true);
+        }
+        let stability = match (&reader.open_revision, &reader.final_revision) {
+            (Some(open), Some(final_revision)) if open == final_revision => {
+                FileReadStability::Verified
+            }
+            (Some(_), Some(_)) => FileReadStability::Changed,
+            _ => FileReadStability::Unverified,
+        };
+        let completion = FileReadCompletion {
+            range_start: reader.range_start,
+            range_end: reader.range_end,
+            produced_bytes: reader.produced,
+            digest: complete.then(|| reader.digest.clone()).flatten(),
+            source_eof_at_end: reader.source_eof_at_end,
+            stability,
+            complete,
+        };
+        let result = FileReaderCloseResult { completion };
+        reader.phase = ReaderPhase::Closed;
+        reader.close_result = Some((accept_complete, result.clone()));
+        drop(reader);
+        self.mark_terminal(&handle.0);
+        Ok(result)
+    }
+
+    pub(crate) async fn open_writer(
+        &self,
+        mounts: &MountRegistry,
+        params: &FileWriterOpenParams,
+    ) -> Result<FileWriterOpenResult, TransferError> {
+        self.expire().await;
+        self.reserve_record()?;
+        let mount = match mounts.get(&params.path.mount_id) {
+            Some(mount) if mount.writable && mount.allows("open_writer") => mount,
+            _ => return Err(TransferError::Denied),
+        };
+        let destination = observe_destination(&mount, &params.path)?;
+        let open_revision = destination.as_ref().map(|(_, revision)| revision.clone());
+        validate_open_mode(
+            params.mode,
+            open_revision.as_ref(),
+            params.expected_revision.as_ref(),
+        )?;
+        let mut candidate = mount.create_candidate().map_err(map_mount_error)?;
+        if params.executable.is_none()
+            && let Some((metadata, _)) = &destination
+        {
+            set_permissions_from(&candidate.file, metadata).map_err(|_| TransferError::Source)?;
+        }
+        let mut prefix_bytes = 0_u64;
+        let mut prefix_digest = None;
+        if params.mode == FileWriteMode::Append {
+            let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
+            if Some(file_revision(&opened.metadata)) != open_revision {
+                return Err(TransferError::Conflict);
+            }
+            prefix_bytes = opened.metadata.len();
+            candidate
+                .reserve_bytes(prefix_bytes)
+                .map_err(map_mount_error)?;
+            let mut source = tokio::fs::File::from_std(opened.file).take(prefix_bytes);
+            let destination = candidate
+                .file
+                .try_clone()
+                .map(tokio::fs::File::from_std)
+                .map_err(|_| TransferError::Internal)?;
+            let mut destination = destination;
+            let copy = async {
+                let mut copied = 0_u64;
+                let mut hasher = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let read = source
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|_| TransferError::Source)?;
+                    if read == 0 {
+                        break;
+                    }
+                    destination
+                        .write_all(&buffer[..read])
+                        .await
+                        .map_err(|_| TransferError::Source)?;
+                    hasher.update(&buffer[..read]);
+                    copied = copied
+                        .checked_add(read as u64)
+                        .ok_or(TransferError::Limit)?;
+                }
+                destination
+                    .flush()
+                    .await
+                    .map_err(|_| TransferError::Source)?;
+                Ok::<(u64, ContentDigest), TransferError>((
+                    copied,
+                    ContentDigest {
+                        algorithm: "sha256".to_owned(),
+                        value: format!("{:x}", hasher.finalize()),
+                    },
+                ))
+            };
+            let (copied, digest) =
+                tokio::time::timeout(self.operation_timeout(params.context.deadline)?, copy)
+                    .await
+                    .map_err(|_| TransferError::Timeout)??;
+            if copied != prefix_bytes {
+                return Err(TransferError::Conflict);
+            }
+            prefix_digest = Some(digest);
+        }
+        let max_transfer_bytes = mount.max_file_bytes.saturating_sub(prefix_bytes);
+        let writer_file = candidate
+            .file
+            .try_clone()
+            .map(tokio::fs::File::from_std)
+            .map_err(|_| TransferError::Internal)?;
+        let expires_at = self.transfer_expiry(params.transfer_deadline)?;
+        let handle = self
+            .inner
+            .selector_ids
+            .next("writer")
+            .map_err(map_registry_error)?;
+        let record = Arc::new(Mutex::new(WriterRecord {
+            handle: handle.clone(),
+            path: params.path.clone(),
+            mode: params.mode,
+            open_revision,
+            executable: params.executable,
+            candidate: Some(candidate),
+            file: Some(writer_file),
+            phase: WriterPhase::Open,
+            transferred: 0,
+            prefix_bytes,
+            prefix_digest,
+            hasher: Sha256::new(),
+            digest: None,
+            max_transfer_bytes,
+            expires_at,
+            last_progress: Instant::now(),
+        }));
+        self.insert_record(handle.clone(), TransferRecord::Writer(record))?;
+        Ok(FileWriterOpenResult {
+            writer: FileWriterHandle(handle),
+            max_transfer_bytes,
+            expires_at,
+        })
+    }
+
+    pub(crate) async fn abort_writer(
+        &self,
+        handle: &FileWriterHandle,
+    ) -> Result<FileWriterAbortStatus, TransferError> {
+        let record = match self.record(&handle.0)? {
+            TransferRecord::Writer(record) => record,
+            TransferRecord::Reader(_) => return Err(TransferError::WrongKind),
+        };
+        let mut writer = record.lock().await;
+        let status = match writer.phase {
+            WriterPhase::Committed => FileWriterAbortStatus::AlreadyCommitted,
+            WriterPhase::Committing | WriterPhase::UnknownOutcome => {
+                FileWriterAbortStatus::CommitInProgress
+            }
+            WriterPhase::Aborted => FileWriterAbortStatus::AlreadyAborted,
+            _ => {
+                writer.phase = WriterPhase::Aborted;
+                self.discard_writer_candidate(&mut writer);
+                FileWriterAbortStatus::Aborted
+            }
+        };
+        let terminal = matches!(
+            status,
+            FileWriterAbortStatus::Aborted
+                | FileWriterAbortStatus::AlreadyAborted
+                | FileWriterAbortStatus::AlreadyCommitted
+        );
+        drop(writer);
+        if terminal {
+            self.mark_terminal(&handle.0);
+        }
+        Ok(status)
+    }
+
+    pub(crate) async fn prepare_commit(
+        &self,
+        params: &FileWriterCommitParams,
+    ) -> Result<WriterCommit, TransferError> {
+        let record = match self.record(&params.writer.0)? {
+            TransferRecord::Writer(record) => record,
+            TransferRecord::Reader(_) => return Err(TransferError::WrongKind),
+        };
+        let mut writer = record.lock().await;
+        if expired(writer.expires_at, writer.last_progress, self.inner.idle_ttl) {
+            writer.phase = WriterPhase::Aborted;
+            self.discard_writer_candidate(&mut writer);
+            drop(writer);
+            self.mark_terminal(&params.writer.0);
+            return Err(TransferError::Expired);
+        }
+        if writer.phase != WriterPhase::Sealed {
+            return Err(TransferError::WrongState);
+        }
+        let digest = writer.digest.clone().ok_or(TransferError::WrongState)?;
+        if params.transferred_bytes != writer.transferred || params.transfer_digest != digest {
+            writer.phase = WriterPhase::Aborted;
+            self.discard_writer_candidate(&mut writer);
+            drop(writer);
+            self.mark_terminal(&params.writer.0);
+            return Err(TransferError::IntegrityMismatch);
+        }
+        writer.phase = WriterPhase::Committing;
+        writer.file.take();
+        let candidate = writer.candidate.take().ok_or(TransferError::Internal)?;
+        Ok(WriterCommit {
+            registry: self.clone(),
+            record: Arc::clone(&record),
+            handle: writer.handle.clone(),
+            path: writer.path.clone(),
+            mode: writer.mode,
+            open_revision: writer.open_revision.clone(),
+            executable: writer.executable,
+            candidate,
+            transferred: writer.transferred,
+            prefix_bytes: writer.prefix_bytes,
+            prefix_digest: writer.prefix_digest.clone(),
+            transfer_digest: digest,
+        })
+    }
+
+    pub(crate) async fn handle_frame(&self, frame: DataFrame) -> Result<(), TransferError> {
+        let record = self.record(&frame.handle)?;
+        let result = match record.clone() {
+            TransferRecord::Reader(reader) => self.handle_reader_frame(reader, frame).await,
+            TransferRecord::Writer(writer) => self.handle_writer_frame(writer, frame).await,
+        };
+        if result.is_err() {
+            self.reset_record(&record).await;
+        }
+        result
+    }
+
+    pub(crate) async fn reconcile_committing(&self) {
+        let records = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.records.values().cloned().collect::<Vec<_>>()
+        };
+        let mut reconciled = Vec::new();
+        for record in records {
+            if let TransferRecord::Writer(writer) = record {
+                let mut writer = writer.lock().await;
+                if writer.phase == WriterPhase::Committing {
+                    writer.phase = WriterPhase::UnknownOutcome;
+                    reconciled.push(writer.handle.clone());
+                }
+            }
+        }
+        for handle in reconciled {
+            self.mark_terminal(&handle);
+        }
+    }
+
+    pub(crate) async fn close_session(&self) {
+        let records = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.session_closed = true;
+            state.records.values().cloned().collect::<Vec<_>>()
+        };
+        let mut operation_owned = BTreeSet::new();
+        for record in records {
+            match record {
+                TransferRecord::Reader(reader) => {
+                    let mut reader = reader.lock().await;
+                    if reader.phase != ReaderPhase::Closed {
+                        reader.cancellation.send_replace(true);
+                        reader.phase = ReaderPhase::Closed;
+                    }
+                }
+                TransferRecord::Writer(writer) => {
+                    let mut writer = writer.lock().await;
+                    if writer.phase == WriterPhase::Committing {
+                        operation_owned.insert(writer.handle.clone());
+                    } else if !matches!(
+                        writer.phase,
+                        WriterPhase::Committed | WriterPhase::UnknownOutcome
+                    ) {
+                        writer.phase = WriterPhase::Aborted;
+                        self.discard_writer_candidate(&mut writer);
+                    }
+                }
+            }
+        }
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state
+                .records
+                .retain(|handle, _| operation_owned.contains(handle));
+            state
+                .terminal_order
+                .retain(|(handle, _)| operation_owned.contains(handle));
+        }
+        self.inner
+            .outbound
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
+    async fn handle_reader_frame(
+        &self,
+        record: Arc<Mutex<ReaderRecord>>,
+        frame: DataFrame,
+    ) -> Result<(), TransferError> {
+        match frame.kind {
+            DataFrameKind::Attach => {
+                let mut reader = record.lock().await;
+                if reader.phase != ReaderPhase::Open || frame.offset != 0 {
+                    return Err(TransferError::Protocol);
+                }
+                if expired(reader.expires_at, reader.last_progress, self.inner.idle_ttl) {
+                    reader.phase = ReaderPhase::Reset;
+                    return Err(TransferError::Expired);
+                }
+                let file = reader.file.take().ok_or(TransferError::Internal)?;
+                reader.phase = ReaderPhase::Streaming;
+                reader.last_progress = Instant::now();
+                let handle = reader.handle.clone();
+                let mut cancellation = reader.cancellation.subscribe();
+                drop(reader);
+                self.send(DataFrame {
+                    kind: DataFrameKind::Attached,
+                    handle: handle.clone(),
+                    offset: 0,
+                    payload: Vec::new(),
+                    reset_status: None,
+                })
+                .await?;
+                let registry = self.clone();
+                tokio::spawn(async move {
+                    registry
+                        .produce_reader(record, file, handle, &mut cancellation)
+                        .await;
+                });
+                Ok(())
+            }
+            DataFrameKind::EndAck => {
+                let mut reader = record.lock().await;
+                if reader.phase != ReaderPhase::AwaitingAck || frame.offset != reader.produced {
+                    return Err(TransferError::Protocol);
+                }
+                reader.phase = ReaderPhase::Acknowledged;
+                reader.last_progress = Instant::now();
+                Ok(())
+            }
+            DataFrameKind::Reset => {
+                let mut reader = record.lock().await;
+                if matches!(reader.phase, ReaderPhase::Reset | ReaderPhase::Closed) {
+                    return Ok(());
+                }
+                reader.cancellation.send_replace(true);
+                reader.phase = ReaderPhase::Reset;
+                let handle = reader.handle.clone();
+                let offset = reader.produced;
+                drop(reader);
+                self.mark_terminal(&handle);
+                self.send(DataFrame {
+                    kind: DataFrameKind::Reset,
+                    handle,
+                    offset,
+                    payload: Vec::new(),
+                    reset_status: frame.reset_status.or(Some(DataResetStatus::Cancelled)),
+                })
+                .await
+            }
+            _ => Err(TransferError::Protocol),
+        }
+    }
+
+    async fn produce_reader(
+        &self,
+        record: Arc<Mutex<ReaderRecord>>,
+        file: std::fs::File,
+        handle: String,
+        cancellation: &mut watch::Receiver<bool>,
+    ) {
+        let (range_start, range_end) = {
+            let reader = record.lock().await;
+            (reader.range_start, reader.range_end)
+        };
+        let mut file = tokio::fs::File::from_std(file);
+        if file.seek(SeekFrom::Start(range_start)).await.is_err() {
+            self.reset_reader(&record, &handle, DataResetStatus::Source)
+                .await;
+            return;
+        }
+        let payload_limit = self
+            .inner
+            .max_frame_bytes
+            .saturating_sub(crate::eip::EIP_DATA_FRAME_HEADER_BYTES + handle.len())
+            .max(1);
+        let mut buffer = vec![0_u8; payload_limit.min(64 * 1024)];
+        let mut offset = 0_u64;
+        let mut hasher = Sha256::new();
+        while offset < range_end - range_start {
+            let remaining =
+                usize::try_from((range_end - range_start - offset).min(buffer.len() as u64))
+                    .unwrap_or(buffer.len());
+            let read = match file.read(&mut buffer[..remaining]).await {
+                Ok(0) | Err(_) => {
+                    self.reset_reader(&record, &handle, DataResetStatus::Source)
+                        .await;
+                    return;
+                }
+                Ok(read) => read,
+            };
+            let frame = DataFrame {
+                kind: DataFrameKind::Chunk,
+                handle: handle.clone(),
+                offset,
+                payload: buffer[..read].to_vec(),
+                reset_status: None,
+            };
+            tokio::select! {
+                biased;
+                changed = cancellation.changed() => {
+                    let _ = changed;
+                    self.reset_reader(&record, &handle, DataResetStatus::Cancelled).await;
+                    return;
+                }
+                result = self.send(frame) => {
+                    if result.is_err() {
+                        self.reset_reader(&record, &handle, DataResetStatus::Internal).await;
+                        return;
+                    }
+                }
+            }
+            hasher.update(&buffer[..read]);
+            offset += read as u64;
+            let mut reader = record.lock().await;
+            reader.produced = offset;
+            reader.last_progress = Instant::now();
+        }
+        let final_revision = file
+            .metadata()
+            .await
+            .ok()
+            .map(|metadata| file_revision(&metadata));
+        {
+            let mut reader = record.lock().await;
+            reader.digest = Some(ContentDigest {
+                algorithm: "sha256".to_owned(),
+                value: format!("{:x}", hasher.finalize()),
+            });
+            reader.final_revision = final_revision;
+            reader.phase = ReaderPhase::AwaitingAck;
+            reader.last_progress = Instant::now();
+        }
+        if self
+            .send(DataFrame {
+                kind: DataFrameKind::End,
+                handle,
+                offset,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .is_err()
+        {
+            record.lock().await.phase = ReaderPhase::Reset;
+        }
+    }
+
+    async fn reset_reader(
+        &self,
+        record: &Arc<Mutex<ReaderRecord>>,
+        handle: &str,
+        status: DataResetStatus,
+    ) {
+        let offset = {
+            let mut reader = record.lock().await;
+            reader.phase = ReaderPhase::Reset;
+            reader.produced
+        };
+        let _ = self
+            .send(DataFrame {
+                kind: DataFrameKind::Reset,
+                handle: handle.to_owned(),
+                offset,
+                payload: Vec::new(),
+                reset_status: Some(status),
+            })
+            .await;
+        self.mark_terminal(handle);
+    }
+
+    async fn handle_writer_frame(
+        &self,
+        record: Arc<Mutex<WriterRecord>>,
+        frame: DataFrame,
+    ) -> Result<(), TransferError> {
+        let mut writer = record.lock().await;
+        let operation_owned = matches!(
+            writer.phase,
+            WriterPhase::Committing | WriterPhase::Committed | WriterPhase::UnknownOutcome
+        );
+        if !operation_owned && expired(writer.expires_at, writer.last_progress, self.inner.idle_ttl)
+        {
+            writer.phase = WriterPhase::Aborted;
+            return Err(TransferError::Expired);
+        }
+        match frame.kind {
+            DataFrameKind::Attach if writer.phase == WriterPhase::Open && frame.offset == 0 => {
+                writer.phase = WriterPhase::Receiving;
+                writer.last_progress = Instant::now();
+                let handle = writer.handle.clone();
+                drop(writer);
+                self.send(DataFrame {
+                    kind: DataFrameKind::Attached,
+                    handle,
+                    offset: 0,
+                    payload: Vec::new(),
+                    reset_status: None,
+                })
+                .await
+            }
+            DataFrameKind::Chunk
+                if writer.phase == WriterPhase::Receiving && frame.offset == writer.transferred =>
+            {
+                let next = writer
+                    .transferred
+                    .checked_add(frame.payload.len() as u64)
+                    .ok_or(TransferError::Limit)?;
+                if next > writer.max_transfer_bytes {
+                    writer.phase = WriterPhase::Aborted;
+                    return Err(TransferError::Limit);
+                }
+                writer
+                    .candidate
+                    .as_mut()
+                    .ok_or(TransferError::Internal)?
+                    .reserve_bytes(frame.payload.len() as u64)
+                    .map_err(map_mount_error)?;
+                let Some(file) = writer.file.as_mut() else {
+                    return Err(TransferError::Internal);
+                };
+                if file.write_all(&frame.payload).await.is_err() {
+                    writer.phase = WriterPhase::Aborted;
+                    return Err(TransferError::Source);
+                }
+                writer.hasher.update(&frame.payload);
+                writer.transferred = next;
+                writer.last_progress = Instant::now();
+                Ok(())
+            }
+            DataFrameKind::End
+                if writer.phase == WriterPhase::Receiving && frame.offset == writer.transferred =>
+            {
+                let Some(file) = writer.file.as_mut() else {
+                    return Err(TransferError::Internal);
+                };
+                file.flush().await.map_err(|_| TransferError::Source)?;
+                file.sync_all().await.map_err(|_| TransferError::Source)?;
+                let digest = ContentDigest {
+                    algorithm: "sha256".to_owned(),
+                    value: format!("{:x}", writer.hasher.clone().finalize()),
+                };
+                writer.digest = Some(digest);
+                writer.phase = WriterPhase::Sealed;
+                writer.last_progress = Instant::now();
+                let handle = writer.handle.clone();
+                let offset = writer.transferred;
+                drop(writer);
+                self.send(DataFrame {
+                    kind: DataFrameKind::EndAck,
+                    handle,
+                    offset,
+                    payload: Vec::new(),
+                    reset_status: None,
+                })
+                .await
+            }
+            DataFrameKind::Reset if operation_owned => Ok(()),
+            DataFrameKind::Reset => {
+                writer.phase = WriterPhase::Aborted;
+                self.discard_writer_candidate(&mut writer);
+                let handle = writer.handle.clone();
+                let offset = writer.transferred;
+                drop(writer);
+                self.mark_terminal(&handle);
+                self.send(DataFrame {
+                    kind: DataFrameKind::Reset,
+                    handle,
+                    offset,
+                    payload: Vec::new(),
+                    reset_status: frame.reset_status.or(Some(DataResetStatus::Cancelled)),
+                })
+                .await
+            }
+            _ => Err(TransferError::Protocol),
+        }
+    }
+
+    async fn send(&self, frame: DataFrame) -> Result<(), TransferError> {
+        let sender = self
+            .inner
+            .outbound
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or(TransferError::Internal)?;
+        sender
+            .send(frame)
+            .await
+            .map_err(|_| TransferError::Internal)
+    }
+
+    async fn reset_record(&self, record: &TransferRecord) {
+        match record {
+            TransferRecord::Reader(reader) => {
+                let handle = {
+                    let mut reader = reader.lock().await;
+                    if reader.phase != ReaderPhase::Closed {
+                        reader.cancellation.send_replace(true);
+                        reader.phase = ReaderPhase::Reset;
+                    }
+                    reader.handle.clone()
+                };
+                self.mark_terminal(&handle);
+            }
+            TransferRecord::Writer(writer) => {
+                let handle = {
+                    let mut writer = writer.lock().await;
+                    if matches!(
+                        writer.phase,
+                        WriterPhase::Committing
+                            | WriterPhase::Committed
+                            | WriterPhase::UnknownOutcome
+                    ) {
+                        return;
+                    }
+                    writer.phase = WriterPhase::Aborted;
+                    self.discard_writer_candidate(&mut writer);
+                    writer.handle.clone()
+                };
+                self.mark_terminal(&handle);
+            }
+        }
+    }
+
+    pub(crate) async fn expire(&self) {
+        let records = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.records.values().cloned().collect::<Vec<_>>()
+        };
+        for record in records {
+            match record {
+                TransferRecord::Reader(reader) => {
+                    let terminal = {
+                        let mut reader = reader.lock().await;
+                        if matches!(reader.phase, ReaderPhase::Closed | ReaderPhase::Reset)
+                            || !expired(
+                                reader.expires_at,
+                                reader.last_progress,
+                                self.inner.idle_ttl,
+                            )
+                        {
+                            None
+                        } else {
+                            reader.cancellation.send_replace(true);
+                            reader.phase = ReaderPhase::Reset;
+                            Some(reader.handle.clone())
+                        }
+                    };
+                    if let Some(handle) = terminal {
+                        self.mark_terminal(&handle);
+                    }
+                }
+                TransferRecord::Writer(writer) => {
+                    let terminal = {
+                        let mut writer = writer.lock().await;
+                        if matches!(
+                            writer.phase,
+                            WriterPhase::Committing
+                                | WriterPhase::Committed
+                                | WriterPhase::UnknownOutcome
+                                | WriterPhase::Aborted
+                        ) || !expired(
+                            writer.expires_at,
+                            writer.last_progress,
+                            self.inner.idle_ttl,
+                        ) {
+                            None
+                        } else {
+                            writer.phase = WriterPhase::Aborted;
+                            self.discard_writer_candidate(&mut writer);
+                            Some(writer.handle.clone())
+                        }
+                    };
+                    if let Some(handle) = terminal {
+                        self.mark_terminal(&handle);
+                    }
+                }
+            }
+        }
+    }
+
+    fn discard_writer_candidate(&self, writer: &mut WriterRecord) {
+        writer.file.take();
+        if let Some(candidate) = writer.candidate.take() {
+            let _ = candidate.delete();
+        }
+    }
+
+    fn operation_timeout(
+        &self,
+        requested: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Duration, TransferError> {
+        let Some(requested) = requested else {
+            return Ok(self.inner.max_operation_duration);
+        };
+        let remaining = (requested - chrono::Utc::now())
+            .to_std()
+            .map_err(|_| TransferError::Timeout)?;
+        if remaining.is_zero() {
+            return Err(TransferError::Timeout);
+        }
+        Ok(remaining.min(self.inner.max_operation_duration))
+    }
+
+    fn transfer_expiry(
+        &self,
+        requested: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, TransferError> {
+        let maximum = chrono::Utc::now()
+            + chrono::Duration::from_std(self.inner.max_duration)
+                .map_err(|_| TransferError::Internal)?;
+        let expires_at = requested.map_or(maximum, |deadline| deadline.min(maximum));
+        if expires_at <= chrono::Utc::now() {
+            return Err(TransferError::Expired);
+        }
+        Ok(expires_at)
+    }
+
+    fn reserve_record(&self) -> Result<(), TransferError> {
+        let now = Instant::now();
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.prune(now, self.inner.terminal_ttl);
+        if state.session_closed {
+            return Err(TransferError::SessionClosed);
+        }
+        let terminal = state.terminal_order.len();
+        let active = state.records.len().saturating_sub(terminal);
+        if active >= self.inner.max_active {
+            return Err(TransferError::Busy);
+        }
+        while state.records.len() >= self.inner.max_records {
+            if !state.reclaim_terminal() {
+                return Err(TransferError::Busy);
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_record(&self, handle: String, record: TransferRecord) -> Result<(), TransferError> {
+        let now = Instant::now();
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.prune(now, self.inner.terminal_ttl);
+        if state.session_closed {
+            return Err(TransferError::SessionClosed);
+        }
+        if state.records.contains_key(&handle) {
+            return Err(TransferError::Conflict);
+        }
+        let terminal = state.terminal_order.len();
+        let active = state.records.len().saturating_sub(terminal);
+        if active >= self.inner.max_active {
+            return Err(TransferError::Busy);
+        }
+        while state.records.len() >= self.inner.max_records {
+            if !state.reclaim_terminal() {
+                return Err(TransferError::Busy);
+            }
+        }
+        state.records.insert(handle, record);
+        Ok(())
+    }
+
+    fn record(&self, handle: &str) -> Result<TransferRecord, TransferError> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .records
+            .get(handle)
+            .cloned()
+            .ok_or(TransferError::InvalidHandle)
+    }
+
+    pub(crate) fn has_active(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.records.len() > state.terminal_order.len()
+    }
+
+    pub(crate) fn is_live_reader(&self, handle: &str) -> bool {
+        self.is_live_handle(handle, |record| matches!(record, TransferRecord::Reader(_)))
+    }
+
+    pub(crate) fn is_live_writer(&self, handle: &str) -> bool {
+        self.is_live_handle(handle, |record| matches!(record, TransferRecord::Writer(_)))
+    }
+
+    fn is_live_handle(
+        &self,
+        handle: &str,
+        expected_kind: impl FnOnce(&TransferRecord) -> bool,
+    ) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.records.get(handle).is_some_and(expected_kind)
+            && !state
+                .terminal_order
+                .iter()
+                .any(|(terminal, _)| terminal == handle)
+    }
+
+    fn mark_terminal(&self, handle: &str) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.records.contains_key(handle)
+            && !state
+                .terminal_order
+                .iter()
+                .any(|(terminal, _)| terminal == handle)
+        {
+            state
+                .terminal_order
+                .push_back((handle.to_owned(), Instant::now()));
+        }
+    }
+}
+
+impl WriterCommit {
+    pub(crate) async fn execute(
+        self,
+        operations: OperationRegistry,
+        operation_id: String,
+    ) -> Result<WriterCommitOutput, TransferError> {
+        let registry = self.registry.clone();
+        let record = Arc::clone(&self.record);
+        let handle = self.handle.clone();
+        match tokio::task::spawn_blocking(move || {
+            let result = self.execute_sync(&operations, &operation_id);
+            {
+                let mut writer = record.blocking_lock();
+                writer.phase = match &result {
+                    Ok(_) => WriterPhase::Committed,
+                    Err(TransferError::UnknownOutcome) => WriterPhase::UnknownOutcome,
+                    Err(_) => WriterPhase::Aborted,
+                };
+            }
+            registry.mark_terminal(&handle);
+            result
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(TransferError::Internal),
+        }
+    }
+
+    fn execute_sync(
+        mut self,
+        operations: &OperationRegistry,
+        operation_id: &str,
+    ) -> Result<WriterCommitOutput, TransferError> {
+        check_operation(operations, operation_id)?;
+        self.candidate
+            .file
+            .sync_all()
+            .map_err(|_| TransferError::Source)?;
+        let metadata = self
+            .candidate
+            .file
+            .metadata()
+            .map_err(|_| TransferError::Source)?;
+        let expected_size = self
+            .prefix_bytes
+            .checked_add(self.transferred)
+            .ok_or(TransferError::Limit)?;
+        if metadata.len() != expected_size || file_has_multiple_links(&metadata) {
+            return Err(TransferError::IntegrityMismatch);
+        }
+        self.candidate
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| TransferError::Source)?;
+        if self.mode == FileWriteMode::Append {
+            let expected_prefix = self
+                .prefix_digest
+                .as_ref()
+                .ok_or(TransferError::IntegrityMismatch)?;
+            if expected_prefix.algorithm != "sha256"
+                || hash_exact(
+                    &mut self.candidate.file,
+                    self.prefix_bytes,
+                    operations,
+                    operation_id,
+                )? != expected_prefix.value
+            {
+                return Err(TransferError::IntegrityMismatch);
+            }
+        } else if self.prefix_bytes != 0 || self.prefix_digest.is_some() {
+            return Err(TransferError::IntegrityMismatch);
+        }
+        if self.transfer_digest.algorithm != "sha256"
+            || hash_exact(
+                &mut self.candidate.file,
+                self.transferred,
+                operations,
+                operation_id,
+            )? != self.transfer_digest.value
+        {
+            return Err(TransferError::IntegrityMismatch);
+        }
+        check_operation(operations, operation_id)?;
+        let mount = Arc::clone(self.candidate.mount());
+        let _mutation = mount.mutation_guard();
+        let current = observe_destination(&mount, &self.path)?.map(|(_, revision)| revision);
+        if current != self.open_revision {
+            return Err(TransferError::Conflict);
+        }
+        validate_commit_mode(self.mode, current.as_ref())?;
+        check_operation(operations, operation_id)?;
+        if let Some(executable) = self.executable {
+            set_executable(&self.candidate.file, executable).map_err(|_| TransferError::Denied)?;
+        }
+        let replace = self.mode != FileWriteMode::Create;
+        mount
+            .publish_candidate(&mut self.candidate, &self.path, replace)
+            .map_err(map_mount_error)?;
+        let candidate_metadata = self
+            .candidate
+            .file
+            .metadata()
+            .map_err(|_| TransferError::UnknownOutcome)?;
+        let opened = mount
+            .open_regular(&self.path)
+            .map_err(|_| TransferError::UnknownOutcome)?;
+        if file_revision(&candidate_metadata) != file_revision(&opened.metadata) {
+            return Err(TransferError::UnknownOutcome);
+        }
+        Ok(WriterCommitOutput {
+            info: file_info(&self.path, &opened.metadata),
+            transferred_bytes: self.transferred,
+            transfer_digest: self.transfer_digest.clone(),
+        })
+    }
+}
+
+impl TransferState {
+    fn prune(&mut self, now: Instant, ttl: Duration) {
+        while self
+            .terminal_order
+            .front()
+            .is_some_and(|(_, completed)| now.duration_since(*completed) >= ttl)
+        {
+            if let Some((handle, _)) = self.terminal_order.pop_front() {
+                self.records.remove(&handle);
+            }
+        }
+    }
+
+    fn reclaim_terminal(&mut self) -> bool {
+        while let Some((handle, _)) = self.terminal_order.pop_front() {
+            if self.records.remove(&handle).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn hash_exact(
+    file: &mut std::fs::File,
+    mut remaining: u64,
+    operations: &OperationRegistry,
+    operation_id: &str,
+) -> Result<String, TransferError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        check_operation(operations, operation_id)?;
+        let limit = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file
+            .read(&mut buffer[..limit])
+            .map_err(|_| TransferError::Source)?;
+        if read == 0 {
+            return Err(TransferError::IntegrityMismatch);
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn check_operation(
+    operations: &OperationRegistry,
+    operation_id: &str,
+) -> Result<(), TransferError> {
+    match operations.interruption(operation_id) {
+        Some(OperationInterruption::Cancelled) => Err(TransferError::Cancelled),
+        Some(OperationInterruption::TimedOut) => Err(TransferError::Timeout),
+        None => Ok(()),
+    }
+}
+
+fn validate_open_mode(
+    mode: FileWriteMode,
+    current: Option<&FileRevision>,
+    expected: Option<&FileRevision>,
+) -> Result<(), TransferError> {
+    if let Some(expected) = expected
+        && current != Some(expected)
+    {
+        return Err(TransferError::Conflict);
+    }
+    match mode {
+        FileWriteMode::Create if current.is_some() => Err(TransferError::Conflict),
+        FileWriteMode::Replace | FileWriteMode::Append if current.is_none() => {
+            Err(TransferError::NotFound)
+        }
+        FileWriteMode::Append if expected.is_none() => Err(TransferError::Conflict),
+        _ => Ok(()),
+    }
+}
+
+fn validate_commit_mode(
+    mode: FileWriteMode,
+    current: Option<&FileRevision>,
+) -> Result<(), TransferError> {
+    match mode {
+        FileWriteMode::Create if current.is_some() => Err(TransferError::Conflict),
+        FileWriteMode::Replace | FileWriteMode::Append if current.is_none() => {
+            Err(TransferError::Conflict)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn observe_destination(
+    mount: &Arc<Mount>,
+    path: &EIPPath,
+) -> Result<Option<(std::fs::Metadata, FileRevision)>, TransferError> {
+    match mount.metadata(path, false) {
+        Ok(metadata) if metadata.is_symlink() => return Err(TransferError::Denied),
+        Ok(metadata) if !metadata.is_file() => return Err(TransferError::Denied),
+        Ok(_) => {}
+        Err(MountPathError::NotFound) => return Ok(None),
+        Err(error) => return Err(map_mount_error(error)),
+    }
+    let opened = mount.open_regular(path).map_err(map_mount_error)?;
+    let revision = file_revision(&opened.metadata);
+    Ok(Some((opened.metadata, revision)))
+}
+
+pub(crate) fn file_info(path: &EIPPath, metadata: &std::fs::Metadata) -> FileInfo {
+    let kind = if metadata.is_file() {
+        FileKind::File
+    } else if metadata.is_dir() {
+        FileKind::Directory
+    } else if metadata.file_type().is_symlink() {
+        FileKind::Symlink
+    } else {
+        FileKind::Other
+    };
+    FileInfo {
+        path: path.clone(),
+        kind,
+        size_bytes: metadata.is_file().then_some(metadata.len()),
+        modified_at: metadata.modified().ok().map(chrono::DateTime::from),
+        executable: executable(metadata),
+        revision: cfg!(unix).then(|| file_revision(metadata)),
+    }
+}
+
+pub(crate) fn file_revision(metadata: &std::fs::Metadata) -> FileRevision {
+    let mut hasher = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for value in [
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime() as u64,
+            metadata.mtime_nsec() as u64,
+            metadata.ctime() as u64,
+            metadata.ctime_nsec() as u64,
+            metadata.mode() as u64,
+        ] {
+            hasher.update(value.to_be_bytes());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        hasher.update(metadata.len().to_be_bytes());
+        if let Ok(modified) = metadata.modified()
+            && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH)
+        {
+            hasher.update(duration.as_nanos().to_be_bytes());
+        }
+    }
+    FileRevision(format!("r1-{:x}", hasher.finalize()))
+}
+
+#[cfg(unix)]
+fn executable(metadata: &std::fs::Metadata) -> Option<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    metadata
+        .is_file()
+        .then(|| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable(metadata: &std::fs::Metadata) -> Option<bool> {
+    metadata.is_file().then_some(false)
+}
+
+#[cfg(unix)]
+fn set_executable(file: &std::fs::File, executable: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = file.metadata()?.permissions();
+    let mut mode = permissions.mode();
+    mode = if executable {
+        mode | 0o100
+    } else {
+        mode & !0o111
+    };
+    permissions.set_mode(mode);
+    file.set_permissions(permissions)
+}
+
+#[cfg(not(unix))]
+fn set_executable(_file: &std::fs::File, executable: bool) -> std::io::Result<()> {
+    if executable {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "executable bits are unsupported",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn set_permissions_from(file: &std::fs::File, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(
+        metadata.permissions().mode() & 0o777,
+    ))
+}
+
+#[cfg(not(unix))]
+fn set_permissions_from(
+    _file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn file_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() != 1
+}
+
+#[cfg(not(unix))]
+fn file_has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn expired(
+    absolute: chrono::DateTime<chrono::Utc>,
+    last_progress: Instant,
+    idle_ttl: Duration,
+) -> bool {
+    absolute <= chrono::Utc::now() || last_progress.elapsed() >= idle_ttl
+}
+
+fn map_mount_error(error: MountPathError) -> TransferError {
+    match error {
+        MountPathError::Invalid => TransferError::Protocol,
+        MountPathError::Denied | MountPathError::NotRegular => TransferError::Denied,
+        MountPathError::NotFound => TransferError::NotFound,
+        MountPathError::AlreadyExists => TransferError::Conflict,
+        MountPathError::Limit => TransferError::Limit,
+        MountPathError::Quota => TransferError::Quota,
+        MountPathError::Unsupported => TransferError::Unsupported,
+        MountPathError::UnknownOutcome => TransferError::UnknownOutcome,
+        MountPathError::Io => TransferError::Source,
+        MountPathError::Internal => TransferError::Internal,
+    }
+}
+
+fn map_registry_error(_error: RegistryError) -> TransferError {
+    TransferError::Internal
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::{Seek, Write},
+        path::PathBuf,
+    };
+
+    use sha2::{Digest, Sha256};
+    use tokio::sync::mpsc;
+
+    use crate::{
+        config::{Config, TrustedMountConfig},
+        eip::{
+            DataFrame, DataFrameKind, EIPCallContext, EIPPath, FileReaderOpenParams, FileWriteMode,
+            FileWriterCommitParams, FileWriterOpenParams,
+        },
+        mount::MountRegistry,
+        operation::{OperationRegistry, random_selector},
+    };
+
+    use super::{
+        ContentDigest, FileWriterAbortStatus, TransferError, TransferRecord, TransferRegistry,
+        WriterPhase, file_revision,
+    };
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(
+                random_selector("agent-envd-transfer-test").expect("random temporary directory"),
+            );
+            fs::create_dir(&path).expect("creates temporary directory");
+            Self(path)
+        }
+
+        fn child(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn context(operation_id: &str) -> EIPCallContext {
+        EIPCallContext {
+            operation_id: operation_id.to_owned(),
+            deadline: None,
+            idempotency_key: None,
+        }
+    }
+
+    fn path(value: &str) -> EIPPath {
+        EIPPath {
+            mount_id: "workspace".to_owned(),
+            path: value.to_owned(),
+        }
+    }
+
+    fn setup() -> (
+        TempTree,
+        Config,
+        MountRegistry,
+        TransferRegistry,
+        mpsc::Receiver<DataFrame>,
+    ) {
+        setup_with_idle_ttl(60_000)
+    }
+
+    fn setup_with_idle_ttl(
+        idle_ttl_ms: u64,
+    ) -> (
+        TempTree,
+        Config,
+        MountRegistry,
+        TransferRegistry,
+        mpsc::Receiver<DataFrame>,
+    ) {
+        let tree = TempTree::new();
+        let native_root = tree.child("native");
+        let staging_root = tree.child("staging");
+        fs::create_dir(&native_root).expect("creates native root");
+        fs::create_dir(&staging_root).expect("creates staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging_root, fs::Permissions::from_mode(0o700))
+                .expect("makes staging private");
+        }
+
+        let mut config = Config::for_test("env-transfer-test");
+        config.limits.max_staged_file_objects = 1;
+        config.limits.file_transfer_idle_ttl_ms = idle_ttl_ms;
+        config.mounts.push(TrustedMountConfig {
+            mount_id: "workspace".to_owned(),
+            native_root,
+            staging_root: Some(staging_root),
+            writable: true,
+            exclusive_mutation_control: true,
+            allow_command_execution: false,
+            max_file_bytes: 1024 * 1024,
+            allowed_operations: vec!["open_reader".to_owned(), "open_writer".to_owned()],
+        });
+        let mounts = MountRegistry::initialize(&config).expect("initializes mount registry");
+        let transfers = TransferRegistry::new(&config).expect("initializes transfer registry");
+        let (sender, receiver) = mpsc::channel(16);
+        transfers
+            .install_outbound(sender)
+            .expect("installs outbound data sender");
+        (tree, config, mounts, transfers, receiver)
+    }
+
+    #[tokio::test]
+    async fn reader_stream_requires_terminal_ack_before_complete_close() {
+        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let content = b"reader-content";
+        fs::write(tree.child("native/source.bin"), content).expect("writes source");
+        let opened = transfers
+            .open_reader(
+                &mounts,
+                &FileReaderOpenParams {
+                    context: context("open-reader"),
+                    path: path("/source.bin"),
+                    byte_range: None,
+                    expected_revision: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens reader");
+
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: opened.reader.0.clone(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("attaches reader");
+        assert_eq!(
+            outbound.recv().await.expect("attached frame").kind,
+            DataFrameKind::Attached
+        );
+        let mut received = Vec::new();
+        loop {
+            let frame = outbound.recv().await.expect("reader frame");
+            match frame.kind {
+                DataFrameKind::Chunk => {
+                    assert_eq!(frame.offset, received.len() as u64);
+                    received.extend(frame.payload);
+                }
+                DataFrameKind::End => {
+                    assert_eq!(frame.offset, received.len() as u64);
+                    break;
+                }
+                other => panic!("unexpected reader frame: {other:?}"),
+            }
+        }
+        assert_eq!(received, content);
+        assert_eq!(
+            transfers.close_reader(&opened.reader, true).await,
+            Err(TransferError::WrongState)
+        );
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::EndAck,
+                handle: opened.reader.0.clone(),
+                offset: received.len() as u64,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("acknowledges reader end");
+        let completion = transfers
+            .close_reader(&opened.reader, true)
+            .await
+            .expect("closes complete reader")
+            .completion;
+        assert!(completion.complete);
+        assert_eq!(completion.produced_bytes, content.len() as u64);
+        assert_eq!(
+            completion.digest.expect("complete digest").value,
+            format!("{:x}", Sha256::digest(content))
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_commit_is_atomic_and_reset_releases_staging_quota() {
+        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let missing_mount = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("missing-mount"),
+                    path: EIPPath {
+                        mount_id: "missing".to_owned(),
+                        path: "/denied.bin".to_owned(),
+                    },
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await;
+        assert_eq!(missing_mount, Err(TransferError::Denied));
+
+        let opened = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("open-writer"),
+                    path: path("/target.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens writer after denied open released quota");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: opened.writer.0.clone(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("attaches writer");
+        assert_eq!(
+            outbound.recv().await.expect("attached frame").kind,
+            DataFrameKind::Attached
+        );
+        let content = b"writer-content";
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Chunk,
+                handle: opened.writer.0.clone(),
+                offset: 0,
+                payload: content.to_vec(),
+                reset_status: None,
+            })
+            .await
+            .expect("uploads chunk");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::End,
+                handle: opened.writer.0.clone(),
+                offset: content.len() as u64,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("seals writer");
+        assert_eq!(
+            outbound.recv().await.expect("end ack").kind,
+            DataFrameKind::EndAck
+        );
+        let digest = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            value: format!("{:x}", Sha256::digest(content)),
+        };
+        let operations = OperationRegistry::new(
+            "env-test".to_owned(),
+            7,
+            16,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let writer = opened.writer;
+        let commit = transfers
+            .prepare_commit(&FileWriterCommitParams {
+                context: context("commit-writer"),
+                writer: writer.clone(),
+                transferred_bytes: content.len() as u64,
+                transfer_digest: digest.clone(),
+            })
+            .await
+            .expect("prepares commit");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Reset,
+                handle: writer.0.clone(),
+                offset: content.len() as u64,
+                payload: Vec::new(),
+                reset_status: Some(crate::eip::DataResetStatus::Cancelled),
+            })
+            .await
+            .expect("operation-owned writer ignores session reset");
+        assert_eq!(
+            transfers
+                .abort_writer(&writer)
+                .await
+                .expect("observes commit handoff"),
+            FileWriterAbortStatus::CommitInProgress
+        );
+        let commit_result = commit.execute(operations, "commit-writer".to_owned()).await;
+        let commit = commit_result.unwrap_or_else(|error| {
+            let native = fs::read_dir(tree.child("native"))
+                .expect("lists native root")
+                .map(|entry| entry.expect("native entry").file_name())
+                .collect::<Vec<_>>();
+            let staging = fs::read_dir(tree.child("staging"))
+                .expect("lists staging root")
+                .map(|entry| entry.expect("staging entry").file_name())
+                .collect::<Vec<_>>();
+            panic!("commits writer: {error:?}; native={native:?}; staging={staging:?}")
+        });
+        assert_eq!(commit.transfer_digest, digest);
+        assert_eq!(
+            fs::read(tree.child("native/target.bin")).expect("reads target"),
+            content
+        );
+
+        let reset = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("reset-writer"),
+                    path: path("/reset.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens writer after commit released quota");
+        let protocol_error = transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Chunk,
+                handle: reset.writer.0.clone(),
+                offset: 0,
+                payload: b"invalid-before-attach".to_vec(),
+                reset_status: None,
+            })
+            .await;
+        assert_eq!(protocol_error, Err(TransferError::Protocol));
+        assert_eq!(
+            transfers
+                .abort_writer(&reset.writer)
+                .await
+                .expect("observes reset writer"),
+            FileWriterAbortStatus::AlreadyAborted
+        );
+        let after_reset = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("after-reset"),
+                    path: path("/after-reset.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens writer after reset released quota");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Reset,
+                handle: after_reset.writer.0.clone(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: Some(crate::eip::DataResetStatus::Cancelled),
+            })
+            .await
+            .expect("accepts client reset");
+        let reset_ack = outbound.recv().await.expect("reset acknowledgement");
+        assert_eq!(reset_ack.kind, DataFrameKind::Reset);
+        assert_eq!(reset_ack.handle, after_reset.writer.0);
+        assert_eq!(
+            transfers
+                .abort_writer(&after_reset.writer)
+                .await
+                .expect("observes reset writer"),
+            FileWriterAbortStatus::AlreadyAborted
+        );
+    }
+
+    #[tokio::test]
+    async fn session_close_retains_commit_record_until_native_owner_finishes() {
+        let (tree, _config, mounts, transfers, _outbound) = setup();
+        let opened = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("close-during-commit-open"),
+                    path: path("/close-during-commit.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens writer");
+        let digest = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            value: format!("{:x}", Sha256::digest(b"")),
+        };
+        let record = match transfers
+            .record(&opened.writer.0)
+            .expect("writer record exists")
+        {
+            TransferRecord::Writer(record) => record,
+            TransferRecord::Reader(_) => panic!("writer record expected"),
+        };
+        {
+            let mut writer = record.lock().await;
+            writer.phase = WriterPhase::Sealed;
+            writer.digest = Some(digest.clone());
+        }
+        let commit = transfers
+            .prepare_commit(&FileWriterCommitParams {
+                context: context("close-during-commit"),
+                writer: opened.writer.clone(),
+                transferred_bytes: 0,
+                transfer_digest: digest,
+            })
+            .await
+            .expect("hands candidate to commit owner");
+        transfers.close_session().await;
+        assert!(transfers.has_active());
+        transfers.reconcile_committing().await;
+        assert!(!transfers.has_active());
+        assert_eq!(
+            transfers
+                .abort_writer(&opened.writer)
+                .await
+                .expect("retained commit remains observable"),
+            FileWriterAbortStatus::CommitInProgress
+        );
+
+        let operations = OperationRegistry::new(
+            "env-test".to_owned(),
+            7,
+            16,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        commit
+            .execute(operations, "close-during-commit".to_owned())
+            .await
+            .expect("native commit finishes after session close");
+        assert!(!transfers.has_active());
+        assert_eq!(
+            fs::read(tree.child("native/close-during-commit.bin")).expect("reads committed file"),
+            b""
+        );
+        assert_eq!(
+            transfers
+                .open_writer(
+                    &mounts,
+                    &FileWriterOpenParams {
+                        context: context("late-open"),
+                        path: path("/late-open.bin"),
+                        mode: FileWriteMode::Create,
+                        expected_revision: None,
+                        executable: None,
+                        transfer_deadline: None,
+                    },
+                )
+                .await,
+            Err(TransferError::SessionClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn append_commit_rehashes_the_staged_prefix() {
+        let (tree, _config, mounts, transfers, mut outbound) = setup();
+        let target = tree.child("native/append.bin");
+        fs::write(&target, b"prefix").expect("writes append target");
+        let mount = mounts.get("workspace").expect("workspace mount");
+        let revision = file_revision(
+            &mount
+                .open_regular(&path("/append.bin"))
+                .expect("opens append target")
+                .metadata,
+        );
+        let opened = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("append-open"),
+                    path: path("/append.bin"),
+                    mode: FileWriteMode::Append,
+                    expected_revision: Some(revision),
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens append writer");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: opened.writer.0.clone(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("attaches append writer");
+        assert_eq!(
+            outbound.recv().await.expect("attached frame").kind,
+            DataFrameKind::Attached
+        );
+        let suffix = b"-suffix";
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Chunk,
+                handle: opened.writer.0.clone(),
+                offset: 0,
+                payload: suffix.to_vec(),
+                reset_status: None,
+            })
+            .await
+            .expect("uploads append suffix");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::End,
+                handle: opened.writer.0.clone(),
+                offset: suffix.len() as u64,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("seals append writer");
+        assert_eq!(
+            outbound.recv().await.expect("end ack").kind,
+            DataFrameKind::EndAck
+        );
+
+        let record = match transfers
+            .record(&opened.writer.0)
+            .expect("append writer record")
+        {
+            TransferRecord::Writer(record) => record,
+            TransferRecord::Reader(_) => panic!("writer record expected"),
+        };
+        let mut candidate = {
+            let writer = record.lock().await;
+            writer
+                .candidate
+                .as_ref()
+                .expect("staged candidate")
+                .file
+                .try_clone()
+                .expect("clones staged candidate")
+        };
+        candidate
+            .seek(std::io::SeekFrom::Start(0))
+            .expect("seeks staged prefix");
+        candidate.write_all(b"X").expect("corrupts staged prefix");
+        candidate.sync_all().expect("syncs corruption");
+
+        let digest = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            value: format!("{:x}", Sha256::digest(suffix)),
+        };
+        let operations = OperationRegistry::new(
+            "env-test".to_owned(),
+            7,
+            16,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let result = transfers
+            .prepare_commit(&FileWriterCommitParams {
+                context: context("append-commit"),
+                writer: opened.writer,
+                transferred_bytes: suffix.len() as u64,
+                transfer_digest: digest,
+            })
+            .await
+            .expect("hands off append commit")
+            .execute(operations, "append-commit".to_owned())
+            .await;
+        assert!(matches!(result, Err(TransferError::IntegrityMismatch)));
+        assert_eq!(fs::read(target).expect("reads unchanged target"), b"prefix");
+    }
+
+    #[tokio::test]
+    async fn expired_reader_complete_close_becomes_terminal() {
+        let (tree, _config, mounts, transfers, _outbound) = setup_with_idle_ttl(1);
+        fs::write(tree.child("native/expired.bin"), b"expired").expect("writes reader source");
+        let opened = transfers
+            .open_reader(
+                &mounts,
+                &FileReaderOpenParams {
+                    context: context("expiring-reader"),
+                    path: path("/expired.bin"),
+                    byte_range: None,
+                    expected_revision: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens reader");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert_eq!(
+            transfers.close_reader(&opened.reader, true).await,
+            Err(TransferError::Expired)
+        );
+        let incomplete = transfers
+            .close_reader(&opened.reader, false)
+            .await
+            .expect("expired reader retains incomplete close evidence");
+        assert!(!incomplete.completion.complete);
+        assert!(!transfers.is_live_reader(&opened.reader.0));
+    }
+
+    #[tokio::test]
+    async fn expired_writer_cleanup_returns_staging_capacity() {
+        let (tree, _config, mounts, transfers, _outbound) = setup_with_idle_ttl(1);
+        let first = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("expiring-writer"),
+                    path: path("/first.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("first writer opens");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("replacement-writer"),
+                    path: path("/second.bin"),
+                    mode: FileWriteMode::Create,
+                    expected_revision: None,
+                    executable: None,
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("expired writer released the single staging slot");
+        assert_eq!(
+            fs::read_dir(tree.child("staging"))
+                .expect("lists staging")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transfers
+                .abort_writer(&first.writer)
+                .await
+                .expect("expired writer remains terminal"),
+            FileWriterAbortStatus::AlreadyAborted
+        );
+        assert_eq!(
+            transfers
+                .abort_writer(&second.writer)
+                .await
+                .expect("second writer aborts"),
+            FileWriterAbortStatus::Aborted
+        );
+        assert_eq!(
+            fs::read_dir(tree.child("staging"))
+                .expect("lists staging")
+                .count(),
+            0
+        );
+    }
+}

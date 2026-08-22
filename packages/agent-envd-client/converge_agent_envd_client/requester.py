@@ -10,6 +10,8 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from converge_agent_envd_client.eip.v1 import (
+    DataFrame,
+    DataFrameKind,
     EIPRequester,
     JsonRpcErrorResponse,
     JsonRpcRequest,
@@ -23,10 +25,11 @@ from converge_agent_envd_client.errors import (
     EIPMethodError,
     EIPProtocolError,
     EIPRequestTimeoutError,
+    EIPSessionStateError,
     EIPTransportClosedError,
     EIPTransportError,
 )
-from converge_agent_envd_client.transport import EIPTransport
+from converge_agent_envd_client.transport import ControlFrame, EIPTransport
 
 _MAX_JSONRPC_ID = 2**63 - 1
 _RESPONSE_TYPE = cast(
@@ -40,6 +43,81 @@ class _PendingRequest:
     method: MethodSpec[Any, Any]
     future: asyncio.Future[object]
     abandoned: bool = False
+
+
+class TransferChannel:
+    """One bounded logical transfer inbox owned by the coordinator's physical reader."""
+
+    def __init__(self, handle: str, *, inbound_frames: int) -> None:
+        if not isinstance(handle, str) or not handle:
+            raise ValueError("transfer handle must be a non-empty string")
+        if not isinstance(inbound_frames, int) or isinstance(inbound_frames, bool) or inbound_frames < 1:
+            raise ValueError("inbound_frames must be a positive integer")
+        self.handle = handle
+        # One extra slot is reserved for a terminal peer RESET or local error.
+        # The semaphore keeps nonterminal frames at the negotiated allowance
+        # while letting the physical receive loop apply transport backpressure.
+        self._queue: asyncio.Queue[DataFrame | BaseException] = asyncio.Queue(inbound_frames + 1)
+        self._data_slots = asyncio.Semaphore(inbound_frames)
+        self._failed = False
+        self._discarding = False
+        self._discarded = asyncio.Event()
+        self._peer_reset_received = False
+
+    @property
+    def peer_reset_received(self) -> bool:
+        return self._peer_reset_received
+
+    async def receive(self) -> DataFrame:
+        item = await self._queue.get()
+        if isinstance(item, BaseException):
+            raise item
+        if item.kind is not DataFrameKind.RESET:
+            self._data_slots.release()
+        return item
+
+    async def deliver(self, frame: DataFrame) -> None:
+        if self._failed or self._discarding:
+            return
+        if frame.kind is DataFrameKind.RESET:
+            if self._peer_reset_received:
+                raise EIPProtocolError("received duplicate RESET for one EIP transfer")
+            self._peer_reset_received = True
+            self._queue.put_nowait(frame)
+            return
+        acquired = asyncio.create_task(self._data_slots.acquire())
+        discarded = asyncio.create_task(self._discarded.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {acquired, discarded},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if discarded in done or self._failed or self._discarding:
+                if acquired.done() and not acquired.cancelled() and acquired.exception() is None:
+                    self._data_slots.release()
+                return
+            await acquired
+            self._queue.put_nowait(frame)
+        finally:
+            for task in (acquired, discarded):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(acquired, discarded, return_exceptions=True)
+
+    def discard(self) -> None:
+        self._discarding = True
+        self._discarded.set()
+
+    def fail(self, error: BaseException) -> None:
+        if self._failed:
+            return
+        self._failed = True
+        self._discarded.set()
+        try:
+            self._queue.put_nowait(error)
+        except asyncio.QueueFull:
+            # A queued peer RESET already provides a terminal channel event.
+            pass
 
 
 class _AdmissionLimiter:
@@ -95,6 +173,9 @@ class RequestCoordinator(EIPRequester):
         self._admission = _AdmissionLimiter(max_in_flight)
         self._request_timeout = request_timeout
         self._pending: dict[str | int, _PendingRequest] = {}
+        self._transfers: dict[str, TransferChannel] = {}
+        self._retired_transfers: set[str] = set()
+        self._max_transfer_channels = 1
         self._next_id = 1
         self._reader_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
@@ -150,7 +231,7 @@ class RequestCoordinator(EIPRequester):
         self._ensure_reader()
 
         try:
-            await _wait_until(self._transport.send(payload), timeout_at)
+            await _wait_until(self._transport.send(ControlFrame(payload)), timeout_at)
         except TimeoutError as error:
             pending.abandoned = True
             raise EIPRequestTimeoutError(
@@ -187,15 +268,19 @@ class RequestCoordinator(EIPRequester):
         max_in_flight: int,
         max_request_bytes: int,
         max_response_bytes: int,
+        max_transfer_frame_bytes: int,
+        max_concurrent_file_transfers: int,
     ) -> None:
-        if self._pending:
-            raise RuntimeError("cannot reconfigure requester limits with in-flight requests")
-        if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight < 1:
-            raise ValueError("max_in_flight must be a positive integer")
+        if self._pending or self._transfers:
+            raise RuntimeError("cannot reconfigure requester limits with active work")
+        _validate_positive_integer("max_in_flight", max_in_flight)
+        _validate_positive_integer("max_concurrent_file_transfers", max_concurrent_file_transfers)
         self._admission.set_limit(max_in_flight)
+        self._max_transfer_channels = max_concurrent_file_transfers
         self._transport.set_limits(
             max_request_bytes=max_request_bytes,
             max_response_bytes=max_response_bytes,
+            max_transfer_frame_bytes=max_transfer_frame_bytes,
         )
 
     def narrow_limits(
@@ -204,14 +289,80 @@ class RequestCoordinator(EIPRequester):
         max_in_flight: int,
         max_request_bytes: int,
         max_response_bytes: int,
+        max_transfer_frame_bytes: int,
+        max_concurrent_file_transfers: int,
     ) -> None:
-        if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight < 1:
-            raise ValueError("max_in_flight must be a positive integer")
+        _validate_positive_integer("max_in_flight", max_in_flight)
+        _validate_positive_integer("max_concurrent_file_transfers", max_concurrent_file_transfers)
         self._admission.narrow_limit(max_in_flight)
+        self._max_transfer_channels = min(
+            self._max_transfer_channels,
+            max_concurrent_file_transfers,
+        )
         self._transport.set_limits(
             max_request_bytes=max_request_bytes,
             max_response_bytes=max_response_bytes,
+            max_transfer_frame_bytes=max_transfer_frame_bytes,
         )
+
+    def register_transfer(self, handle: str, *, inbound_frames: int = 8) -> TransferChannel:
+        if self._closed or self._terminal_error is not None:
+            raise EIPTransportClosedError("EIP requester is closed") from self._terminal_error
+        if handle in self._transfers:
+            raise EIPSessionStateError("transfer handle is already attached locally")
+        if len(self._transfers) >= self._max_transfer_channels:
+            raise EIPSessionStateError("negotiated concurrent transfer limit is exhausted")
+        channel = TransferChannel(handle, inbound_frames=inbound_frames)
+        self._transfers[handle] = channel
+        self._ensure_reader()
+        return channel
+
+    def unregister_transfer(self, channel: TransferChannel) -> None:
+        if self._transfers.get(channel.handle) is not channel:
+            raise EIPSessionStateError("transfer channel is not registered")
+        del self._transfers[channel.handle]
+
+    def retire_transfer(self, channel: TransferChannel) -> None:
+        self._retire_transfer(channel)
+
+    def transfer_is_retired(self, channel: TransferChannel) -> bool:
+        return channel.handle in self._retired_transfers and channel.handle not in self._transfers
+
+    def complete_retired_transfer(self, handle: str) -> None:
+        self._retired_transfers.discard(handle)
+
+    async def reset_transfer(self, channel: TransferChannel, frame: DataFrame) -> None:
+        if frame.handle != channel.handle or frame.kind is not DataFrameKind.RESET:
+            raise ValueError("reset frame does not match its transfer channel")
+        self._retire_transfer(channel)
+        try:
+            await self._transport.send(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            transport_error = (
+                error if isinstance(error, EIPClientError) else EIPTransportError("failed to reset EIP transfer")
+            )
+            self._terminate(transport_error)
+            await self._transport.close()
+            raise transport_error from error
+
+    async def send_data_frame(self, channel: TransferChannel, frame: DataFrame) -> None:
+        if self._transfers.get(channel.handle) is not channel:
+            raise EIPSessionStateError("transfer channel is not registered")
+        if frame.handle != channel.handle:
+            raise ValueError("data frame handle does not match its transfer channel")
+        try:
+            await self._transport.send(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            transport_error = (
+                error if isinstance(error, EIPClientError) else EIPTransportError("failed to send EIP data frame")
+            )
+            self._terminate(transport_error)
+            await self._transport.close()
+            raise transport_error from error
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -229,7 +380,9 @@ class RequestCoordinator(EIPRequester):
         finally:
             if reader_task is not None:
                 await asyncio.gather(reader_task, return_exceptions=True)
-            self._fail_pending(EIPTransportClosedError("EIP requester closed"))
+            closed = EIPTransportClosedError("EIP requester closed")
+            self._fail_pending(closed)
+            self._fail_transfers(closed)
 
     def _ensure_reader(self) -> None:
         if self._reader_task is None:
@@ -246,36 +399,14 @@ class RequestCoordinator(EIPRequester):
     async def _reader_loop(self) -> None:
         try:
             while not self._closed:
-                payload = await self._transport.receive()
-                response = decode_model(payload, _RESPONSE_TYPE)
-                if response.id is None:
-                    raise EIPProtocolError("received an uncorrelated JSON-RPC error response")
-                pending = self._pending.pop(response.id, None)
-                if pending is None:
-                    raise EIPProtocolError("received an unknown or duplicate JSON-RPC response ID")
-                self._admission.release()
-
-                if isinstance(response, JsonRpcErrorResponse):
-                    if not pending.abandoned:
-                        pending.future.set_exception(EIPMethodError(response.error))
+                frame = await self._transport.receive()
+                if isinstance(frame, ControlFrame):
+                    self._handle_control_frame(frame)
                     continue
-
-                try:
-                    result_payload = json.dumps(
-                        response.result,
-                        ensure_ascii=False,
-                        allow_nan=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ).encode("utf-8")
-                    result = decode_model(result_payload, pending.method.result_type)
-                except Exception as error:
-                    protocol_error = EIPProtocolError(f"invalid {pending.method.name} result from EIP peer")
-                    if not pending.abandoned:
-                        pending.future.set_exception(protocol_error)
-                    raise protocol_error from error
-                if not pending.abandoned:
-                    pending.future.set_result(result)
+                if isinstance(frame, DataFrame):
+                    await self._handle_data_frame(frame)
+                    continue
+                raise EIPProtocolError("transport returned an unsupported EIP frame")
         except asyncio.CancelledError:
             return
         except Exception as error:
@@ -283,10 +414,62 @@ class RequestCoordinator(EIPRequester):
             self._terminate(terminal_error)
             await self._transport.close()
 
+    def _handle_control_frame(self, frame: ControlFrame) -> None:
+        response = decode_model(frame.payload, _RESPONSE_TYPE)
+        if response.id is None:
+            raise EIPProtocolError("received an uncorrelated JSON-RPC error response")
+        pending = self._pending.pop(response.id, None)
+        if pending is None:
+            raise EIPProtocolError("received an unknown or duplicate JSON-RPC response ID")
+        self._admission.release()
+
+        if isinstance(response, JsonRpcErrorResponse):
+            if not pending.abandoned:
+                pending.future.set_exception(EIPMethodError(response.error))
+            return
+
+        try:
+            result_payload = json.dumps(
+                response.result,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            result = decode_model(result_payload, pending.method.result_type)
+        except Exception as error:
+            protocol_error = EIPProtocolError(f"invalid {pending.method.name} result from EIP peer")
+            if not pending.abandoned:
+                pending.future.set_exception(protocol_error)
+            raise protocol_error from error
+        if not pending.abandoned:
+            pending.future.set_result(result)
+
+    async def _handle_data_frame(self, frame: DataFrame) -> None:
+        channel = self._transfers.get(frame.handle)
+        if channel is not None:
+            await channel.deliver(frame)
+            return
+        if frame.handle in self._retired_transfers:
+            if frame.kind is DataFrameKind.RESET:
+                self._retired_transfers.discard(frame.handle)
+            return
+        raise EIPProtocolError("received an EIP data frame for an unknown transfer handle")
+
+    def _retire_transfer(self, channel: TransferChannel) -> None:
+        if self._transfers.get(channel.handle) is not channel:
+            raise EIPSessionStateError("transfer channel is not registered")
+        if len(self._retired_transfers) >= self._max_transfer_channels:
+            raise EIPSessionStateError("retired transfer capacity is awaiting RESET acknowledgements")
+        channel.discard()
+        del self._transfers[channel.handle]
+        self._retired_transfers.add(channel.handle)
+
     def _terminate(self, error: BaseException) -> None:
         if self._terminal_error is None:
             self._terminal_error = error
         self._fail_pending(error)
+        self._fail_transfers(error)
 
     def _fail_pending(self, error: BaseException) -> None:
         pending_requests = tuple(self._pending.values())
@@ -295,6 +478,10 @@ class RequestCoordinator(EIPRequester):
             self._admission.release()
             if not pending.abandoned and not pending.future.done():
                 pending.future.set_exception(error)
+
+    def _fail_transfers(self, error: BaseException) -> None:
+        for channel in self._transfers.values():
+            channel.fail(error)
 
 
 async def _await_shared_close(close_task: asyncio.Task[None]) -> None:
@@ -321,6 +508,11 @@ async def _wait_until[T](awaitable: Awaitable[T], timeout_at: float | None) -> T
         return await awaitable
     async with asyncio.timeout_at(timeout_at):
         return await awaitable
+
+
+def _validate_positive_integer(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
 
 
 def _deadline_expired(timeout_at: float | None) -> bool:

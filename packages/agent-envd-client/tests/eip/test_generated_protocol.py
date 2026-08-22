@@ -1,26 +1,30 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import cast
 
 import pytest
 from converge_agent_envd_client.eip.v1 import (
-    EIP_DESCRIPTOR_SHA256,
     EIP_ERROR_CODES,
     EIP_PROTO_PACKAGE,
     EIP_PROTOCOL_VERSION,
     METHODS,
+    DataFrame,
+    DataFrameKind,
+    DataResetStatus,
     JsonRpcErrorResponse,
     JsonRpcRequest,
     JsonRpcSuccessResponse,
+    decode_data_frame,
     decode_model,
+    encode_data_frame,
     encode_model,
 )
 from converge_agent_envd_client.eip.v1.models import (
     CommandEnvironment,
     CommandNetwork,
+    ContentDigest,
     EIPCallContext,
     EIPError,
     EIPLimits,
@@ -39,8 +43,8 @@ from converge_agent_envd_client.eip.v1.models import (
 from pydantic import BaseModel, ValidationError
 
 REPOSITORY_ROOT = Path(__file__).parents[4]
-DESCRIPTOR_PATH = REPOSITORY_ROOT / "crates/agent-envd/protocol/eip/v1/descriptor.pb"
 GOLDEN_PATH = REPOSITORY_ROOT / "crates/agent-envd/protocol/eip/v1/testdata/golden.json"
+DATA_FRAME_GOLDEN_PATH = REPOSITORY_ROOT / "crates/agent-envd/protocol/eip/v1/testdata/data-frame-golden.json"
 
 
 def valid_eip_limits() -> dict[str, int]:
@@ -60,6 +64,14 @@ def valid_eip_limits() -> dict[str, int]:
         "session_idle_ttl_ms": 1,
         "max_process_records": 1,
         "terminal_process_record_ttl_ms": 1,
+        "max_transfer_frame_bytes": 25,
+        "max_concurrent_file_transfers": 1,
+        "max_file_transfer_records": 1,
+        "file_transfer_record_ttl_ms": 1,
+        "max_staged_file_bytes": 1,
+        "max_staged_file_objects": 1,
+        "file_transfer_idle_ttl_ms": 1,
+        "max_file_transfer_duration_ms": 1,
     }
 
 
@@ -79,16 +91,16 @@ MODEL_TYPES: dict[str, type[BaseModel]] = {
 def test_generated_surface_covers_eip_v1() -> None:
     assert EIP_PROTOCOL_VERSION == "1.0"
     assert EIP_PROTO_PACKAGE == "converge.agent_envd.eip.v1"
-    assert len(METHODS) == 30
+    assert len(METHODS) == 35
     assert len(set(METHODS)) == len(METHODS)
     assert all(method.kind == "request_response" for method in METHODS.values())
     assert all(method.name == name for name, method in METHODS.items())
     assert all(method.introduced == "1.0" for method in METHODS.values())
     assert EIP_ERROR_CODES[ErrorType.RETENTION_GAP] == -32022
-
-
-def test_embedded_descriptor_digest_matches_checked_descriptor() -> None:
-    assert hashlib.sha256(DESCRIPTOR_PATH.read_bytes()).hexdigest() == EIP_DESCRIPTOR_SHA256
+    assert EIP_ERROR_CODES[ErrorType.INTEGRITY_MISMATCH] == -32061
+    transfer_methods = [method for method in METHODS.values() if method.transfer_action is not None]
+    assert len(transfer_methods) == 5
+    assert all(method.transfer_direction is not None for method in transfer_methods)
 
 
 def test_shared_golden_values_round_trip_canonically() -> None:
@@ -100,6 +112,49 @@ def test_shared_golden_values_round_trip_canonically() -> None:
         encoded_model = encode_model(model)
         assert encoded_model == encoded_fixture.encode()
         assert json.loads(encoded_model) == case["value"]
+
+
+def test_generated_data_frame_codec_matches_shared_golden_frames() -> None:
+    fixture = json.loads(DATA_FRAME_GOLDEN_PATH.read_text(encoding="utf-8"))
+    for case in fixture["cases"]:
+        frame = DataFrame(
+            kind=DataFrameKind[case["kind"].upper()],
+            handle=case["handle"],
+            offset=case["offset"],
+            payload=bytes.fromhex(case["payload_hex"]),
+            reset_status=(DataResetStatus[case["reset_status"].upper()] if case["reset_status"] is not None else None),
+        )
+        expected = bytes.fromhex(case["frame_hex"])
+        assert encode_data_frame(frame, max_frame_bytes=1024) == expected
+        assert decode_data_frame(expected, max_frame_bytes=1024) == frame
+
+
+def test_generated_data_frame_codec_rejects_structural_violations() -> None:
+    valid = encode_data_frame(
+        DataFrame(kind=DataFrameKind.ATTACH, handle="reader-1"),
+        max_frame_bytes=1024,
+    )
+    for index, value in ((0, ord("X")), (4, 2), (5, 99), (10, 1), (7, 1)):
+        invalid = bytearray(valid)
+        invalid[index] = value
+        with pytest.raises(ValueError):
+            decode_data_frame(bytes(invalid), max_frame_bytes=1024)
+    with pytest.raises(ValueError):
+        decode_data_frame(valid[:-1], max_frame_bytes=1024)
+    with pytest.raises(ValueError):
+        decode_data_frame(valid + b"\x00", max_frame_bytes=1024)
+    with pytest.raises(ValueError):
+        decode_data_frame(valid, max_frame_bytes=len(valid) - 1)
+
+    invalid_frames = (
+        DataFrame(kind=DataFrameKind.END, handle="reader-1", offset=1, payload=b"x"),
+        DataFrame(kind=DataFrameKind.RESET, handle="reader-1", offset=1),
+        DataFrame(kind=DataFrameKind.ATTACH, handle=""),
+        DataFrame(kind=DataFrameKind.CHUNK, handle="reader-1", offset=2**64 - 1, payload=b"x"),
+    )
+    for frame in invalid_frames:
+        with pytest.raises(ValueError):
+            encode_data_frame(frame, max_frame_bytes=1024)
 
 
 def test_encoder_revalidates_mutated_collection_values() -> None:
@@ -150,6 +205,8 @@ def test_eip_limits_define_a_valid_omitted_output_policy() -> None:
         EIPLimits.model_validate({**limits, "max_processes": 2})
     with pytest.raises(ValidationError, match="max_concurrent_operations cannot exceed"):
         EIPLimits.model_validate({**limits, "max_concurrent_operations": 2})
+    with pytest.raises(ValidationError, match="max_concurrent_file_transfers cannot exceed"):
+        EIPLimits.model_validate({**limits, "max_concurrent_file_transfers": 2})
 
 
 def test_jsonrpc_integer_ids_use_signed_64_bit_range() -> None:
@@ -282,6 +339,14 @@ def test_eip_profile_rejects_noncanonical_paths_and_base64() -> None:
         EncodedBytes(encoding="base64", data="aGVsbG8=")
     with pytest.raises(ValidationError):
         EncodedBytes(encoding="base64", data="AB")
+
+
+def test_sha256_digest_profile_is_exact_and_lowercase() -> None:
+    assert ContentDigest(algorithm="sha256", value="a" * 64).value == "a" * 64
+    with pytest.raises(ValidationError):
+        ContentDigest(algorithm="sha256", value="A" * 64)
+    with pytest.raises(ValidationError):
+        ContentDigest(algorithm="sha256", value="a" * 63)
 
 
 def test_output_capture_rejects_unusable_structural_states() -> None:

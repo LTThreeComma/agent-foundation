@@ -13,7 +13,7 @@ enum MethodKind {
 }
 
 enum IdempotencyClass {
-  reserved 6, 7;
+  reserved 7, 8;
   reserved "IDEMPOTENCY_CLASS_STATE_EXPORT", "IDEMPOTENCY_CLASS_NOTIFICATION";
 
   IDEMPOTENCY_CLASS_UNSPECIFIED = 0;
@@ -22,6 +22,7 @@ enum IdempotencyClass {
   IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY = 3;
   IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL = 4;
   IDEMPOTENCY_CLASS_SESSION_TERMINAL = 5;
+  IDEMPOTENCY_CLASS_SESSION_RESOURCE_REPLAY = 6;
 }
 
 enum IdempotencyKeyMode {
@@ -45,6 +46,20 @@ enum ErrorFamily {
   ERROR_FAMILY_SESSION = 8;
 }
 
+enum TransferAction {
+  TRANSFER_ACTION_UNSPECIFIED = 0;
+  TRANSFER_ACTION_OPEN = 1;
+  TRANSFER_ACTION_CLOSE = 2;
+  TRANSFER_ACTION_COMMIT = 3;
+  TRANSFER_ACTION_ABORT = 4;
+}
+
+enum TransferDirection {
+  TRANSFER_DIRECTION_UNSPECIFIED = 0;
+  TRANSFER_DIRECTION_SERVER_TO_CLIENT = 1;
+  TRANSFER_DIRECTION_CLIENT_TO_SERVER = 2;
+}
+
 message EIPMethodOptions {
   string jsonrpc_method = 1;
   string capability = 2;
@@ -54,6 +69,8 @@ message EIPMethodOptions {
   uint32 introduced_major = 6;
   uint32 introduced_minor = 7;
   ErrorFamily error_family = 8;
+  TransferAction transfer_action = 9;
+  TransferDirection transfer_direction = 10;
 }
 
 message EIPMessageOptions {
@@ -73,6 +90,43 @@ enum EIPStringFormat {
   EIP_STRING_FORMAT_PATH = 2;
   EIP_STRING_FORMAT_BASE64_UNPADDED = 3;
   EIP_STRING_FORMAT_PROTOCOL_VERSION = 4;
+  EIP_STRING_FORMAT_SHA256 = 5;
+}
+
+enum EIPDataFrameKind {
+  EIP_DATA_FRAME_KIND_UNSPECIFIED = 0;
+  EIP_DATA_FRAME_KIND_ATTACH = 1;
+  EIP_DATA_FRAME_KIND_ATTACHED = 2;
+  EIP_DATA_FRAME_KIND_CHUNK = 3;
+  EIP_DATA_FRAME_KIND_END = 4;
+  EIP_DATA_FRAME_KIND_END_ACK = 5;
+  EIP_DATA_FRAME_KIND_RESET = 6;
+}
+
+enum EIPDataResetStatus {
+  EIP_DATA_RESET_STATUS_UNSPECIFIED = 0;
+  EIP_DATA_RESET_STATUS_PROTOCOL = 1;
+  EIP_DATA_RESET_STATUS_DENIED = 2;
+  EIP_DATA_RESET_STATUS_EXPIRED = 3;
+  EIP_DATA_RESET_STATUS_SOURCE = 4;
+  EIP_DATA_RESET_STATUS_LIMIT = 5;
+  EIP_DATA_RESET_STATUS_CANCELLED = 6;
+  EIP_DATA_RESET_STATUS_INTERNAL = 7;
+}
+
+message EIPDataFrameProfileOptions {
+  string magic = 1;
+  uint32 profile_version = 2;
+  uint32 eip_major = 3;
+  uint32 header_bytes = 4;
+  uint32 magic_bytes = 5;
+  uint32 version_bytes = 6;
+  uint32 kind_bytes = 7;
+  uint32 status_bytes = 8;
+  uint32 handle_length_bytes = 9;
+  uint32 reserved_bytes = 10;
+  uint32 stream_offset_bytes = 11;
+  uint32 payload_length_bytes = 12;
 }
 
 message EIPFieldOptions {
@@ -87,6 +141,10 @@ message EIPFieldOptions {
   optional uint64 default_uint = 9;
   optional string default_string = 10;
   bool default_message = 11;
+}
+
+extend google.protobuf.FileOptions {
+  EIPDataFrameProfileOptions eip_data_frame_profile = 51000;
 }
 
 extend google.protobuf.MethodOptions {

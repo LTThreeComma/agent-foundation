@@ -5,17 +5,22 @@ from typing import Protocol
 
 from .methods import (
     ENVIRONMENT_DESCRIBE,
+    FILE_ABORT_WRITER,
+    FILE_CLOSE_READER,
+    FILE_COMMIT_WRITER,
     FILE_COPY,
     FILE_FIND,
     FILE_LIST,
     FILE_MKDIR,
     FILE_MOVE,
-    FILE_PATCH,
-    FILE_READ,
+    FILE_OPEN_READER,
+    FILE_OPEN_WRITER,
+    FILE_PATCH_TEXT,
+    FILE_READ_TEXT,
     FILE_REMOVE,
     FILE_SEARCH,
     FILE_STAT,
-    FILE_WRITE,
+    FILE_WRITE_TEXT,
     INITIALIZE,
     OPERATION_CANCEL,
     OUTPUT_READ,
@@ -49,18 +54,28 @@ from .models import (
     FileMkdirResult,
     FileMoveParams,
     FileMoveResult,
-    FilePatchParams,
-    FilePatchResult,
-    FileReadParams,
-    FileReadResult,
+    FilePatchTextParams,
+    FilePatchTextResult,
+    FileReaderCloseParams,
+    FileReaderCloseResult,
+    FileReaderOpenParams,
+    FileReaderOpenResult,
+    FileReadTextParams,
+    FileReadTextResult,
     FileRemoveParams,
     FileRemoveResult,
     FileSearchParams,
     FileSearchResult,
     FileStatParams,
     FileStatResult,
-    FileWriteParams,
-    FileWriteResult,
+    FileWriterAbortParams,
+    FileWriterAbortResult,
+    FileWriterCommitParams,
+    FileWriterCommitResult,
+    FileWriterOpenParams,
+    FileWriterOpenResult,
+    FileWriteTextParams,
+    FileWriteTextResult,
     InitializeParams,
     InitializeResult,
     OperationCancelParams,
@@ -111,6 +126,15 @@ class EIPClient:
     async def environment_describe(self, params: EnvironmentDescribeParams) -> EnvironmentDescribeResult:
         return await self._requester.request(ENVIRONMENT_DESCRIBE, params)
 
+    async def file_abort_writer(self, params: FileWriterAbortParams) -> FileWriterAbortResult:
+        return await self._requester.request(FILE_ABORT_WRITER, params)
+
+    async def file_close_reader(self, params: FileReaderCloseParams) -> FileReaderCloseResult:
+        return await self._requester.request(FILE_CLOSE_READER, params)
+
+    async def file_commit_writer(self, params: FileWriterCommitParams) -> FileWriterCommitResult:
+        return await self._requester.request(FILE_COMMIT_WRITER, params)
+
     async def file_copy(self, params: FileCopyParams) -> FileCopyResult:
         return await self._requester.request(FILE_COPY, params)
 
@@ -126,11 +150,17 @@ class EIPClient:
     async def file_move(self, params: FileMoveParams) -> FileMoveResult:
         return await self._requester.request(FILE_MOVE, params)
 
-    async def file_patch(self, params: FilePatchParams) -> FilePatchResult:
-        return await self._requester.request(FILE_PATCH, params)
+    async def file_open_reader(self, params: FileReaderOpenParams) -> FileReaderOpenResult:
+        return await self._requester.request(FILE_OPEN_READER, params)
 
-    async def file_read(self, params: FileReadParams) -> FileReadResult:
-        return await self._requester.request(FILE_READ, params)
+    async def file_open_writer(self, params: FileWriterOpenParams) -> FileWriterOpenResult:
+        return await self._requester.request(FILE_OPEN_WRITER, params)
+
+    async def file_patch_text(self, params: FilePatchTextParams) -> FilePatchTextResult:
+        return await self._requester.request(FILE_PATCH_TEXT, params)
+
+    async def file_read_text(self, params: FileReadTextParams) -> FileReadTextResult:
+        return await self._requester.request(FILE_READ_TEXT, params)
 
     async def file_remove(self, params: FileRemoveParams) -> FileRemoveResult:
         return await self._requester.request(FILE_REMOVE, params)
@@ -141,8 +171,8 @@ class EIPClient:
     async def file_stat(self, params: FileStatParams) -> FileStatResult:
         return await self._requester.request(FILE_STAT, params)
 
-    async def file_write(self, params: FileWriteParams) -> FileWriteResult:
-        return await self._requester.request(FILE_WRITE, params)
+    async def file_write_text(self, params: FileWriteTextParams) -> FileWriteTextResult:
+        return await self._requester.request(FILE_WRITE_TEXT, params)
 
     async def initialize(self, params: InitializeParams) -> InitializeResult:
         return await self._requester.request(INITIALIZE, params)

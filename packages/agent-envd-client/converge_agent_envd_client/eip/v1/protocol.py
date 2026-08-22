@@ -11,7 +11,6 @@ EIP_PROTOCOL_VERSION: Final = "1.0"
 EIP_PROTOCOL_MAJOR: Final = 1
 EIP_PROTOCOL_MINOR: Final = 0
 EIP_PROTO_PACKAGE: Final = "converge.agent_envd.eip.v1"
-EIP_DESCRIPTOR_SHA256: Final = "04f2f65327235a7b1cfb97d1a5ecfc50f5b2e95a61a8a48a8f3321ca86f24112"
 
 type JsonRpcId = StrictStr | Annotated[StrictInt, Field(ge=-(2**63), le=2**63 - 1)]
 
@@ -26,7 +25,7 @@ class JsonRpcEnvelope(BaseModel):
             unknown = set(value) - set(cls.model_fields)
             reserved = sorted(name for name in unknown if isinstance(name, str) and name.startswith("eip_"))
             if reserved:
-                raise ValueError(f"unknown reserved JSON-RPC field: {reserved[0]}")
+                raise ValueError("unknown reserved JSON-RPC field: {reserved[0]}")
         return value
 
 

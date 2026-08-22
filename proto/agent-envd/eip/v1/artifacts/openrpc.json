@@ -30,7 +30,141 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/EnvironmentDescribeParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
+    },
+    {
+      "name": "file.abort_writer",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterAbortParams/properties/context"
+          }
+        },
+        {
+          "name": "writer",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterAbortParams/properties/writer"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FileWriterAbortResult"
+        }
+      },
+      "x-eip-capability": "file.write",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "state_idempotent_control",
+      "x-eip-idempotency-key": "optional",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileWriterAbortParams"
+      },
+      "x-eip-transfer-action": "abort",
+      "x-eip-transfer-direction": "client_to_server"
+    },
+    {
+      "name": "file.close_reader",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReaderCloseParams/properties/context"
+          }
+        },
+        {
+          "name": "reader",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReaderCloseParams/properties/reader"
+          }
+        },
+        {
+          "name": "accept_complete",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReaderCloseParams/properties/accept_complete"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FileReaderCloseResult"
+        }
+      },
+      "x-eip-capability": "file.read",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "state_idempotent_control",
+      "x-eip-idempotency-key": "optional",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileReaderCloseParams"
+      },
+      "x-eip-transfer-action": "close",
+      "x-eip-transfer-direction": "server_to_client"
+    },
+    {
+      "name": "file.commit_writer",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterCommitParams/properties/context"
+          }
+        },
+        {
+          "name": "writer",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterCommitParams/properties/writer"
+          }
+        },
+        {
+          "name": "transferred_bytes",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterCommitParams/properties/transferred_bytes"
+          }
+        },
+        {
+          "name": "transfer_digest",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterCommitParams/properties/transfer_digest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FileWriterCommitResult"
+        }
+      },
+      "x-eip-capability": "file.write",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "provider_key_replay",
+      "x-eip-idempotency-key": "optional",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileWriterCommitParams"
+      },
+      "x-eip-transfer-action": "commit",
+      "x-eip-transfer-direction": "client_to_server"
     },
     {
       "name": "file.copy",
@@ -84,6 +218,13 @@
           "schema": {
             "$ref": "schema.json#/$defs/FileCopyParams/properties/require_atomic_destination"
           }
+        },
+        {
+          "name": "require_stable_source",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileCopyParams/properties/require_stable_source"
+          }
         }
       ],
       "result": {
@@ -100,7 +241,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileCopyParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.find",
@@ -177,7 +320,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileFindParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.list",
@@ -240,7 +385,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileListParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.mkdir",
@@ -289,7 +436,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileMkdirParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.move",
@@ -352,52 +501,177 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileMoveParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
-      "name": "file.patch",
+      "name": "file.open_reader",
       "paramStructure": "by-name",
       "params": [
         {
           "name": "context",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FilePatchParams/properties/context"
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/context"
           }
         },
         {
           "name": "path",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FilePatchParams/properties/path"
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/path"
           }
         },
         {
-          "name": "patch_format",
-          "required": true,
+          "name": "byte_range",
+          "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FilePatchParams/properties/patch_format"
-          }
-        },
-        {
-          "name": "patch",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FilePatchParams/properties/patch"
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/byte_range"
           }
         },
         {
           "name": "expected_revision",
-          "required": true,
+          "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FilePatchParams/properties/expected_revision"
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/expected_revision"
+          }
+        },
+        {
+          "name": "transfer_deadline",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/transfer_deadline"
           }
         }
       ],
       "result": {
         "name": "result",
         "schema": {
-          "$ref": "schema.json#/$defs/FilePatchResult"
+          "$ref": "schema.json#/$defs/FileReaderOpenResult"
+        }
+      },
+      "x-eip-capability": "file.read",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "session_resource_replay",
+      "x-eip-idempotency-key": "optional",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileReaderOpenParams"
+      },
+      "x-eip-transfer-action": "open",
+      "x-eip-transfer-direction": "server_to_client"
+    },
+    {
+      "name": "file.open_writer",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/context"
+          }
+        },
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/path"
+          }
+        },
+        {
+          "name": "mode",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/mode"
+          }
+        },
+        {
+          "name": "expected_revision",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/expected_revision"
+          }
+        },
+        {
+          "name": "executable",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/executable"
+          }
+        },
+        {
+          "name": "transfer_deadline",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/transfer_deadline"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FileWriterOpenResult"
+        }
+      },
+      "x-eip-capability": "file.write",
+      "x-eip-error-family": "resource",
+      "x-eip-idempotency": "session_resource_replay",
+      "x-eip-idempotency-key": "optional",
+      "x-eip-introduced": "1.0",
+      "x-eip-kind": "request_response",
+      "x-eip-params-schema": {
+        "$ref": "schema.json#/$defs/FileWriterOpenParams"
+      },
+      "x-eip-transfer-action": "open",
+      "x-eip-transfer-direction": "client_to_server"
+    },
+    {
+      "name": "file.patch_text",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/context"
+          }
+        },
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/path"
+          }
+        },
+        {
+          "name": "patch_format",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/patch_format"
+          }
+        },
+        {
+          "name": "patch",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/patch"
+          }
+        },
+        {
+          "name": "expected_revision",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/expected_revision"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/$defs/FilePatchTextResult"
         }
       },
       "x-eip-capability": "file.write",
@@ -407,60 +681,69 @@
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
-        "$ref": "schema.json#/$defs/FilePatchParams"
-      }
+        "$ref": "schema.json#/$defs/FilePatchTextParams"
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
-      "name": "file.read",
+      "name": "file.read_text",
       "paramStructure": "by-name",
       "params": [
         {
           "name": "context",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/context"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/context"
           }
         },
         {
           "name": "path",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/path"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/path"
           }
         },
         {
-          "name": "offset",
+          "name": "cursor",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/offset"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/cursor"
           }
         },
         {
-          "name": "length",
+          "name": "start_line",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/length"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/start_line"
+          }
+        },
+        {
+          "name": "max_lines",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/max_lines"
+          }
+        },
+        {
+          "name": "max_bytes",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/max_bytes"
           }
         },
         {
           "name": "expected_revision",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/expected_revision"
-          }
-        },
-        {
-          "name": "output_policy",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileReadParams/properties/output_policy"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/expected_revision"
           }
         }
       ],
       "result": {
         "name": "result",
         "schema": {
-          "$ref": "schema.json#/$defs/FileReadResult"
+          "$ref": "schema.json#/$defs/FileReadTextResult"
         }
       },
       "x-eip-capability": "file.read",
@@ -470,8 +753,10 @@
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
-        "$ref": "schema.json#/$defs/FileReadParams"
-      }
+        "$ref": "schema.json#/$defs/FileReadTextParams"
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.remove",
@@ -534,7 +819,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileRemoveParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.search",
@@ -625,7 +912,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileSearchParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "file.stat",
@@ -667,73 +956,61 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/FileStatParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
-      "name": "file.write",
+      "name": "file.write_text",
       "paramStructure": "by-name",
       "params": [
         {
           "name": "context",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/context"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/context"
           }
         },
         {
           "name": "path",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/path"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/path"
           }
         },
         {
           "name": "mode",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/mode"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/mode"
           }
         },
         {
-          "name": "data",
+          "name": "text",
           "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/data"
-          }
-        },
-        {
-          "name": "offset",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/offset"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/text"
           }
         },
         {
           "name": "expected_revision",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/expected_revision"
-          }
-        },
-        {
-          "name": "create_parents",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/create_parents"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/expected_revision"
           }
         },
         {
           "name": "executable",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriteParams/properties/executable"
+            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/executable"
           }
         }
       ],
       "result": {
         "name": "result",
         "schema": {
-          "$ref": "schema.json#/$defs/FileWriteResult"
+          "$ref": "schema.json#/$defs/FileWriteTextResult"
         }
       },
       "x-eip-capability": "file.write",
@@ -743,8 +1020,10 @@
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
-        "$ref": "schema.json#/$defs/FileWriteParams"
-      }
+        "$ref": "schema.json#/$defs/FileWriteTextParams"
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "initialize",
@@ -800,7 +1079,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/InitializeParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "operation.cancel",
@@ -835,7 +1116,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/OperationCancelParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "output.read",
@@ -891,7 +1174,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/OutputReadParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "output.release",
@@ -933,7 +1218,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/OutputReleaseParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "port.inspect",
@@ -968,7 +1255,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/PortInspectParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "port.wait",
@@ -1010,7 +1299,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/PortWaitParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.close_stdin",
@@ -1045,7 +1336,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessCloseStdinParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.inspect",
@@ -1080,7 +1373,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessInspectParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.kill",
@@ -1115,7 +1410,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessKillParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.read_output",
@@ -1178,7 +1475,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessReadOutputParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.release",
@@ -1213,7 +1512,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessReleaseParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.signal",
@@ -1255,7 +1556,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessSignalParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.start",
@@ -1290,7 +1593,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessStartParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.wait",
@@ -1332,7 +1637,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessWaitParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "process.write_stdin",
@@ -1381,7 +1688,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ProcessWriteStdinParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "receipt.get",
@@ -1423,7 +1732,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ReceiptGetParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "session.close",
@@ -1451,7 +1762,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/SessionCloseParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     },
     {
       "name": "shell.exec",
@@ -1486,7 +1799,9 @@
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
         "$ref": "schema.json#/$defs/ShellExecParams"
-      }
+      },
+      "x-eip-transfer-action": null,
+      "x-eip-transfer-direction": null
     }
   ],
   "openrpc": "1.3.2"

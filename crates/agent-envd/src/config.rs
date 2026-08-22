@@ -1,11 +1,22 @@
-use std::{env, error::Error, fmt, path::Path, time::Duration};
+use std::{
+    env,
+    error::Error,
+    fmt, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use serde::Deserialize;
 
 use crate::eip::EIPLimits;
 
 const DEFAULT_MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_OPERATIONS: u64 = 32;
+const DEFAULT_MAX_TRANSFER_FRAME_BYTES: u64 = 256 * 1024;
+const DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS: u64 = 16;
 const DEFAULT_SESSION_IDLE_TTL_MS: u64 = 5 * 60 * 1000;
+const DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS: u64 = 5_000;
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
@@ -30,17 +41,43 @@ const NETWORK_ONLY_VARIABLES: &[&str] = &[
     "AGENT_ENVD_WEBSOCKET_ENABLED",
 ];
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TrustedMountConfig {
+    pub(crate) mount_id: String,
+    pub(crate) native_root: PathBuf,
+    #[serde(default)]
+    pub(crate) staging_root: Option<PathBuf>,
+    pub(crate) writable: bool,
+    pub(crate) exclusive_mutation_control: bool,
+    #[serde(default = "default_allow_command_execution")]
+    pub(crate) allow_command_execution: bool,
+    pub(crate) max_file_bytes: u64,
+    #[serde(default)]
+    pub(crate) allowed_operations: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    #[serde(default)]
+    mounts: Vec<TrustedMountConfig>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) environment_id: String,
     pub(crate) limits: EIPLimits,
     pub(crate) initialization_timeout: Duration,
     pub(crate) session_idle_timeout: Duration,
+    pub(crate) staging_scavenge_timeout: Duration,
+    pub(crate) mounts: Vec<TrustedMountConfig>,
 }
 
 impl Config {
     pub(crate) fn from_environment() -> Result<Self, ConfigError> {
         reject_unknown_environment_variables()?;
+        let file = load_file_config(config_file_argument()?)?;
 
         let transport =
             optional_unicode("AGENT_ENVD_TRANSPORT")?.unwrap_or_else(|| "stdio".to_owned());
@@ -124,6 +161,8 @@ impl Config {
             environment_id,
             initialization_timeout: INITIALIZATION_TIMEOUT,
             session_idle_timeout: Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS),
+            staging_scavenge_timeout: Duration::from_millis(DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS),
+            mounts: file.mounts,
             limits,
         })
     }
@@ -135,8 +174,54 @@ impl Config {
             limits: default_limits(),
             initialization_timeout: Duration::from_millis(20),
             session_idle_timeout: Duration::from_secs(1),
+            staging_scavenge_timeout: Duration::from_secs(1),
+            mounts: Vec::new(),
         }
     }
+}
+
+fn default_allow_command_execution() -> bool {
+    true
+}
+
+fn config_file_argument() -> Result<Option<PathBuf>, ConfigError> {
+    let mut arguments = env::args_os().skip(1);
+    let Some(flag) = arguments.next() else {
+        return Ok(None);
+    };
+    if flag != "--config" {
+        return Err(ConfigError::new(
+            "the only supported argument is --config <absolute-json-path>",
+        ));
+    }
+    let path = arguments
+        .next()
+        .ok_or_else(|| ConfigError::new("--config requires a path"))?;
+    if arguments.next().is_some() {
+        return Err(ConfigError::new("unexpected arguments after --config path"));
+    }
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(ConfigError::new("--config path must be absolute"));
+    }
+    Ok(Some(path))
+}
+
+fn load_file_config(path: Option<PathBuf>) -> Result<FileConfig, ConfigError> {
+    let Some(path) = path else {
+        return Ok(FileConfig::default());
+    };
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| ConfigError::new(format!("cannot inspect config file: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ConfigError::new(
+            "--config must identify a regular file, not a symlink",
+        ));
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| ConfigError::new(format!("cannot read config file: {error}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| ConfigError::new(format!("invalid config file JSON: {error}")))
 }
 
 fn default_limits() -> EIPLimits {
@@ -156,6 +241,14 @@ fn default_limits() -> EIPLimits {
         session_idle_ttl_ms: DEFAULT_SESSION_IDLE_TTL_MS,
         max_process_records: 128,
         terminal_process_record_ttl_ms: 60 * 60 * 1000,
+        max_transfer_frame_bytes: DEFAULT_MAX_TRANSFER_FRAME_BYTES,
+        max_concurrent_file_transfers: DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS,
+        max_file_transfer_records: 128,
+        file_transfer_record_ttl_ms: 60 * 60 * 1000,
+        max_staged_file_bytes: 512 * 1024 * 1024,
+        max_staged_file_objects: 64,
+        file_transfer_idle_ttl_ms: 60 * 1000,
+        max_file_transfer_duration_ms: 15 * 60 * 1000,
     }
 }
 

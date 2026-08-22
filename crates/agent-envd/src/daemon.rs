@@ -1,12 +1,15 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::BTreeMap,
     error::Error,
     fmt,
-    sync::{Mutex as StdMutex, PoisonError},
+    future::Future,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
-use tokio::sync::{Mutex, watch};
+use serde::{Serialize, de::DeserializeOwned};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::{
     config::Config,
@@ -15,12 +18,18 @@ use crate::{
         EnvironmentDescribeParams, EnvironmentDescribeResult, EnvironmentDescriptor, ErrorType,
         InitializeParams, InitializeResult, IsolationBackend, IsolationCleanupGuarantee,
         IsolationMode, IsolationNetworkPolicy, IsolationPosture, JsonRpcErrorResponse, JsonRpcId,
-        JsonRpcRequest, JsonRpcSuccessResponse, RetryHint, SessionCloseParams, SessionCloseResult,
+        JsonRpcRequest, JsonRpcSuccessResponse, ReceiptOutcome, ReceiptStage, RetryHint,
+        SessionCloseParams, SessionCloseResult,
     },
+    mount::MountRegistry,
+    operation::{BeginOutcome, OperationLease, OperationRegistry, RegistryError},
+    resource::{ResourceError, ResourceRegistry},
+    retention::{RetentionError, RetentionQuota, RetentionStore},
+    transfer::{TransferError, TransferRegistry},
 };
 
 const MAX_STRING_REQUEST_ID_BYTES: usize = 128;
-const CAPABILITIES: [&str; 2] = ["environment.describe", "session.close"];
+const BASE_CAPABILITIES: [&str; 2] = ["environment.describe", "session.close"];
 
 macro_rules! unsupported_methods {
     ($($name:ident($params:ty) -> $result:ty;)+) => {
@@ -42,40 +51,233 @@ enum SessionState {
     Closed,
 }
 
+struct SessionAdmission {
+    state: Mutex<SessionAdmissionState>,
+    idle: Notify,
+}
+
+struct SessionAdmissionState {
+    lifecycle: SessionState,
+    active_session_work: usize,
+}
+
+struct SessionWorkGuard<'a> {
+    admission: &'a SessionAdmission,
+}
+
+#[derive(Clone, Default)]
+struct OwnedOperationTasks {
+    inner: Arc<OwnedOperationTasksInner>,
+}
+
 #[derive(Default)]
-struct OperationIds {
-    live: HashSet<String>,
-    terminal: VecDeque<(String, Instant)>,
+struct OwnedOperationTasksInner {
+    state: Mutex<OwnedOperationTaskState>,
+    idle: Notify,
 }
 
-impl OperationIds {
-    fn prune_expired(&mut self, now: Instant, ttl: Duration) {
-        while self
-            .terminal
-            .front()
-            .is_some_and(|(_, completed_at)| now.duration_since(*completed_at) >= ttl)
-        {
-            self.terminal.pop_front();
-        }
-    }
-
-    fn contains(&self, operation_id: &str) -> bool {
-        self.live.contains(operation_id)
-            || self
-                .terminal
-                .iter()
-                .any(|(retained_id, _)| retained_id == operation_id)
-    }
+#[derive(Default)]
+struct OwnedOperationTaskState {
+    tasks: BTreeMap<String, Option<oneshot::Sender<()>>>,
+    draining: bool,
 }
+
+struct OwnedOperationTaskGuard {
+    tasks: OwnedOperationTasks,
+    operation_id: String,
+}
+
+type OwnedOperationResult<T> = oneshot::Receiver<Option<Result<T, EIPError>>>;
 
 pub(crate) struct Daemon {
     descriptor: EnvironmentDescriptor,
-    session: Mutex<SessionState>,
-    operation_ids: StdMutex<OperationIds>,
-    max_operation_records: usize,
-    operation_record_ttl: Duration,
+    session: SessionAdmission,
+    max_operation_duration: Duration,
+    operations: OperationRegistry,
+    owned_operations: OwnedOperationTasks,
+    mounts: MountRegistry,
+    resources: ResourceRegistry,
+    retention: RetentionStore,
+    transfers: TransferRegistry,
     closed: watch::Sender<bool>,
     max_response_bytes: usize,
+}
+
+impl SessionAdmission {
+    fn state(&self) -> MutexGuard<'_, SessionAdmissionState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn admit_work(&self) -> Option<SessionWorkGuard<'_>> {
+        let mut state = self.state();
+        if state.lifecycle != SessionState::Initialized {
+            return None;
+        }
+        state.active_session_work = state
+            .active_session_work
+            .checked_add(1)
+            .expect("session work accounting overflow");
+        Some(SessionWorkGuard { admission: self })
+    }
+
+    fn close(&self) {
+        self.state().lifecycle = SessionState::Closed;
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.state().active_session_work == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for SessionWorkGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.admission.state();
+        state.active_session_work = state
+            .active_session_work
+            .checked_sub(1)
+            .expect("session work guard released exactly once");
+        let idle = state.active_session_work == 0;
+        drop(state);
+        if idle {
+            self.admission.idle.notify_waiters();
+        }
+    }
+}
+
+impl OwnedOperationTasks {
+    fn spawn<T, F>(&self, operation_id: String, future: F) -> OwnedOperationResult<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, EIPError>> + Send + 'static,
+    {
+        let (reconcile_tx, mut reconcile_rx) = oneshot::channel();
+        let (result_tx, result_rx) = oneshot::channel();
+        let mut reconcile_tx = Some(reconcile_tx);
+        let registered = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.draining {
+                false
+            } else {
+                let replaced = state
+                    .tasks
+                    .insert(operation_id.clone(), reconcile_tx.take());
+                assert!(
+                    replaced.is_none(),
+                    "operation task IDs are generation-unique"
+                );
+                true
+            }
+        };
+        if !registered {
+            drop(future);
+            let _ = result_tx.send(None);
+            return result_rx;
+        }
+        let guard = OwnedOperationTaskGuard {
+            tasks: self.clone(),
+            operation_id,
+        };
+        tokio::spawn(async move {
+            let _guard = guard;
+            let mut future = Box::pin(future);
+            let result = tokio::select! {
+                biased;
+                _ = &mut reconcile_rx => {
+                    drop(future);
+                    None
+                }
+                result = future.as_mut() => Some(result),
+            };
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    #[cfg(test)]
+    fn active_ids(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tasks
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn begin_drain(&self) -> Vec<String> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.draining = true;
+        state.tasks.keys().cloned().collect()
+    }
+
+    fn request_reconciliation(&self) {
+        let senders = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.draining = true;
+            state
+                .tasks
+                .values_mut()
+                .filter_map(Option::take)
+                .collect::<Vec<_>>()
+        };
+        for sender in senders {
+            let _ = sender.send(());
+        }
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            let notified = self.inner.idle.notified();
+            if self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .tasks
+                .is_empty()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for OwnedOperationTaskGuard {
+    fn drop(&mut self) {
+        let idle = {
+            let mut state = self
+                .tasks
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.tasks.remove(&self.operation_id);
+            state.tasks.is_empty()
+        };
+        if idle {
+            self.tasks.inner.idle.notify_waiters();
+        }
+    }
 }
 
 impl Daemon {
@@ -94,11 +296,51 @@ impl Daemon {
                 DaemonInitError::new("max_operation_records does not fit this platform")
             })?;
         let operation_record_ttl = Duration::from_millis(config.limits.operation_record_ttl_ms);
+        let mounts = MountRegistry::initialize(config).map_err(|error| {
+            DaemonInitError::new(format!("mount initialization failed: {error}"))
+        })?;
+        let transfers = TransferRegistry::new(config)
+            .map_err(|_| DaemonInitError::new("transfer registry initialization failed"))?;
+        let operations = OperationRegistry::new(
+            config.environment_id.clone(),
+            generation,
+            max_operation_records,
+            operation_record_ttl,
+            Duration::from_millis(config.limits.max_operation_duration_ms),
+        );
+        let retention_quota = RetentionQuota::new(config)
+            .map_err(|_| DaemonInitError::new("retention quota initialization failed"))?;
+        let resources = ResourceRegistry::new(config, operations.clone(), retention_quota.clone())
+            .map_err(|_| DaemonInitError::new("resource registry initialization failed"))?;
+        let retention = RetentionStore::new(config, generation, retention_quota)
+            .map_err(|_| DaemonInitError::new("retention store initialization failed"))?;
+        let mut capabilities = BASE_CAPABILITIES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        capabilities.extend([
+            "operation.cancel".to_owned(),
+            "port.observe".to_owned(),
+            "receipt.read".to_owned(),
+        ]);
+        if mounts.has_complete_read_family() {
+            capabilities.push("file.read".to_owned());
+        }
+        if mounts.has_complete_write_family() {
+            capabilities.push("file.write".to_owned());
+        }
+        if mounts.supports_anywhere("find") {
+            capabilities.push("file.find".to_owned());
+        }
+        if mounts.supports_anywhere("search") {
+            capabilities.push("file.search".to_owned());
+        }
+        capabilities.sort();
         let descriptor = EnvironmentDescriptor {
             environment_id: config.environment_id.clone(),
             generation,
-            capabilities: CAPABILITIES.iter().map(ToString::to_string).collect(),
-            mounts: Vec::new(),
+            capabilities,
+            mounts: mounts.descriptors(),
             shell_profiles: Vec::new(),
             limits: config.limits.clone(),
             isolation: IsolationPosture {
@@ -114,10 +356,20 @@ impl Daemon {
         let (closed, _) = watch::channel(false);
         Ok(Self {
             descriptor,
-            session: Mutex::new(SessionState::Uninitialized),
-            operation_ids: StdMutex::new(OperationIds::default()),
-            max_operation_records,
-            operation_record_ttl,
+            session: SessionAdmission {
+                state: Mutex::new(SessionAdmissionState {
+                    lifecycle: SessionState::Uninitialized,
+                    active_session_work: 0,
+                }),
+                idle: Notify::new(),
+            },
+            max_operation_duration: Duration::from_millis(config.limits.max_operation_duration_ms),
+            operations,
+            owned_operations: OwnedOperationTasks::default(),
+            mounts,
+            resources,
+            retention,
+            transfers,
             closed,
             max_response_bytes,
         })
@@ -125,6 +377,96 @@ impl Daemon {
 
     pub(crate) fn subscribe_closed(&self) -> watch::Receiver<bool> {
         self.closed.subscribe()
+    }
+
+    pub(crate) fn has_active_file_transfers(&self) -> bool {
+        self.transfers.has_active()
+    }
+
+    pub(crate) fn install_data_sender(
+        &self,
+        sender: mpsc::Sender<eip::DataFrame>,
+    ) -> Result<(), DaemonInitError> {
+        self.transfers
+            .install_outbound(sender)
+            .map_err(|_| DaemonInitError::new("stdio data sender is already installed"))
+    }
+
+    pub(crate) async fn handle_data_frame(
+        &self,
+        frame: eip::DataFrame,
+    ) -> Result<(), TransferError> {
+        let _work = self.session.admit_work().ok_or(TransferError::Protocol)?;
+        self.transfers.handle_frame(frame).await
+    }
+
+    pub(crate) async fn transport_closed(&self, budget: Duration) -> bool {
+        self.session.close();
+        self.closed.send_replace(true);
+        self.transfers.begin_session_close();
+        let admission_budget = budget / 2;
+        let admission_idle = tokio::time::timeout(admission_budget, self.session.wait_until_idle())
+            .await
+            .is_ok();
+        let transfers_closed = tokio::time::timeout(
+            budget.saturating_sub(admission_budget),
+            self.transfers.close_session(),
+        )
+        .await
+        .is_ok();
+        admission_idle && transfers_closed
+    }
+
+    pub(crate) async fn drain_owned_operations(&self, budget: Duration) -> bool {
+        let started = Instant::now();
+        for operation_id in self.owned_operations.begin_drain() {
+            self.operations.cancel(&operation_id);
+        }
+        let task_budget = budget / 3;
+        let tasks_drained =
+            if tokio::time::timeout(task_budget, self.owned_operations.wait_until_idle())
+                .await
+                .is_ok()
+            {
+                true
+            } else {
+                self.owned_operations.request_reconciliation();
+                tokio::time::timeout(task_budget, self.owned_operations.wait_until_idle())
+                    .await
+                    .is_ok()
+            };
+        let transfers_reconciled = tokio::time::timeout(
+            budget.saturating_sub(started.elapsed()),
+            self.transfers.reconcile_committing(),
+        )
+        .await
+        .is_ok();
+        tasks_drained && transfers_reconciled
+    }
+
+    async fn await_owned_operation<T>(
+        &self,
+        operation_id: &str,
+        result: OwnedOperationResult<T>,
+    ) -> Result<T, EIPError> {
+        match result.await {
+            Ok(Some(result)) => result,
+            Ok(None) | Err(_) => Err(self
+                .operations
+                .failure_by_operation(operation_id)
+                .unwrap_or_else(|| {
+                    protocol_error(
+                        ErrorType::InternalError,
+                        "owned operation task ended without terminal evidence",
+                    )
+                })),
+        }
+    }
+
+    pub(crate) async fn maintenance(&self) {
+        self.retention.expire();
+        self.resources.expire();
+        self.transfers.expire().await;
     }
 
     pub(crate) async fn handle_payload(&self, payload: &str) -> Vec<u8> {
@@ -148,7 +490,7 @@ impl Daemon {
                         ErrorType::InvalidRequest
                     }
                 };
-                self.close_if_uninitialized().await;
+                self.close_if_uninitialized();
                 return self.error_response(
                     request_id,
                     protocol_error(error_type, error_type_message(error_type)),
@@ -157,7 +499,7 @@ impl Daemon {
         };
 
         if !valid_request_id(&request.id) {
-            self.close_if_uninitialized().await;
+            self.close_if_uninitialized();
             return self.error_response(
                 None,
                 protocol_error(ErrorType::InvalidRequest, "invalid JSON-RPC request ID"),
@@ -181,7 +523,7 @@ impl Daemon {
         let is_initialization = request.method == "initialize";
         let result = eip::dispatch(self, &request.method, &params_json).await;
         if is_initialization && result.is_err() {
-            self.close_if_uninitialized().await;
+            self.close_if_uninitialized();
         }
 
         match result {
@@ -214,11 +556,11 @@ impl Daemon {
     }
 
     async fn preflight(&self, method: &str) -> Result<(), EIPError> {
-        let mut state = self.session.lock().await;
-        match *state {
+        let mut state = self.session.state();
+        match state.lifecycle {
             SessionState::Uninitialized if method == "initialize" => Ok(()),
             SessionState::Uninitialized => {
-                *state = SessionState::Closed;
+                state.lifecycle = SessionState::Closed;
                 self.closed.send_replace(true);
                 Err(protocol_error(
                     ErrorType::NotInitialized,
@@ -252,16 +594,17 @@ impl Daemon {
         }
     }
 
-    async fn close_if_uninitialized(&self) {
-        let mut state = self.session.lock().await;
-        if *state == SessionState::Uninitialized {
-            *state = SessionState::Closed;
+    fn close_if_uninitialized(&self) {
+        let mut state = self.session.state();
+        if state.lifecycle == SessionState::Uninitialized {
+            state.lifecycle = SessionState::Closed;
             self.closed.send_replace(true);
         }
     }
 
-    async fn ensure_initialized(&self) -> Result<(), EIPError> {
-        if *self.session.lock().await == SessionState::Initialized {
+    #[allow(clippy::result_large_err)]
+    fn ensure_initialized(&self) -> Result<(), EIPError> {
+        if self.session.state().lifecycle == SessionState::Initialized {
             Ok(())
         } else {
             Err(protocol_error(
@@ -271,46 +614,58 @@ impl Daemon {
         }
     }
 
-    // EIPError is generated and intentionally carries complete bounded evidence.
     #[allow(clippy::result_large_err)]
-    fn begin_operation<'a>(
+    fn admit_record<P: Serialize>(
+        &self,
+        method: &str,
+        context: &eip::EIPCallContext,
+        params: &P,
+        key_allowed: bool,
+    ) -> Result<BeginOutcome, EIPError> {
+        let session = self.session.state();
+        if session.lifecycle != SessionState::Initialized {
+            return Err(protocol_error(
+                ErrorType::NotInitialized,
+                "session is not initialized",
+            ));
+        }
+        self.begin_record(method, context, params, key_allowed)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn admit_owned_record<'a, P: Serialize>(
         &'a self,
-        operation_id: &str,
-        idempotency_key: Option<&str>,
-    ) -> Result<OperationGuard<'a>, EIPError> {
-        if idempotency_key.is_some() {
-            return Err(protocol_error(
-                ErrorType::InvalidParams,
-                "idempotency_key is not allowed for this method",
-            ));
-        }
-        let now = Instant::now();
-        let mut operation_ids = self
-            .operation_ids
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        operation_ids.prune_expired(now, self.operation_record_ttl);
-        if operation_ids.contains(operation_id) {
-            return Err(protocol_error(
-                ErrorType::Conflict,
-                "operation_id is already active or retained",
-            ));
-        }
-        while operation_ids.live.len() + operation_ids.terminal.len() >= self.max_operation_records
-        {
-            if operation_ids.terminal.pop_front().is_none() {
-                let mut error = protocol_error(
-                    ErrorType::Busy,
-                    "operation record capacity is currently exhausted",
-                );
-                error.data.retry_hint = RetryHint::AfterCapacity;
-                return Err(error);
-            }
-        }
-        operation_ids.live.insert(operation_id.to_owned());
-        Ok(OperationGuard {
-            daemon: self,
-            operation_id: operation_id.to_owned(),
+        method: &str,
+        context: &eip::EIPCallContext,
+        params: &P,
+    ) -> Result<(SessionWorkGuard<'a>, BeginOutcome), EIPError> {
+        let work = self.session.admit_work().ok_or_else(|| {
+            protocol_error(ErrorType::NotInitialized, "session is not initialized")
+        })?;
+        let operation = self.begin_record(method, context, params, true)?;
+        Ok((work, operation))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn begin_record<P: Serialize>(
+        &self,
+        method: &str,
+        context: &eip::EIPCallContext,
+        params: &P,
+        key_allowed: bool,
+    ) -> Result<BeginOutcome, EIPError> {
+        self.operations
+            .begin(method, context, params, key_allowed)
+            .map_err(map_registry_error)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn decode_replay<R: DeserializeOwned>(&self, value: serde_json::Value) -> Result<R, EIPError> {
+        serde_json::from_value(value).map_err(|_| {
+            protocol_error(
+                ErrorType::InternalError,
+                "retained operation result failed validation",
+            )
         })
     }
 
@@ -330,58 +685,31 @@ impl Daemon {
     }
 }
 
-struct OperationGuard<'a> {
-    daemon: &'a Daemon,
-    operation_id: String,
-}
-
-impl Drop for OperationGuard<'_> {
-    fn drop(&mut self) {
-        let mut operation_ids = self
-            .daemon
-            .operation_ids
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        operation_ids.live.remove(&self.operation_id);
-        operation_ids
-            .terminal
-            .push_back((self.operation_id.clone(), Instant::now()));
-        while operation_ids.live.len() + operation_ids.terminal.len()
-            > self.daemon.max_operation_records
-        {
-            operation_ids.terminal.pop_front();
-        }
-    }
-}
-
 impl EipHandler for Daemon {
     async fn environment_describe(
         &self,
         params: EnvironmentDescribeParams,
     ) -> Result<EnvironmentDescribeResult, EIPError> {
-        self.ensure_initialized().await?;
-        let _operation = self.begin_operation(
-            &params.context.operation_id,
-            params.context.idempotency_key.as_deref(),
-        )?;
-        if params
-            .context
-            .deadline
-            .is_some_and(|deadline| deadline <= chrono::Utc::now())
-        {
-            return Err(protocol_error(
-                ErrorType::Timeout,
-                "operation deadline has expired",
-            ));
-        }
-        Ok(EnvironmentDescribeResult {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("environment.describe", &params.context, &params, false)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let result = EnvironmentDescribeResult {
             descriptor: self.descriptor.clone(),
-        })
+        };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
     }
 
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult, EIPError> {
-        let mut state = self.session.lock().await;
-        if *state != SessionState::Uninitialized {
+        let mut state = self.session.state();
+        if state.lifecycle != SessionState::Uninitialized {
             return Err(protocol_error(
                 ErrorType::AlreadyInitialized,
                 "session is already initialized",
@@ -417,12 +745,12 @@ impl EipHandler for Daemon {
         };
 
         if let Some(error) = failure {
-            *state = SessionState::Closed;
+            state.lifecycle = SessionState::Closed;
             self.closed.send_replace(true);
             return Err(error);
         }
 
-        *state = SessionState::Initialized;
+        state.lifecycle = SessionState::Initialized;
         Ok(InitializeResult {
             protocol_version: eip::EIP_PROTOCOL_VERSION.to_owned(),
             server: EIPServerInfo {
@@ -437,43 +765,822 @@ impl EipHandler for Daemon {
         &self,
         params: SessionCloseParams,
     ) -> Result<SessionCloseResult, EIPError> {
-        self.ensure_initialized().await?;
-        let _operation = self.begin_operation(
-            &params.context.operation_id,
-            params.context.idempotency_key.as_deref(),
-        )?;
-        if params
-            .context
-            .deadline
-            .is_some_and(|deadline| deadline <= chrono::Utc::now())
-        {
+        ensure_deadline(&params.context)?;
+        let operation = {
+            let mut session = self.session.state();
+            if session.lifecycle != SessionState::Initialized {
+                return Err(protocol_error(
+                    ErrorType::NotInitialized,
+                    "session is not initialized",
+                ));
+            }
+            let operation = self.begin_record("session.close", &params.context, &params, false)?;
+            session.lifecycle = SessionState::Closed;
+            operation
+        };
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        self.closed.send_replace(true);
+        self.transfers.begin_session_close();
+        self.session.wait_until_idle().await;
+        self.transfers.close_session().await;
+        let result = SessionCloseResult { closed: true };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_open_reader(
+        &self,
+        params: eip::FileReaderOpenParams,
+    ) -> Result<eip::FileReaderOpenResult, EIPError> {
+        self.transfers.expire().await;
+        let work = self.session.admit_work().ok_or_else(|| {
+            protocol_error(ErrorType::NotInitialized, "session is not initialized")
+        })?;
+        let operation = self
+            .operations
+            .begin_with_replay_validation(
+                "file.open_reader",
+                &params.context,
+                &params,
+                true,
+                |value| {
+                    serde_json::from_value::<eip::FileReaderOpenResult>(value.clone())
+                        .is_ok_and(|result| self.transfers.is_live_reader(&result.reader.0))
+                },
+            )
+            .map_err(map_registry_error)?;
+        drop(work);
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let result = self
+            .transfers
+            .open_reader(&self.mounts, &params)
+            .await
+            .map_err(map_transfer_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_close_reader(
+        &self,
+        params: eip::FileReaderCloseParams,
+    ) -> Result<eip::FileReaderCloseResult, EIPError> {
+        self.ensure_initialized()?;
+        let operation =
+            match self.admit_record("file.close_reader", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let result = self
+            .transfers
+            .close_reader(&params.reader, params.accept_complete)
+            .await
+            .map_err(map_transfer_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_open_writer(
+        &self,
+        params: eip::FileWriterOpenParams,
+    ) -> Result<eip::FileWriterOpenResult, EIPError> {
+        self.transfers.expire().await;
+        let work = self.session.admit_work().ok_or_else(|| {
+            protocol_error(ErrorType::NotInitialized, "session is not initialized")
+        })?;
+        let operation = self
+            .operations
+            .begin_with_replay_validation(
+                "file.open_writer",
+                &params.context,
+                &params,
+                true,
+                |value| {
+                    serde_json::from_value::<eip::FileWriterOpenResult>(value.clone())
+                        .is_ok_and(|result| self.transfers.is_live_writer(&result.writer.0))
+                },
+            )
+            .map_err(map_registry_error)?;
+        drop(work);
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let result = self
+            .transfers
+            .open_writer(&self.mounts, &params)
+            .await
+            .map_err(map_transfer_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_abort_writer(
+        &self,
+        params: eip::FileWriterAbortParams,
+    ) -> Result<eip::FileWriterAbortResult, EIPError> {
+        self.ensure_initialized()?;
+        let operation =
+            match self.admit_record("file.abort_writer", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let result = eip::FileWriterAbortResult {
+            status: self
+                .transfers
+                .abort_writer(&params.writer)
+                .await
+                .map_err(map_transfer_error)?,
+        };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_commit_writer(
+        &self,
+        params: eip::FileWriterCommitParams,
+    ) -> Result<eip::FileWriterCommitResult, EIPError> {
+        let work = self.session.admit_work().ok_or_else(|| {
+            protocol_error(ErrorType::NotInitialized, "session is not initialized")
+        })?;
+        let operation =
+            match self.begin_record("file.commit_writer", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let (operation, receipt) = mutation_receipt(operation, "file.commit_writer")?;
+        let commit = match self.transfers.prepare_commit(&params).await {
+            Ok(commit) => commit,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "file.commit_writer",
+                    map_transfer_error(error),
+                ));
+            }
+        };
+        let operation_id = params.context.operation_id.clone();
+        let operations = self.operations.clone();
+        let commit_operation_id = operation_id.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let committed = match commit.execute(operations, commit_operation_id).await {
+                    Ok(committed) => committed,
+                    Err(error) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.commit_writer",
+                            map_transfer_error(error),
+                        ));
+                    }
+                };
+                let result = eip::FileWriterCommitResult {
+                    info: committed.info,
+                    transferred_bytes: committed.transferred_bytes,
+                    transfer_digest: committed.transfer_digest,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_stat(
+        &self,
+        params: eip::FileStatParams,
+    ) -> Result<eip::FileStatResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("file.stat", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let call = params.clone();
+        let result = tokio::task::spawn_blocking(move || resources.stat(&mounts, &call))
+            .await
+            .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
+            .map_err(map_resource_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_read_text(
+        &self,
+        params: eip::FileReadTextParams,
+    ) -> Result<eip::FileReadTextResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("file.read_text", &params.context, &params, false)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let call = params.clone();
+        let result = tokio::task::spawn_blocking(move || resources.read_text(&mounts, &call))
+            .await
+            .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
+            .map_err(map_resource_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_list(
+        &self,
+        params: eip::FileListParams,
+    ) -> Result<eip::FileListResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("file.list", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let call = params.clone();
+        let result = tokio::task::spawn_blocking(move || resources.list(&mounts, &call))
+            .await
+            .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
+            .map_err(map_resource_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_find(
+        &self,
+        params: eip::FileFindParams,
+    ) -> Result<eip::FileFindResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("file.find", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let call = params.clone();
+        let result = tokio::task::spawn_blocking(move || resources.find(&mounts, &call))
+            .await
+            .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
+            .map_err(map_resource_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_search(
+        &self,
+        params: eip::FileSearchParams,
+    ) -> Result<eip::FileSearchResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("file.search", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let call = params.clone();
+        let result = tokio::task::spawn_blocking(move || resources.search(&mounts, &call))
+            .await
+            .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
+            .map_err(map_resource_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn file_write_text(
+        &self,
+        params: eip::FileWriteTextParams,
+    ) -> Result<eip::FileWriteTextResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        if params.mode == eip::FileWriteMode::Append && params.context.idempotency_key.is_none() {
             return Err(protocol_error(
-                ErrorType::Timeout,
-                "operation deadline has expired",
+                ErrorType::InvalidParams,
+                "append requires an idempotency_key",
             ));
         }
-        *self.session.lock().await = SessionState::Closed;
-        self.closed.send_replace(true);
-        Ok(SessionCloseResult { closed: true })
+        let (work, operation) =
+            self.admit_owned_record("file.write_text", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.write_text")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let write =
+                    tokio::task::spawn_blocking(move || resources.write_text(&mounts, &params))
+                        .await;
+                let (info, bytes_written) = match write {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.write_text",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.write_text",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FileWriteTextResult {
+                    info,
+                    bytes_written,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_mkdir(
+        &self,
+        params: eip::FileMkdirParams,
+    ) -> Result<eip::FileMkdirResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let (work, operation) = self.admit_owned_record("file.mkdir", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.mkdir")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let mkdir =
+                    tokio::task::spawn_blocking(move || resources.mkdir(&mounts, &params)).await;
+                let (info, created_directories) = match mkdir {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.mkdir",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.mkdir",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FileMkdirResult {
+                    info,
+                    created_directories,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_patch_text(
+        &self,
+        params: eip::FilePatchTextParams,
+    ) -> Result<eip::FilePatchTextResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let (work, operation) =
+            self.admit_owned_record("file.patch_text", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.patch_text")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let patch =
+                    tokio::task::spawn_blocking(move || resources.patch_text(&mounts, &params))
+                        .await;
+                let (info, hunks_applied) = match patch {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.patch_text",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.patch_text",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FilePatchTextResult {
+                    info,
+                    hunks_applied,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_copy(
+        &self,
+        params: eip::FileCopyParams,
+    ) -> Result<eip::FileCopyResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let (work, operation) = self.admit_owned_record("file.copy", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.copy")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let copy =
+                    tokio::task::spawn_blocking(move || resources.copy(&mounts, &params)).await;
+                let (destination, bytes_copied, source_stability) = match copy {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.copy",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.copy",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FileCopyResult {
+                    destination,
+                    bytes_copied,
+                    atomic_destination: true,
+                    receipt: receipt.clone(),
+                    source_stability,
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_move(
+        &self,
+        params: eip::FileMoveParams,
+    ) -> Result<eip::FileMoveResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let (work, operation) = self.admit_owned_record("file.move", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.move")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let moved =
+                    tokio::task::spawn_blocking(move || resources.move_path(&mounts, &params))
+                        .await;
+                let destination = match moved {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.move",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.move",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FileMoveResult {
+                    destination,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn file_remove(
+        &self,
+        params: eip::FileRemoveParams,
+    ) -> Result<eip::FileRemoveResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let (work, operation) = self.admit_owned_record("file.remove", &params.context, &params)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "file.remove")?;
+        let operation_id = params.context.operation_id.clone();
+        let resources = self.resources.clone();
+        let mounts = self.mounts.clone();
+        let owned = self
+            .owned_operations
+            .spawn(operation_id.clone(), async move {
+                let removed =
+                    tokio::task::spawn_blocking(move || resources.remove(&mounts, &params)).await;
+                let removed_entries = match removed {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.remove",
+                            map_resource_error(error),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(mutation_failure(
+                            operation,
+                            "file.remove",
+                            protocol_error(ErrorType::InternalError, "resource worker failed"),
+                        ));
+                    }
+                };
+                let result = eip::FileRemoveResult {
+                    removed_entries,
+                    receipt: receipt.clone(),
+                };
+                operation
+                    .finish(&result, Some(receipt))
+                    .map_err(map_registry_error)?;
+                Ok(result)
+            });
+        drop(work);
+        self.await_owned_operation(&operation_id, owned).await
+    }
+
+    async fn operation_cancel(
+        &self,
+        params: eip::OperationCancelParams,
+    ) -> Result<eip::OperationCancelResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("operation.cancel", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let result = eip::OperationCancelResult {
+            status: self.operations.cancel(&params.target_operation_id),
+        };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn receipt_get(
+        &self,
+        params: eip::ReceiptGetParams,
+    ) -> Result<eip::ReceiptGetResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("receipt.get", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let receipt = if let Some(reference) = &params.receipt_ref {
+            self.operations.receipt_by_ref(reference)
+        } else if let Some(operation_id) = &params.operation_id {
+            self.operations.receipt_by_operation(operation_id)
+        } else {
+            None
+        }
+        .ok_or_else(|| protocol_error(ErrorType::NotFoundOrDenied, "receipt was not found"))?;
+        let result = eip::ReceiptGetResult { receipt };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn output_read(
+        &self,
+        params: eip::OutputReadParams,
+    ) -> Result<eip::OutputReadResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("output.read", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let result = self.retention.read(&params).map_err(map_retention_error)?;
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn output_release(
+        &self,
+        params: eip::OutputReleaseParams,
+    ) -> Result<eip::OutputReleaseResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("output.release", &params.context, &params, true)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (operation, receipt) = mutation_receipt(operation, "output.release")?;
+        let released = if let Some(reference) = &params.reference {
+            self.retention.release_reference(reference)
+        } else if let Some(cursor) = &params.cursor {
+            self.retention.release_cursor(cursor) || self.resources.release_cursor(cursor)
+        } else {
+            false
+        };
+        let result = eip::OutputReleaseResult {
+            released,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn port_inspect(
+        &self,
+        params: eip::PortInspectParams,
+    ) -> Result<eip::PortInspectResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("port.inspect", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let observation = inspect_port(&params.target, deadline).await;
+        let result = eip::PortInspectResult { observation };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn port_wait(
+        &self,
+        params: eip::PortWaitParams,
+    ) -> Result<eip::PortWaitResult, EIPError> {
+        self.ensure_initialized()?;
+        let requested_deadline = params.context.deadline.ok_or_else(|| {
+            protocol_error(
+                ErrorType::InvalidParams,
+                "port.wait requires a finite context deadline",
+            )
+        })?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("port.wait", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let deadline = effective_deadline(Some(requested_deadline), self.max_operation_duration)?;
+        loop {
+            if self
+                .operations
+                .cancellation_requested(&params.context.operation_id)
+            {
+                return Err(protocol_error(
+                    ErrorType::Cancelled,
+                    "port wait was cancelled",
+                ));
+            }
+            let observation = inspect_port(&params.target, deadline).await;
+            let desired = match params.desired_status {
+                eip::DesiredPortStatus::Listening => eip::PortStatus::Listening,
+                eip::DesiredPortStatus::NotListening => eip::PortStatus::NotListening,
+            };
+            if observation.status == desired {
+                let result = eip::PortWaitResult { observation };
+                operation
+                    .finish(&result, None)
+                    .map_err(map_registry_error)?;
+                return Ok(result);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(protocol_error(
+                    ErrorType::Timeout,
+                    "port wait deadline has expired",
+                ));
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+        }
     }
 
     unsupported_methods! {
-        file_copy(eip::FileCopyParams) -> eip::FileCopyResult;
-        file_find(eip::FileFindParams) -> eip::FileFindResult;
-        file_list(eip::FileListParams) -> eip::FileListResult;
-        file_mkdir(eip::FileMkdirParams) -> eip::FileMkdirResult;
-        file_move(eip::FileMoveParams) -> eip::FileMoveResult;
-        file_patch(eip::FilePatchParams) -> eip::FilePatchResult;
-        file_read(eip::FileReadParams) -> eip::FileReadResult;
-        file_remove(eip::FileRemoveParams) -> eip::FileRemoveResult;
-        file_search(eip::FileSearchParams) -> eip::FileSearchResult;
-        file_stat(eip::FileStatParams) -> eip::FileStatResult;
-        file_write(eip::FileWriteParams) -> eip::FileWriteResult;
-        operation_cancel(eip::OperationCancelParams) -> eip::OperationCancelResult;
-        output_read(eip::OutputReadParams) -> eip::OutputReadResult;
-        output_release(eip::OutputReleaseParams) -> eip::OutputReleaseResult;
-        port_inspect(eip::PortInspectParams) -> eip::PortInspectResult;
-        port_wait(eip::PortWaitParams) -> eip::PortWaitResult;
         process_close_stdin(eip::ProcessCloseStdinParams) -> eip::ProcessCloseStdinResult;
         process_inspect(eip::ProcessInspectParams) -> eip::ProcessInspectResult;
         process_kill(eip::ProcessKillParams) -> eip::ProcessKillResult;
@@ -483,9 +1590,264 @@ impl EipHandler for Daemon {
         process_start(eip::ProcessStartParams) -> eip::ProcessStartResult;
         process_wait(eip::ProcessWaitParams) -> eip::ProcessWaitResult;
         process_write_stdin(eip::ProcessWriteStdinParams) -> eip::ProcessWriteStdinResult;
-        receipt_get(eip::ReceiptGetParams) -> eip::ReceiptGetResult;
         shell_exec(eip::ShellExecParams) -> eip::ShellExecResult;
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn mutation_failure(operation: OperationLease, method: &str, mut error: EIPError) -> EIPError {
+    let (stage, outcome) = match error.data.error_type {
+        ErrorType::UnknownOutcome => (ReceiptStage::Unknown, ReceiptOutcome::Unknown),
+        ErrorType::Cancelled => (ReceiptStage::Completed, ReceiptOutcome::Cancelled),
+        ErrorType::Timeout => (ReceiptStage::Completed, ReceiptOutcome::TimedOut),
+        _ => (ReceiptStage::Completed, ReceiptOutcome::Failed),
+    };
+    if let Ok(receipt) = operation.receipt(method, stage, Some(outcome)) {
+        error.data.dispatch_stage = if stage == ReceiptStage::Unknown {
+            DispatchStage::Unknown
+        } else {
+            DispatchStage::Completed
+        };
+        error.data.operation_id = Some(receipt.operation_id.clone());
+        error.data.environment_id = Some(receipt.environment_id.clone());
+        error.data.generation = Some(receipt.generation);
+        error.data.receipt = Some(receipt.clone());
+        operation.finish_failure(receipt, error.clone());
+    }
+    error
+}
+
+#[allow(clippy::result_large_err)]
+fn mutation_receipt(
+    mut operation: OperationLease,
+    method: &str,
+) -> Result<(OperationLease, eip::OperationReceipt), EIPError> {
+    let receipt = operation
+        .receipt(
+            method,
+            ReceiptStage::Completed,
+            Some(ReceiptOutcome::Succeeded),
+        )
+        .map_err(map_registry_error)?;
+    let mut unknown_receipt = receipt.clone();
+    unknown_receipt.stage = ReceiptStage::Unknown;
+    unknown_receipt.outcome = Some(ReceiptOutcome::Unknown);
+    unknown_receipt.observed_at = chrono::Utc::now();
+    let mut failure = protocol_error(
+        ErrorType::UnknownOutcome,
+        "mutation completion evidence became unavailable before terminal recording",
+    );
+    failure.data.retry_hint = RetryHint::ReconcileFirst;
+    failure.data.dispatch_stage = DispatchStage::Unknown;
+    failure.data.operation_id = Some(unknown_receipt.operation_id.clone());
+    failure.data.environment_id = Some(unknown_receipt.environment_id.clone());
+    failure.data.generation = Some(unknown_receipt.generation);
+    failure.data.receipt = Some(unknown_receipt.clone());
+    operation.preserve_failure_on_drop(unknown_receipt, failure);
+    Ok((operation, receipt))
+}
+
+#[allow(clippy::result_large_err)]
+fn ensure_deadline(context: &eip::EIPCallContext) -> Result<(), EIPError> {
+    if context
+        .deadline
+        .is_some_and(|deadline| deadline <= chrono::Utc::now())
+    {
+        Err(protocol_error(
+            ErrorType::Timeout,
+            "operation deadline has expired",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn effective_deadline(
+    requested: Option<chrono::DateTime<chrono::Utc>>,
+    hard_duration: Duration,
+) -> Result<Instant, EIPError> {
+    let now = Instant::now();
+    let hard = now + hard_duration;
+    let Some(requested) = requested else {
+        return Ok(hard);
+    };
+    let remaining = (requested - chrono::Utc::now())
+        .to_std()
+        .map_err(|_| protocol_error(ErrorType::Timeout, "operation deadline has expired"))?;
+    Ok(hard.min(now + remaining))
+}
+
+async fn inspect_port(target: &eip::PortTarget, deadline: Instant) -> eip::PortObservation {
+    let ip = match target.address {
+        eip::PortAddress::Loopback => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        eip::PortAddress::Any => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    };
+    let timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(100));
+    let status = if timeout.is_zero() {
+        eip::PortStatus::Unknown
+    } else {
+        match tokio::time::timeout(
+            timeout,
+            tokio::net::TcpStream::connect(SocketAddr::new(ip, target.port as u16)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => eip::PortStatus::Listening,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                eip::PortStatus::NotListening
+            }
+            Ok(Err(_)) | Err(_) => eip::PortStatus::Unknown,
+        }
+    };
+    eip::PortObservation {
+        target: target.clone(),
+        status,
+        managed_process: None,
+        observed_at: chrono::Utc::now(),
+    }
+}
+
+fn map_resource_error(error: ResourceError) -> EIPError {
+    let error = match error {
+        ResourceError::PartialRemove {
+            removed_entries,
+            cause,
+        } => {
+            let mut mapped = map_resource_error(*cause);
+            mapped.data.emitted_items = Some(removed_entries);
+            mapped.data.retry_hint = RetryHint::ReconcileFirst;
+            return mapped;
+        }
+        error => error,
+    };
+    let (error_type, message, retry_hint) = match error {
+        ResourceError::Invalid => (
+            ErrorType::InvalidParams,
+            "invalid resource operation parameters",
+            RetryHint::Never,
+        ),
+        ResourceError::Denied => (
+            ErrorType::Denied,
+            "resource access is denied",
+            RetryHint::Never,
+        ),
+        ResourceError::NotFound => (
+            ErrorType::NotFoundOrDenied,
+            "resource was not found or is not visible",
+            RetryHint::Never,
+        ),
+        ResourceError::Conflict => (
+            ErrorType::Conflict,
+            "resource identity or revision changed",
+            RetryHint::ReconcileFirst,
+        ),
+        ResourceError::Unsupported => (
+            ErrorType::Unsupported,
+            "resource operation is unsupported",
+            RetryHint::Never,
+        ),
+        ResourceError::Limit => (
+            ErrorType::QuotaExceeded,
+            "resource operation exceeded a finite limit",
+            RetryHint::Never,
+        ),
+        ResourceError::OutputLimit => (
+            ErrorType::OutputLimitExceeded,
+            "resource output exceeded the selected policy",
+            RetryHint::Never,
+        ),
+        ResourceError::InvalidHandle => (
+            ErrorType::InvalidHandle,
+            "resource cursor is invalid or expired",
+            RetryHint::Never,
+        ),
+        ResourceError::Busy => (
+            ErrorType::Busy,
+            "resource cursor capacity is exhausted",
+            RetryHint::AfterCapacity,
+        ),
+        ResourceError::Cancelled => (
+            ErrorType::Cancelled,
+            "resource operation was cancelled",
+            RetryHint::Never,
+        ),
+        ResourceError::Timeout => (
+            ErrorType::Timeout,
+            "resource operation exceeded its deadline",
+            RetryHint::Never,
+        ),
+        ResourceError::UnknownOutcome => (
+            ErrorType::UnknownOutcome,
+            "resource commit completed with uncertain durability evidence",
+            RetryHint::ReconcileFirst,
+        ),
+        ResourceError::Io => (
+            ErrorType::ProviderUnavailable,
+            "resource provider I/O failed",
+            RetryHint::SameRequest,
+        ),
+        ResourceError::Internal => (
+            ErrorType::InternalError,
+            "resource operation failed internally",
+            RetryHint::Never,
+        ),
+        ResourceError::PartialRemove { .. } => unreachable!("handled before error mapping"),
+    };
+    let mut mapped = protocol_error(error_type, message);
+    mapped.data.retry_hint = retry_hint;
+    mapped
+}
+
+fn map_retention_error(error: RetentionError) -> EIPError {
+    let gap_bounds = match error {
+        RetentionError::Gap {
+            available_start,
+            available_end,
+        } => Some((available_start, available_end)),
+        _ => None,
+    };
+    let (error_type, message, retry_hint) = match error {
+        RetentionError::Invalid => (
+            ErrorType::InvalidParams,
+            "invalid output policy or selector",
+            RetryHint::Never,
+        ),
+        RetentionError::InvalidHandle => (
+            ErrorType::InvalidHandle,
+            "output cursor is invalid or expired",
+            RetryHint::Never,
+        ),
+        RetentionError::Gap { .. } => (
+            ErrorType::RetentionGap,
+            "retained output is unavailable at the requested offset",
+            RetryHint::Never,
+        ),
+        RetentionError::Busy => (
+            ErrorType::Busy,
+            "retained output cursor capacity is exhausted",
+            RetryHint::AfterCapacity,
+        ),
+        RetentionError::OutputLimit => (
+            ErrorType::OutputLimitExceeded,
+            "output exceeded the selected policy",
+            RetryHint::Never,
+        ),
+        RetentionError::Internal => (
+            ErrorType::InternalError,
+            "retained output operation failed internally",
+            RetryHint::Never,
+        ),
+    };
+    let mut mapped = protocol_error(error_type, message);
+    mapped.data.retry_hint = retry_hint;
+    if let Some((available_start, available_end)) = gap_bounds {
+        mapped.data.available_start = Some(available_start);
+        mapped.data.available_end = Some(available_end);
+    }
+    mapped
 }
 
 fn method_capability(method: &str) -> Option<&'static str> {
@@ -512,6 +1874,142 @@ fn map_dispatch_error(error: DispatchError, method: &str) -> EIPError {
         error.data.capability = method_capability(method).map(ToOwned::to_owned);
     }
     error
+}
+
+fn map_registry_error(error: RegistryError) -> EIPError {
+    let (error_type, message, retry_hint) = match error {
+        RegistryError::Collision => (
+            ErrorType::Conflict,
+            "operation_id is already active or retained",
+            RetryHint::Never,
+        ),
+        RegistryError::DeadlineExpired => (
+            ErrorType::Timeout,
+            "operation deadline has expired",
+            RetryHint::Never,
+        ),
+        RegistryError::IdempotencyDisallowed => (
+            ErrorType::InvalidParams,
+            "idempotency_key is not allowed for this method",
+            RetryHint::Never,
+        ),
+        RegistryError::IdempotencyConflict => (
+            ErrorType::IdempotencyConflict,
+            "idempotency key was reused for a different request",
+            RetryHint::Never,
+        ),
+        RegistryError::InProgress => (
+            ErrorType::OperationInProgress,
+            "matching operation is still in progress",
+            RetryHint::ReconcileFirst,
+        ),
+        RegistryError::TerminalFailure => (
+            ErrorType::Conflict,
+            "matching operation completed without a replayable success result",
+            RetryHint::ReconcileFirst,
+        ),
+        RegistryError::Capacity => (
+            ErrorType::Busy,
+            "operation record capacity is currently exhausted",
+            RetryHint::AfterCapacity,
+        ),
+        RegistryError::Encoding => (
+            ErrorType::InternalError,
+            "operation evidence encoding failed",
+            RetryHint::Never,
+        ),
+    };
+    let mut mapped = protocol_error(error_type, message);
+    mapped.data.retry_hint = retry_hint;
+    mapped
+}
+
+fn map_transfer_error(error: TransferError) -> EIPError {
+    let (error_type, message, retry_hint) = match error {
+        TransferError::InvalidHandle | TransferError::WrongKind | TransferError::WrongState => (
+            ErrorType::InvalidHandle,
+            "file transfer handle or state is invalid",
+            RetryHint::Never,
+        ),
+        TransferError::Conflict => (
+            ErrorType::Conflict,
+            "file transfer precondition changed",
+            RetryHint::AfterRefresh,
+        ),
+        TransferError::IntegrityMismatch => (
+            ErrorType::IntegrityMismatch,
+            "file transfer count or digest did not match",
+            RetryHint::Never,
+        ),
+        TransferError::Expired => (
+            ErrorType::Timeout,
+            "file transfer expired",
+            RetryHint::Never,
+        ),
+        TransferError::Busy => (
+            ErrorType::Busy,
+            "file transfer capacity is exhausted",
+            RetryHint::AfterCapacity,
+        ),
+        TransferError::Quota | TransferError::Limit => (
+            ErrorType::QuotaExceeded,
+            "file transfer quota is exhausted",
+            RetryHint::AfterCapacity,
+        ),
+        TransferError::Unsupported => (
+            ErrorType::Unsupported,
+            "file transfer operation is unsupported",
+            RetryHint::Never,
+        ),
+        TransferError::Denied => (
+            ErrorType::Denied,
+            "file transfer is denied",
+            RetryHint::Never,
+        ),
+        TransferError::NotFound => (
+            ErrorType::NotFoundOrDenied,
+            "file resource was not found or is denied",
+            RetryHint::Never,
+        ),
+        TransferError::Source => (
+            ErrorType::ProviderUnavailable,
+            "native file source became unavailable",
+            RetryHint::AfterRefresh,
+        ),
+        TransferError::Protocol => (
+            ErrorType::InvalidParams,
+            "file transfer request is invalid",
+            RetryHint::Never,
+        ),
+        TransferError::Cancelled => (
+            ErrorType::Cancelled,
+            "file transfer operation was cancelled",
+            RetryHint::Never,
+        ),
+        TransferError::Timeout => (
+            ErrorType::Timeout,
+            "file transfer operation exceeded its deadline",
+            RetryHint::Never,
+        ),
+        TransferError::UnknownOutcome => (
+            ErrorType::UnknownOutcome,
+            "file commit completed with uncertain durability evidence",
+            RetryHint::ReconcileFirst,
+        ),
+        TransferError::SessionClosed => (
+            ErrorType::NotInitialized,
+            "file transfer session is closed",
+            RetryHint::Never,
+        ),
+        TransferError::Internal => (
+            ErrorType::InternalError,
+            "file transfer internal failure",
+            RetryHint::Never,
+        ),
+    };
+    let mut mapped = protocol_error(error_type, message);
+    mapped.data.retry_hint = retry_hint;
+    mapped
 }
 
 fn protocol_error(error_type: ErrorType, message: impl Into<String>) -> EIPError {
@@ -609,13 +2107,50 @@ impl Error for DaemonInitError {}
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::PoisonError, time::Duration};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc, Condvar, Mutex, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use serde_json::{Value, json};
 
-    use crate::config::Config;
+    use crate::{
+        config::{Config, TrustedMountConfig},
+        eip::{
+            EIPCallContext, EIPPath, EipHandler, FileWriteMode, FileWriteTextParams,
+            FileWriterOpenParams,
+        },
+        operation::{BeginOutcome, random_selector},
+    };
 
-    use super::{Daemon, fresh_generation};
+    use super::{Daemon, fresh_generation, mutation_receipt};
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(
+                random_selector("agent-envd-daemon-test").expect("random temporary directory"),
+            );
+            fs::create_dir(&path).expect("creates temporary directory");
+            Self(path)
+        }
+
+        fn child(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn request(id: Value, method: &str, params: Value) -> String {
         json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
@@ -660,7 +2195,13 @@ mod tests {
         assert_eq!(initialized["result"]["descriptor"]["generation"], 7);
         assert_eq!(
             initialized["result"]["descriptor"]["capabilities"],
-            json!(["environment.describe", "session.close"])
+            json!([
+                "environment.describe",
+                "operation.cancel",
+                "port.observe",
+                "receipt.read",
+                "session.close"
+            ])
         );
 
         let described: Value = serde_json::from_slice(
@@ -687,6 +2228,121 @@ mod tests {
         .expect("response is JSON");
         assert_eq!(closed["result"]["closed"], true);
         assert!(*daemon.subscribe_closed().borrow());
+    }
+
+    #[tokio::test]
+    async fn session_teardown_serializes_transfer_and_mutation_admission() {
+        let tree = TempTree::new();
+        let native = tree.child("native");
+        let staging = tree.child("staging");
+        fs::create_dir(&native).expect("native root");
+        fs::create_dir(&staging).expect("staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("private staging root");
+        }
+        let mut config = Config::for_test("env-test");
+        config.mounts.push(TrustedMountConfig {
+            mount_id: "workspace".to_owned(),
+            native_root: native.clone(),
+            staging_root: Some(staging.clone()),
+            writable: true,
+            exclusive_mutation_control: true,
+            allow_command_execution: false,
+            max_file_bytes: 1024 * 1024,
+            allowed_operations: Vec::new(),
+        });
+        let daemon = Arc::new(Daemon::with_generation(&config, 71).expect("daemon builds"));
+        let _ = initialize(&daemon).await;
+        EipHandler::file_open_writer(
+            daemon.as_ref(),
+            FileWriterOpenParams {
+                context: EIPCallContext {
+                    operation_id: "open-before-close".to_owned(),
+                    deadline: None,
+                    idempotency_key: None,
+                },
+                path: EIPPath {
+                    mount_id: "workspace".to_owned(),
+                    path: "/candidate.bin".to_owned(),
+                },
+                mode: FileWriteMode::Create,
+                expected_revision: None,
+                executable: None,
+                transfer_deadline: None,
+            },
+        )
+        .await
+        .expect("opens session-owned writer");
+        let in_flight = daemon
+            .session
+            .admit_work()
+            .expect("admits work before teardown");
+        let closing_daemon = Arc::clone(&daemon);
+        let closing = tokio::spawn(async move {
+            closing_daemon
+                .transport_closed(Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!closing.is_finished());
+        drop(in_flight);
+        assert!(closing.await.expect("close waits for admitted work"));
+        assert!(!daemon.has_active_file_transfers());
+        assert_eq!(
+            fs::read_dir(&staging).expect("staging directory").count(),
+            0
+        );
+
+        let second = Arc::new(Daemon::with_generation(&config, 72).expect("daemon builds"));
+        let _ = initialize(&second).await;
+        assert!(second.transport_closed(Duration::from_secs(1)).await);
+        let rejected = EipHandler::file_write_text(
+            second.as_ref(),
+            FileWriteTextParams {
+                context: EIPCallContext {
+                    operation_id: "write-after-close".to_owned(),
+                    deadline: None,
+                    idempotency_key: Some("write-after-close-key".to_owned()),
+                },
+                path: EIPPath {
+                    mount_id: "workspace".to_owned(),
+                    path: "/too-late.txt".to_owned(),
+                },
+                mode: FileWriteMode::Create,
+                text: "too late".to_owned(),
+                expected_revision: None,
+                executable: None,
+            },
+        )
+        .await
+        .expect_err("post-close mutation is rejected before operation admission");
+        assert_eq!(
+            rejected.data.error_type,
+            crate::eip::ErrorType::NotInitialized
+        );
+        assert!(!native.join("too-late.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn transport_teardown_bounds_stalled_admission_handoffs() {
+        let config = Config::for_test("env-test");
+        let daemon = Daemon::with_generation(&config, 73).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+        let stalled = daemon
+            .session
+            .admit_work()
+            .expect("admits a handoff before close");
+        let closed = tokio::time::timeout(
+            Duration::from_secs(1),
+            daemon.transport_closed(Duration::from_millis(20)),
+        )
+        .await
+        .expect("transport teardown stays bounded");
+        assert!(!closed);
+        drop(stalled);
     }
 
     #[tokio::test]
@@ -763,20 +2419,10 @@ mod tests {
         .expect("response is JSON");
         assert_eq!(too_long["error"]["code"], -32602);
 
-        let operation_ids = daemon
-            .operation_ids
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        assert!(operation_ids.live.is_empty());
-        assert_eq!(operation_ids.terminal.len(), 2);
-        assert!(
-            operation_ids
-                .terminal
-                .iter()
-                .map(|(operation_id, _)| operation_id.len())
-                .sum::<usize>()
-                <= 2 * 128 * 4
-        );
+        let (active, records, identifier_bytes) = daemon.operations.record_stats();
+        assert_eq!(active, 0);
+        assert_eq!(records, 2);
+        assert!(identifier_bytes <= 2 * 128 * 4);
     }
 
     #[tokio::test]
@@ -835,6 +2481,532 @@ mod tests {
 
         assert_eq!(response["error"]["code"], -32012);
         assert_eq!(response["error"]["data"]["capability"], "file.read");
+    }
+
+    #[tokio::test]
+    async fn operation_namespace_and_session_resource_replay_are_unified() {
+        let tree = TempTree::new();
+        let native = tree.child("native");
+        let staging = tree.child("staging");
+        fs::create_dir(&native).expect("native root");
+        fs::create_dir(&staging).expect("staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("private staging root");
+        }
+        fs::write(native.join("replay.txt"), "replay").expect("replay source");
+        let mut config = Config::for_test("env-test");
+        config.mounts.push(TrustedMountConfig {
+            mount_id: "workspace".to_owned(),
+            native_root: native.clone(),
+            staging_root: Some(staging),
+            writable: true,
+            exclusive_mutation_control: true,
+            allow_command_execution: false,
+            max_file_bytes: 1024 * 1024,
+            allowed_operations: Vec::new(),
+        });
+        let daemon = Daemon::with_generation(&config, 12).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+
+        let described: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(10),
+                    "environment.describe",
+                    json!({"context": {"operation_id": "cross-method"}}),
+                ))
+                .await,
+        )
+        .expect("describe response");
+        assert_eq!(described["result"]["descriptor"]["generation"], 12);
+        let collided: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(11),
+                    "file.stat",
+                    json!({
+                        "context": {"operation_id": "cross-method"},
+                        "path": {"mount_id": "workspace", "path": "/"}
+                    }),
+                ))
+                .await,
+        )
+        .expect("collision response");
+        assert_eq!(collided["error"]["code"], -32060);
+
+        let open_params = |operation_id: &str| {
+            json!({
+                "context": {"operation_id": operation_id, "idempotency_key": "reader-key"},
+                "path": {"mount_id": "workspace", "path": "/replay.txt"}
+            })
+        };
+        let opened: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(12),
+                    "file.open_reader",
+                    open_params("reader-open-1"),
+                ))
+                .await,
+        )
+        .expect("reader open response");
+        let reader = opened["result"]["reader"].clone();
+        assert_eq!(reader, "reader-1");
+        let replayed: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(13),
+                    "file.open_reader",
+                    open_params("reader-open-2"),
+                ))
+                .await,
+        )
+        .expect("reader replay response");
+        assert_eq!(replayed["result"]["reader"], reader);
+        let closed: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(14),
+                    "file.close_reader",
+                    json!({
+                        "context": {"operation_id": "reader-close"},
+                        "reader": reader,
+                        "accept_complete": false
+                    }),
+                ))
+                .await,
+        )
+        .expect("reader close response");
+        assert_eq!(closed["result"]["completion"]["complete"], false);
+        let reopened: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(15),
+                    "file.open_reader",
+                    open_params("reader-open-3"),
+                ))
+                .await,
+        )
+        .expect("reader reopen response");
+        assert_eq!(reopened["result"]["reader"], "reader-2");
+    }
+
+    #[tokio::test]
+    async fn resource_and_transfer_candidates_share_one_staging_quota() {
+        let tree = TempTree::new();
+        let native = tree.child("native");
+        let staging = tree.child("staging");
+        fs::create_dir(&native).expect("native root");
+        fs::create_dir(&staging).expect("staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("private staging root");
+        }
+        let mut config = Config::for_test("env-test");
+        config.limits.max_staged_file_objects = 1;
+        config.limits.max_staged_file_bytes = 1024;
+        config.mounts.push(TrustedMountConfig {
+            mount_id: "workspace".to_owned(),
+            native_root: native.clone(),
+            staging_root: Some(staging),
+            writable: true,
+            exclusive_mutation_control: true,
+            allow_command_execution: false,
+            max_file_bytes: 1024,
+            allowed_operations: Vec::new(),
+        });
+        let daemon = Daemon::with_generation(&config, 73).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+
+        let opened: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(2),
+                    "file.open_writer",
+                    json!({
+                        "context": {"operation_id": "quota-writer-open"},
+                        "path": {"mount_id": "workspace", "path": "/writer.bin"},
+                        "mode": "create"
+                    }),
+                ))
+                .await,
+        )
+        .expect("writer response");
+        let writer = opened["result"]["writer"].clone();
+        assert_eq!(writer, "writer-1");
+
+        let blocked: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(3),
+                    "file.write_text",
+                    json!({
+                        "context": {"operation_id": "quota-write-blocked", "idempotency_key": "quota-blocked-key"},
+                        "path": {"mount_id": "workspace", "path": "/inline.txt"},
+                        "mode": "create",
+                        "text": "blocked"
+                    }),
+                ))
+                .await,
+        )
+        .expect("blocked write response");
+        assert_eq!(blocked["error"]["data"]["error_type"], "quota_exceeded");
+        assert!(!native.join("inline.txt").exists());
+
+        let aborted: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(4),
+                    "file.abort_writer",
+                    json!({
+                        "context": {"operation_id": "quota-writer-abort"},
+                        "writer": writer
+                    }),
+                ))
+                .await,
+        )
+        .expect("abort response");
+        assert_eq!(aborted["result"]["status"], "aborted");
+
+        let written: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(5),
+                    "file.write_text",
+                    json!({
+                        "context": {"operation_id": "quota-write-after-abort", "idempotency_key": "quota-after-key"},
+                        "path": {"mount_id": "workspace", "path": "/inline.txt"},
+                        "mode": "create",
+                        "text": "released"
+                    }),
+                ))
+                .await,
+        )
+        .expect("write response");
+        assert_eq!(written["result"]["bytes_written"], 8);
+        assert_eq!(
+            fs::read_to_string(native.join("inline.txt")).expect("inline target"),
+            "released"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_resource_handlers_return_receipts_and_reconcile() {
+        let tree = TempTree::new();
+        let native = tree.child("native");
+        let staging = tree.child("staging");
+        fs::create_dir(&native).expect("native root");
+        fs::create_dir(&staging).expect("staging root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .expect("private staging root");
+        }
+        let mut config = Config::for_test("env-test");
+        config.mounts.push(TrustedMountConfig {
+            mount_id: "workspace".to_owned(),
+            native_root: native.clone(),
+            staging_root: Some(staging),
+            writable: true,
+            exclusive_mutation_control: true,
+            allow_command_execution: false,
+            max_file_bytes: 1024 * 1024,
+            allowed_operations: Vec::new(),
+        });
+        let daemon = Daemon::with_generation(&config, 12).expect("daemon builds");
+        let initialized = initialize(&daemon).await;
+        let capabilities = initialized["result"]["descriptor"]["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        for capability in ["file.read", "file.write", "file.find", "file.search"] {
+            assert!(capabilities.iter().any(|value| value == capability));
+        }
+
+        let write: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(2),
+                    "file.write_text",
+                    json!({
+                        "context": {"operation_id": "write-e2e", "idempotency_key": "write-key"},
+                        "path": {"mount_id": "workspace", "path": "/block2.txt"},
+                        "mode": "create",
+                        "text": "block2\n"
+                    }),
+                ))
+                .await,
+        )
+        .expect("write response");
+        assert_eq!(write["result"]["bytes_written"], 7);
+        assert_eq!(
+            fs::read_to_string(native.join("block2.txt")).expect("file"),
+            "block2\n"
+        );
+        let receipt_ref = write["result"]["receipt"]["receipt_ref"].clone();
+
+        let receipt: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(3),
+                    "receipt.get",
+                    json!({
+                        "context": {"operation_id": "receipt-e2e"},
+                        "receipt_ref": receipt_ref
+                    }),
+                ))
+                .await,
+        )
+        .expect("receipt response");
+        assert_eq!(receipt["result"]["receipt"]["operation_id"], "write-e2e");
+        assert_eq!(receipt["result"]["receipt"]["outcome"], "succeeded");
+
+        let read: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(4),
+                    "file.read_text",
+                    json!({
+                        "context": {"operation_id": "read-e2e"},
+                        "path": {"mount_id": "workspace", "path": "/block2.txt"},
+                        "max_bytes": 64
+                    }),
+                ))
+                .await,
+        )
+        .expect("read response");
+        assert_eq!(read["result"]["text"], "block2\n");
+        assert_eq!(read["result"]["content_complete"], true);
+
+        let failed: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(41),
+                    "file.write_text",
+                    json!({
+                        "context": {"operation_id": "failed-write", "idempotency_key": "failed-key"},
+                        "path": {"mount_id": "workspace", "path": "/missing.txt"},
+                        "mode": "replace",
+                        "text": "never committed"
+                    }),
+                ))
+                .await,
+        )
+        .expect("failed mutation response");
+        assert_eq!(
+            failed["error"]["data"]["receipt"]["operation_id"],
+            "failed-write"
+        );
+        assert_eq!(failed["error"]["data"]["receipt"]["outcome"], "failed");
+        let failed_receipt: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(42),
+                    "receipt.get",
+                    json!({
+                        "context": {"operation_id": "failed-receipt"},
+                        "operation_id": "failed-write"
+                    }),
+                ))
+                .await,
+        )
+        .expect("failed receipt response");
+        assert_eq!(failed_receipt["result"]["receipt"]["outcome"], "failed");
+        let failed_replay: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(43),
+                    "file.write_text",
+                    json!({
+                        "context": {"operation_id": "failed-write-retry", "idempotency_key": "failed-key"},
+                        "path": {"mount_id": "workspace", "path": "/missing.txt"},
+                        "mode": "replace",
+                        "text": "never committed"
+                    }),
+                ))
+                .await,
+        )
+        .expect("failed replay response");
+        assert_eq!(
+            failed_replay["error"]["data"]["error_type"],
+            failed["error"]["data"]["error_type"]
+        );
+        assert_eq!(
+            failed_replay["error"]["data"]["receipt"],
+            failed["error"]["data"]["receipt"]
+        );
+        assert_eq!(
+            failed_replay["error"]["data"]["operation_id"],
+            "failed-write"
+        );
+
+        let cancelled: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(5),
+                    "operation.cancel",
+                    json!({
+                        "context": {"operation_id": "cancel-e2e"},
+                        "target_operation_id": "write-e2e"
+                    }),
+                ))
+                .await,
+        )
+        .expect("cancel response");
+        assert_eq!(cancelled["result"]["status"], "already_terminal");
+    }
+
+    #[tokio::test]
+    async fn aborted_mutation_owner_preserves_unknown_outcome_replay() {
+        let config = Config::for_test("env-test");
+        let daemon = Daemon::with_generation(&config, 13).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+        let params = FileWriteTextParams {
+            context: EIPCallContext {
+                operation_id: "drain-write".to_owned(),
+                deadline: None,
+                idempotency_key: Some("drain-write-key".to_owned()),
+            },
+            path: EIPPath {
+                mount_id: "workspace".to_owned(),
+                path: "/drain.txt".to_owned(),
+            },
+            mode: FileWriteMode::Create,
+            text: "drain".to_owned(),
+            expected_revision: None,
+            executable: None,
+        };
+        let operation = match daemon
+            .begin_record("file.write_text", &params.context, &params, true)
+            .expect("operation is admitted")
+        {
+            BeginOutcome::New(operation) => operation,
+            BeginOutcome::Replay(_) | BeginOutcome::ReplayFailure(_) => {
+                panic!("new operation expected")
+            }
+        };
+        let (operation, receipt) =
+            mutation_receipt(operation, "file.write_text").expect("receipt is armed");
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocking_gate = Arc::clone(&gate);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let owned =
+            daemon
+                .owned_operations
+                .spawn(params.context.operation_id.clone(), async move {
+                    tokio::task::spawn_blocking(move || {
+                        let _ = started_tx.send(());
+                        let (released, changed) = &*blocking_gate;
+                        let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+                        while !*released {
+                            released = changed
+                                .wait(released)
+                                .unwrap_or_else(PoisonError::into_inner);
+                        }
+                    })
+                    .await
+                    .expect("blocking worker exits");
+                    operation
+                        .finish(&json!({"completed": true}), Some(receipt))
+                        .expect("operation finishes");
+                    Ok(json!({"completed": true}))
+                });
+        let response_waiter = tokio::spawn(async move {
+            let _ = owned.await;
+        });
+        started_rx.await.expect("blocking worker starts");
+        response_waiter.abort();
+        assert!(
+            response_waiter
+                .await
+                .expect_err("response waiter is cancelled")
+                .is_cancelled()
+        );
+        assert_eq!(daemon.operations.record_stats().0, 1);
+        assert_eq!(
+            daemon.owned_operations.active_ids(),
+            vec!["drain-write".to_owned()]
+        );
+        daemon.owned_operations.request_reconciliation();
+        daemon.owned_operations.wait_until_idle().await;
+        let (released, changed) = &*gate;
+        *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        changed.notify_all();
+
+        let mut retry = params;
+        retry.context.operation_id = "drain-write-retry".to_owned();
+        let replay = daemon
+            .begin_record("file.write_text", &retry.context, &retry, true)
+            .expect("matching idempotency key replays");
+        let BeginOutcome::ReplayFailure(error) = replay else {
+            panic!("unknown-outcome failure replay expected");
+        };
+        assert_eq!(error.data.error_type, crate::eip::ErrorType::UnknownOutcome);
+        assert_eq!(error.data.operation_id.as_deref(), Some("drain-write"));
+        let replayed_receipt = error.data.receipt.expect("unknown receipt is retained");
+        assert_eq!(replayed_receipt.operation_id, "drain-write");
+        assert_eq!(
+            replayed_receipt.outcome,
+            Some(crate::eip::ReceiptOutcome::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_registered_after_drain_is_reconciled_before_dispatch() {
+        let config = Config::for_test("env-test");
+        let daemon = Daemon::with_generation(&config, 14).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+        daemon.owned_operations.begin_drain();
+        let params = FileWriteTextParams {
+            context: EIPCallContext {
+                operation_id: "late-write".to_owned(),
+                deadline: None,
+                idempotency_key: Some("late-write-key".to_owned()),
+            },
+            path: EIPPath {
+                mount_id: "workspace".to_owned(),
+                path: "/late.txt".to_owned(),
+            },
+            mode: FileWriteMode::Create,
+            text: "late".to_owned(),
+            expected_revision: None,
+            executable: None,
+        };
+        let operation = match daemon
+            .begin_record("file.write_text", &params.context, &params, true)
+            .expect("operation is admitted")
+        {
+            BeginOutcome::New(operation) => operation,
+            BeginOutcome::Replay(_) | BeginOutcome::ReplayFailure(_) => {
+                panic!("new operation expected")
+            }
+        };
+        let (operation, receipt) =
+            mutation_receipt(operation, "file.write_text").expect("receipt is armed");
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let worker_dispatched = Arc::clone(&dispatched);
+        let owned =
+            daemon
+                .owned_operations
+                .spawn(params.context.operation_id.clone(), async move {
+                    worker_dispatched.store(true, Ordering::SeqCst);
+                    operation
+                        .finish(&json!({"completed": true}), Some(receipt))
+                        .expect("operation finishes");
+                    Ok(json!({"completed": true}))
+                });
+        let error = daemon
+            .await_owned_operation(&params.context.operation_id, owned)
+            .await
+            .expect_err("late registration is reconciled");
+        assert_eq!(error.data.error_type, crate::eip::ErrorType::UnknownOutcome);
+        assert!(!dispatched.load(Ordering::SeqCst));
+        daemon.owned_operations.wait_until_idle().await;
     }
 
     #[tokio::test]

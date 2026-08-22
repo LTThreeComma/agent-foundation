@@ -12,6 +12,7 @@ const TOOLING_MESSAGES: &[&str] = &[
     "EIPMessageOptions",
     "EIPEnumValueOptions",
     "EIPFieldOptions",
+    "EIPDataFrameProfileOptions",
 ];
 const TOOLING_ENUMS: &[&str] = &[
     "MethodKind",
@@ -19,9 +20,14 @@ const TOOLING_ENUMS: &[&str] = &[
     "IdempotencyKeyMode",
     "ErrorFamily",
     "EIPStringFormat",
+    "TransferAction",
+    "TransferDirection",
+    "EIPDataFrameKind",
+    "EIPDataResetStatus",
 ];
 
 struct Extensions {
+    file: ExtensionDescriptor,
     method: ExtensionDescriptor,
     message: ExtensionDescriptor,
     enum_value: ExtensionDescriptor,
@@ -39,12 +45,15 @@ struct MethodRecord {
     idempotency_key: String,
     introduced: String,
     error_family: String,
+    transfer_action: Option<String>,
+    transfer_direction: Option<String>,
     params_type: String,
     result_type: Option<String>,
 }
 
-pub fn render(pool: &DescriptorPool, digest: &str) -> Result<String, String> {
+pub fn render(pool: &DescriptorPool) -> Result<String, String> {
     let extensions = Extensions {
+        file: extension(pool, "eip_data_frame_profile")?,
         method: extension(pool, "eip_method")?,
         message: extension(pool, "eip_message")?,
         enum_value: extension(pool, "eip_enum_value")?,
@@ -57,9 +66,9 @@ pub fn render(pool: &DescriptorPool, digest: &str) -> Result<String, String> {
     );
     output.push_str(&format!(
         "pub const EIP_PROTOCOL_VERSION: &str = \"1.0\";\n\
-         pub const EIP_PROTO_PACKAGE: &str = \"{PACKAGE}\";\n\
-         pub const EIP_DESCRIPTOR_SHA256: &str = \"{digest}\";\n\n"
+         pub const EIP_PROTO_PACKAGE: &str = \"{PACKAGE}\";\n\n"
     ));
+    render_data_frame(&mut output, pool, &extensions)?;
     output.push_str(
         "#[derive(Debug, Clone, PartialEq, Eq)]\n\
          pub struct ValidationError(pub String);\n\n\
@@ -105,6 +114,9 @@ pub fn render(pool: &DescriptorPool, digest: &str) -> Result<String, String> {
          \x20   use base64::Engine as _;\n\
          \x20   !value.contains('=')\n\
          \x20       && base64::engine::general_purpose::STANDARD_NO_PAD.decode(value).is_ok()\n\
+         }\n\n\
+         fn validate_sha256(value: &str) -> bool {\n\
+         \x20   value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))\n\
          }\n\n"
     );
     output.push_str(
@@ -227,6 +239,270 @@ impl<'de> serde::de::Visitor<'de> for UniqueJsonVisitor {
 fn extension(pool: &DescriptorPool, name: &str) -> Result<ExtensionDescriptor, String> {
     pool.get_extension_by_name(&format!("{PACKAGE}.{name}"))
         .ok_or_else(|| format!("descriptor is missing {name} extension"))
+}
+
+fn numeric_enum_values(
+    pool: &DescriptorPool,
+    name: &str,
+    prefix: &str,
+) -> Result<Vec<(String, i32)>, String> {
+    let descriptor = pool
+        .get_enum_by_name(&format!("{PACKAGE}.{name}"))
+        .ok_or_else(|| format!("descriptor is missing {name}"))?;
+    Ok(descriptor
+        .values()
+        .filter(|value| value.number() != 0)
+        .map(|value| {
+            (
+                value
+                    .name()
+                    .strip_prefix(prefix)
+                    .unwrap_or(value.name())
+                    .to_upper_camel_case(),
+                value.number(),
+            )
+        })
+        .collect())
+}
+
+fn render_data_frame(
+    output: &mut String,
+    pool: &DescriptorPool,
+    extensions: &Extensions,
+) -> Result<(), String> {
+    let candidates = pool
+        .files()
+        .filter_map(|file| {
+            let options = file.options();
+            options
+                .has_extension(&extensions.file)
+                .then(|| extension_message(options, &extensions.file))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if candidates.len() != 1 {
+        return Err(format!(
+            "expected exactly one EIP data-frame profile, found {}",
+            candidates.len()
+        ));
+    }
+    let profile = &candidates[0];
+    let magic = string_field(profile, "magic")?;
+    let version = u32_field(profile, "profile_version")?;
+    let eip_major = u32_field(profile, "eip_major")?;
+    let header_bytes = u32_field(profile, "header_bytes")?;
+    let widths = [
+        u32_field(profile, "magic_bytes")?,
+        u32_field(profile, "version_bytes")?,
+        u32_field(profile, "kind_bytes")?,
+        u32_field(profile, "status_bytes")?,
+        u32_field(profile, "handle_length_bytes")?,
+        u32_field(profile, "reserved_bytes")?,
+        u32_field(profile, "stream_offset_bytes")?,
+        u32_field(profile, "payload_length_bytes")?,
+    ];
+    if magic != "EIPD"
+        || version != 1
+        || eip_major != 1
+        || header_bytes != 24
+        || widths != [4, 1, 1, 2, 2, 2, 8, 4]
+        || widths.iter().sum::<u32>() != header_bytes
+    {
+        return Err("EIP data-frame profile has an incompatible header layout".to_owned());
+    }
+    let kinds = numeric_enum_values(pool, "EIPDataFrameKind", "EIP_DATA_FRAME_KIND_")?;
+    let statuses = numeric_enum_values(pool, "EIPDataResetStatus", "EIP_DATA_RESET_STATUS_")?;
+    let expected_kinds = vec![
+        ("Attach".to_owned(), 1),
+        ("Attached".to_owned(), 2),
+        ("Chunk".to_owned(), 3),
+        ("End".to_owned(), 4),
+        ("EndAck".to_owned(), 5),
+        ("Reset".to_owned(), 6),
+    ];
+    let expected_statuses = vec![
+        ("Protocol".to_owned(), 1),
+        ("Denied".to_owned(), 2),
+        ("Expired".to_owned(), 3),
+        ("Source".to_owned(), 4),
+        ("Limit".to_owned(), 5),
+        ("Cancelled".to_owned(), 6),
+        ("Internal".to_owned(), 7),
+    ];
+    if kinds != expected_kinds || statuses != expected_statuses {
+        return Err("EIP data-frame enum mapping is incompatible with profile 1".to_owned());
+    }
+
+    output.push_str(&format!(
+        "pub const EIP_DATA_FRAME_MAGIC: [u8; 4] = *b\"{magic}\";\n\
+         pub const EIP_DATA_FRAME_PROFILE_VERSION: u8 = {version};\n\
+         pub const EIP_DATA_FRAME_EIP_MAJOR: u8 = {eip_major};\n\
+         pub const EIP_DATA_FRAME_HEADER_BYTES: usize = {header_bytes};\n\
+         pub const EIP_DATA_FRAME_MAX_HANDLE_BYTES: usize = u16::MAX as usize;\n\
+         pub const EIP_DATA_FRAME_MAX_PAYLOAD_BYTES: usize = u32::MAX as usize;\n\n"
+    ));
+    output.push_str(
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n#[repr(u8)]\npub enum DataFrameKind {\n",
+    );
+    for (name, number) in &kinds {
+        output.push_str(&format!("    {name} = {number},\n"));
+    }
+    output.push_str("}\n\nimpl TryFrom<u8> for DataFrameKind {\n    type Error = DataFrameCodecError;\n    fn try_from(value: u8) -> Result<Self, Self::Error> {\n        match value {\n");
+    for (name, number) in &kinds {
+        output.push_str(&format!("            {number} => Ok(Self::{name}),\n"));
+    }
+    output.push_str("            _ => Err(DataFrameCodecError(\"unknown EIP data-frame kind\".to_owned())),\n        }\n    }\n}\n\n");
+
+    output.push_str(
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n#[repr(u16)]\npub enum DataResetStatus {\n",
+    );
+    for (name, number) in &statuses {
+        output.push_str(&format!("    {name} = {number},\n"));
+    }
+    output.push_str("}\n\nimpl TryFrom<u16> for DataResetStatus {\n    type Error = DataFrameCodecError;\n    fn try_from(value: u16) -> Result<Self, Self::Error> {\n        match value {\n");
+    for (name, number) in &statuses {
+        output.push_str(&format!("            {number} => Ok(Self::{name}),\n"));
+    }
+    output.push_str("            _ => Err(DataFrameCodecError(\"RESET has an invalid terminal status\".to_owned())),\n        }\n    }\n}\n\n");
+
+    output.push_str(
+        r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFrameCodecError(pub String);
+
+impl std::fmt::Display for DataFrameCodecError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DataFrameCodecError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFrame {
+    pub kind: DataFrameKind,
+    pub handle: String,
+    pub offset: u64,
+    pub payload: Vec<u8>,
+    pub reset_status: Option<DataResetStatus>,
+}
+
+fn validate_data_frame(frame: &DataFrame, max_frame_bytes: usize) -> Result<(Vec<u8>, u16), DataFrameCodecError> {
+    let handle = frame.handle.as_bytes();
+    if handle.is_empty() {
+        return Err(DataFrameCodecError("EIP data-frame handle must be non-empty UTF-8".to_owned()));
+    }
+    if handle.len() > EIP_DATA_FRAME_MAX_HANDLE_BYTES {
+        return Err(DataFrameCodecError("EIP data-frame handle is too long".to_owned()));
+    }
+    if frame.payload.len() > EIP_DATA_FRAME_MAX_PAYLOAD_BYTES {
+        return Err(DataFrameCodecError("EIP data-frame payload is too long".to_owned()));
+    }
+    let status = if frame.kind == DataFrameKind::Reset {
+        frame.reset_status
+            .map(|value| value as u16)
+            .ok_or_else(|| DataFrameCodecError("RESET requires a terminal status".to_owned()))?
+    } else {
+        if frame.reset_status.is_some() {
+            return Err(DataFrameCodecError("terminal status is valid only for RESET".to_owned()));
+        }
+        0
+    };
+    if frame.kind != DataFrameKind::Chunk && !frame.payload.is_empty() {
+        return Err(DataFrameCodecError("payload is valid only for CHUNK".to_owned()));
+    }
+    if frame.kind == DataFrameKind::Chunk
+        && frame.offset.checked_add(frame.payload.len() as u64).is_none()
+    {
+        return Err(DataFrameCodecError("EIP data-frame payload overflows the stream offset".to_owned()));
+    }
+    if matches!(frame.kind, DataFrameKind::Attach | DataFrameKind::Attached) && frame.offset != 0 {
+        return Err(DataFrameCodecError("attachment frames must use offset zero".to_owned()));
+    }
+    if max_frame_bytes < EIP_DATA_FRAME_HEADER_BYTES + 1 {
+        return Err(DataFrameCodecError("invalid EIP data-frame ceiling".to_owned()));
+    }
+    let total = EIP_DATA_FRAME_HEADER_BYTES
+        .checked_add(handle.len())
+        .and_then(|value| value.checked_add(frame.payload.len()))
+        .ok_or_else(|| DataFrameCodecError("EIP data frame length overflows usize".to_owned()))?;
+    if total > max_frame_bytes {
+        return Err(DataFrameCodecError("EIP data frame exceeds the configured ceiling".to_owned()));
+    }
+    Ok((handle.to_vec(), status))
+}
+
+pub fn encode_data_frame(frame: &DataFrame, max_frame_bytes: usize) -> Result<Vec<u8>, DataFrameCodecError> {
+    let (handle, status) = validate_data_frame(frame, max_frame_bytes)?;
+    let mut output = Vec::with_capacity(EIP_DATA_FRAME_HEADER_BYTES + handle.len() + frame.payload.len());
+    output.extend_from_slice(&EIP_DATA_FRAME_MAGIC);
+    output.push(EIP_DATA_FRAME_PROFILE_VERSION);
+    output.push(frame.kind as u8);
+    output.extend_from_slice(&status.to_be_bytes());
+    output.extend_from_slice(&(handle.len() as u16).to_be_bytes());
+    output.extend_from_slice(&0u16.to_be_bytes());
+    output.extend_from_slice(&frame.offset.to_be_bytes());
+    output.extend_from_slice(&(frame.payload.len() as u32).to_be_bytes());
+    output.extend_from_slice(&handle);
+    output.extend_from_slice(&frame.payload);
+    Ok(output)
+}
+
+pub fn decode_data_frame(payload: &[u8], max_frame_bytes: usize) -> Result<DataFrame, DataFrameCodecError> {
+    if max_frame_bytes < EIP_DATA_FRAME_HEADER_BYTES + 1 {
+        return Err(DataFrameCodecError("invalid EIP data-frame ceiling".to_owned()));
+    }
+    if payload.len() > max_frame_bytes {
+        return Err(DataFrameCodecError("EIP data frame exceeds the configured ceiling".to_owned()));
+    }
+    if payload.len() < EIP_DATA_FRAME_HEADER_BYTES {
+        return Err(DataFrameCodecError("EIP data frame is shorter than its header".to_owned()));
+    }
+    if payload[..4] != EIP_DATA_FRAME_MAGIC {
+        return Err(DataFrameCodecError("invalid EIP data-frame magic".to_owned()));
+    }
+    if payload[4] != EIP_DATA_FRAME_PROFILE_VERSION {
+        return Err(DataFrameCodecError("unsupported EIP data-frame profile version".to_owned()));
+    }
+    let kind = DataFrameKind::try_from(payload[5])?;
+    let status_value = u16::from_be_bytes([payload[6], payload[7]]);
+    let handle_length = u16::from_be_bytes([payload[8], payload[9]]) as usize;
+    if payload[10] != 0 || payload[11] != 0 {
+        return Err(DataFrameCodecError("EIP data-frame reserved field must be zero".to_owned()));
+    }
+    let offset = u64::from_be_bytes(payload[12..20].try_into().expect("fixed-width offset"));
+    let payload_length = u32::from_be_bytes(payload[20..24].try_into().expect("fixed-width payload length")) as usize;
+    let expected = EIP_DATA_FRAME_HEADER_BYTES
+        .checked_add(handle_length)
+        .and_then(|value| value.checked_add(payload_length))
+        .ok_or_else(|| DataFrameCodecError("EIP data-frame body length overflow".to_owned()))?;
+    if expected != payload.len() {
+        return Err(DataFrameCodecError("EIP data-frame body length mismatch".to_owned()));
+    }
+    let handle_end = EIP_DATA_FRAME_HEADER_BYTES + handle_length;
+    let handle = std::str::from_utf8(&payload[EIP_DATA_FRAME_HEADER_BYTES..handle_end])
+        .map_err(|_| DataFrameCodecError("EIP data-frame handle must be non-empty UTF-8".to_owned()))?
+        .to_owned();
+    let reset_status = if kind == DataFrameKind::Reset {
+        Some(DataResetStatus::try_from(status_value)?)
+    } else {
+        if status_value != 0 {
+            return Err(DataFrameCodecError("terminal status is valid only for RESET".to_owned()));
+        }
+        None
+    };
+    let frame = DataFrame {
+        kind,
+        handle,
+        offset,
+        payload: payload[handle_end..].to_vec(),
+        reset_status,
+    };
+    validate_data_frame(&frame, max_frame_bytes)?;
+    Ok(frame)
+}
+
+"#,
+    );
+    Ok(())
 }
 
 fn extension_message(
@@ -680,6 +956,19 @@ fn render_validation_impl(
                 "        if {sum} != 1 {{ return Err(ValidationError(\"exactly one of {names} must be present\".to_owned())); }}\n"
             ));
         }
+        if descriptor.name() == "FileReadTextParams" {
+            output.push_str(
+                "        if self.cursor.is_some() && self.start_line.is_some() { return Err(ValidationError(\"cursor and start_line are mutually exclusive\".to_owned())); }\n",
+            );
+        }
+        if descriptor.name() == "FileReadCompletion" {
+            output.push_str(
+                "        if self.range_start > self.range_end { return Err(ValidationError(\"range_start cannot exceed range_end\".to_owned())); }\n\
+                 \x20       let expected = self.range_end - self.range_start;\n\
+                 \x20       if self.complete && (self.digest.is_none() || self.produced_bytes != expected) { return Err(ValidationError(\"complete reads require exact bytes and digest\".to_owned())); }\n\
+                 \x20       if !self.complete && self.digest.is_some() { return Err(ValidationError(\"incomplete reads cannot expose a digest\".to_owned())); }\n",
+            );
+        }
         if descriptor.name() == "OutputPolicy" {
             output.push_str(
                 "        if self.max_inline_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_bytes cannot exceed max_output_bytes\".to_owned())); }\n",
@@ -701,7 +990,8 @@ fn render_validation_impl(
             output.push_str(
                 "        if self.max_inline_output_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_output_bytes cannot exceed max_output_bytes\".to_owned())); }\n\
                  \x20       if self.max_processes > self.max_process_records { return Err(ValidationError(\"max_processes cannot exceed max_process_records\".to_owned())); }\n\
-                 \x20       if self.max_concurrent_operations > self.max_operation_records { return Err(ValidationError(\"max_concurrent_operations cannot exceed max_operation_records\".to_owned())); }\n",
+                 \x20       if self.max_concurrent_operations > self.max_operation_records { return Err(ValidationError(\"max_concurrent_operations cannot exceed max_operation_records\".to_owned())); }\n\
+                 \x20       if self.max_concurrent_file_transfers > self.max_file_transfer_records { return Err(ValidationError(\"max_concurrent_file_transfers cannot exceed max_file_transfer_records\".to_owned())); }\n",
             );
         }
         if descriptor.name() == "EIPErrorData" {
@@ -841,6 +1131,7 @@ fn render_field_checks(
             "EIP_STRING_FORMAT_PROTOCOL_VERSION" => {
                 Some(format!("!validate_protocol_version({string_target})"))
             }
+            "EIP_STRING_FORMAT_SHA256" => Some(format!("!validate_sha256({string_target})")),
             _ => None,
         };
         if let Some(invalid) = invalid {
@@ -986,6 +1277,28 @@ fn method_records(
                 record.jsonrpc_method
             ));
         }
+        if record.transfer_action.is_some() != record.transfer_direction.is_some() {
+            return Err(format!(
+                "EIP method {} has incomplete transfer metadata",
+                record.jsonrpc_method
+            ));
+        }
+        if let Some(action) = &record.transfer_action
+            && !matches!(action.as_str(), "open" | "close" | "commit" | "abort")
+        {
+            return Err(format!(
+                "EIP method {} has invalid transfer action",
+                record.jsonrpc_method
+            ));
+        }
+        if let Some(direction) = &record.transfer_direction
+            && !matches!(direction.as_str(), "server_to_client" | "client_to_server")
+        {
+            return Err(format!(
+                "EIP method {} has invalid transfer direction",
+                record.jsonrpc_method
+            ));
+        }
     }
     Ok(records)
 }
@@ -1008,6 +1321,15 @@ fn method_record(
     let error_family = enum_field_name(&option, "error_family")?
         .trim_start_matches("ERROR_FAMILY_")
         .to_ascii_lowercase();
+    let transfer_action_value = enum_field_name(&option, "transfer_action")?
+        .trim_start_matches("TRANSFER_ACTION_")
+        .to_ascii_lowercase();
+    let transfer_direction_value = enum_field_name(&option, "transfer_direction")?
+        .trim_start_matches("TRANSFER_DIRECTION_")
+        .to_ascii_lowercase();
+    let transfer_action = (transfer_action_value != "unspecified").then_some(transfer_action_value);
+    let transfer_direction =
+        (transfer_direction_value != "unspecified").then_some(transfer_direction_value);
     let major = u32_field(&option, "introduced_major")?;
     let minor = u32_field(&option, "introduced_minor")?;
     let result_type = (method.output().full_name() != "google.protobuf.Empty")
@@ -1024,6 +1346,8 @@ fn method_record(
         idempotency_key,
         introduced: format!("{major}.{minor}"),
         error_family,
+        transfer_action,
+        transfer_direction,
         params_type: method.input().name().to_owned(),
         result_type,
     })
@@ -1121,6 +1445,8 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
          \x20   pub idempotency_key: &'static str,\n\
          \x20   pub introduced: &'static str,\n\
          \x20   pub error_family: &'static str,\n\
+         \x20   pub transfer_action: Option<&'static str>,\n\
+         \x20   pub transfer_direction: Option<&'static str>,\n\
          \x20   pub params_type: &'static str,\n\
          \x20   pub result_type: &'static str,\n\
          }\n\n\
@@ -1135,8 +1461,16 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
             .result_type
             .as_deref()
             .expect("validated EIP request-response has a result type");
+        let transfer_action = method
+            .transfer_action
+            .as_ref()
+            .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
+        let transfer_direction = method
+            .transfer_direction
+            .as_ref()
+            .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
         output.push_str(&format!(
-            "    MethodSpec {{ name: \"{}\", capability: {}, kind: \"{}\", idempotency: \"{}\", idempotency_key: \"{}\", introduced: \"{}\", error_family: \"{}\", params_type: \"{}\", result_type: \"{}\" }},\n",
+            "    MethodSpec {{ name: \"{}\", capability: {}, kind: \"{}\", idempotency: \"{}\", idempotency_key: \"{}\", introduced: \"{}\", error_family: \"{}\", transfer_action: {}, transfer_direction: {}, params_type: \"{}\", result_type: \"{}\" }},\n",
             method.jsonrpc_method,
             capability,
             method.kind,
@@ -1144,6 +1478,8 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
             method.idempotency_key,
             method.introduced,
             method.error_family,
+            transfer_action,
+            transfer_direction,
             method.params_type,
             result
         ));

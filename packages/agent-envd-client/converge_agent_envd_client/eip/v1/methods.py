@@ -18,18 +18,28 @@ from .models import (
     FileMkdirResult,
     FileMoveParams,
     FileMoveResult,
-    FilePatchParams,
-    FilePatchResult,
-    FileReadParams,
-    FileReadResult,
+    FilePatchTextParams,
+    FilePatchTextResult,
+    FileReaderCloseParams,
+    FileReaderCloseResult,
+    FileReaderOpenParams,
+    FileReaderOpenResult,
+    FileReadTextParams,
+    FileReadTextResult,
     FileRemoveParams,
     FileRemoveResult,
     FileSearchParams,
     FileSearchResult,
     FileStatParams,
     FileStatResult,
-    FileWriteParams,
-    FileWriteResult,
+    FileWriterAbortParams,
+    FileWriterAbortResult,
+    FileWriterCommitParams,
+    FileWriterCommitResult,
+    FileWriterOpenParams,
+    FileWriterOpenResult,
+    FileWriteTextParams,
+    FileWriteTextResult,
     InitializeParams,
     InitializeResult,
     OperationCancelParams,
@@ -80,6 +90,8 @@ class MethodSpec[P, R]:
     error_family: str
     params_type: type[P]
     result_type: type[R]
+    transfer_action: Literal["open", "close", "commit", "abort"] | None = None
+    transfer_direction: Literal["server_to_client", "client_to_server"] | None = None
 
 
 ENVIRONMENT_DESCRIBE = MethodSpec(
@@ -90,8 +102,52 @@ ENVIRONMENT_DESCRIBE = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="common",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=EnvironmentDescribeParams,
     result_type=EnvironmentDescribeResult,
+)
+
+FILE_ABORT_WRITER = MethodSpec(
+    name="file.abort_writer",
+    capability="file.write",
+    kind="request_response",
+    idempotency="state_idempotent_control",
+    idempotency_key="optional",
+    introduced="1.0",
+    error_family="resource",
+    transfer_action="abort",
+    transfer_direction="client_to_server",
+    params_type=FileWriterAbortParams,
+    result_type=FileWriterAbortResult,
+)
+
+FILE_CLOSE_READER = MethodSpec(
+    name="file.close_reader",
+    capability="file.read",
+    kind="request_response",
+    idempotency="state_idempotent_control",
+    idempotency_key="optional",
+    introduced="1.0",
+    error_family="resource",
+    transfer_action="close",
+    transfer_direction="server_to_client",
+    params_type=FileReaderCloseParams,
+    result_type=FileReaderCloseResult,
+)
+
+FILE_COMMIT_WRITER = MethodSpec(
+    name="file.commit_writer",
+    capability="file.write",
+    kind="request_response",
+    idempotency="provider_key_replay",
+    idempotency_key="optional",
+    introduced="1.0",
+    error_family="resource",
+    transfer_action="commit",
+    transfer_direction="client_to_server",
+    params_type=FileWriterCommitParams,
+    result_type=FileWriterCommitResult,
 )
 
 FILE_COPY = MethodSpec(
@@ -102,6 +158,8 @@ FILE_COPY = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileCopyParams,
     result_type=FileCopyResult,
 )
@@ -114,6 +172,8 @@ FILE_FIND = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileFindParams,
     result_type=FileFindResult,
 )
@@ -126,6 +186,8 @@ FILE_LIST = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileListParams,
     result_type=FileListResult,
 )
@@ -138,6 +200,8 @@ FILE_MKDIR = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileMkdirParams,
     result_type=FileMkdirResult,
 )
@@ -150,32 +214,66 @@ FILE_MOVE = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileMoveParams,
     result_type=FileMoveResult,
 )
 
-FILE_PATCH = MethodSpec(
-    name="file.patch",
+FILE_OPEN_READER = MethodSpec(
+    name="file.open_reader",
+    capability="file.read",
+    kind="request_response",
+    idempotency="session_resource_replay",
+    idempotency_key="optional",
+    introduced="1.0",
+    error_family="resource",
+    transfer_action="open",
+    transfer_direction="server_to_client",
+    params_type=FileReaderOpenParams,
+    result_type=FileReaderOpenResult,
+)
+
+FILE_OPEN_WRITER = MethodSpec(
+    name="file.open_writer",
+    capability="file.write",
+    kind="request_response",
+    idempotency="session_resource_replay",
+    idempotency_key="optional",
+    introduced="1.0",
+    error_family="resource",
+    transfer_action="open",
+    transfer_direction="client_to_server",
+    params_type=FileWriterOpenParams,
+    result_type=FileWriterOpenResult,
+)
+
+FILE_PATCH_TEXT = MethodSpec(
+    name="file.patch_text",
     capability="file.write",
     kind="request_response",
     idempotency="provider_key_replay",
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
-    params_type=FilePatchParams,
-    result_type=FilePatchResult,
+    transfer_action=None,
+    transfer_direction=None,
+    params_type=FilePatchTextParams,
+    result_type=FilePatchTextResult,
 )
 
-FILE_READ = MethodSpec(
-    name="file.read",
+FILE_READ_TEXT = MethodSpec(
+    name="file.read_text",
     capability="file.read",
     kind="request_response",
     idempotency="read_only_retry",
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
-    params_type=FileReadParams,
-    result_type=FileReadResult,
+    transfer_action=None,
+    transfer_direction=None,
+    params_type=FileReadTextParams,
+    result_type=FileReadTextResult,
 )
 
 FILE_REMOVE = MethodSpec(
@@ -186,6 +284,8 @@ FILE_REMOVE = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileRemoveParams,
     result_type=FileRemoveResult,
 )
@@ -198,6 +298,8 @@ FILE_SEARCH = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileSearchParams,
     result_type=FileSearchResult,
 )
@@ -210,20 +312,24 @@ FILE_STAT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=FileStatParams,
     result_type=FileStatResult,
 )
 
-FILE_WRITE = MethodSpec(
-    name="file.write",
+FILE_WRITE_TEXT = MethodSpec(
+    name="file.write_text",
     capability="file.write",
     kind="request_response",
     idempotency="provider_key_replay",
     idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
-    params_type=FileWriteParams,
-    result_type=FileWriteResult,
+    transfer_action=None,
+    transfer_direction=None,
+    params_type=FileWriteTextParams,
+    result_type=FileWriteTextResult,
 )
 
 INITIALIZE = MethodSpec(
@@ -234,6 +340,8 @@ INITIALIZE = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="initialization",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=InitializeParams,
     result_type=InitializeResult,
 )
@@ -246,6 +354,8 @@ OPERATION_CANCEL = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="common",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=OperationCancelParams,
     result_type=OperationCancelResult,
 )
@@ -258,6 +368,8 @@ OUTPUT_READ = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="output",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=OutputReadParams,
     result_type=OutputReadResult,
 )
@@ -270,6 +382,8 @@ OUTPUT_RELEASE = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="output",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=OutputReleaseParams,
     result_type=OutputReleaseResult,
 )
@@ -282,6 +396,8 @@ PORT_INSPECT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=PortInspectParams,
     result_type=PortInspectResult,
 )
@@ -294,6 +410,8 @@ PORT_WAIT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=PortWaitParams,
     result_type=PortWaitResult,
 )
@@ -306,6 +424,8 @@ PROCESS_CLOSE_STDIN = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessCloseStdinParams,
     result_type=ProcessCloseStdinResult,
 )
@@ -318,6 +438,8 @@ PROCESS_INSPECT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessInspectParams,
     result_type=ProcessInspectResult,
 )
@@ -330,6 +452,8 @@ PROCESS_KILL = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessKillParams,
     result_type=ProcessKillResult,
 )
@@ -342,6 +466,8 @@ PROCESS_READ_OUTPUT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessReadOutputParams,
     result_type=ProcessReadOutputResult,
 )
@@ -354,6 +480,8 @@ PROCESS_RELEASE = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessReleaseParams,
     result_type=ProcessReleaseResult,
 )
@@ -366,6 +494,8 @@ PROCESS_SIGNAL = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessSignalParams,
     result_type=ProcessSignalResult,
 )
@@ -378,6 +508,8 @@ PROCESS_START = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessStartParams,
     result_type=ProcessStartResult,
 )
@@ -390,6 +522,8 @@ PROCESS_WAIT = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessWaitParams,
     result_type=ProcessWaitResult,
 )
@@ -402,6 +536,8 @@ PROCESS_WRITE_STDIN = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="process",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ProcessWriteStdinParams,
     result_type=ProcessWriteStdinResult,
 )
@@ -414,6 +550,8 @@ RECEIPT_GET = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="common",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ReceiptGetParams,
     result_type=ReceiptGetResult,
 )
@@ -426,6 +564,8 @@ SESSION_CLOSE = MethodSpec(
     idempotency_key="disallowed",
     introduced="1.0",
     error_family="session",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=SessionCloseParams,
     result_type=SessionCloseResult,
 )
@@ -438,6 +578,8 @@ SHELL_EXEC = MethodSpec(
     idempotency_key="optional",
     introduced="1.0",
     error_family="command",
+    transfer_action=None,
+    transfer_direction=None,
     params_type=ShellExecParams,
     result_type=ShellExecResult,
 )
@@ -445,17 +587,22 @@ SHELL_EXEC = MethodSpec(
 METHODS = MappingProxyType(
     {
         ENVIRONMENT_DESCRIBE.name: ENVIRONMENT_DESCRIBE,
+        FILE_ABORT_WRITER.name: FILE_ABORT_WRITER,
+        FILE_CLOSE_READER.name: FILE_CLOSE_READER,
+        FILE_COMMIT_WRITER.name: FILE_COMMIT_WRITER,
         FILE_COPY.name: FILE_COPY,
         FILE_FIND.name: FILE_FIND,
         FILE_LIST.name: FILE_LIST,
         FILE_MKDIR.name: FILE_MKDIR,
         FILE_MOVE.name: FILE_MOVE,
-        FILE_PATCH.name: FILE_PATCH,
-        FILE_READ.name: FILE_READ,
+        FILE_OPEN_READER.name: FILE_OPEN_READER,
+        FILE_OPEN_WRITER.name: FILE_OPEN_WRITER,
+        FILE_PATCH_TEXT.name: FILE_PATCH_TEXT,
+        FILE_READ_TEXT.name: FILE_READ_TEXT,
         FILE_REMOVE.name: FILE_REMOVE,
         FILE_SEARCH.name: FILE_SEARCH,
         FILE_STAT.name: FILE_STAT,
-        FILE_WRITE.name: FILE_WRITE,
+        FILE_WRITE_TEXT.name: FILE_WRITE_TEXT,
         INITIALIZE.name: INITIALIZE,
         OPERATION_CANCEL.name: OPERATION_CANCEL,
         OUTPUT_READ.name: OUTPUT_READ,

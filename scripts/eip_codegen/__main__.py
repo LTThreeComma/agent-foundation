@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -11,7 +10,7 @@ from typing import TypedDict
 
 from .artifacts import write_artifacts
 from .compiler import compile_descriptor
-from .model import OptionReader, build_index
+from .model import OptionReader, build_index, data_frame_profile
 from .python_renderer import GENERATED_HEADER, write_python_surface
 
 DESCRIPTOR_PATH = Path("crates/agent-envd/protocol/eip/v1/descriptor.pb")
@@ -23,7 +22,6 @@ ALLOWED_ROOTS = (DESCRIPTOR_PATH.parent, PYTHON_PATH, ARTIFACT_PATH)
 
 class GeneratedManifest(TypedDict):
     generated: bool
-    descriptor_sha256: str
     files: list[str]
 
 
@@ -41,12 +39,11 @@ def _safe_generated_path(value: str) -> Path:
     return path
 
 
-def _write_manifest(root: Path, generated: list[Path], descriptor_sha256: str) -> None:
+def _write_manifest(root: Path, generated: list[Path]) -> None:
     relative = sorted(str(path.relative_to(root)) for path in generated)
     relative.append(str(MANIFEST_PATH))
     manifest = {
         "generated": True,
-        "descriptor_sha256": descriptor_sha256,
         "files": sorted(relative),
     }
     path = root / MANIFEST_PATH
@@ -57,27 +54,27 @@ def _write_manifest(root: Path, generated: list[Path], descriptor_sha256: str) -
 def generate_tree(root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="eip-compile-") as compile_tmp:
         descriptor_set, descriptor_bytes, option_module = compile_descriptor(Path(compile_tmp))
-    descriptor_sha256 = hashlib.sha256(descriptor_bytes).hexdigest()
     index = build_index(descriptor_set)
     options = OptionReader(option_module)
+    frame_profile = data_frame_profile(index, options)
 
     descriptor_target = root / DESCRIPTOR_PATH
     descriptor_target.parent.mkdir(parents=True, exist_ok=True)
     descriptor_target.write_bytes(descriptor_bytes)
 
     python_target = root / PYTHON_PATH
-    python_paths = write_python_surface(python_target, index, options, descriptor_sha256)
+    python_paths = write_python_surface(python_target, index, options, frame_profile)
     _format_python(python_target)
 
     artifact_paths = write_artifacts(
         root / ARTIFACT_PATH,
         index,
         options,
-        descriptor_sha256,
         python_target / "models.py",
+        frame_profile,
     )
     generated = [descriptor_target, *python_paths, *artifact_paths]
-    _write_manifest(root, generated, descriptor_sha256)
+    _write_manifest(root, generated)
 
 
 def _read_manifest(root: Path) -> GeneratedManifest:
@@ -87,17 +84,11 @@ def _read_manifest(root: Path) -> GeneratedManifest:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("generated") is not True:
         raise ValueError(f"invalid generated manifest: {MANIFEST_PATH}")
-    descriptor_sha256 = value.get("descriptor_sha256")
     files = value.get("files")
-    if (
-        not isinstance(descriptor_sha256, str)
-        or not isinstance(files, list)
-        or not all(isinstance(item, str) for item in files)
-    ):
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
         raise ValueError(f"invalid generated manifest: {MANIFEST_PATH}")
     return {
         "generated": True,
-        "descriptor_sha256": descriptor_sha256,
         "files": [item for item in files if isinstance(item, str)],
     }
 

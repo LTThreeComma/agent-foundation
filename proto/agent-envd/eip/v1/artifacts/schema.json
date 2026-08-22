@@ -216,6 +216,27 @@
         }
       ]
     },
+    "ContentDigest": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "sha256",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "value": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "title": "ContentDigest",
+      "type": "object"
+    },
     "DesiredPortStatus": {
       "enum": [
         "listening",
@@ -554,10 +575,40 @@
     "EIPLimits": {
       "additionalProperties": false,
       "properties": {
+        "file_transfer_idle_ttl_ms": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "File Transfer Idle Ttl Ms",
+          "type": "integer"
+        },
+        "file_transfer_record_ttl_ms": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "File Transfer Record Ttl Ms",
+          "type": "integer"
+        },
+        "max_concurrent_file_transfers": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Concurrent File Transfers",
+          "type": "integer"
+        },
         "max_concurrent_operations": {
           "maximum": 18446744073709551615,
           "minimum": 1,
           "title": "Max Concurrent Operations",
+          "type": "integer"
+        },
+        "max_file_transfer_duration_ms": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max File Transfer Duration Ms",
+          "type": "integer"
+        },
+        "max_file_transfer_records": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max File Transfer Records",
           "type": "integer"
         },
         "max_inline_output_bytes": {
@@ -626,6 +677,24 @@
           "title": "Max Retention Ttl Ms",
           "type": "integer"
         },
+        "max_staged_file_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Staged File Bytes",
+          "type": "integer"
+        },
+        "max_staged_file_objects": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Staged File Objects",
+          "type": "integer"
+        },
+        "max_transfer_frame_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 25,
+          "title": "Max Transfer Frame Bytes",
+          "type": "integer"
+        },
         "operation_record_ttl_ms": {
           "maximum": 18446744073709551615,
           "minimum": 1,
@@ -660,7 +729,15 @@
         "operation_record_ttl_ms",
         "session_idle_ttl_ms",
         "max_process_records",
-        "terminal_process_record_ttl_ms"
+        "terminal_process_record_ttl_ms",
+        "max_transfer_frame_bytes",
+        "max_concurrent_file_transfers",
+        "max_file_transfer_records",
+        "file_transfer_record_ttl_ms",
+        "max_staged_file_bytes",
+        "max_staged_file_objects",
+        "file_transfer_idle_ttl_ms",
+        "max_file_transfer_duration_ms"
       ],
       "title": "EIPLimits",
       "type": "object"
@@ -835,10 +912,39 @@
         "execution_isolation_failed",
         "cleanup_failed",
         "command_start_failed",
-        "conflict"
+        "conflict",
+        "integrity_mismatch"
       ],
       "title": "ErrorType",
       "type": "string"
+    },
+    "FileByteRange": {
+      "additionalProperties": false,
+      "properties": {
+        "length": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Length"
+        },
+        "offset": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        }
+      },
+      "title": "FileByteRange",
+      "type": "object"
     },
     "FileCopyParams": {
       "additionalProperties": false,
@@ -881,6 +987,11 @@
           "title": "Require Atomic Destination",
           "type": "boolean"
         },
+        "require_stable_source": {
+          "default": false,
+          "title": "Require Stable Source",
+          "type": "boolean"
+        },
         "source": {
           "$ref": "#/$defs/EIPPath"
         }
@@ -911,16 +1022,28 @@
         },
         "receipt": {
           "$ref": "#/$defs/OperationReceipt"
+        },
+        "source_stability": {
+          "$ref": "#/$defs/FileCopySourceStability"
         }
       },
       "required": [
         "destination",
         "bytes_copied",
         "atomic_destination",
-        "receipt"
+        "receipt",
+        "source_stability"
       ],
       "title": "FileCopyResult",
       "type": "object"
+    },
+    "FileCopySourceStability": {
+      "enum": [
+        "verified",
+        "unverified"
+      ],
+      "title": "FileCopySourceStability",
+      "type": "string"
     },
     "FileFindParams": {
       "additionalProperties": false,
@@ -1292,7 +1415,7 @@
       "title": "FileMoveResult",
       "type": "object"
     },
-    "FilePatchParams": {
+    "FilePatchTextParams": {
       "additionalProperties": false,
       "properties": {
         "context": {
@@ -1321,10 +1444,10 @@
         "patch",
         "expected_revision"
       ],
-      "title": "FilePatchParams",
+      "title": "FilePatchTextParams",
       "type": "object"
     },
-    "FilePatchResult": {
+    "FilePatchTextResult": {
       "additionalProperties": false,
       "properties": {
         "hunks_applied": {
@@ -1345,12 +1468,255 @@
         "hunks_applied",
         "receipt"
       ],
-      "title": "FilePatchResult",
+      "title": "FilePatchTextResult",
       "type": "object"
     },
-    "FileReadParams": {
+    "FileReadCompletion": {
       "additionalProperties": false,
       "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentDigest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "produced_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Produced Bytes",
+          "type": "integer"
+        },
+        "range_end": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Range End",
+          "type": "integer"
+        },
+        "range_start": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Range Start",
+          "type": "integer"
+        },
+        "source_eof_at_end": {
+          "title": "Source Eof At End",
+          "type": "boolean"
+        },
+        "stability": {
+          "$ref": "#/$defs/FileReadStability"
+        }
+      },
+      "required": [
+        "range_start",
+        "range_end",
+        "produced_bytes",
+        "source_eof_at_end",
+        "stability",
+        "complete"
+      ],
+      "title": "FileReadCompletion",
+      "type": "object"
+    },
+    "FileReadStability": {
+      "enum": [
+        "verified",
+        "changed",
+        "unverified"
+      ],
+      "title": "FileReadStability",
+      "type": "string"
+    },
+    "FileReadTextParams": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileTextCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileRevision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_bytes": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Bytes"
+        },
+        "max_lines": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Lines"
+        },
+        "path": {
+          "$ref": "#/$defs/EIPPath"
+        },
+        "start_line": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Line"
+        }
+      },
+      "required": [
+        "context",
+        "path"
+      ],
+      "title": "FileReadTextParams",
+      "type": "object"
+    },
+    "FileReadTextResult": {
+      "additionalProperties": false,
+      "properties": {
+        "content_complete": {
+          "title": "Content Complete",
+          "type": "boolean"
+        },
+        "end": {
+          "$ref": "#/$defs/TextPosition"
+        },
+        "info": {
+          "$ref": "#/$defs/FileInfo"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileTextCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "start": {
+          "$ref": "#/$defs/TextPosition"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "info",
+        "text",
+        "start",
+        "end",
+        "content_complete",
+        "truncated"
+      ],
+      "title": "FileReadTextResult",
+      "type": "object"
+    },
+    "FileReaderCloseParams": {
+      "additionalProperties": false,
+      "properties": {
+        "accept_complete": {
+          "title": "Accept Complete",
+          "type": "boolean"
+        },
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "reader": {
+          "$ref": "#/$defs/FileReaderHandle"
+        }
+      },
+      "required": [
+        "context",
+        "reader",
+        "accept_complete"
+      ],
+      "title": "FileReaderCloseParams",
+      "type": "object"
+    },
+    "FileReaderCloseResult": {
+      "additionalProperties": false,
+      "properties": {
+        "completion": {
+          "$ref": "#/$defs/FileReadCompletion"
+        }
+      },
+      "required": [
+        "completion"
+      ],
+      "title": "FileReaderCloseResult",
+      "type": "object"
+    },
+    "FileReaderHandle": {
+      "minLength": 1,
+      "title": "FileReaderHandle",
+      "type": "string"
+    },
+    "FileReaderOpenParams": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileByteRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
@@ -1365,57 +1731,40 @@
           ],
           "default": null
         },
-        "length": {
+        "path": {
+          "$ref": "#/$defs/EIPPath"
+        },
+        "transfer_deadline": {
           "anyOf": [
             {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
+              "format": "date-time",
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Length"
-        },
-        "offset": {
-          "default": 0,
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Offset",
-          "type": "integer"
-        },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "path": {
-          "$ref": "#/$defs/EIPPath"
+          "title": "Transfer Deadline"
         }
       },
       "required": [
         "context",
         "path"
       ],
-      "title": "FileReadParams",
+      "title": "FileReaderOpenParams",
       "type": "object"
     },
-    "FileReadResult": {
+    "FileReaderOpenResult": {
       "additionalProperties": false,
       "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
         "info": {
           "$ref": "#/$defs/FileInfo"
-        },
-        "output": {
-          "$ref": "#/$defs/OutputCapture"
         },
         "range_end": {
           "maximum": 18446744073709551615,
@@ -1428,15 +1777,24 @@
           "minimum": 0,
           "title": "Range Start",
           "type": "integer"
+        },
+        "reader": {
+          "$ref": "#/$defs/FileReaderHandle"
+        },
+        "source_eof_at_end": {
+          "title": "Source Eof At End",
+          "type": "boolean"
         }
       },
       "required": [
+        "reader",
         "info",
         "range_start",
         "range_end",
-        "output"
+        "source_eof_at_end",
+        "expires_at"
       ],
-      "title": "FileReadResult",
+      "title": "FileReaderOpenResult",
       "type": "object"
     },
     "FileRemoveParams": {
@@ -1672,19 +2030,26 @@
       "title": "FileStatResult",
       "type": "object"
     },
-    "FileWriteParams": {
+    "FileTextCursor": {
+      "minLength": 1,
+      "title": "FileTextCursor",
+      "type": "string"
+    },
+    "FileWriteMode": {
+      "enum": [
+        "create",
+        "replace",
+        "upsert",
+        "append"
+      ],
+      "title": "FileWriteMode",
+      "type": "string"
+    },
+    "FileWriteTextParams": {
       "additionalProperties": false,
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
-        },
-        "create_parents": {
-          "default": false,
-          "title": "Create Parents",
-          "type": "boolean"
-        },
-        "data": {
-          "$ref": "#/$defs/EncodedBytes"
         },
         "executable": {
           "anyOf": [
@@ -1710,36 +2075,26 @@
           "default": null
         },
         "mode": {
-          "$ref": "#/$defs/WriteMode"
-        },
-        "offset": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Offset"
+          "$ref": "#/$defs/FileWriteMode"
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
         }
       },
       "required": [
         "context",
         "path",
         "mode",
-        "data"
+        "text"
       ],
-      "title": "FileWriteParams",
+      "title": "FileWriteTextParams",
       "type": "object"
     },
-    "FileWriteResult": {
+    "FileWriteTextResult": {
       "additionalProperties": false,
       "properties": {
         "bytes_written": {
@@ -1760,7 +2115,191 @@
         "bytes_written",
         "receipt"
       ],
-      "title": "FileWriteResult",
+      "title": "FileWriteTextResult",
+      "type": "object"
+    },
+    "FileWriterAbortParams": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "writer": {
+          "$ref": "#/$defs/FileWriterHandle"
+        }
+      },
+      "required": [
+        "context",
+        "writer"
+      ],
+      "title": "FileWriterAbortParams",
+      "type": "object"
+    },
+    "FileWriterAbortResult": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/FileWriterAbortStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "FileWriterAbortResult",
+      "type": "object"
+    },
+    "FileWriterAbortStatus": {
+      "enum": [
+        "aborted",
+        "already_aborted",
+        "commit_in_progress",
+        "already_committed"
+      ],
+      "title": "FileWriterAbortStatus",
+      "type": "string"
+    },
+    "FileWriterCommitParams": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "transfer_digest": {
+          "$ref": "#/$defs/ContentDigest"
+        },
+        "transferred_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Transferred Bytes",
+          "type": "integer"
+        },
+        "writer": {
+          "$ref": "#/$defs/FileWriterHandle"
+        }
+      },
+      "required": [
+        "context",
+        "writer",
+        "transferred_bytes",
+        "transfer_digest"
+      ],
+      "title": "FileWriterCommitParams",
+      "type": "object"
+    },
+    "FileWriterCommitResult": {
+      "additionalProperties": false,
+      "properties": {
+        "info": {
+          "$ref": "#/$defs/FileInfo"
+        },
+        "receipt": {
+          "$ref": "#/$defs/OperationReceipt"
+        },
+        "transfer_digest": {
+          "$ref": "#/$defs/ContentDigest"
+        },
+        "transferred_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Transferred Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "info",
+        "transferred_bytes",
+        "transfer_digest",
+        "receipt"
+      ],
+      "title": "FileWriterCommitResult",
+      "type": "object"
+    },
+    "FileWriterHandle": {
+      "minLength": 1,
+      "title": "FileWriterHandle",
+      "type": "string"
+    },
+    "FileWriterOpenParams": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/EIPCallContext"
+        },
+        "executable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executable"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileRevision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "$ref": "#/$defs/FileWriteMode"
+        },
+        "path": {
+          "$ref": "#/$defs/EIPPath"
+        },
+        "transfer_deadline": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transfer Deadline"
+        }
+      },
+      "required": [
+        "context",
+        "path",
+        "mode"
+      ],
+      "title": "FileWriterOpenParams",
+      "type": "object"
+    },
+    "FileWriterOpenResult": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "max_transfer_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Max Transfer Bytes",
+          "type": "integer"
+        },
+        "writer": {
+          "$ref": "#/$defs/FileWriterHandle"
+        }
+      },
+      "required": [
+        "writer",
+        "max_transfer_bytes",
+        "expires_at"
+      ],
+      "title": "FileWriterOpenResult",
       "type": "object"
     },
     "FindMode": {
@@ -2054,6 +2593,7 @@
           "$ref": "#/$defs/ReceiptRef"
         },
         "request_digest": {
+          "pattern": "^[0-9a-f]{64}$",
           "title": "Request Digest",
           "type": "string"
         },
@@ -3578,16 +4118,28 @@
       "title": "TerminationReason",
       "type": "string"
     },
-    "WriteMode": {
-      "enum": [
-        "create",
-        "replace",
-        "upsert",
-        "append",
-        "write_at"
+    "TextPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_column": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Byte Column",
+          "type": "integer"
+        },
+        "line": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "line",
+        "byte_column"
       ],
-      "title": "WriteMode",
-      "type": "string"
+      "title": "TextPosition",
+      "type": "object"
     }
   },
   "$id": "https://github.com/converge-ai-labs/agent-foundation/eip/v1/schema.json",

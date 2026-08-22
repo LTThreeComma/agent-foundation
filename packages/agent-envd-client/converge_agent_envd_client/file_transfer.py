@@ -1,0 +1,547 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import secrets
+from collections.abc import Coroutine
+from datetime import datetime
+from types import TracebackType
+from typing import Any, Self, cast
+
+from converge_agent_envd_client.eip.v1 import (
+    EIP_DATA_FRAME_HEADER_BYTES,
+    ContentDigest,
+    DataFrame,
+    DataFrameKind,
+    DataResetStatus,
+    EIPCallContext,
+    EIPClient,
+    EIPPath,
+    FileByteRange,
+    FileReadCompletion,
+    FileReaderCloseParams,
+    FileReaderOpenParams,
+    FileReaderOpenResult,
+    FileReadStability,
+    FileRevision,
+    FileWriteMode,
+    FileWriterAbortParams,
+    FileWriterAbortResult,
+    FileWriterAbortStatus,
+    FileWriterCommitParams,
+    FileWriterCommitResult,
+    FileWriterOpenParams,
+    FileWriterOpenResult,
+)
+from converge_agent_envd_client.errors import (
+    EIPClientError,
+    EIPProtocolError,
+    EIPSessionStateError,
+    EIPTransferError,
+)
+from converge_agent_envd_client.requester import RequestCoordinator, TransferChannel
+
+
+class EIPFileReader:
+    """High-level exact reader that owns attachment, integrity, and typed close."""
+
+    def __init__(
+        self,
+        requester: RequestCoordinator,
+        client: EIPClient,
+        path: EIPPath,
+        *,
+        byte_range: FileByteRange | None,
+        expected_revision: FileRevision | None,
+        transfer_deadline: datetime | None,
+    ) -> None:
+        self._requester = requester
+        self._client = client
+        self._params = FileReaderOpenParams(
+            context=_new_context(with_idempotency=True),
+            path=path,
+            byte_range=byte_range,
+            expected_revision=expected_revision,
+            transfer_deadline=cast(str | None, transfer_deadline),
+        )
+        self._opened: FileReaderOpenResult | None = None
+        self._channel: TransferChannel | None = None
+        self._hasher = hashlib.sha256()
+        self._received_bytes = 0
+        self._completion: FileReadCompletion | None = None
+        self._entered = False
+        self._finalized = False
+
+    @property
+    def open_context(self) -> EIPCallContext:
+        return self._params.context
+
+    @property
+    def completion(self) -> FileReadCompletion:
+        if self._completion is None:
+            raise EIPSessionStateError("reader has not completed successfully")
+        return self._completion
+
+    @property
+    def opened(self) -> FileReaderOpenResult:
+        if self._opened is None:
+            raise EIPSessionStateError("reader has not been opened")
+        return self._opened
+
+    async def __aenter__(self) -> Self:
+        if self._entered:
+            raise EIPSessionStateError("reader context cannot be entered more than once")
+        self._entered = True
+        try:
+            self._opened = await self._client.file_open_reader(self._params)
+            handle = self._opened.reader.root
+            self._channel = self._requester.register_transfer(handle, inbound_frames=8)
+            await self._requester.send_data_frame(
+                self._channel,
+                DataFrame(kind=DataFrameKind.ATTACH, handle=handle),
+            )
+            attached = await self._channel.receive()
+            _expect_frame(attached, DataFrameKind.ATTACHED, offset=0)
+            return self
+        except BaseException:
+            await _ignore_cleanup_failure(self._abandon())
+            raise
+
+    def __aiter__(self) -> Self:
+        if not self._entered:
+            raise EIPSessionStateError("reader context has not been entered")
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._entered:
+            raise EIPSessionStateError("reader context has not been entered")
+        if self._finalized:
+            raise StopAsyncIteration
+        channel = self._require_channel()
+        frame = await channel.receive()
+        if frame.kind is DataFrameKind.CHUNK:
+            if frame.offset != self._received_bytes:
+                await self._reset_for_protocol(frame.offset)
+                raise EIPProtocolError("reader data frame offset is not contiguous")
+            self._hasher.update(frame.payload)
+            self._received_bytes += len(frame.payload)
+            return frame.payload
+        if frame.kind is DataFrameKind.END:
+            if frame.offset != self._received_bytes:
+                await self._reset_for_protocol(frame.offset)
+                raise EIPProtocolError("reader terminal offset does not match consumed bytes")
+            await self._requester.send_data_frame(
+                channel,
+                DataFrame(
+                    kind=DataFrameKind.END_ACK,
+                    handle=channel.handle,
+                    offset=self._received_bytes,
+                ),
+            )
+            result = await self._client.file_close_reader(
+                FileReaderCloseParams(
+                    context=_new_context(),
+                    reader=self.opened.reader,
+                    accept_complete=True,
+                )
+            )
+            self._completion = result.completion
+            self._finalize_channel()
+            self._verify_completion(result.completion)
+            raise StopAsyncIteration
+        if frame.kind is DataFrameKind.RESET:
+            raise _peer_reset("reader", frame)
+        await self._reset_for_protocol(frame.offset)
+        raise EIPProtocolError(f"unexpected {frame.kind.name} frame on a reader transfer")
+
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._finalized:
+            return
+        cleanup = asyncio.create_task(self._abandon(), name="eip-reader-abandon")
+        if exception_type is not None:
+            await _ignore_cleanup_failure_task(cleanup)
+            return
+        await _await_shared_cleanup(cleanup)
+
+    async def _abandon(self) -> None:
+        if self._finalized:
+            return
+        first_error: BaseException | None = None
+        channel = self._channel
+        channel_retired = False
+        if channel is not None and not channel.peer_reset_received:
+            try:
+                await self._requester.reset_transfer(
+                    channel,
+                    DataFrame(
+                        kind=DataFrameKind.RESET,
+                        handle=channel.handle,
+                        offset=self._received_bytes,
+                        reset_status=DataResetStatus.CANCELLED,
+                    ),
+                )
+                channel_retired = True
+            except BaseException as error:
+                channel_retired = self._requester.transfer_is_retired(channel)
+                first_error = error
+        if self._opened is not None:
+            try:
+                await self._client.file_close_reader(
+                    FileReaderCloseParams(
+                        context=_new_context(),
+                        reader=self._opened.reader,
+                        accept_complete=False,
+                    )
+                )
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if channel_retired:
+            self._channel = None
+            self._finalized = True
+        elif channel is not None and channel.peer_reset_received:
+            self._finalize_channel()
+        else:
+            self._finalize_channel(retire=True)
+        if first_error is not None:
+            raise first_error
+
+    async def _reset_for_protocol(self, offset: int) -> None:
+        channel = self._require_channel()
+        try:
+            await self._requester.send_data_frame(
+                channel,
+                DataFrame(
+                    kind=DataFrameKind.RESET,
+                    handle=channel.handle,
+                    offset=offset,
+                    reset_status=DataResetStatus.PROTOCOL,
+                ),
+            )
+        except EIPClientError:
+            pass
+
+    def _verify_completion(self, completion: FileReadCompletion) -> None:
+        opened = self.opened
+        if not completion.complete:
+            raise EIPProtocolError("reader accepted a complete stream but envd reported it incomplete")
+        if completion.range_start != opened.range_start or completion.range_end != opened.range_end:
+            raise EIPProtocolError("reader completion range differs from its open result")
+        if completion.produced_bytes != self._received_bytes:
+            raise EIPProtocolError("reader byte count differs from envd completion evidence")
+        digest = completion.digest
+        if digest is None or digest.algorithm != "sha256" or digest.value != self._hasher.hexdigest():
+            raise EIPProtocolError("reader digest differs from envd completion evidence")
+        if completion.stability is FileReadStability.CHANGED:
+            raise EIPTransferError("reader source revision changed during transfer")
+
+    def _require_channel(self) -> TransferChannel:
+        if self._channel is None:
+            raise EIPSessionStateError("reader transfer is not attached")
+        return self._channel
+
+    def _finalize_channel(self, *, retire: bool = False) -> None:
+        channel = self._channel
+        if channel is not None:
+            if retire:
+                self._requester.retire_transfer(channel)
+            else:
+                self._requester.unregister_transfer(channel)
+            self._channel = None
+        self._finalized = True
+
+
+class EIPFileWriter:
+    """High-level staged writer that hides framed upload and abort ownership."""
+
+    def __init__(
+        self,
+        requester: RequestCoordinator,
+        client: EIPClient,
+        path: EIPPath,
+        mode: FileWriteMode,
+        *,
+        expected_revision: FileRevision | None,
+        executable: bool | None,
+        transfer_deadline: datetime | None,
+        max_transfer_frame_bytes: int,
+    ) -> None:
+        self._requester = requester
+        self._client = client
+        self._params = FileWriterOpenParams(
+            context=_new_context(with_idempotency=True),
+            path=path,
+            mode=mode,
+            expected_revision=expected_revision,
+            executable=executable,
+            transfer_deadline=cast(str | None, transfer_deadline),
+        )
+        self._max_transfer_frame_bytes = max_transfer_frame_bytes
+        self._opened: FileWriterOpenResult | None = None
+        self._channel: TransferChannel | None = None
+        self._hasher = hashlib.sha256()
+        self._transferred_bytes = 0
+        self._result: FileWriterCommitResult | None = None
+        self._commit_context = _new_context(with_idempotency=True)
+        self._entered = False
+        self._sealed = False
+        self._finalized = False
+        self._lock = asyncio.Lock()
+
+    @property
+    def open_context(self) -> EIPCallContext:
+        return self._params.context
+
+    @property
+    def commit_context(self) -> EIPCallContext:
+        return self._commit_context
+
+    @property
+    def result(self) -> FileWriterCommitResult:
+        if self._result is None:
+            raise EIPSessionStateError("writer has not committed successfully")
+        return self._result
+
+    @property
+    def opened(self) -> FileWriterOpenResult:
+        if self._opened is None:
+            raise EIPSessionStateError("writer has not been opened")
+        return self._opened
+
+    @property
+    def transferred_bytes(self) -> int:
+        return self._transferred_bytes
+
+    async def __aenter__(self) -> Self:
+        if self._entered:
+            raise EIPSessionStateError("writer context cannot be entered more than once")
+        self._entered = True
+        try:
+            self._opened = await self._client.file_open_writer(self._params)
+            handle = self._opened.writer.root
+            self._channel = self._requester.register_transfer(handle, inbound_frames=4)
+            await self._requester.send_data_frame(
+                self._channel,
+                DataFrame(kind=DataFrameKind.ATTACH, handle=handle),
+            )
+            attached = await self._channel.receive()
+            _expect_frame(attached, DataFrameKind.ATTACHED, offset=0)
+            return self
+        except BaseException:
+            await _ignore_cleanup_failure(self._abort())
+            raise
+
+    async def write(self, chunk: bytes | bytearray | memoryview) -> None:
+        if isinstance(chunk, bytes):
+            payload = chunk
+        elif isinstance(chunk, (bytearray, memoryview)):
+            payload = bytes(chunk)
+        else:
+            raise TypeError("writer chunks must be bytes-like")
+        async with self._lock:
+            self._ensure_writable()
+            if not payload:
+                return
+            opened = self.opened
+            next_total = self._transferred_bytes + len(payload)
+            if next_total > opened.max_transfer_bytes:
+                raise EIPTransferError("writer payload exceeds its negotiated transfer byte limit")
+            channel = self._require_channel()
+            payload_limit = (
+                self._max_transfer_frame_bytes - EIP_DATA_FRAME_HEADER_BYTES - len(channel.handle.encode("utf-8"))
+            )
+            if payload_limit < 1:
+                raise EIPProtocolError("negotiated data frame limit cannot carry writer payload")
+            for start in range(0, len(payload), payload_limit):
+                part = payload[start : start + payload_limit]
+                await self._requester.send_data_frame(
+                    channel,
+                    DataFrame(
+                        kind=DataFrameKind.CHUNK,
+                        handle=channel.handle,
+                        offset=self._transferred_bytes,
+                        payload=part,
+                    ),
+                )
+                self._hasher.update(part)
+                self._transferred_bytes += len(part)
+
+    async def commit(self) -> FileWriterCommitResult:
+        async with self._lock:
+            self._ensure_writable()
+            channel = self._require_channel()
+            await self._requester.send_data_frame(
+                channel,
+                DataFrame(
+                    kind=DataFrameKind.END,
+                    handle=channel.handle,
+                    offset=self._transferred_bytes,
+                ),
+            )
+            self._sealed = True
+            terminal = await channel.receive()
+            if terminal.kind is DataFrameKind.RESET:
+                raise _peer_reset("writer", terminal)
+            _expect_frame(terminal, DataFrameKind.END_ACK, offset=self._transferred_bytes)
+            digest = ContentDigest(algorithm="sha256", value=self._hasher.hexdigest())
+            result = await self._client.file_commit_writer(
+                FileWriterCommitParams(
+                    context=self._commit_context,
+                    writer=self.opened.writer,
+                    transferred_bytes=self._transferred_bytes,
+                    transfer_digest=digest,
+                )
+            )
+            self._result = result
+            self._finalize_channel()
+            if result.transferred_bytes != self._transferred_bytes or result.transfer_digest != digest:
+                raise EIPProtocolError("writer commit evidence differs from the uploaded bytes")
+            return result
+
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._finalized:
+            return
+        cleanup = asyncio.create_task(self._abort(), name="eip-writer-abort")
+        if exception_type is not None:
+            await _ignore_cleanup_failure_task(cleanup)
+            return
+        await _await_shared_cleanup(cleanup)
+
+    async def _abort(self) -> FileWriterAbortResult | None:
+        if self._finalized:
+            return None
+        first_error: BaseException | None = None
+        channel = self._channel
+        channel_retired = False
+        if channel is not None and not channel.peer_reset_received:
+            try:
+                await self._requester.reset_transfer(
+                    channel,
+                    DataFrame(
+                        kind=DataFrameKind.RESET,
+                        handle=channel.handle,
+                        offset=self._transferred_bytes,
+                        reset_status=DataResetStatus.CANCELLED,
+                    ),
+                )
+                channel_retired = True
+            except BaseException as error:
+                channel_retired = self._requester.transfer_is_retired(channel)
+                first_error = error
+        result: FileWriterAbortResult | None = None
+        if self._opened is not None:
+            try:
+                result = await self._client.file_abort_writer(
+                    FileWriterAbortParams(
+                        context=_new_context(),
+                        writer=self._opened.writer,
+                    )
+                )
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if channel_retired:
+            self._channel = None
+            self._finalized = True
+        elif channel is not None and channel.peer_reset_received:
+            self._finalize_channel()
+        else:
+            self._finalize_channel(retire=True)
+        if first_error is not None:
+            raise first_error
+        if result is not None and result.status in {
+            FileWriterAbortStatus.COMMIT_IN_PROGRESS,
+            FileWriterAbortStatus.ALREADY_COMMITTED,
+        }:
+            if channel_retired and channel is not None:
+                self._requester.complete_retired_transfer(channel.handle)
+            raise EIPTransferError(f"writer abort could not prove rollback: {result.status.value}")
+        return result
+
+    def _ensure_writable(self) -> None:
+        if not self._entered:
+            raise EIPSessionStateError("writer context has not been entered")
+        if self._finalized:
+            raise EIPSessionStateError("writer is already finalized")
+        if self._sealed:
+            raise EIPSessionStateError("writer data stream is already sealed")
+
+    def _require_channel(self) -> TransferChannel:
+        if self._channel is None:
+            raise EIPSessionStateError("writer transfer is not attached")
+        return self._channel
+
+    def _finalize_channel(self, *, retire: bool = False) -> None:
+        channel = self._channel
+        if channel is not None:
+            if retire:
+                self._requester.retire_transfer(channel)
+            else:
+                self._requester.unregister_transfer(channel)
+            self._channel = None
+        self._finalized = True
+
+
+def _new_context(*, with_idempotency: bool = False) -> EIPCallContext:
+    return EIPCallContext(
+        operation_id=f"op-{secrets.token_urlsafe(9)}",
+        idempotency_key=f"key-{secrets.token_urlsafe(9)}" if with_idempotency else None,
+    )
+
+
+def _expect_frame(frame: DataFrame, kind: DataFrameKind, *, offset: int) -> None:
+    if frame.kind is DataFrameKind.RESET:
+        raise _peer_reset("transfer", frame)
+    if frame.kind is not kind or frame.offset != offset:
+        raise EIPProtocolError(
+            f"expected {kind.name} at offset {offset}, got {frame.kind.name} at offset {frame.offset}"
+        )
+
+
+def _peer_reset(direction: str, frame: DataFrame) -> EIPTransferError:
+    return EIPTransferError(
+        f"{direction} transfer was reset by the EIP peer",
+        status=frame.reset_status,
+        offset=frame.offset,
+    )
+
+
+async def _ignore_cleanup_failure(awaitable: Coroutine[Any, Any, object]) -> None:
+    task = asyncio.create_task(awaitable)
+    await _ignore_cleanup_failure_task(task)
+
+
+async def _ignore_cleanup_failure_task(task: asyncio.Task[object]) -> None:
+    try:
+        await _await_shared_cleanup(task)
+    except BaseException:
+        pass
+
+
+async def _await_shared_cleanup[T](task: asyncio.Task[T]) -> T:
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            cancelled = True
+            continue
+        except BaseException:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
