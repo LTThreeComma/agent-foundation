@@ -36,12 +36,13 @@ The Host revision stores only Host-owned serializable values and exact dependenc
 
 At execution time trusted installed adapters create:
 
-- native `AgentSpec` and process-local `OutputSpec`;
+- native `AgentSpec` and, for code-first output, a process-local `OutputSpec`;
 - optional Model or logical model name;
-- native tools and Toolsets;
-- Agent-bound Capabilities;
+- Agent-bound Capabilities that own all function tools, Toolsets, guidance, settings, and hooks;
 - concrete Harness plugin instances;
 - self-healing and semantic recovery policy.
+
+A declarative object JSON Schema remains in native `AgentSpec.output_schema` and is the build-time output source when no process-local `OutputSpec` is supplied. The worker never changes output type per run.
 
 The resulting value is an ordinary `AgentDefinition`. The Harness does not verify Host artifact digests, reconstruct import paths from input, or inspect Preset provenance.
 
@@ -56,6 +57,8 @@ For each logical run the Host constructs `RunBindings` with:
 - bounded non-authoritative metadata.
 
 The Harness enters the Environment aggregate and activates the paired controller for the complete logical run. A Host reconciliation task can start before stream entry and await `controller.wait_until_active()` without polling, so an authorized Host path can materialize fresh provider bindings and add, refresh, or remove bindings during input preparation, model attempts, tool work, or recovery backoff. The controller is a process-local mutation handle: it is never put in metadata, `AgentContext`, a Capability namespace, a model tool, or a durable record, and it cannot be reused after the run terminal fence.
+
+An operator may populate its Environment provider registry from explicitly selected `converge_agent_harness.environments` entry-point metadata after verifying the exact dependency/artifact lock. Entry-point availability never authorizes a definition, and a durable row never carries an import target. A provider that allocates before Harness entry still implements the stronger Host materialization, launch-state, reconciliation, and unentered-discard contract rather than using the simple pre-entry-inert factory path.
 
 A hosted model integration normally implements `ModelRunBinding`, resolves its own trusted configuration, current policy, credentials, and route selection, and returns a native Model or raises. The Harness applies no special catalog role validation and, if a Host omits the binding for a string model, deliberately delegates to native Pydantic inference. A fail-closed hosted profile therefore requires its worker adapter to supply and test the binding; this is a Host invariant, not a different Harness API.
 

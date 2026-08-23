@@ -10,6 +10,7 @@ from converge_agent_harness import HarnessBuilder, HarnessState, ModelRecoveryPo
 from converge_agent_harness.recovery import INTERRUPTED_TOOL_RESULT, normalize_interrupted_history
 from pydantic import BaseModel
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import Capability
 from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.messages import (
     ModelMessage,
@@ -421,7 +422,7 @@ async def test_tool_execution_failure_does_not_start_model_recovery() -> None:
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        tools=(failing_tool,),
+        capabilities=(Capability(tools=[failing_tool], id="test-tools"),),
         model_recovery=_recovery_policy(max_attempts=5),
     )
 
@@ -454,7 +455,7 @@ async def test_deferred_tool_request_stays_suspended_and_is_not_closed_or_retrie
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        tools=(deferred_tool,),
+        capabilities=(Capability(tools=[deferred_tool], id="test-tools"),),
         model_recovery=_recovery_policy(max_attempts=5),
     )
 

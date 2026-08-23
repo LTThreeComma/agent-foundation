@@ -6,7 +6,7 @@ import asyncio
 import contextvars
 import hashlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterable, Iterator, Mapping
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -103,6 +103,16 @@ class InvocationAuthorizationCapability(AbstractCapability[AgentContext]):
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentContext]) -> AbstractToolset[AgentContext]:
         return InvocationAuthorizationToolset(toolset)
 
+    async def wrap_run_event_stream(
+        self,
+        ctx: RunContext[AgentContext],
+        *,
+        stream: AsyncIterable[Any],
+    ) -> AsyncIterable[Any]:
+        _validate_finalized_capability_provenance(ctx)
+        async for event in stream:
+            yield event
+
 
 @dataclass
 class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
@@ -110,6 +120,7 @@ class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
 
     async def get_tools(self, ctx: RunContext[AgentContext]) -> dict[str, ToolsetTool[AgentContext]]:
         _validate_client_run_attachment(ctx)
+        _resolve_environment_result_projector(ctx)
         tools = await self.wrapped.get_tools(ctx)
         policy = _resolve_policy(ctx)
         managed_ids: dict[str, str] = {}
@@ -273,7 +284,11 @@ class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
             finally:
                 _INVOCATION_SCOPE.reset(token)
             try:
-                safe_result = _apply_result_policy(result, managed)
+                safe_result = _apply_result_policy(
+                    result,
+                    managed,
+                    environment_projector=_resolve_environment_result_projector(ctx),
+                )
             except ToolFailed:
                 await _emit(ctx, managed, "result_rejected", invocation_id=invocation.invocation_id)
                 raise
@@ -352,14 +367,94 @@ async def _require_policy_allow(
         raise ApprovalRequired(metadata=dict(decision.approval_metadata))
 
 
+def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> None:
+    """Reject protected Capability replacement after native for_run finalization."""
+    from converge_agent_harness.environment.tools import (
+        ENVIRONMENT_TOOLS_CAPABILITY_ID,
+        EnvironmentToolsCapability,
+        _EnvironmentToolsRunCapability,
+    )
+    from converge_agent_harness.tools.client import (
+        CLIENT_TOOLS_CAPABILITY_ID,
+        CLIENT_TOOLS_RUN_CAPABILITY_ID,
+        ClientToolsCapability,
+        ClientToolsRunCapability,
+    )
+
+    provenance = ctx.deps._capability_provenance
+    expected = {
+        INVOCATION_AUTHORIZATION_CAPABILITY_ID: (
+            (InvocationAuthorizationCapability,),
+            None,
+        ),
+        INVOCATION_POLICY_CAPABILITY_ID: (
+            (InvocationPolicyCapability,),
+            provenance.run_ids,
+        ),
+        CLIENT_TOOLS_CAPABILITY_ID: (
+            (ClientToolsCapability,),
+            provenance.definition_ids,
+        ),
+        CLIENT_TOOLS_RUN_CAPABILITY_ID: (
+            (ClientToolsRunCapability,),
+            provenance.run_ids,
+        ),
+        ENVIRONMENT_TOOLS_CAPABILITY_ID: (
+            (EnvironmentToolsCapability, _EnvironmentToolsRunCapability),
+            provenance.definition_ids,
+        ),
+    }
+    reserved_types = tuple(capability_type for item in expected.values() for capability_type in item[0])
+    for capability_id, capability in ctx.capabilities.items():
+        if isinstance(capability, reserved_types) and capability_id not in expected:
+            raise DefinitionError(
+                "A protected Harness Capability changed its reserved ID during run binding.",
+                code="capability_scope_invalid",
+                details={
+                    "capability_id": capability_id,
+                    "capability_type": type(capability).__name__,
+                    "source": "run_finalized",
+                },
+            )
+
+    for capability_id, (expected_types, allowed_ids) in expected.items():
+        capability = ctx.capabilities.get(capability_id)
+        if capability_id == INVOCATION_AUTHORIZATION_CAPABILITY_ID:
+            if type(capability) is not InvocationAuthorizationCapability:
+                raise DefinitionError(
+                    "The finalized run is missing its exact mandatory invocation Capability.",
+                    code="capability_scope_invalid",
+                    details={"capability_id": capability_id, "source": "run_finalized"},
+                )
+            continue
+        if capability is None:
+            if allowed_ids is not None and capability_id in allowed_ids:
+                raise DefinitionError(
+                    "A protected Harness Capability disappeared during run binding.",
+                    code="capability_scope_invalid",
+                    details={"capability_id": capability_id, "source": "run_finalized"},
+                )
+            continue
+        if type(capability) not in expected_types or allowed_ids is None or capability_id not in allowed_ids:
+            raise DefinitionError(
+                "A protected Harness Capability changed type or source during run binding.",
+                code="capability_scope_invalid",
+                details={
+                    "capability_id": capability_id,
+                    "capability_type": type(capability).__name__,
+                    "source": "run_finalized",
+                },
+            )
+
+
 def _resolve_policy(ctx: RunContext[AgentContext]) -> InvocationPolicyCapability | None:
     value = ctx.capabilities.get(INVOCATION_POLICY_CAPABILITY_ID)
     if value is None:
         return None
-    if not isinstance(value, InvocationPolicyCapability):
+    if type(value) is not InvocationPolicyCapability:
         raise DefinitionError(
-            "The invocation policy Capability has an incompatible type.",
-            code="invocation_policy_type_mismatch",
+            "The invocation policy Capability changed protected type during run binding.",
+            code="capability_scope_invalid",
         )
     if INVOCATION_POLICY_CAPABILITY_ID not in ctx.deps._capability_provenance.run_ids:
         raise DefinitionError(
@@ -432,10 +527,20 @@ async def _prepare_invocation(
     )
 
 
-def _apply_result_policy(result: Any, metadata: HarnessToolMetadata) -> JsonValue:
+def _apply_result_policy(
+    result: Any,
+    metadata: HarnessToolMetadata,
+    *,
+    environment_projector: Any | None = None,
+) -> JsonValue:
+    from converge_agent_harness.environment.models import EnvironmentError
+    from converge_agent_harness.environment.tools import _EnvironmentRetainedToolResult
+
     policy = metadata.output_policy
+    retained = result if isinstance(result, _EnvironmentRetainedToolResult) else None
+    candidate = retained.value if retained is not None else result
     try:
-        value = _project_json_result(result)
+        value = _project_json_result(candidate)
         limit = policy.max_inline_bytes if policy.overflow == "fail" else policy.max_output_bytes
         captured, complete = _capture_json(value, limit=limit, redact=policy.redact)
     except (RecursionError, TypeError, ValueError, ValidationError) as exc:
@@ -446,16 +551,37 @@ def _apply_result_policy(result: Any, metadata: HarnessToolMetadata) -> JsonValu
     if policy.overflow == "fail":
         raise ToolFailed("Managed tool result exceeded its output limit.")
 
+    compact_reference: str | None = None
+    if policy.overflow == "environment_reference" and retained is not None and environment_projector is not None:
+        try:
+            _, compact_reference = environment_projector.project_retained_result(retained)
+        except EnvironmentError:
+            # A live Environment may legitimately have no compatible retained-output
+            # sink after a topology change or reference-table exhaustion. Preserve the
+            # bounded no-reference fallback rather than turning completed work into a
+            # retry-shaped tool failure.
+            compact_reference = None
+        except DefinitionError:
+            raise
+        except Exception as exc:
+            raise ToolFailed("Managed tool retained output could not be projected.") from exc
+
     fallback: dict[str, JsonValue] = {
         "content": captured[: policy.max_inline_bytes].decode("utf-8", errors="ignore"),
         "complete": False,
         "truncated": True,
         "captured_bytes": len(captured),
-        "reference": None,
+        "reference": compact_reference,
     }
     if complete:
         fallback["dropped_bytes"] = 0
     return fallback
+
+
+def _resolve_environment_result_projector(ctx: RunContext[AgentContext]) -> Any | None:
+    from converge_agent_harness.environment.tools import _resolve_environment_result_projector as resolve
+
+    return resolve(ctx)
 
 
 def _project_json_result(result: Any) -> JsonValue:
@@ -570,7 +696,7 @@ def _validate_client_run_attachment(ctx: RunContext[AgentContext]) -> None:
 
     provenance = ctx.deps._capability_provenance
     owner = ctx.capabilities.get(CLIENT_TOOLS_CAPABILITY_ID)
-    if owner is not None and not isinstance(owner, ClientToolsCapability):
+    if owner is not None and type(owner) is not ClientToolsCapability:
         raise DefinitionError(
             "The client-tools Capability has an incompatible type.",
             code="client_tools_type_mismatch",
@@ -582,7 +708,7 @@ def _validate_client_run_attachment(ctx: RunContext[AgentContext]) -> None:
         )
 
     attachment = ctx.capabilities.get(CLIENT_TOOLS_RUN_CAPABILITY_ID)
-    if attachment is not None and not isinstance(attachment, ClientToolsRunCapability):
+    if attachment is not None and type(attachment) is not ClientToolsRunCapability:
         raise DefinitionError(
             "The client-tools run Capability has an incompatible type.",
             code="client_tools_run_type_mismatch",

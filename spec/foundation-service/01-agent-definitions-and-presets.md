@@ -41,7 +41,7 @@ class FoundationAgentSpec(BaseModel):
     capabilities: tuple[FoundationCapabilityConfig, ...] = ()
 ```
 
-Foundation owns these serializable configuration types. They describe enough behavior for trusted adapters to reconstruct a native Pydantic `AgentSpec`, process-local `OutputSpec`, concrete plugins, tools, Toolsets, and Capabilities. `FoundationEnvironmentRequest` is the initial topology template and immutable authority ceiling owned by [Environment Provider Integrations](06-environment-providers.md#definition-configuration); it is not reconstructed into `AgentDefinition` and performs no allocation during materialization. These types do not attempt to serialize arbitrary Python objects or mirror every Pydantic constructor option.
+Foundation owns these serializable configuration types. They describe enough behavior for trusted adapters to reconstruct a native Pydantic `AgentSpec`, an optional process-local code-first `OutputSpec`, concrete plugins, and top-level Capabilities. A Capability owns every function tool, Toolset, instruction, setting, and hook contributed by its feature; Foundation does not reconstruct peer top-level tool or Toolset fields. `FoundationEnvironmentRequest` is the initial topology template and immutable authority ceiling owned by [Environment Provider Integrations](06-environment-providers.md#definition-configuration); it is not reconstructed into `AgentDefinition` and performs no allocation during materialization. These types do not attempt to serialize arbitrary Python objects or mirror every Pydantic constructor option.
 
 Plugin and Capability configuration uses Foundation-owned discriminated typed schemas selected from operator-approved installed integrations. A configuration type identifies a logical integration and its arguments, not a Python import path. Foundation validates it through that integration's authoring codec without constructing a run-bound object or resolving credentials.
 
@@ -121,19 +121,18 @@ Hosted model settings are canonical JSON validated by the selected integration. 
 
 A Model Preset replaces the logical model and complete settings value as one unit. No hidden static settings may be added below the materialized definition unless the integration's published contract explicitly makes them part of native provider construction rather than Agent request intent.
 
-## Plugin, Capability, Tool, and Output Contributions
+## Plugin, Capability, and Output Contributions
 
 Foundation configuration identifies operator-approved logical integrations and stable IDs. The selected dependency lock names the exact artifact and adapter revision that can reconstruct each concrete Python object.
 
 At execution:
 
 - plugin configuration reconstructs concrete `AbstractHarnessPlugin` instances;
-- Capability configuration reconstructs native Pydantic Capability specs or trusted instances;
-- tool configuration reconstructs native tools or Toolsets;
-- output configuration reconstructs the process-local `OutputSpec` and validates its schema agreement;
+- Capability configuration reconstructs native Pydantic Capability specs or trusted instances, including every feature-owned function tool and Toolset;
+- code-first output configuration reconstructs one process-local `OutputSpec`, while declarative object JSON Schema remains in native `AgentSpec.output_schema`; exactly one build-time source is selected;
 - model configuration supplies a model name and fresh `ModelRunBinding` or a trusted concrete Model.
 
-Foundation business records never contain plugin or Capability classes, live factories, live Toolsets, native Models, output Python types, or collaborators. They can contain an operator-approved `provider_key`, strict typed canonical parameters, and an exact Environment integration dependency lock; those are selectors for worker reconstruction, not Python factories. The Harness has no catalog to reconstruct them on Foundation's behalf.
+Foundation business records never contain plugin or Capability classes, live factories, live Toolsets, native Models, output Python types, or collaborators. They can contain an operator-approved `provider_key`, strict typed canonical parameters, and an exact Environment integration dependency lock; those are selectors for worker reconstruction, not Python factories. Foundation supplies exact authorized custom Capability types to the Harness builder and can populate its provider registry from verified selected Environment entry points, but Foundation remains responsible for locks, configuration codecs, and durable reconstruction.
 
 Duplicate stable IDs, duplicate model-visible tool names, conflicting output schemas, and unsupported integration configurations fail during materialization or worker reconstruction at the earliest owning boundary.
 
@@ -213,7 +212,7 @@ After an Execution selects one revision, the worker:
 
 1. verifies `harness_api_compatibility` and every dependency/artifact lock;
 2. loads only trusted installed adapters selected by those locks;
-3. reconstructs native `AgentSpec`, `OutputSpec`, model selection, tools, Toolsets, Capabilities, and concrete plugins;
+3. reconstructs native `AgentSpec`, the selected build-time output contract, model selection, top-level Capabilities, and concrete plugins;
 4. constructs one process-local Harness `AgentDefinition` per executable node;
 5. calls `HarnessBuilder.build()`;
 6. resolves locked Environment providers only through the operator-approved registry;
@@ -262,7 +261,7 @@ Capability state, Environment portable-state, provider parameter, and provider l
 1. Every durable Execution selects one immutable Foundation definition revision.
 2. The revision contains one complete serializable Foundation definition and exact locks.
 3. Process-local Python objects are reconstructed only inside the trusted worker.
-4. Foundation never relies on a Harness compiler, catalog, export manifest, or serialized plugin spec.
+4. Foundation never relies on a Harness compiler, universal catalog, export manifest, or serialized plugin spec; exact custom Capability classes and selected Environment entry points remain trusted locked reconstruction inputs.
 5. Every logical hosted model locks one integration and receives a fresh required `ModelRunBinding`.
 6. Every allowed Environment provider key locks one integration; provider objects and credentials never enter the definition revision.
 7. Presets contain no live authority or secret material.

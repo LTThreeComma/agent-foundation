@@ -17,6 +17,7 @@ Environment operations are provider-neutral. `LocalFileOperator` and `LocalShell
 | Concern                                                                                                                                                             | Owner                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Desired topology, provider selection, logical resource identity, and lifecycle policy                                                                               | Host                                                                                                                                  |
+| Installed Environment package metadata, explicit entry-point loading, and validated process-local plugin catalog                                                    | Harness Environment plugin boundary and selecting Host                                                                                |
 | Run-scoped aggregate binding, immutable topology, virtual routing, readiness coordination, operation leases, retirement, and portable Environment-state aggregation | Harness Environment core                                                                                                              |
 | Model-visible tools, stable guidance, bounded topology context, and topology-change notices                                                                         | Optional `EnvironmentToolsCapability`                                                                                                 |
 | Provider resource entry, background preparation and maintenance, generation observation, operation execution, and provider-local cleanup                            | Entered provider binding                                                                                                              |
@@ -236,6 +237,7 @@ class EnvironmentReadinessRequirement(BaseModel):
 
     operations: frozenset[EnvironmentOperationFamily]
     binding_ids: frozenset[str] | None = None
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,17 +422,103 @@ def create_noop_environment_run_binding(
 
 `create_noop_environment_run_binding()` returns the public `NoopEnvironmentRunBinding`, whose entered value is `NoopBoundEnvironment`. It uses the same aggregate coordinator and complete facade with an initially empty binding tuple, deterministic typed selection/unsupported failures, an empty state contribution, and a full paired controller until run close; it is not a second execution path. A Host can later publish a binding through that controller, after which the same stable facade is no longer empty. Omitted limits select finite package defaults, while explicit values can only narrow them. `RunBindings.local()` uses this constructor when no Environment is supplied. Callers observe no `is_noop` flag; `bound.topology.bindings == ()` is the canonical test.
 
-`EnvironmentProviderBinding` is trusted, process-local, single-use input. It is a lifecycle adapter already materialized by the Host; it is not an `AbstractHarnessPlugin`, Capability, serialized factory description, or arbitrary import reference. Entering it authenticates or validates the selected logical resource, establishes one immutable observed generation and descriptor, exposes provider-neutral operation implementations, and creates an enforceable readiness path.
+`EnvironmentProviderBinding` is trusted, process-local, single-use input. It is a lifecycle adapter constructed directly by trusted code or through the explicit Environment plugin boundary; it is not an `AbstractHarnessPlugin`, Capability, serialized factory description, or arbitrary import reference. Entering it authenticates or validates the selected logical resource, establishes one immutable observed generation and descriptor, exposes provider-neutral operation implementations, and creates an enforceable readiness path.
 
 `discard()` is idempotent and closes a binding that was never entered or whose entry failed. The context manager returned by `bind()` must unwind every resource acquired by a partial `__aenter__()` before propagating its error; the Harness still calls `discard()` so candidate cleanup does not depend on how far entry progressed. Once an initial request is transferred into `EnvironmentRunBinding` entry, or a dynamic request is passed to `controller.apply()`, the aggregate owns every supplied candidate. It exits every successfully entered scope and discards every candidate that did not successfully enter. These cleanup calls run in bounded cancellation-shielded aggregate cleanup so a primary failure or cancellation cannot orphan the next candidate; cleanup failures are aggregated without replacing the primary outcome. The caller must not enter, discard, or reuse a transferred binding.
 
 A provider can prepare family-specific resources after entry. All preparation, TTL refresh, session keepalive, liveness observation, bounded reconnect, and cleanup tasks are children of the entered provider scope and the aggregate's supervised async lifetime. They cannot escape binding close or mutate a published descriptor in place. Direct local can have no maintenance task. The Harness defines no universal `ping()` because provider liveness and session semantics differ. A maintenance failure updates typed availability and readiness; it never grants fallback authority.
+
+Environment operations and provider callbacks are always finite. A request- or operation-specific semantic deadline takes precedence. When no narrower owner supplies one, first-party Environment adapters use a generous 600-second fallback so a defective provider cannot hold a run forever. This fallback is not installed as a Harness-wide Pydantic `Agent.tool_timeout`, does not shorten an explicit shell/process/port/state deadline, and does not override a provider's stricter declared limit. Teardown uses its separately bounded cleanup policy and continues attempting every owned resource.
+
+Pydantic AI remains the sole owner of model tool argument and output retry accounting through `AgentSpec.retries`, per-Toolset limits, and native `ModelRetry` handling. Environment Toolsets do not wrap those calls in another generic retry loop. Provider transport retry remains below the semantic operation and mutations repeat only with affirmative idempotency or reconciliation evidence. Exhausting tool or output retries is terminal for that inner Agent attempt and does not activate Harness model-interruption recovery.
 
 Before publication, the aggregate captures one descriptor and one recursively detached `EnvironmentProviderOperations` value for the entered scope, then verifies that descriptor operation families, exact catalog permissions, operation facets, and readiness behavior agree. Every advertised `files`, `shell`, `processes`, `ports`, or `outputs` family has its corresponding non-null facet, every non-null facet is advertised, `state` has a valid state codec path, descriptor and live-ready families contain no unknown or facet-less family, and every advertised action maps to that exact executable family and method. `ensure_ready()` must reject an unadvertised family. Descriptor and facet selection cannot change in place after publication; only typed availability and readiness observations remain live. A mismatch is provider failure, not a partially usable binding.
 
 `EnvironmentRunBinding` is a paired single-use aggregate and controller. It captures positive immutable topology and state limits before entry. The aggregate validates the supplied Agent instance, enters initial provider scopes, obtains trustworthy identities and descriptors, intersects requested ceilings with provider capabilities and current policy, and publishes one immutable topology. Initial entry transfers every supplied candidate to the aggregate. Failure closes every scope already opened, discards every other candidate, and publishes nothing. Rebinding the aggregate, reusing a transferred provider binding, or applying through a controller paired with another run fails before publication.
 
 A zero-binding aggregate is the no-operation Environment used by `RunBindings.local()` when no provider is supplied. The same `BoundEnvironment` contract covers zero, one, and many bindings. Its facade objects remain stable for the run and resolve each call through the current immutable topology snapshot.
+
+### Environment Package Plugins
+
+A trusted third-party distribution can provide an Environment integration without adding provider-specific imports or branches to Agent Foundation. It registers one factory class in the Python distribution entry-point group `converge_agent_harness.environments`:
+
+```toml
+[project.entry-points."converge_agent_harness.environments"]
+"acme.sandbox" = "acme_environment.plugin:AcmeEnvironmentPlugin"
+```
+
+The entry-point name is the stable Host-facing `provider_key`. It selects installed integration code and is distinct from the provider binding's `provider_type`, logical `environment_id`, Harness `binding_id`, and model-facing alias.
+
+```python
+ENVIRONMENT_PLUGIN_ENTRY_POINT_GROUP = (
+    "converge_agent_harness.environments"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentPluginReference:
+    provider_key: str
+    import_target: str
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentPluginRegistration:
+    provider_key: str
+    class_module: str
+    class_qualname: str
+    import_target: str | None
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+class EnvironmentPlugin(ABC):
+    @classmethod
+    def plugin_key(cls) -> str: ...
+
+    @abstractmethod
+    def create_provider_binding(
+        self,
+        configuration: Mapping[str, JsonValue],
+    ) -> EnvironmentProviderBinding: ...
+
+
+class EnvironmentPluginCatalog(Mapping[str, EnvironmentPlugin]):
+    @property
+    def registrations(
+        self,
+    ) -> tuple[EnvironmentPluginRegistration, ...]: ...
+
+    def require(self, provider_key: str) -> EnvironmentPlugin: ...
+
+    def create_provider_binding(
+        self,
+        provider_key: str,
+        configuration: Mapping[str, JsonValue],
+    ) -> EnvironmentProviderBinding: ...
+
+
+def discover_environment_plugins(
+) -> tuple[EnvironmentPluginReference, ...]: ...
+
+
+def build_environment_plugin_catalog(
+    *,
+    selected_entry_points: Iterable[str] = (),
+    explicit_plugins: Iterable[EnvironmentPlugin] = (),
+) -> EnvironmentPluginCatalog: ...
+```
+
+Metadata discovery does not import target code. Catalog construction validates every requested key and explicit instance, preflights all missing names and collisions before loading any target, imports only explicitly selected names, requires an `EnvironmentPlugin` subclass with a no-argument constructor, instantiates it once, and requires its non-blank `plugin_key()` to equal the entry-point name. Explicit instances support embedding and tests without distribution metadata. A provider-key collision fails even when two entries load the same class. The immutable catalog records class module and qualified name plus entry-point distribution, version, and import target for trusted diagnostics and Host lock verification; it contains no global mutable registration.
+
+Installed metadata is availability, not authorization. A Host or operator selects exact provider keys before import, verifies the corresponding artifact or dependency lock under its own policy, and separately authorizes each definition or run to use the key. An Agent definition, model value, API request, durable state, Environment parameter map, or database row cannot supply an arbitrary `module:object` target. Empty selection imports nothing, module import performs no discovery, and catalog failure stops setup before model work.
+
+`EnvironmentPluginCatalog.create_provider_binding()` is the validating public factory boundary. It calls the selected plugin exactly once, preserves any failure as a protected cause, and requires an `EnvironmentProviderBinding` instance before returning it. It does not call `bind()`, `discard()`, or claim aggregate transfer. Factory freshness and pre-entry inertness are trusted plugin obligations that cannot be proven by introspection: abandoning a successful result before aggregate transfer requires no external cleanup, and later reuse is rejected by the aggregate's existing single-use claim. Provider I/O, allocation, session entry, and all cleanup-producing work occur inside the binding's `bind()` async scope. A plugin that raises must clean any partial process-local construction. Catalog errors use stable `EnvironmentError` codes and safe bounded provider/distribution fields without configuration values, object representations, credentials, raw exception text, or private installation paths.
+
+The Host places one or more returned candidates in an ordinary `EnvironmentTopologyRequest` and calls `create_environment_run_binding()`. The existing aggregate therefore remains the sole owner of topology, transfer, routing, state, fencing, and cleanup. Selecting or loading an Environment plugin never grants model behavior, contributes a Capability, or installs tools; `EnvironmentToolsCapability` remains an explicit definition Capability.
+
+Foundation's durable provider integrations can be packaged and selected through entry-point metadata, but their pre-Harness allocation uses the stronger Foundation materialization, operation, launch-state, reconciliation, and unentered-discard contract. A pre-entry resourceful Foundation integration does not call this simple `create_provider_binding()` path to bypass durable ownership.
 
 ### Direct Local Construction
 
@@ -516,7 +604,7 @@ The configuration, binding, `LocalFileOperator`, and `LocalShell` are public Har
 
 ## Scoped Readiness and Recovery
 
-`EnvironmentReadinessRequirement` names operation families and optionally exact current binding IDs. `binding_ids=None` selects every binding in the captured topology that advertises at least one requested family. An empty family set or explicitly empty ID set is invalid. Every explicitly selected ID must exist and advertise at least one requested family; an explicit zero-intersection binding is an invalid requirement rather than a silently ignored target. The selected bindings must collectively cover every requested family. No wait succeeds vacuously.
+`EnvironmentReadinessRequirement` names operation families and optionally exact current binding IDs. `binding_ids=None` selects every binding in the captured topology that advertises at least one requested family. `timeout_seconds` is an optional positive finite semantic readiness deadline; `None` selects the 600-second first-party fallback. An empty family set or explicitly empty ID set is invalid. Every explicitly selected ID must exist and advertise at least one requested family; an explicit zero-intersection binding is an invalid requirement rather than a silently ignored target. The selected bindings must collectively cover every requested family. No wait succeeds vacuously.
 
 `ensure_ready()` captures one topology snapshot and waits only for each selected binding's non-empty intersection with the requirement. Equivalent and overlapping waits share provider preparation. Success is bound to the selected binding revision and observed generation. Removal, replacement, generation change, timeout, cancellation, provider failure, or aggregate teardown returns a typed Environment error and never retargets the wait.
 

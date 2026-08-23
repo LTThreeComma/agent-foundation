@@ -69,17 +69,18 @@ The trusted Host reconstructs Python objects from its own configuration and depe
 
 ## Major Components
 
-| Component           | Responsibility                                                                                                             | Explicit boundary                                          |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `AgentDefinition`   | Hold native `AgentSpec`, output, Model, tools, Toolsets, Capabilities, plugins, child definitions, and recovery policy     | Process-local Python value only                            |
-| `HarnessBuilder`    | Bind Agent plugins, add the thin model resolver and mandatory inert invocation boundary, and call `Agent.from_spec()` once | Performs no I/O, discovery, or Host materialization        |
-| Plugin graph        | Deterministic ordering, fresh run binding, outer middleware, and Capability contribution                                   | Trusted code; Pydantic owns inner hooks                    |
-| `RunBindings`       | Carry fresh Agent instance, Environment aggregate, optional model binding, run Capabilities, and metadata                  | No durable state or generic service locator                |
-| Environment core    | Enter provider scopes, publish immutable routing, coordinate readiness/state, and serve Host topology updates              | Not a Capability, provider factory, or durable command API |
-| `AgentContext`      | Share run Identity, Environment facade, state, plugins, child collection, model binding, and metadata                      | One context per logical Harness run                        |
-| `HarnessRunStream`  | Lazy single-consumer events, cancellation, state export, model attempts, results, and cleanup                              | Not a Host durable Attempt, queue, replay stream, or lease |
-| `HarnessState`      | Detached messages, JSON Capability namespaces, and optional portable Environment data                                      | Host chooses persistence and checkpoint selection          |
-| Invocation boundary | Mandatory inert outer wrapper; managed behavior activates only for metadata-aware function tools and fresh policy          | Native unannotated tools remain trusted Pydantic behavior  |
+| Component           | Responsibility                                                                                                                 | Explicit boundary                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `AgentDefinition`   | Hold native `AgentSpec`, one build-time output, Model, top-level Capabilities, plugins, child definitions, and recovery policy | Process-local Python value only                             |
+| `HarnessBuilder`    | Authorize declarative Capability types, bind Agent plugins, add mandatory boundaries, and call `Agent.from_spec()` once        | Performs no I/O, package discovery, or Host materialization |
+| Plugin graph        | Deterministic ordering, fresh run binding, outer middleware, and Capability contribution                                       | Trusted code; Pydantic owns inner hooks                     |
+| `RunBindings`       | Carry fresh Agent instance, Environment aggregate, optional model binding, run Capabilities, and metadata                      | No durable state or generic service locator                 |
+| Environment plugins | Discover installed metadata and load only explicitly selected provider factories into an immutable catalog                     | Availability is not Host authorization                      |
+| Environment core    | Enter provider scopes, publish immutable routing, coordinate readiness/state, and serve Host topology updates                  | Not a Capability, provider factory, or durable command API  |
+| `AgentContext`      | Share run Identity, Environment facade, state, plugins, child collection, model binding, and metadata                          | One context per logical Harness run                         |
+| `HarnessRunStream`  | Lazy single-consumer events, cancellation, state export, model attempts, results, and cleanup                                  | Not a Host durable Attempt, queue, replay stream, or lease  |
+| `HarnessState`      | Detached messages, JSON Capability namespaces, and optional portable Environment data                                          | Host chooses persistence and checkpoint selection           |
+| Invocation boundary | Mandatory inert outer wrapper; managed behavior activates only for metadata-aware function tools and fresh policy              | Native unannotated tools remain trusted Pydantic behavior   |
 
 ## End-to-End Flow
 

@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Pydantic AI Capabilities remain the reusable extension mechanism inside the Agent loop. This document names first-party composition roles and points to their owning contracts. It is a documentation catalog only: it is not a runtime class registry, serialized plugin catalog, package installer, or source of authority.
+Pydantic AI Capabilities remain the reusable extension mechanism inside the Agent loop and the only top-level feature-behavior plane in `AgentDefinition`. This document names first-party composition roles and points to their owning contracts. It is a documentation catalog only: it is not the narrow Host-supplied custom Capability type catalog used for `AgentSpec` reconstruction, a serialized plugin catalog, package installer, or source of authority.
 
 Concrete Capabilities enter through:
 
@@ -41,7 +41,7 @@ Model self-healing is a Model wrapper, not a Capability. Interrupted-stream sema
 | Checkpoint observation           | Capability using public complete message boundaries                 | [Harness State and Resume](10-snapshot-and-resume.md)                    |
 | Provider-specific Agent behavior | Capability public hooks only when profile/adapter is insufficient   | [Input, Model, and Output](16-input-model-and-output.md)                 |
 
-Native tools and Toolsets remain valid code-first `AgentDefinition` inputs. A feature does not need a Harness Capability merely to wrap an existing Pydantic type one-to-one. `EnvironmentToolsCapability` is useful because it combines stable Toolsets with request-dynamic topology context and native notices; the Environment resource itself still enters through the fixed `RunBindings.environment` field.
+Native function tools and Toolsets remain valid code-first Pydantic inputs only inside a Capability. A small native `Capability(tools=[...])` or Toolset Capability is the ordinary one-to-one adapter; it does not require a Harness-specific subclass. The owning Capability also owns any tool timeout and stable Capability/Toolset identity because top-level `AgentSpec.tool_timeout` does not implicitly configure Capability-owned Toolsets. `EnvironmentToolsCapability` is richer because it combines stable Toolsets with request-dynamic topology context and native notices; the Environment resource itself still enters through the fixed `RunBindings.environment` field.
 
 ## Composition
 

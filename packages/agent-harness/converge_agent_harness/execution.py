@@ -5,17 +5,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import typing
-from collections.abc import AsyncIterator, Awaitable, Coroutine, Sequence
-from contextlib import AsyncExitStack, suppress
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Collection, Coroutine, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from functools import reduce
 from operator import or_
-from typing import Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import Any, Literal, cast, get_args, get_origin, get_type_hints, overload
 from uuid import uuid4
 
-from pydantic import ConfigDict, PydanticSchemaGenerationError, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, PydanticSchemaGenerationError, TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunEvents
 from pydantic_ai.agent.spec import AgentSpec
@@ -23,18 +23,25 @@ from pydantic_ai.capabilities import AbstractCapability, ResolveModelId
 from pydantic_ai.exceptions import AgentRunError, RunCancelled, UsageLimitExceeded, UserError
 from pydantic_ai.messages import AgentStreamEvent, ModelMessage
 from pydantic_ai.models import KnownModelName, Model, ModelResolutionContext
-from pydantic_ai.output import NativeOutput, OutputSpec, PromptedOutput, TextOutput, ToolOutput
+from pydantic_ai.output import NativeOutput, OutputSpec, PromptedOutput, StructuredDict, TextOutput, ToolOutput
 from pydantic_ai.run import AgentRunResultEvent
-from pydantic_ai.tools import DeferredToolRequests, Tool, ToolFuncEither
-from pydantic_ai.toolsets import AgentToolset
+from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
+from typing_extensions import is_typeddict
 
+from converge_agent_harness.capability_types import CapabilityTypeCatalog
 from converge_agent_harness.context import (
     AgentContext,
     BuiltSubagent,
     RunBindings,
     SubagentCollection,
     _CapabilityProvenance,
+)
+from converge_agent_harness.environment.models import EnvironmentError, EnvironmentTopologyChange
+from converge_agent_harness.environment.providers import BoundEnvironment
+from converge_agent_harness.environment.tools import (
+    ENVIRONMENT_TOOLS_CAPABILITY_ID,
+    EnvironmentToolsCapability,
 )
 from converge_agent_harness.errors import (
     DefinitionError,
@@ -94,6 +101,123 @@ from converge_agent_harness.tools.policy import INVOCATION_POLICY_CAPABILITY_ID,
 
 _AGENT_EVENT_ADAPTER = TypeAdapter(AgentStreamEvent)
 _EXTENSION_EVENT_ADAPTER = TypeAdapter(HarnessExtensionEvent)
+_EMPTY_CAPABILITY_TYPE_CATALOG = CapabilityTypeCatalog()
+
+
+@dataclass(frozen=True, slots=True)
+class _ResponsePumpTerminal:
+    error: BaseException | None = None
+
+
+@dataclass(slots=True)
+class _TopologyEventDrain:
+    requested: asyncio.Event = field(default_factory=asyncio.Event)
+    drained: asyncio.Event = field(default_factory=asyncio.Event)
+    progress: asyncio.Event = field(default_factory=asyncio.Event)
+    cursor: int | None = None
+    terminal_version: int | None = None
+
+
+def _consume_finished_task(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _stop_environment_event_task(task: asyncio.Task[None]) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        done, pending = await asyncio.wait((task,), timeout=5.0)
+    except BaseException:
+        if not task.done():
+            task.add_done_callback(_consume_finished_task)
+        raise
+    if pending:
+        task.add_done_callback(_consume_finished_task)
+        raise RunError(
+            "Environment topology event adapter did not stop before cleanup deadline.",
+            code="event_adapter_cleanup_timeout",
+        )
+    if task in done and not task.cancelled():
+        task.result()
+
+
+async def _emit_environment_topology_events(
+    context: AgentContext,
+    drain: _TopologyEventDrain,
+) -> None:
+    """Adapt the non-draining Environment journal through the logical terminal fence."""
+    observer = context.environment.topology_observer
+    cursor = observer.initial_topology_version
+    drain.cursor = cursor
+    while True:
+        terminal_version = drain.terminal_version
+        if terminal_version is not None and cursor >= terminal_version:
+            drain.drained.set()
+            drain.progress.set()
+            return
+
+        read_task = asyncio.create_task(observer.read(after_version=cursor, wait=True))
+        terminal_task = asyncio.create_task(drain.requested.wait())
+        try:
+            done, _ = await asyncio.wait({read_task, terminal_task}, return_when=asyncio.FIRST_COMPLETED)
+            if terminal_task in done:
+                if not read_task.done():
+                    read_task.cancel()
+                    await asyncio.gather(read_task, return_exceptions=True)
+                changes = await observer.read(after_version=cursor, wait=False)
+            else:
+                changes = read_task.result()
+        except EnvironmentError as exc:
+            if exc.code == "environment_closed":
+                terminal_version = drain.terminal_version
+                if terminal_version is not None and cursor >= terminal_version:
+                    drain.drained.set()
+                    drain.progress.set()
+                return
+            raise
+        finally:
+            for task in (read_task, terminal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(read_task, terminal_task, return_exceptions=True)
+
+        for change in changes:
+            try:
+                await context.events.emit(_environment_topology_event(change))
+            except RunError as exc:
+                if exc.code in {"event_emitter_closed", "event_consumer_stopped"}:
+                    return
+                raise
+            cursor = change.current_version
+            progress = drain.progress
+            drain.cursor = cursor
+            drain.progress = asyncio.Event()
+            progress.set()
+
+
+def _environment_topology_event(change: EnvironmentTopologyChange) -> HarnessExtensionEvent:
+    projected: list[dict[str, JsonValue]] = [
+        {
+            "kind": item.kind,
+            "binding_id": item.binding_id,
+            "previous_revision": item.previous_revision,
+            "current_revision": item.current_revision,
+            "previous_alias": item.previous_alias,
+            "current_alias": item.current_alias,
+        }
+        for item in change.bindings[:128]
+    ]
+    payload: dict[str, JsonValue] = {
+        "type": "environment_topology_changed",
+        "previous_version": change.previous_version,
+        "current_version": change.current_version,
+        "request_digest": change.request_digest,
+        "binding_change_count": len(change.bindings),
+        "bindings": cast(JsonValue, projected),
+        "bindings_truncated": len(projected) < len(change.bindings),
+    }
+    return HarnessExtensionEvent(kind="context", payload=payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,11 +269,9 @@ class AgentDefinition[OutputT]:
     """Immutable code-first inputs for one process-local executable Agent."""
 
     agent: AgentSpec
-    output_type: OutputSpec[OutputT]
+    output_type: OutputSpec[OutputT] | None
     definition_id: str = field(default_factory=lambda: str(uuid4()))
     model: Model | KnownModelName | str | None = None
-    tools: tuple[Tool[AgentContext] | ToolFuncEither[AgentContext, ...], ...] = ()
-    toolsets: tuple[AgentToolset[AgentContext], ...] = ()
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     plugins: tuple[AbstractHarnessPlugin, ...] = ()
     subagents: tuple[SubagentDefinition, ...] = ()
@@ -159,19 +281,23 @@ class AgentDefinition[OutputT]:
     def __post_init__(self) -> None:
         if not self.definition_id.strip():
             raise DefinitionError("definition_id must not be blank.", code="definition_id_invalid")
-        if self.agent.output_schema is not None:
+        has_schema = self.agent.output_schema is not None
+        if self.output_type is not None and has_schema:
             raise DefinitionError(
-                "AgentSpec.output_schema must be omitted because AgentDefinition.output_type owns business output.",
+                "AgentDefinition.output_type and AgentSpec.output_schema are mutually exclusive.",
                 code="output_contract_conflict",
             )
-        if _output_spec_contains_deferred_requests(self.output_type):
+        if self.output_type is None and not has_schema:
+            raise DefinitionError(
+                "AgentDefinition requires an explicit output_type or AgentSpec.output_schema.",
+                code="output_contract_missing",
+            )
+        if self.output_type is not None and _output_spec_contains_deferred_requests(self.output_type):
             raise DefinitionError(
                 "DeferredToolRequests is reserved for Harness suspension and cannot be a business output.",
                 code="output_contract_reserved",
             )
         object.__setattr__(self, "agent", self.agent.model_copy(deep=True))
-        object.__setattr__(self, "tools", tuple(self.tools))
-        object.__setattr__(self, "toolsets", tuple(self.toolsets))
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "plugins", tuple(self.plugins))
         subagents = tuple(self.subagents)
@@ -188,6 +314,14 @@ class AgentDefinition[OutputT]:
 
 class HarnessBuilder:
     """Build executable Agents through one authoritative Agent.from_spec path."""
+
+    def __init__(self, *, capability_type_catalog: CapabilityTypeCatalog | None = None) -> None:
+        if capability_type_catalog is not None and not isinstance(capability_type_catalog, CapabilityTypeCatalog):
+            raise DefinitionError(
+                "capability_type_catalog must be a CapabilityTypeCatalog or None.",
+                code="capability_type_catalog_invalid",
+            )
+        self._capability_type_catalog = capability_type_catalog or _EMPTY_CAPABILITY_TYPE_CATALOG
 
     def build[BuildOutputT](self, definition: AgentDefinition[BuildOutputT]) -> ExecutableAgent[BuildOutputT]:
         """Validate code-first composition and recursively construct a reusable executable."""
@@ -236,15 +370,20 @@ class HarnessBuilder:
         if isinstance(model, Model):
             model = wrap_self_healing_model(model, enabled=definition.self_healing)
         try:
+            construction_spec, business_output, output_adapter = _resolve_business_output(definition)
+            complete_output = [business_output, DeferredToolRequests]
             agent = Agent.from_spec(
-                definition.agent.model_copy(deep=True),
+                construction_spec,
                 deps_type=AgentContext,
+                custom_capability_types=self._capability_type_catalog.custom_capability_types,
                 model=model,
-                output_type=definition.output_type,
-                tools=definition.tools,
-                toolsets=definition.toolsets,
+                output_type=complete_output,
                 capabilities=capabilities,
                 defer_model_check=True,
+            )
+            _validate_built_capability_tree(
+                agent.root_capability,
+                definition_reserved_ids=definition_reserved_ids,
             )
         except Exception as exc:
             if isinstance(exc, HarnessError):
@@ -256,13 +395,14 @@ class HarnessBuilder:
             ) from exc
         return ExecutableAgent(
             definition=definition,
-            agent=cast(Agent[AgentContext, BuildOutputT], agent),
-            output_adapter=_build_output_adapter(definition.output_type),
+            agent=cast(Agent[AgentContext, BuildOutputT | DeferredToolRequests], agent),
+            output_adapter=output_adapter,
             plugins=plugins,
             subagents=subagents,
             definition_reserved_capability_ids=definition_reserved_ids,
         )
 
+    @overload
     def build_code[BuildOutputT](
         self,
         agent: AgentSpec,
@@ -270,14 +410,41 @@ class HarnessBuilder:
         output_type: OutputSpec[BuildOutputT],
         definition_id: str | None = None,
         model: Model | KnownModelName | str | None = None,
-        tools: Sequence[Tool[AgentContext] | ToolFuncEither[AgentContext, ...]] = (),
-        toolsets: Sequence[AgentToolset[AgentContext]] = (),
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         plugins: Sequence[AbstractHarnessPlugin] = (),
         subagents: Sequence[SubagentDefinition] = (),
         self_healing: bool = True,
         model_recovery: ModelRecoveryPolicy | None = None,
-    ) -> ExecutableAgent[BuildOutputT]:
+    ) -> ExecutableAgent[BuildOutputT]: ...
+
+    @overload
+    def build_code(
+        self,
+        agent: AgentSpec,
+        *,
+        output_type: None,
+        definition_id: str | None = None,
+        model: Model | KnownModelName | str | None = None,
+        capabilities: Sequence[AbstractCapability[AgentContext]] = (),
+        plugins: Sequence[AbstractHarnessPlugin] = (),
+        subagents: Sequence[SubagentDefinition] = (),
+        self_healing: bool = True,
+        model_recovery: ModelRecoveryPolicy | None = None,
+    ) -> ExecutableAgent[dict[str, JsonValue]]: ...
+
+    def build_code(
+        self,
+        agent: AgentSpec,
+        *,
+        output_type: OutputSpec[Any] | None,
+        definition_id: str | None = None,
+        model: Model | KnownModelName | str | None = None,
+        capabilities: Sequence[AbstractCapability[AgentContext]] = (),
+        plugins: Sequence[AbstractHarnessPlugin] = (),
+        subagents: Sequence[SubagentDefinition] = (),
+        self_healing: bool = True,
+        model_recovery: ModelRecoveryPolicy | None = None,
+    ) -> ExecutableAgent[Any]:
         """Convenience constructor retaining the same AgentDefinition build path."""
         return self.build(
             AgentDefinition(
@@ -285,8 +452,6 @@ class HarnessBuilder:
                 output_type=output_type,
                 definition_id=definition_id or str(uuid4()),
                 model=model,
-                tools=tuple(tools),
-                toolsets=tuple(toolsets),
                 capabilities=tuple(capabilities),
                 plugins=tuple(plugins),
                 subagents=tuple(subagents),
@@ -303,7 +468,7 @@ class ExecutableAgent[OutputT]:
         self,
         *,
         definition: AgentDefinition[OutputT],
-        agent: Agent[AgentContext, OutputT],
+        agent: Agent[AgentContext, OutputT | DeferredToolRequests],
         output_adapter: TypeAdapter[Any],
         plugins: tuple[AbstractHarnessPlugin, ...],
         subagents: SubagentCollection,
@@ -423,13 +588,26 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._run_reserved_capability_ids = run_reserved_capability_ids
         self._usage = usage if usage is not None else RunUsage()
         self._usage_limits = usage_limits
-        self._stack = AsyncExitStack()
         self._emitter = _RunEventEmitter(self.run_id)
+        self._environment_ready: asyncio.Future[BoundEnvironment] | None = None
+        self._environment_close_requested = asyncio.Event()
+        self._environment_lifecycle_task: asyncio.Task[None] | None = None
+        self._environment_ready_delivered = False
         self._context: AgentContext | None = None
         self._response: PluginRunResponse[OutputT] | None = None
         self._responses: list[tuple[int, PluginRunResponse[OutputT]]] = []
         self._response_ids: set[int] = set()
+        self._closed_response_ids: set[int] = set()
         self._pydantic_events: AgentRunEvents[OutputT | DeferredToolRequests] | None = None
+        self._topology_event_drain = _TopologyEventDrain()
+        self._environment_event_task: asyncio.Task[None] | None = None
+        self._response_pump_task: asyncio.Task[None] | None = None
+        self._response_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+        self._response_next_task: asyncio.Task[Any] | None = None
+        self._terminal_close_task: asyncio.Task[None] | None = None
+        self._pending_terminal_result: HarnessRunResult[OutputT] | None = None
+        self._source_cleanup_failures: list[BaseException] = []
+        self._logical_events_started = False
         self._latest_messages: tuple[ModelMessage, ...] = self._previous_state.message_history
         self._new_message_index = len(self._latest_messages)
         self._source_sequence = 0
@@ -466,9 +644,10 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             raise RunError("HarnessRunStream cannot be entered more than once.", code="run_stream_reused")
         self._entered = True
         try:
-            environment = await self._stack.enter_async_context(
-                self._bindings.environment.bind(run_id=self.run_id, instance=self._bindings.instance)
-            )
+            self._environment_ready = asyncio.get_running_loop().create_future()
+            self._environment_lifecycle_task = asyncio.create_task(self._run_environment_lifecycle())
+            environment = await asyncio.shield(self._environment_ready)
+            self._environment_ready_delivered = True
             preparation = RunPreparationContext(
                 run_id=self.run_id,
                 instance=self._bindings.instance,
@@ -515,6 +694,71 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             await self._close_resources(outcome=None)
             raise
 
+    async def _run_environment_lifecycle(self) -> None:
+        ready = self._environment_ready
+        assert ready is not None
+        try:
+            async with self._bindings.environment.bind(
+                run_id=self.run_id,
+                instance=self._bindings.instance,
+            ) as environment:
+                if self._previous_state.environment_state is not None:
+                    await environment.restore_state(self._previous_state.environment_state)
+                await environment.activate()
+                if not ready.done():
+                    ready.set_result(environment)
+                await self._environment_close_requested.wait()
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.cancel()
+            raise
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+                return
+            raise
+
+    async def _close_environment_lifecycle(self) -> None:
+        task = self._environment_lifecycle_task
+        self._environment_lifecycle_task = None
+        if task is None:
+            return
+
+        abort_entry = not self._environment_ready_delivered
+        if abort_entry:
+            ready = self._environment_ready
+            if ready is not None and not ready.done():
+                ready.cancel()
+            if not task.done():
+                task.cancel()
+        else:
+            self._environment_close_requested.set()
+
+        pending_cancellation: asyncio.CancelledError | None = None
+        current_task = asyncio.current_task()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if current_task is not None and current_task.cancelling():
+                    pending_cancellation = pending_cancellation or exc
+                    if abort_entry and not task.done():
+                        task.cancel()
+                continue
+
+        lifecycle_error: BaseException | None = None
+        if task.cancelled():
+            if not abort_entry:
+                lifecycle_error = asyncio.CancelledError("Environment lifecycle was cancelled during cleanup.")
+        else:
+            lifecycle_error = task.exception()
+        if pending_cancellation is not None:
+            if lifecycle_error is not None:
+                pending_cancellation.add_note(f"Environment lifecycle cleanup also failed: {lifecycle_error!r}")
+            raise pending_cancellation
+        if lifecycle_error is not None:
+            raise lifecycle_error
+
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
@@ -522,7 +766,9 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         traceback: object,
     ) -> None:
         del exc_type, traceback
-        if not self._closed:
+        if self._terminal_close_task is not None:
+            await self._terminal_close_task
+        elif not self._closed:
             cancellation = exc_value if isinstance(exc_value, asyncio.CancelledError) else None
             await self._close_resources(outcome=self._last_valid_outcome, cancellation=cancellation)
 
@@ -535,7 +781,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         return self
 
     async def __anext__(self) -> HarnessStreamItem[OutputT]:
-        if not self._entered or self._closed or self._terminal_yielded:
+        if not self._entered or self._terminal_yielded or (self._closed and self._pending_terminal_result is None):
             raise StopAsyncIteration
         if self._next_active:
             raise RunError(
@@ -551,54 +797,60 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
     async def _next_item(self) -> HarnessStreamItem[OutputT]:
         assert self._response is not None
         try:
-            item = await self._response.__anext__()
-            if isinstance(item, HarnessRunResult):
-                result = self._validate_result_candidate(item)
-                self._last_valid_outcome = result
-                await self._close_resources(outcome=result)
-                self._result = result
-                self._terminal_yielded = True
-                return HarnessRunResultEvent(
-                    run_id=self.run_id,
-                    sequence=self._next_public_sequence(),
-                    occurred_at=datetime.now(UTC),
-                    result=result,
-                )
+            self._start_logical_event_mux()
+            while True:
+                if self._pending_terminal_result is not None:
+                    close_task = self._terminal_close_task
+                    assert close_task is not None
+                    await close_task
+                    result = self._pending_terminal_result
+                    self._pending_terminal_result = None
+                    self._terminal_close_task = None
+                    self._result = result
+                    self._terminal_yielded = True
+                    return HarnessRunResultEvent(
+                        run_id=self.run_id,
+                        sequence=self._next_public_sequence(),
+                        occurred_at=datetime.now(UTC),
+                        result=result,
+                    )
 
-            if not isinstance(item, HarnessEvent) or item.sequence < 0:
-                raise PluginError("Plugin emitted an invalid stream item.", code="plugin_event_invalid")
-            try:
-                event = (
-                    _EXTENSION_EVENT_ADAPTER.validate_python(
-                        item.event.model_dump(),
-                        strict=True,
+                self._ensure_response_next_task()
+                assert self._response_next_task is not None
+                task = self._response_next_task
+                wait_for: set[asyncio.Task[Any]] = {task}
+                lifecycle_task = self._environment_lifecycle_task
+                if lifecycle_task is not None:
+                    wait_for.add(lifecycle_task)
+                done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
+                if lifecycle_task is not None and lifecycle_task in done:
+                    self._environment_lifecycle_task = None
+                    if lifecycle_task.cancelled():
+                        raise RunError(
+                            "Environment lifecycle stopped before logical run cleanup.",
+                            code="environment_lifecycle_stopped",
+                        )
+                    error = lifecycle_task.exception()
+                    if error is not None:
+                        raise error
+                    raise RunError(
+                        "Environment lifecycle stopped before logical run cleanup.",
+                        code="environment_lifecycle_stopped",
                     )
-                    if isinstance(item.event, HarnessExtensionEvent)
-                    else _AGENT_EVENT_ADAPTER.validate_python(item.event, strict=True)
-                )
-            except ValidationError as exc:
-                raise PluginError(
-                    "Plugin emitted an invalid Harness event.",
-                    code="plugin_event_invalid",
-                ) from exc
-            if item.run_id != self.run_id:
-                if not self._emitter.is_registered_child(item.run_id):
-                    raise PluginError(
-                        "Plugin emitted an event for an unregistered child run.",
-                        code="plugin_event_run_mismatch",
-                    )
-                return HarnessEvent(
-                    run_id=item.run_id,
-                    sequence=item.sequence,
-                    occurred_at=item.occurred_at,
-                    event=event,
-                )
-            return HarnessEvent(
-                run_id=self.run_id,
-                sequence=self._next_public_sequence(),
-                occurred_at=datetime.now(UTC),
-                event=event,
-            )
+                item = task.result()
+                self._response_next_task = None
+                if isinstance(item, _ResponsePumpTerminal):
+                    if item.error is not None:
+                        raise item.error
+                    raise StopAsyncIteration
+                if isinstance(item, HarnessRunResult):
+                    result = self._validate_result_candidate(item)
+                    self._last_valid_outcome = result
+                    await self._stop_response_pump(cancel=False)
+                    self._pending_terminal_result = result
+                    self._terminal_close_task = asyncio.create_task(self._close_resources(outcome=result))
+                    continue
+                return self._public_event(item)
         except StopAsyncIteration as exc:
             error = PluginError(
                 "Plugin middleware ended without a result candidate.",
@@ -607,6 +859,12 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             error.__cause__ = exc
             await self._raise_after_failure(error)
         except asyncio.CancelledError as exc:
+            if self._terminal_close_task is not None:
+                try:
+                    await self._terminal_close_task
+                except BaseException as cleanup:
+                    exc.add_note(f"Harness cleanup also failed: {cleanup!r}")
+                raise
             await self._close_resources(outcome=self._last_valid_outcome, cancellation=exc)
             raise
         except RunCleanupError as exc:
@@ -616,6 +874,190 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         except BaseException as exc:
             await self._raise_after_failure(exc)
         raise AssertionError("unreachable")
+
+    def _start_logical_event_mux(self) -> None:
+        if self._logical_events_started:
+            return
+        self._logical_events_started = True
+        self._emitter.start_consuming()
+        self._topology_event_drain.cursor = self.context.environment.topology_observer.initial_topology_version
+        self._environment_event_task = asyncio.create_task(
+            _emit_environment_topology_events(self.context, self._topology_event_drain)
+        )
+        self._response_pump_task = asyncio.create_task(self._pump_response())
+
+    def _install_terminal_fence(self) -> None:
+        drain = self._topology_event_drain
+        if drain.terminal_version is not None:
+            return
+        self._bindings.environment.controller.begin_close()
+        drain.terminal_version = self.context.environment.topology.topology_version
+        drain.requested.set()
+
+    async def _pump_response(self) -> None:
+        assert self._response is not None
+        response = self._response
+        iteration_error: BaseException | None = None
+        cancellation: asyncio.CancelledError | None = None
+        terminal_result: HarnessRunResult[OutputT] | None = None
+        try:
+            async for item in response:
+                if isinstance(item, HarnessRunResult):
+                    if terminal_result is not None:
+                        raise PluginError(
+                            "Plugin middleware emitted more than one result candidate.",
+                            code="plugin_result_multiple",
+                        )
+                    terminal_result = item
+                    self._install_terminal_fence()
+                    continue
+                await self._response_queue.put(item)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                while current_task.cancelling():
+                    current_task.uncancel()
+        except BaseException as exc:
+            if terminal_result is not None:
+                self._source_cleanup_failures.append(exc)
+            else:
+                iteration_error = exc
+        try:
+            await self._close_registered_responses()
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        except BaseException as exc:
+            self._source_cleanup_failures.append(exc)
+        if cancellation is not None:
+            raise cancellation
+        if terminal_result is not None:
+            await self._response_queue.put(terminal_result)
+            return
+        await self._response_queue.put(_ResponsePumpTerminal(error=iteration_error))
+
+    async def _close_registered_responses(self) -> None:
+        failures: list[BaseException] = []
+        pending_cancellation: asyncio.CancelledError | None = None
+        current_task = asyncio.current_task()
+
+        def capture_cancellation(exc: asyncio.CancelledError | None = None) -> bool:
+            nonlocal pending_cancellation
+            if current_task is None or not current_task.cancelling():
+                return False
+            pending_cancellation = pending_cancellation or exc or asyncio.CancelledError()
+            while current_task.cancelling():
+                current_task.uncancel()
+            return True
+
+        responses = sorted(self._responses, key=lambda item: item[0], reverse=True)
+        for _, response in responses:
+            response_id = id(response)
+            if response_id in self._closed_response_ids:
+                continue
+            self._closed_response_ids.add(response_id)
+            try:
+                await response.aclose()
+            except asyncio.CancelledError as exc:
+                if not capture_cancellation(exc):
+                    failures.append(exc)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                capture_cancellation()
+        if pending_cancellation is not None:
+            self._source_cleanup_failures.extend(failures)
+            for failure in failures:
+                pending_cancellation.add_note(f"Harness plugin response cleanup also failed: {failure!r}")
+            raise pending_cancellation
+        if len(failures) == 1:
+            failure = failures[0]
+            if isinstance(failure, asyncio.CancelledError):
+                raise BaseExceptionGroup("Harness plugin response cleanup failed", failures)
+            raise failure
+        if failures:
+            raise BaseExceptionGroup("Harness plugin response cleanup failed", failures)
+
+    def _ensure_response_next_task(self) -> None:
+        if self._response_next_task is None:
+            self._response_next_task = asyncio.create_task(self._response_queue.get())
+
+    async def _stop_response_pump(self, *, cancel: bool = True) -> None:
+        task = self._response_pump_task
+        self._response_pump_task = None
+        if task is None:
+            return
+        if cancel and not task.done():
+            task.cancel()
+        pending_cancellation: asyncio.CancelledError | None = None
+        current_task = asyncio.current_task()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if current_task is not None and current_task.cancelling():
+                    pending_cancellation = pending_cancellation or exc
+                    if not task.done():
+                        task.cancel()
+                continue
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                self._source_cleanup_failures.append(error)
+        if pending_cancellation is not None:
+            raise pending_cancellation
+
+    async def _cancel_logical_source_tasks(self) -> None:
+        task = self._response_next_task
+        self._response_next_task = None
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self._stop_response_pump()
+
+    def _public_event(self, item: Any) -> HarnessEvent:
+        if isinstance(item, HarnessExtensionEvent):
+            item = HarnessEvent(
+                run_id=self.run_id,
+                sequence=0,
+                occurred_at=datetime.now(UTC),
+                event=item,
+            )
+        if not isinstance(item, HarnessEvent) or item.sequence < 0:
+            raise PluginError("Plugin emitted an invalid stream item.", code="plugin_event_invalid")
+        try:
+            event = (
+                _EXTENSION_EVENT_ADAPTER.validate_python(
+                    item.event.model_dump(),
+                    strict=True,
+                )
+                if isinstance(item.event, HarnessExtensionEvent)
+                else _AGENT_EVENT_ADAPTER.validate_python(item.event, strict=True)
+            )
+        except ValidationError as exc:
+            raise PluginError(
+                "Plugin emitted an invalid Harness event.",
+                code="plugin_event_invalid",
+            ) from exc
+        if item.run_id != self.run_id:
+            if not self._emitter.is_registered_child(item.run_id):
+                raise PluginError(
+                    "Plugin emitted an event for an unregistered child run.",
+                    code="plugin_event_run_mismatch",
+                )
+            return HarnessEvent(
+                run_id=item.run_id,
+                sequence=item.sequence,
+                occurred_at=item.occurred_at,
+                event=event,
+            )
+        return HarnessEvent(
+            run_id=self.run_id,
+            sequence=self._next_public_sequence(),
+            occurred_at=datetime.now(UTC),
+            event=event,
+        )
 
     async def _raise_after_failure(self, failure: BaseException) -> None:
         """Close a failed stream and retain an already validated inner outcome."""
@@ -676,7 +1118,10 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 )
         typed_response = cast(PluginRunResponse[OutputT], response)
         typed_response._bind_item_validator(self._validate_plugin_response_item)
-        return self._register_response(typed_response, depth=index)
+        registered = self._register_response(typed_response, depth=index * 2 + 1)
+        boundary = PluginRunResponse(self._response_boundary_items(registered, terminal=index == 0))
+        boundary._bind_item_validator(self._validate_plugin_response_item)
+        return self._register_response(boundary, depth=index * 2)
 
     def _validate_plugin_response_item(
         self,
@@ -700,10 +1145,206 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             self._responses.append((depth, response))
         return response
 
+    async def _response_boundary_items(
+        self,
+        response: PluginRunResponse[OutputT],
+        *,
+        terminal: bool,
+    ) -> AsyncGenerator[HarnessEvent | HarnessRunResult[OutputT]]:
+        async for item in response:
+            if not isinstance(item, HarnessRunResult):
+                yield item
+                continue
+            if terminal:
+                self._install_terminal_fence()
+            target_version = self.context.environment.topology.topology_version
+            async for event in self._drain_emitter_through(target_version, terminal=terminal):
+                yield event
+            if terminal:
+                self._emitter.close()
+            yield item
+            return
+
+    async def _drain_emitter_through(
+        self,
+        target_version: int,
+        *,
+        terminal: bool,
+    ) -> AsyncGenerator[HarnessEvent]:
+        emitter_task: asyncio.Task[HarnessExtensionEvent | HarnessEvent] | None = None
+        progress_task: asyncio.Task[bool] | None = None
+        deadline_task = asyncio.create_task(asyncio.sleep(5.0)) if terminal else None
+        try:
+            while True:
+                if emitter_task is not None and emitter_task.done():
+                    event = emitter_task.result()
+                    emitter_task = None
+                    yield self._adapt_extension_event(event) if isinstance(event, HarnessExtensionEvent) else event
+                    continue
+
+                adapter_task = self._environment_event_task
+                if adapter_task is not None and adapter_task.done():
+                    self._environment_event_task = None
+                    adapter_task.result()
+                    adapter_task = None
+                    if not terminal or not self._topology_event_drain.drained.is_set():
+                        raise RunError(
+                            "Environment topology event adapter stopped before the terminal journal fence.",
+                            code="event_adapter_stopped",
+                        )
+
+                progress = self._topology_event_drain.progress
+                cursor = self._topology_event_drain.cursor
+                adapter_complete = adapter_task is None or adapter_task.done()
+                terminal_complete = not terminal or (self._topology_event_drain.drained.is_set() and adapter_complete)
+                if cursor is not None and cursor >= target_version and self._emitter.empty() and terminal_complete:
+                    if emitter_task is not None and not emitter_task.done():
+                        emitter_task.cancel()
+                        await asyncio.gather(emitter_task, return_exceptions=True)
+                    return
+
+                if emitter_task is None:
+                    emitter_task = asyncio.create_task(self._emitter.next())
+                if progress_task is None:
+                    progress_task = asyncio.create_task(progress.wait())
+                wait_for: set[asyncio.Task[Any]] = {emitter_task, progress_task}
+                if adapter_task is not None:
+                    wait_for.add(adapter_task)
+                if deadline_task is not None:
+                    wait_for.add(deadline_task)
+                done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
+                if deadline_task is not None and deadline_task in done:
+                    raise RunError(
+                        "Environment topology event adapter did not drain before cleanup deadline.",
+                        code="event_adapter_cleanup_timeout",
+                    )
+                if progress_task in done:
+                    progress_task.result()
+                    progress_task = None
+        finally:
+            tasks: list[asyncio.Task[Any]] = [
+                task for task in (emitter_task, progress_task, deadline_task) if task is not None
+            ]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _pump_model_items(
+        self,
+        source: AsyncGenerator[HarnessEvent | HarnessRunResult[OutputT]],
+        queue: asyncio.Queue[Any],
+    ) -> None:
+        error: BaseException | None = None
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            async for item in source:
+                await queue.put(item)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except BaseException as exc:
+            error = exc
+        try:
+            await source.aclose()
+        except BaseException as exc:
+            error = exc if error is None else BaseExceptionGroup("Harness model source cleanup failed", [error, exc])
+        if cancellation is not None:
+            if error is not None:
+                cancellation.add_note(f"Harness model source cleanup also failed: {error!r}")
+            raise cancellation
+        await queue.put(_ResponsePumpTerminal(error=error))
+
     async def _agent_items(
         self,
         exchange: PluginRunExchange,
-    ) -> AsyncIterator[HarnessEvent | HarnessRunResult[OutputT]]:
+    ) -> AsyncGenerator[HarnessEvent | HarnessRunResult[OutputT]]:
+        source_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+        source_pump = asyncio.create_task(self._pump_model_items(self._model_items(exchange), source_queue))
+        source_task: asyncio.Task[Any] | None = None
+        emitter_task: asyncio.Task[HarnessExtensionEvent | HarnessEvent] | None = None
+        pending_result: HarnessRunResult[OutputT] | None = None
+        try:
+            while True:
+                if emitter_task is not None and emitter_task.done():
+                    event = emitter_task.result()
+                    emitter_task = None
+                    yield self._adapt_extension_event(event) if isinstance(event, HarnessExtensionEvent) else event
+                    continue
+                if source_task is None:
+                    source_task = asyncio.create_task(source_queue.get())
+                if emitter_task is None:
+                    emitter_task = asyncio.create_task(self._emitter.next())
+
+                wait_for: set[asyncio.Task[Any]] = {source_task, emitter_task}
+                adapter_task = self._environment_event_task
+                if adapter_task is not None and not adapter_task.done():
+                    wait_for.add(adapter_task)
+                done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
+
+                if adapter_task is not None and adapter_task in done:
+                    self._environment_event_task = None
+                    adapter_task.result()
+                    raise RunError(
+                        "Environment topology event adapter stopped before the logical terminal fence.",
+                        code="event_adapter_stopped",
+                    )
+                if emitter_task in done:
+                    event = emitter_task.result()
+                    emitter_task = None
+                    yield self._adapt_extension_event(event) if isinstance(event, HarnessExtensionEvent) else event
+                    continue
+                if source_task in done:
+                    task = source_task
+                    source_task = None
+                    item = task.result()
+                    if isinstance(item, _ResponsePumpTerminal):
+                        await source_pump
+                        if item.error is not None:
+                            raise item.error
+                        if pending_result is None:
+                            return
+                        if emitter_task is not None:
+                            if emitter_task.done():
+                                event = emitter_task.result()
+                                emitter_task = None
+                                yield (
+                                    self._adapt_extension_event(event)
+                                    if isinstance(event, HarnessExtensionEvent)
+                                    else event
+                                )
+                            else:
+                                emitter_task.cancel()
+                                await asyncio.gather(emitter_task, return_exceptions=True)
+                                emitter_task = None
+                        target_version = self.context.environment.topology.topology_version
+                        async for event in self._drain_emitter_through(target_version, terminal=False):
+                            yield event
+                        yield pending_result
+                        return
+                    if pending_result is not None:
+                        raise RunError(
+                            "Harness model source emitted an item after its result candidate.",
+                            code="agent_result_not_terminal",
+                        )
+                    if isinstance(item, HarnessRunResult):
+                        pending_result = item
+                        continue
+                    yield item
+        finally:
+            tasks: list[asyncio.Task[Any]] = [
+                task for task in (source_task, emitter_task, source_pump) if task is not None
+            ]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _model_items(
+        self,
+        exchange: PluginRunExchange,
+    ) -> AsyncGenerator[HarnessEvent | HarnessRunResult[OutputT]]:
         if exchange.context is not self.context:
             raise PluginError(
                 "Plugin middleware replaced the trusted run context.",
@@ -727,7 +1368,6 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             next_attempt_index = attempt_index + 1
             manager = self._executable._agent.run_stream_events(
                 current_input.value,
-                output_type=[self._executable.definition.output_type, DeferredToolRequests],
                 message_history=current_history,
                 deferred_tool_results=(
                     self._deferred_resume.results if attempt_index == 0 and self._deferred_resume is not None else None
@@ -930,7 +1570,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             )
             if validated.status == "completed":
                 output = validated.output
-                if isinstance(output, DeferredToolRequests):
+                if _business_output_contains_deferred_value(output):
                     raise ValueError("deferred output must suspend the run")
                 self._executable._output_adapter.validate_python(output, strict=True)
             return validated
@@ -959,38 +1599,8 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self,
         events: AgentRunEvents[OutputT | DeferredToolRequests],
     ) -> AsyncIterator[Any]:
-        self._emitter.start_consuming()
-        agent_task: asyncio.Task[Any] | None = asyncio.create_task(events.__anext__())
-        emitter_task: asyncio.Task[Any] | None = None
-        try:
-            while agent_task is not None:
-                emitter_task = asyncio.create_task(self._emitter.next())
-                done, _ = await asyncio.wait({agent_task, emitter_task}, return_when=asyncio.FIRST_COMPLETED)
-                if emitter_task in done:
-                    yield emitter_task.result()
-                    emitter_task = None
-                if agent_task in done:
-                    try:
-                        event = agent_task.result()
-                    except StopAsyncIteration:
-                        agent_task = None
-                    else:
-                        yield event
-                        agent_task = asyncio.create_task(events.__anext__())
-                if emitter_task is not None:
-                    emitter_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await emitter_task
-                    emitter_task = None
-            while not self._emitter.empty():
-                yield self._emitter.get_nowait()
-        finally:
-            self._emitter.stop_consuming()
-            for task in (agent_task, emitter_task):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
+        async for event in events:
+            yield event
 
     def _next_public_sequence(self) -> int:
         sequence = self._public_sequence
@@ -1027,8 +1637,14 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 raise cancellation
             return
 
+        fence_failure: BaseException | None = None
+        try:
+            self._bindings.environment.controller.begin_close()
+        except BaseException as exc:
+            fence_failure = exc
+
         current_task = asyncio.current_task()
-        causes: list[BaseException] = []
+        causes: list[BaseException] = [] if fence_failure is None else [fence_failure]
 
         def capture_pending_cancellation(exc: asyncio.CancelledError | None = None) -> bool:
             nonlocal cancellation
@@ -1055,11 +1671,17 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 # Cleanup code may suppress or translate the injected CancelledError.
                 capture_pending_cancellation()
 
-        responses = sorted(self._responses, key=lambda item: item[0], reverse=True)
-        for _, response in responses:
-            await finish_cleanup(response.aclose())
+        await finish_cleanup(self._cancel_logical_source_tasks())
+        await finish_cleanup(self._close_registered_responses())
+        causes.extend(self._source_cleanup_failures)
+        self._source_cleanup_failures.clear()
+
+        await finish_cleanup(self._close_environment_lifecycle())
         self._emitter.close()
-        await finish_cleanup(self._stack.aclose())
+        if self._environment_event_task is not None:
+            task = self._environment_event_task
+            self._environment_event_task = None
+            await finish_cleanup(_stop_environment_event_task(task))
         self._closed = True
 
         if cancellation is not None:
@@ -1074,12 +1696,116 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             )
 
 
+def _resolve_business_output[OutputT](
+    definition: AgentDefinition[OutputT],
+) -> tuple[AgentSpec, Any, TypeAdapter[Any]]:
+    """Resolve and freeze the one business-output source used for Agent construction."""
+    construction_spec = definition.agent.model_copy(deep=True)
+    if definition.output_type is not None:
+        business_output = _prepare_pydantic_output_spec(definition.output_type)
+        return construction_spec, business_output, _build_output_adapter(definition.output_type)
+
+    schema = construction_spec.output_schema
+    assert schema is not None
+    try:
+        business_output = StructuredDict(deepcopy(schema))
+        output_adapter = TypeAdapter(business_output)
+    except Exception as exc:
+        raise DefinitionError(
+            "AgentSpec.output_schema is not a valid native structured object schema.",
+            code="agent_build_failed",
+            details={"definition_id": definition.definition_id},
+        ) from exc
+    construction_spec = construction_spec.model_copy(update={"output_schema": None}, deep=True)
+    return construction_spec, business_output, output_adapter
+
+
+def _validate_built_capability_tree(
+    root: AbstractCapability[AgentContext],
+    *,
+    definition_reserved_ids: frozenset[str],
+) -> None:
+    """Validate stable IDs and protected provenance on the complete Agent-bound tree."""
+    leaves: list[AbstractCapability[AgentContext]] = []
+    root.apply(leaves.append)
+    seen_ids: dict[str, str] = {}
+    authorization_count = 0
+    reserved_ids = {
+        INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+        INVOCATION_POLICY_CAPABILITY_ID,
+        CLIENT_TOOLS_CAPABILITY_ID,
+        CLIENT_TOOLS_RUN_CAPABILITY_ID,
+        ENVIRONMENT_TOOLS_CAPABILITY_ID,
+    }
+    for capability in leaves:
+        if not isinstance(capability, AbstractCapability):
+            raise DefinitionError(
+                "Built Capability trees must contain only AbstractCapability leaves.",
+                code="capability_type_invalid",
+                details={"source": "built"},
+            )
+        capability_id = capability.id
+        if capability_id is not None:
+            if not isinstance(capability_id, str) or not capability_id.strip():
+                raise DefinitionError(
+                    "Capability IDs must be non-blank strings when present.",
+                    code="capability_id_invalid",
+                    details={"capability_type": type(capability).__name__},
+                )
+            previous = seen_ids.get(capability_id)
+            if previous is not None:
+                raise DefinitionError(
+                    "Capability IDs must be unique in the built Agent tree.",
+                    code="capability_id_duplicate",
+                    details={
+                        "capability_id": capability_id,
+                        "capability_type": type(capability).__name__,
+                        "other_capability_type": previous,
+                    },
+                )
+            seen_ids[capability_id] = type(capability).__name__
+
+        if isinstance(capability, InvocationAuthorizationCapability):
+            authorization_count += 1
+            if capability_id != INVOCATION_AUTHORIZATION_CAPABILITY_ID:
+                raise DefinitionError(
+                    "The mandatory invocation Capability has an invalid ID.",
+                    code="capability_scope_invalid",
+                )
+            continue
+
+        allowed_definition_reserved = (
+            type(capability) in (ClientToolsCapability, EnvironmentToolsCapability)
+            and capability_id in definition_reserved_ids
+        )
+        if (
+            isinstance(capability, InvocationPolicyCapability | ClientToolsRunCapability)
+            or capability_id in reserved_ids
+        ) and not allowed_definition_reserved:
+            raise DefinitionError(
+                "A reserved Harness Capability is present in the built Agent tree from the wrong source.",
+                code="capability_scope_invalid",
+                details={
+                    "capability_id": capability_id,
+                    "capability_type": type(capability).__name__,
+                    "source": "built",
+                },
+            )
+
+    if authorization_count != 1:
+        raise DefinitionError(
+            "The built Agent must contain exactly one mandatory invocation Capability.",
+            code="capability_scope_invalid",
+        )
+
+
 def _validate_capability_source(
     capabilities: Sequence[AbstractCapability[AgentContext]],
     *,
     source: Literal["definition", "run"],
 ) -> frozenset[str]:
     """Flatten Capability trees and preserve ownership of reserved Harness IDs."""
+    run_types = (InvocationPolicyCapability, ClientToolsRunCapability)
     leaves: list[AbstractCapability[AgentContext]] = []
     for capability in capabilities:
         if not isinstance(capability, AbstractCapability):
@@ -1088,6 +1814,16 @@ def _validate_capability_source(
                 code="capability_type_invalid",
                 details={"source": source},
             )
+        if source == "run" and type(capability) not in run_types:
+            raise DefinitionError(
+                "RunBindings accepts only exact documented run attachment Capability types.",
+                code="capability_scope_invalid",
+                details={
+                    "capability_id": capability.id,
+                    "capability_type": type(capability).__name__,
+                    "source": source,
+                },
+            )
         capability.apply(leaves.append)
 
     reserved_ids = {
@@ -1095,6 +1831,7 @@ def _validate_capability_source(
         INVOCATION_POLICY_CAPABILITY_ID,
         CLIENT_TOOLS_CAPABILITY_ID,
         CLIENT_TOOLS_RUN_CAPABILITY_ID,
+        ENVIRONMENT_TOOLS_CAPABILITY_ID,
     }
     accepted: set[str] = set()
     for capability in leaves:
@@ -1104,15 +1841,16 @@ def _validate_capability_source(
                 code="capability_type_invalid",
                 details={"source": source},
             )
-        allowed = (source == "definition" and isinstance(capability, ClientToolsCapability)) or (
-            source == "run" and isinstance(capability, InvocationPolicyCapability | ClientToolsRunCapability)
-        )
+        allowed = (
+            source == "definition" and type(capability) in (ClientToolsCapability, EnvironmentToolsCapability)
+        ) or (source == "run" and type(capability) in run_types)
         reserved_type = isinstance(
             capability,
             InvocationAuthorizationCapability
             | InvocationPolicyCapability
             | ClientToolsCapability
-            | ClientToolsRunCapability,
+            | ClientToolsRunCapability
+            | EnvironmentToolsCapability,
         )
         if reserved_type or capability.id in reserved_ids:
             if not allowed:
@@ -1130,6 +1868,124 @@ def _validate_capability_source(
     return frozenset(accepted)
 
 
+def _prepare_pydantic_output_spec(value: Any) -> Any:
+    """Give Pydantic semantic return annotations for supported sync-awaitable output functions."""
+    if isinstance(value, TextOutput):
+        output_function = _prepare_pydantic_output_callable(value.output_function)
+        return value if output_function is value.output_function else TextOutput(output_function)
+    if isinstance(value, ToolOutput):
+        output = _prepare_pydantic_output_spec(value.output)
+        if output is value.output:
+            return value
+        return ToolOutput(
+            output,
+            name=value.name,
+            description=value.description,
+            max_retries=value.max_retries,
+            strict=value.strict,
+            sequential=value.sequential,
+        )
+    if isinstance(value, NativeOutput):
+        outputs = _prepare_pydantic_output_spec(value.outputs)
+        if outputs is value.outputs:
+            return value
+        return NativeOutput(
+            outputs,
+            name=value.name,
+            description=value.description,
+            strict=value.strict,
+            template=value.template,
+        )
+    if isinstance(value, PromptedOutput):
+        outputs = _prepare_pydantic_output_spec(value.outputs)
+        if outputs is value.outputs:
+            return value
+        return PromptedOutput(
+            outputs,
+            name=value.name,
+            description=value.description,
+            template=value.template,
+        )
+    if isinstance(value, tuple):
+        prepared = tuple(_prepare_pydantic_output_spec(item) for item in value)
+        return (
+            value if all(current is original for current, original in zip(prepared, value, strict=True)) else prepared
+        )
+    if isinstance(value, list):
+        prepared = [_prepare_pydantic_output_spec(item) for item in value]
+        return (
+            value if all(current is original for current, original in zip(prepared, value, strict=True)) else prepared
+        )
+    if inspect.isfunction(value) or inspect.ismethod(value):
+        return _prepare_pydantic_output_callable(value)
+    return value
+
+
+def _prepare_pydantic_output_callable(function: Callable[..., Any]) -> Callable[..., Any]:
+    type_hints = get_type_hints(function, include_extras=True)
+    return_type = type_hints.get("return", Any)
+    semantic_return_type = _semantic_output_return_type(function, return_type)
+    if semantic_return_type == return_type:
+        return function
+
+    def output_facade(*args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    output_facade.__name__ = function.__name__
+    output_facade.__qualname__ = function.__qualname__
+    output_facade.__module__ = function.__module__
+    output_facade.__doc__ = function.__doc__
+    output_facade.__annotations__ = {**type_hints, "return": semantic_return_type}
+    signature = inspect.signature(function).replace(return_annotation=semantic_return_type)
+    cast(Any, output_facade).__signature__ = signature
+    return output_facade
+
+
+def _semantic_output_return_type(function: Callable[..., Any], return_type: Any) -> Any:
+    if inspect.iscoroutinefunction(function):
+        return return_type
+    candidate = return_type
+    while get_origin(candidate) is typing.Annotated:
+        arguments = get_args(candidate)
+        candidate = arguments[0] if arguments else Any
+    origin = get_origin(candidate)
+    if origin is Awaitable:
+        arguments = get_args(candidate)
+        return arguments[0] if arguments else Any
+    if origin is Coroutine:
+        arguments = get_args(candidate)
+        return arguments[2] if len(arguments) == 3 else Any
+    return return_type
+
+
+def _business_output_contains_deferred_value(value: Any) -> bool:
+    """Fail closed if reserved suspension control leaks into a completed container value."""
+    seen: set[int] = set()
+
+    def contains(item: Any) -> bool:
+        if isinstance(item, DeferredToolRequests):
+            return True
+        if isinstance(item, dict):
+            nested = list(item.values())
+        elif isinstance(item, BaseModel):
+            nested = [getattr(item, field_name) for field_name in type(item).model_fields]
+            if item.model_extra is not None:
+                nested.extend(item.model_extra.values())
+        elif not isinstance(item, type) and is_dataclass(item):
+            nested = [getattr(item, field.name) for field in dataclass_fields(cast(Any, item))]
+        elif isinstance(item, list | tuple | set | frozenset):
+            nested = list(item)
+        else:
+            return False
+        item_id = id(item)
+        if item_id in seen:
+            return False
+        seen.add(item_id)
+        return any(contains(nested_value) for nested_value in nested)
+
+    return contains(value)
+
+
 def _output_spec_contains_deferred_requests(output_spec: OutputSpec[Any]) -> bool:
     """Return whether a business output spec directly or transitively reserves deferred control output."""
     seen: set[int] = set()
@@ -1142,6 +1998,13 @@ def _output_spec_contains_deferred_requests(output_spec: OutputSpec[Any]) -> boo
 
         if isinstance(value, type) and issubclass(value, DeferredToolRequests):
             return True
+        if isinstance(value, type) and issubclass(value, BaseModel):
+            return any(contains(model_field.annotation) for model_field in value.model_fields.values())
+        if isinstance(value, type) and is_dataclass(value):
+            annotations = get_type_hints(value, include_extras=True)
+            return any(contains(annotations.get(item.name, item.type)) for item in dataclass_fields(value))
+        if isinstance(value, type) and is_typeddict(value):
+            return any(contains(annotation) for annotation in get_type_hints(value, include_extras=True).values())
         if isinstance(value, typing.TypeAliasType):
             return contains(value.__value__)
         if get_origin(value) is typing.Annotated:
@@ -1155,22 +2018,20 @@ def _output_spec_contains_deferred_requests(output_spec: OutputSpec[Any]) -> boo
             return contains_callable(value.output_function)
         if isinstance(value, Sequence):
             return any(contains(item) for item in value)
-        if get_origin(value) in (typing.Union, type(str | int)):
+        origin = get_origin(value)
+        if origin in (typing.Union, type(str | int), typing.Required, typing.NotRequired):
             return any(contains(item) for item in get_args(value))
+        if isinstance(origin, type):
+            structured_origin = issubclass(origin, BaseModel) or is_dataclass(origin) or is_typeddict(origin)
+            if structured_origin or issubclass(origin, Collection):
+                return any(item is not Ellipsis and contains(item) for item in get_args(value))
         if inspect.isfunction(value) or inspect.ismethod(value):
             return contains_callable(value)
         return False
 
-    def contains_callable(function: Any) -> bool:
-        return_type = get_type_hints(function).get("return", Any)
-        origin = get_origin(return_type)
-        if origin is Awaitable:
-            arguments = get_args(return_type)
-            return_type = arguments[0] if arguments else Any
-        elif origin is Coroutine:
-            arguments = get_args(return_type)
-            return_type = arguments[2] if len(arguments) == 3 else Any
-        return contains(return_type)
+    def contains_callable(function: Callable[..., Any]) -> bool:
+        return_type = get_type_hints(function, include_extras=True).get("return", Any)
+        return contains(_semantic_output_return_type(function, return_type))
 
     return contains(output_spec)
 
@@ -1199,18 +2060,13 @@ def _build_output_adapter(output_spec: OutputSpec[Any]) -> TypeAdapter[Any]:
         else:
             output_types.append(value)
 
-    def collect_callable(function: Any) -> None:
-        return_type = get_type_hints(function).get("return", Any)
-        origin = get_origin(return_type)
-        if origin is Awaitable:
-            arguments = get_args(return_type)
-            return_type = arguments[0] if arguments else Any
-        elif origin is Coroutine:
-            arguments = get_args(return_type)
-            return_type = arguments[2] if len(arguments) == 3 else Any
-        collect(return_type)
+    def collect_callable(function: Callable[..., Any]) -> None:
+        return_type = get_type_hints(function, include_extras=True).get("return", Any)
+        collect(_semantic_output_return_type(function, return_type))
 
     collect(output_spec)
+    if not output_types:
+        raise ValueError("Output specifications must contain at least one semantic output type.")
     validation_type = reduce(or_, output_types)
     try:
         return TypeAdapter(validation_type)

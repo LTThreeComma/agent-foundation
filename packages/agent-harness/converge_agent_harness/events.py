@@ -86,6 +86,8 @@ class _RunEventEmitter:
         self._queue: asyncio.Queue[HarnessExtensionEvent | HarnessEvent] = asyncio.Queue(maxsize=capacity)
         self._child_run_ids: set[str] = set()
         self._consumer_started = False
+        self._producer_stopped = asyncio.Event()
+        self._producer_stopped.set()
         self._closed = False
 
     async def emit(self, event: HarnessExtensionEvent) -> None:
@@ -116,14 +118,33 @@ class _RunEventEmitter:
         return run_id in self._child_run_ids
 
     def start_consuming(self) -> None:
+        if self._closed:
+            raise RunError("The Harness event emitter is closed.", code="event_emitter_closed")
         self._consumer_started = True
+        self._producer_stopped.clear()
 
     def stop_consuming(self) -> None:
         self._consumer_started = False
+        self._producer_stopped.set()
 
     async def _put(self, event: HarnessExtensionEvent | HarnessEvent) -> None:
         if self._consumer_started:
-            await self._queue.put(event)
+            put = asyncio.create_task(self._queue.put(event))
+            stopped = asyncio.create_task(self._producer_stopped.wait())
+            try:
+                done, _ = await asyncio.wait({put, stopped}, return_when=asyncio.FIRST_COMPLETED)
+                if put in done:
+                    put.result()
+                    return
+                raise RunError(
+                    "The Harness event consumer stopped before accepting an event.",
+                    code="event_emitter_closed" if self._closed else "event_consumer_stopped",
+                )
+            finally:
+                for task in (put, stopped):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(put, stopped, return_exceptions=True)
             return
         try:
             self._queue.put_nowait(event)
@@ -141,6 +162,8 @@ class _RunEventEmitter:
 
     def close(self) -> None:
         self._closed = True
+        self._consumer_started = False
+        self._producer_stopped.set()
 
     def envelope(self, event: HarnessExtensionEvent, *, sequence: int) -> HarnessEvent:
         return HarnessEvent(

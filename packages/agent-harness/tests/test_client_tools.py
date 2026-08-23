@@ -22,7 +22,7 @@ from converge_agent_harness.tools import (
 from pydantic import ValidationError
 from pydantic_ai import DeferredToolResults, RunContext, ToolReturn
 from pydantic_ai.agent.spec import AgentSpec
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, Capability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.toolsets import AbstractToolset
@@ -301,18 +301,23 @@ async def test_mixed_external_and_approval_batch_resumes_through_native_categori
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(ClientToolsCapability(spec=spec),),
-        tools=(
-            HarnessTool(
-                managed_change,
-                harness_metadata=HarnessToolMetadata(
-                    tool_id="managed.change",
-                    effects=frozenset({"write"}),
-                    credential_audiences=(),
-                    idempotency="provider_key",
-                    output_policy=ToolOutputPolicy(max_inline_bytes=1024, max_output_bytes=4096),
-                ),
-                requires_approval=True,
+        capabilities=(
+            ClientToolsCapability(spec=spec),
+            Capability(
+                tools=[
+                    HarnessTool(
+                        managed_change,
+                        harness_metadata=HarnessToolMetadata(
+                            tool_id="managed.change",
+                            effects=frozenset({"write"}),
+                            credential_audiences=(),
+                            idempotency="provider_key",
+                            output_policy=ToolOutputPolicy(max_inline_bytes=1024, max_output_bytes=4096),
+                        ),
+                        requires_approval=True,
+                    )
+                ],
+                id="test-tools",
             ),
         ),
     )

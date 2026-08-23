@@ -185,12 +185,12 @@ class ClientToolsCapability(AbstractCapability[AgentContext]):
                 code="capability_scope_invalid",
             )
         attachment = ctx.capabilities.get(CLIENT_TOOLS_RUN_CAPABILITY_ID)
-        if attachment is not None and not isinstance(attachment, ClientToolsRunCapability):
+        if attachment is not None and type(attachment) is not ClientToolsRunCapability:
             raise DefinitionError(
                 "The client-tools run Capability has an incompatible type.",
                 code="client_tools_run_type_mismatch",
             )
-        if isinstance(attachment, ClientToolsRunCapability):
+        if type(attachment) is ClientToolsRunCapability:
             if CLIENT_TOOLS_RUN_CAPABILITY_ID not in provenance.run_ids:
                 raise DefinitionError(
                     "ClientToolsRunCapability must originate from RunBindings.",

@@ -12,11 +12,11 @@ from pydantic import JsonValue
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 
-from converge_agent_harness.environment import BoundEnvironment, EnvironmentRunBinding, NoopEnvironmentRunBinding
 from converge_agent_harness.identity import AgentIdentityRef, AgentInstanceContext
 from converge_agent_harness.state import AgentContextState, HarnessState
 
 if TYPE_CHECKING:
+    from converge_agent_harness.environment.providers import BoundEnvironment, EnvironmentRunBinding
     from converge_agent_harness.events import HarnessEventEmitter
     from converge_agent_harness.execution import AgentDefinition, ExecutableAgent, SubagentDefinition
     from converge_agent_harness.models import ModelRunBinding
@@ -123,6 +123,8 @@ class RunBindings:
         metadata: Mapping[str, JsonValue] | None = None,
     ) -> RunBindings:
         """Create fresh bindings for an embedded process-local run."""
+        from converge_agent_harness.environment.coordinator import NoopEnvironmentRunBinding
+
         instance_id = str(uuid4())
         return cls(
             instance=AgentInstanceContext(
@@ -155,9 +157,28 @@ class AgentContext:
         default_factory=lambda: MappingProxyType({}),
         repr=False,
     )
+    _run_capability_instances: dict[str, AbstractCapability[AgentContext]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def _record_managed_tool_surface(self, tool_ids: Mapping[str, str]) -> None:
         object.__setattr__(self, "_managed_tool_ids", MappingProxyType(dict(tool_ids)))
+
+    def _run_capability(self, capability_id: str) -> AbstractCapability[AgentContext] | None:
+        """Return a logical-run Capability replacement cached across inner Agent attempts."""
+        return self._run_capability_instances.get(capability_id)
+
+    def _record_run_capability(
+        self,
+        capability_id: str,
+        capability: AbstractCapability[AgentContext],
+    ) -> None:
+        """Retain one fresh Capability replacement for this logical Harness run."""
+        existing = self._run_capability_instances.setdefault(capability_id, capability)
+        if existing is not capability:
+            raise RuntimeError(f"Run Capability {capability_id!r} is already bound")
 
     @property
     def identity(self) -> AgentIdentityRef:
@@ -169,4 +190,5 @@ class AgentContext:
         return HarnessState(
             message_history=tuple(message_history),
             agent_context_state=await self.state.snapshot(),
+            environment_state=await self.environment.export_state(),
         )

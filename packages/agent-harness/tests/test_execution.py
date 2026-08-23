@@ -1,28 +1,39 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Coroutine
+import json
+import threading
+import warnings
+from collections.abc import AsyncIterator, Awaitable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 import pytest
 from converge_agent_harness import (
     AgentDefinition,
     DefinitionError,
+    EnvironmentState,
     HarnessBuilder,
     HarnessEvent,
+    HarnessExtensionEvent,
     HarnessRunResultEvent,
     HarnessState,
+    PluginError,
     RunBindings,
     RunError,
     SubagentDefinition,
 )
+from converge_agent_harness.events import _RunEventEmitter
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import Capability
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.output import NativeOutput, PromptedOutput, TextOutput, ToolOutput
-from pydantic_ai.tools import DeferredToolRequests
+from pydantic_ai.tools import DeferredToolRequests, Tool
 from pydantic_ai.usage import RunUsage, UsageLimits
+from typing_extensions import TypedDict
 
 pytestmark = pytest.mark.anyio
 
@@ -35,6 +46,106 @@ def _turn_model(calls: list[tuple[ModelMessage, ...]]) -> FunctionModel:
         yield f"turn-{turn}"
 
     return FunctionModel(stream_function=stream)
+
+
+def _structured_output_model(
+    payload: dict[str, Any],
+    *,
+    schemas: list[dict[str, Any]] | None = None,
+) -> FunctionModel:
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
+        del messages
+        output_tool = info.output_tools[0]
+        if schemas is not None:
+            schemas.append(output_tool.parameters_json_schema)
+        yield {
+            0: DeltaToolCall(
+                name=output_tool.name,
+                json_args=json.dumps(payload),
+                tool_call_id="output-1",
+            )
+        }
+
+    return FunctionModel(stream_function=stream)
+
+
+class _ModelOutput(BaseModel):
+    value: int
+
+
+@dataclass
+class _DataclassOutput:
+    value: int
+
+
+class _TypedDictOutput(TypedDict):
+    value: int
+
+
+class _NestedModelOutput(BaseModel):
+    value: DeferredToolRequests
+
+
+@dataclass
+class _NestedDataclassOutput:
+    value: DeferredToolRequests
+
+
+class _NestedTypedDictOutput(TypedDict):
+    value: DeferredToolRequests
+
+
+class _NestedRootOutput(RootModel[DeferredToolRequests]):
+    pass
+
+
+@dataclass
+class _GenericDataclassOutput[NestedT]:
+    value: NestedT
+
+
+class _RuntimeModelOutput(BaseModel):
+    value: Any
+
+
+@dataclass
+class _RuntimeDataclassOutput:
+    value: Any
+
+
+class _RuntimeRootOutput(RootModel[Any]):
+    pass
+
+
+class _RuntimeExtraOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    value: int
+
+
+def _leaking_list_output(value: str) -> list[Any]:
+    del value
+    return [DeferredToolRequests()]
+
+
+def _leaking_model_output(value: str) -> _RuntimeModelOutput:
+    del value
+    return _RuntimeModelOutput(value=DeferredToolRequests())
+
+
+def _leaking_dataclass_output(value: str) -> _RuntimeDataclassOutput:
+    del value
+    return _RuntimeDataclassOutput(value=DeferredToolRequests())
+
+
+def _leaking_root_output(value: str) -> _RuntimeRootOutput:
+    del value
+    return _RuntimeRootOutput(DeferredToolRequests())
+
+
+def _leaking_extra_output(value: str) -> _RuntimeExtraOutput:
+    del value
+    return _RuntimeExtraOutput(value=1, hidden=DeferredToolRequests())
 
 
 def _build(model: FunctionModel):
@@ -51,7 +162,7 @@ async def test_stream_is_lazy_and_delivers_one_terminal_result_after_events() ->
 
     async with executable.stream("hello", bindings=RunBindings.local()) as stream:
         assert calls == []
-        assert stream.context.environment.is_noop is True
+        assert stream.context.environment.topology.bindings == ()
         assert len(stream.context.subagents) == 0
 
         items = [item async for item in stream]
@@ -69,6 +180,30 @@ async def test_stream_is_lazy_and_delivers_one_terminal_result_after_events() ->
     assert result.state.message_history == result.all_messages()
     assert len(result.new_messages()) == 2
     assert result.usage.requests == 1
+
+
+async def test_environment_state_restores_before_input_factory_and_exports_fresh_state() -> None:
+    calls: list[tuple[ModelMessage, ...]] = []
+    executable = _build(_turn_model(calls))
+    previous = HarnessState(
+        environment_state=EnvironmentState(observed_topology_version=0, bindings={}),
+    )
+
+    async def input_factory(preparation) -> str:
+        assert preparation.environment.restored_state_topology_version == 0
+        assert preparation.environment.topology.topology_version == 0
+        return "restored"
+
+    result = await executable.run(
+        input_factory=input_factory,
+        bindings=RunBindings.local(),
+        previous_state=previous,
+    )
+
+    assert result.output_or_raise() == "turn-1"
+    assert result.state is not None
+    assert result.state.environment_state is not None
+    assert result.state.environment_state.observed_topology_version == 0
 
 
 async def test_enter_and_exit_without_iteration_does_not_start_the_agent() -> None:
@@ -107,27 +242,97 @@ async def test_run_consumes_the_canonical_stream_and_state_resumes_a_rebuilt_age
     assert first_executable.definition is not rebuilt_executable.definition
 
 
-@pytest.mark.parametrize("annotation", ["awaitable", "coroutine"])
+@pytest.mark.parametrize("annotation", ["awaitable", "coroutine", "annotated_awaitable"])
 async def test_output_functions_may_annotate_their_awaitable_result(annotation: str) -> None:
+    output_thread_ids: list[int] = []
+
     async def transform(value: str) -> str:
         return f"{value}|parsed"
 
     def awaitable_output(value: str) -> Awaitable[str]:
+        output_thread_ids.append(threading.get_ident())
         return transform(value)
 
     def coroutine_output(value: str) -> Coroutine[Any, Any, str]:
+        output_thread_ids.append(threading.get_ident())
         return transform(value)
 
-    output_function = awaitable_output if annotation == "awaitable" else coroutine_output
+    def annotated_awaitable_output(value: str) -> Annotated[Awaitable[str], "async-result"]:
+        output_thread_ids.append(threading.get_ident())
+        return transform(value)
+
+    output_functions = {
+        "awaitable": awaitable_output,
+        "coroutine": coroutine_output,
+        "annotated_awaitable": annotated_awaitable_output,
+    }
+    output_function = output_functions[annotation]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message="Could not generate return schema.*")
+        executable = HarnessBuilder().build_code(
+            AgentSpec(model="logical:test", name="test-agent"),
+            output_type=TextOutput(output_function),
+            model=_turn_model([]),
+        )
+        result = await executable.run("hello", bindings=RunBindings.local())
+
+    assert isinstance(executable.definition.output_type, TextOutput)
+    assert executable.definition.output_type.output_function is output_function
+    assert output_thread_ids and all(thread_id != threading.get_ident() for thread_id in output_thread_ids)
+    assert result.output_or_raise() == "turn-1|parsed"
+
+
+async def test_sync_annotated_output_constraints_are_preserved() -> None:
+    def constrained_output(value: str) -> Annotated[str, Field(min_length=3)]:
+        del value
+        return "x"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test", name="test-agent"),
+        output_type=TextOutput(constrained_output),
+        model=_turn_model([]),
+    )
+
+    with pytest.raises(PluginError) as exc_info:
+        await executable.run("hello", bindings=RunBindings.local())
+
+    assert exc_info.value.code == "plugin_result_invalid"
+
+
+@pytest.mark.parametrize(
+    "output_function",
+    [
+        _leaking_list_output,
+        _leaking_model_output,
+        _leaking_dataclass_output,
+        _leaking_root_output,
+        _leaking_extra_output,
+    ],
+)
+async def test_nested_deferred_runtime_value_cannot_complete_as_business_output(output_function: Any) -> None:
     executable = HarnessBuilder().build_code(
         AgentSpec(model="logical:test", name="test-agent"),
         output_type=TextOutput(output_function),
         model=_turn_model([]),
     )
 
-    result = await executable.run("hello", bindings=RunBindings.local())
+    with pytest.raises(PluginError) as exc_info:
+        await executable.run("hello", bindings=RunBindings.local())
 
-    assert result.output_or_raise() == "turn-1|parsed"
+    assert exc_info.value.code == "plugin_result_invalid"
+
+
+@pytest.mark.parametrize("output_type", [[], ()])
+async def test_empty_output_sequence_uses_the_definition_error_boundary(output_type: Any) -> None:
+    with pytest.raises(DefinitionError) as exc_info:
+        HarnessBuilder().build_code(
+            AgentSpec(model="logical:test"),
+            output_type=output_type,
+            model=_turn_model([]),
+        )
+
+    assert exc_info.value.code == "agent_build_failed"
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 class _DeferredSubclass(DeferredToolRequests):
@@ -137,9 +342,25 @@ class _DeferredSubclass(DeferredToolRequests):
 type _DeferredAlias = DeferredToolRequests
 
 
+def _nested_deferred_from_text(value: str) -> list[DeferredToolRequests]:
+    del value
+    return [DeferredToolRequests()]
+
+
 def _deferred_from_text(value: str) -> DeferredToolRequests:
     del value
     return DeferredToolRequests()
+
+
+async def _deferred_after_await() -> DeferredToolRequests:
+    return DeferredToolRequests()
+
+
+def _annotated_awaitable_deferred_from_text(
+    value: str,
+) -> Annotated[Awaitable[DeferredToolRequests], "async-result"]:
+    del value
+    return _deferred_after_await()
 
 
 @pytest.mark.parametrize(
@@ -151,12 +372,24 @@ def _deferred_from_text(value: str) -> DeferredToolRequests:
         Annotated[DeferredToolRequests, "reserved"],
         (str, DeferredToolRequests),
         str | DeferredToolRequests,
+        list[DeferredToolRequests],
+        Sequence[DeferredToolRequests],
+        tuple[DeferredToolRequests, ...],
+        dict[str, DeferredToolRequests],
+        _NestedModelOutput,
+        _NestedDataclassOutput,
+        _NestedTypedDictOutput,
+        _NestedRootOutput,
+        _GenericDataclassOutput[DeferredToolRequests],
+        NativeOutput(list[DeferredToolRequests]),
         NativeOutput(DeferredToolRequests),
         NativeOutput(Annotated[DeferredToolRequests, "reserved"]),
         PromptedOutput(DeferredToolRequests),
         ToolOutput(DeferredToolRequests),
         ToolOutput(_DeferredSubclass),
         TextOutput(_deferred_from_text),
+        TextOutput(_nested_deferred_from_text),
+        TextOutput(_annotated_awaitable_deferred_from_text),
     ],
 )
 async def test_deferred_requests_cannot_be_declared_as_business_output(output_spec: Any) -> None:
@@ -184,6 +417,114 @@ async def test_agent_spec_output_schema_cannot_override_business_output() -> Non
             model=_turn_model([]),
         )
     assert exc_info.value.code == "output_contract_conflict"
+
+
+async def test_missing_build_time_output_contract_is_rejected() -> None:
+    with pytest.raises(DefinitionError) as exc_info:
+        AgentDefinition(
+            agent=AgentSpec(model="logical:test"),
+            output_type=None,
+            model=_turn_model([]),
+        )
+    assert exc_info.value.code == "output_contract_missing"
+
+
+@pytest.mark.parametrize(
+    ("output_type", "expected"),
+    [
+        (_ModelOutput, _ModelOutput(value=7)),
+        (_DataclassOutput, _DataclassOutput(value=7)),
+        (_TypedDictOutput, {"value": 7}),
+    ],
+)
+async def test_code_first_structured_output_types_are_fixed_at_build(
+    output_type: Any,
+    expected: Any,
+) -> None:
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=output_type,
+        model=_structured_output_model({"value": 7}),
+    )
+
+    result = await executable.run("build once", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == expected
+
+
+async def test_agent_spec_object_schema_becomes_native_structured_dict_output() -> None:
+    schema = {
+        "type": "object",
+        "title": "DeclaredOutput",
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    observed_schemas: list[dict[str, Any]] = []
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test", output_schema=schema),
+        output_type=None,
+        model=_structured_output_model({"value": 11}, schemas=observed_schemas),
+    )
+
+    result = await executable.run("schema", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == {"value": 11}
+    assert observed_schemas == [schema]
+    assert executable.definition.agent.output_schema == schema
+
+
+async def test_invalid_agent_spec_output_schema_fails_during_build() -> None:
+    with pytest.raises(DefinitionError) as exc_info:
+        HarnessBuilder().build_code(
+            AgentSpec(model="logical:test", output_schema={"type": "array", "items": {"type": "string"}}),
+            output_type=None,
+            model=_structured_output_model({"value": 1}),
+        )
+
+    assert exc_info.value.code == "agent_build_failed"
+    assert exc_info.value.__cause__ is not None
+
+
+async def test_declarative_schema_build_still_supports_native_deferred_suspension() -> None:
+    def change(value: int) -> int:
+        return value
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
+        del messages, info
+        yield {
+            0: DeltaToolCall(
+                name="change",
+                json_args=json.dumps({"value": 1}),
+                tool_call_id="approval-1",
+            )
+        }
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(
+            model="logical:test",
+            output_schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            },
+        ),
+        output_type=None,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            Capability(
+                tools=[Tool(change, requires_approval=True)],
+                id="test-tools",
+            ),
+        ),
+    )
+
+    result = await executable.run("suspend", bindings=RunBindings.local())
+
+    assert result.status == "suspended"
+    assert result.output is None
+    assert result.deferred is not None
+    assert len(result.deferred.approvals) == 1
 
 
 async def test_builder_recursively_builds_and_owns_authored_subagents() -> None:
@@ -284,7 +625,7 @@ async def test_input_factory_runs_once_after_noop_environment_entry() -> None:
     executable = _build(_turn_model(model_calls))
 
     async def input_factory(preparation):
-        assert preparation.environment.is_noop is True
+        assert preparation.environment.topology.bindings == ()
         calls.append(preparation.run_id)
         return "from factory"
 
@@ -415,3 +756,20 @@ async def test_recognized_pydantic_run_failure_becomes_a_failed_result() -> None
     assert result.failure is not None
     assert result.failure.code == "agent_run_failed"
     assert "invalid response" not in result.failure.message
+
+
+async def test_event_consumer_stop_wakes_a_blocked_topology_event_producer() -> None:
+    emitter = _RunEventEmitter("run-1", capacity=1)
+    event = HarnessExtensionEvent(kind="context", payload={"type": "environment_topology_changed"})
+    emitter.start_consuming()
+    await emitter.emit(event)
+    blocked = asyncio.create_task(emitter.emit(event))
+    await asyncio.sleep(0)
+    assert not blocked.done()
+
+    emitter.stop_consuming()
+
+    with pytest.raises(RunError) as stopped:
+        await asyncio.wait_for(blocked, timeout=0.2)
+    assert stopped.value.code == "event_consumer_stopped"
+    emitter.close()

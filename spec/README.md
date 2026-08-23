@@ -90,15 +90,16 @@ Dependency direction is one-way: Hosts embed the Harness; the Harness uses provi
 
 The Harness is built directly on Pydantic AI 2:
 
-- `AgentDefinition` is an immutable process-local Python value containing native `AgentSpec`, `OutputSpec`, Model/model name, tools, Toolsets, Capabilities, plugins, and recovery configuration;
-- `HarnessBuilder` binds trusted plugins, installs the thin model resolver and inert outer invocation boundary, and calls `Agent.from_spec()` once;
+- `AgentDefinition` is an immutable process-local Python value containing native `AgentSpec`, one build-time explicit or schema-derived output contract, a Model/model name, top-level Capabilities, plugins, and recovery configuration;
+- Capability is the only top-level feature-behavior plane; each feature Capability owns its tools, Toolsets, instructions, settings, and hooks;
+- `HarnessBuilder` authorizes declarative custom Capability types, binds trusted plugins, installs the thin model resolver and inert outer invocation boundary, and calls `Agent.from_spec()` once;
 - `RunBindings` supplies fresh Agent instance, Environment, optional `ModelRunBinding`, run Capabilities, and metadata;
 - one logical Harness run owns one context, Environment, plugin graph, state coordinator, usage accumulator, and public run ID;
 - bounded model recovery can start several Pydantic inner attempts with unique inner run IDs inside that logical run;
 - `HarnessState` carries public messages, detached Capability JSON namespaces, and optional portable Environment backend data; desired topology, provider incarnation envelope, and launch payload remain Host-owned;
 - Pydantic AI owns native Model profiles, transport/output retries, provider-suspended continuation, deferred external calls/approvals, Toolsets, messages, events, and usage.
 
-Plugins are trusted code-first objects. The Harness does not compile serialized Agent definitions, discover packages, or maintain an extension catalog. A hosted Host owns serializable definition schemas and reconstructs process-local Python values through trusted locked adapters.
+Harness middleware plugins are trusted code-first objects, and the Harness does not compile serialized Agent definitions. Environment providers alone have a narrow package-discovery boundary: `importlib.metadata` exposes installed `converge_agent_harness.environments` entries, and a caller-owned immutable catalog imports only explicitly selected factory classes. A hosted Host owns serializable definition schemas, artifact authorization, and reconstruction of every other process-local Python value through trusted locked adapters.
 
 The complete design is indexed in [agent-harness/README.md](agent-harness/README.md).
 
@@ -187,7 +188,7 @@ flowchart LR
     Agent --> Provider[Feature provider]
 ```
 
-Installed plugins and native objects are trusted in-process code. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
+Installed plugins and native objects are trusted in-process code. Environment package presence is only availability; an operator must explicitly select and authorize the provider key before import/use. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
 
 ## Observability and Cost
 

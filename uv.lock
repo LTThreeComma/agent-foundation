@@ -300,6 +300,8 @@ source = { editable = "packages/agent-harness" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
 ]
 
 [package.dev-dependencies]
@@ -311,6 +313,8 @@ test = [
 requires-dist = [
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-slim", specifier = ">=2.31.1,<2.32" },
+    { name = "pydantic-core", specifier = ">=2.41,<3" },
+    { name = "typing-extensions", specifier = ">=4.15,<5" },
 ]
 
 [package.metadata.requires-dev]

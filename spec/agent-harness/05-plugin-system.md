@@ -4,7 +4,7 @@
 
 A Harness plugin is trusted, code-first Python middleware around the complete process-local Harness run. It can transform semantic input, observe or transform stream events, short-circuit execution, replace a complete result candidate, and contribute ordinary Pydantic AI `AbstractCapability[AgentContext]` instances at Agent construction.
 
-Plugins are concrete Python objects supplied in `AgentDefinition.plugins`. The Harness defines no plugin document format, `PluginSpec`, compiler, extension export, class registry, package discovery protocol, or runtime catalog. A Host that wants durable plugin configuration owns that schema and reconstructs trusted plugin objects before calling the Harness.
+Plugins are concrete Python objects supplied in `AgentDefinition.plugins`. The Harness defines no Harness-middleware plugin document format, `PluginSpec`, compiler, package discovery protocol, or runtime catalog. A Host that wants durable middleware configuration owns that schema and reconstructs trusted plugin objects before calling the Harness. The separately owned [Environment package entry-point catalog](08-environment-integration.md#environment-package-plugins) discovers Environment provider factories only; loading one never creates or grants an `AbstractHarnessPlugin`.
 
 Pydantic Capabilities remain the extension point inside the Agent loop. Harness plugins exist only for the wider semantic-input-to-complete-result boundary.
 
@@ -83,7 +83,7 @@ A contributed Capability that needs its run-bound plugin stores only the stable 
 ctx.deps.plugins.require(plugin_id, ExpectedPluginType)
 ```
 
-It must not retain a mutable Agent-bound plugin prototype for concurrent use. Direct native models, tools, and Toolsets remain explicit `AgentDefinition` inputs rather than hidden middleware products.
+It must not retain a mutable Agent-bound plugin prototype for concurrent use. A plugin contributes Agent-loop tools, Toolsets, guidance, settings, or hooks only through its ordinary Capability contribution; those values do not become hidden peer `AgentDefinition` inputs.
 
 ## Run Binding and BoundPluginContext
 

@@ -23,6 +23,7 @@ from converge_agent_harness.tools import (
 )
 from converge_agent_harness.tools.invocation import _apply_result_policy
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import Capability
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
@@ -80,7 +81,7 @@ async def _run(tool, policy: InvocationPolicyCapability):
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model(tool.name, {"value": "3"} if "value" in tool.function_schema.json_schema["properties"] else {}),
-        tools=(tool,),
+        capabilities=(Capability(tools=[tool], id="test-tools"),),
     )
     return await executable.run("go", bindings=RunBindings.local(capabilities=(policy,)))
 
@@ -130,7 +131,12 @@ async def test_resource_resolver_cannot_mutate_digested_dispatch_arguments() -> 
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model("inspect_payload", {"payload": {"value": 3}}),
-        tools=(HarnessTool(inspect_payload, harness_metadata=_metadata(resolver=resolve)),),
+        capabilities=(
+            Capability(
+                tools=[HarnessTool(inspect_payload, harness_metadata=_metadata(resolver=resolve))],
+                id="test-tools",
+            ),
+        ),
     )
     result = await executable.run(
         "go",
@@ -225,7 +231,12 @@ async def test_unknown_provider_outcome_is_safe_and_observable() -> None:
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model("uncertain", {}),
-        tools=(HarnessTool(uncertain, harness_metadata=_metadata(idempotency="none")),),
+        capabilities=(
+            Capability(
+                tools=[HarnessTool(uncertain, harness_metadata=_metadata(idempotency="none"))],
+                id="test-tools",
+            ),
+        ),
     )
     async with executable.stream(
         "go",
@@ -265,7 +276,12 @@ async def test_managed_dispatch_cancellation_releases_credentials_and_preserves_
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model("blocking", {}),
-        tools=(HarnessTool(blocking, harness_metadata=_metadata(audiences=("storage",))),),
+        capabilities=(
+            Capability(
+                tools=[HarnessTool(blocking, harness_metadata=_metadata(audiences=("storage",)))],
+                id="test-tools",
+            ),
+        ),
     )
 
     async with executable.stream(

@@ -15,6 +15,7 @@ from converge_agent_harness.tools import (
 )
 from pydantic_ai import DeferredToolResults, Tool, ToolApproved
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import Capability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
@@ -76,11 +77,16 @@ def _build(executed: list[int], *, resolver=None, requires_approval: bool = True
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model(),
-        tools=(
-            HarnessTool(
-                change,
-                harness_metadata=_metadata(resolver),
-                requires_approval=requires_approval,
+        capabilities=(
+            Capability(
+                tools=[
+                    HarnessTool(
+                        change,
+                        harness_metadata=_metadata(resolver),
+                        requires_approval=requires_approval,
+                    )
+                ],
+                id="test-tools",
             ),
         ),
     )
@@ -203,7 +209,7 @@ async def test_unmanaged_native_approval_remains_unmarked_and_uses_native_resume
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model(),
-        tools=(Tool(change, requires_approval=True),),
+        capabilities=(Capability(tools=[Tool(change, requires_approval=True)], id="test-tools"),),
     )
     first = await executable.run("go", bindings=RunBindings.local())
     assert first.status == "suspended"
@@ -247,7 +253,7 @@ async def test_managed_approval_cannot_remount_to_a_same_named_unmanaged_tool() 
         AgentSpec(model="logical:test"),
         output_type=str,
         model=_model(),
-        tools=(change,),
+        capabilities=(Capability(tools=[change], id="test-tools"),),
     )
     denied = _Policy(InvocationPolicyDecision.deny("revoked"), [])
     with pytest.raises(DefinitionError) as exc_info:

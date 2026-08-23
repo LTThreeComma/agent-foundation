@@ -87,7 +87,7 @@ Initial binding IDs and aliases are unique. A stable initial `binding_id` lets c
 
 ## Provider Registry and Contract
 
-Foundation uses an operator-approved registry keyed by the exact pair of provider key and locked integration revision. Registry population is deployment configuration, not definition input, Python entry-point discovery, or an import path carried in a database row.
+Foundation uses an operator-approved registry keyed by the exact pair of provider key and locked integration revision. Deployment configuration may populate that registry from explicitly selected `converge_agent_harness.environments` distribution entry points after verifying the selected distribution and artifact lock. Installed metadata alone grants nothing, unselected targets are not imported, and definition/API/database values contain only an allowed `provider_key` plus the locked integration revision—never an import path.
 
 ```python
 type EnvironmentProviderOperationKind = Literal[
@@ -240,6 +240,8 @@ class FoundationEnvironmentProvider(Protocol):
         context: EnvironmentProviderHostContext,
     ) -> EnvironmentLaunchObservation: ...
 ```
+
+The selected entry-point target is first validated through the Harness Environment plugin catalog. A Foundation-capable distribution additionally exposes or adapts to `FoundationEnvironmentProvider`; its `provider_key` equals the selected entry-point name and its `integration_revision` matches the locked revision. Foundation never treats the simple pre-entry-inert `EnvironmentPlugin.create_provider_binding()` result as durable materialization evidence. Provider packages that allocate, attach, retain, or reconcile before Harness entry must use the complete protocol below.
 
 The schemas are conceptual. Operation identities, provider launch state, launch-envelope entries, requests, and observations are detached typed Host values; `EnvironmentProviderMaterialization` is process-local because it also groups a live binding. Before any provider call that can allocate, discard, release, suspend, or destroy a resource, Foundation durably creates the corresponding operation record under the current Execution and Attempt fence. Its stable `operation_id`, operation kind, and non-secret `idempotency_key` are then copied into the request. The operation record also binds the exact provider lock, binding and revision, canonical request digest, and lifecycle action where applicable. It survives Attempt and worker loss; a replacement fenced worker or durable maintenance reconciler claims it while the stale worker loses authority. Reconciliation discovery is Execution-wide rather than filtered to current desired intents. Foundation cannot create a new allocative operation for the same durable `binding_id` while any earlier materialization or lifecycle outcome for that slot remains unresolved, even when the earlier revision was superseded or removed.
 

@@ -39,7 +39,7 @@ The Harness adds:
 - normalized process-local events and result combinations;
 - exact Model-history repair and bounded interrupted-execution recovery.
 
-These additions use public Pydantic APIs. There is no definition compiler, custom Capability class catalog, serialized plugin spec, Host role registry, or alternate model-resolution framework.
+These additions use public Pydantic APIs. There is no definition compiler, serialized plugin spec, Host role registry, or alternate model-resolution framework. The exact Host-supplied custom Capability type catalog exists only to authorize native `AgentSpec` reconstruction and performs no package discovery.
 
 ## Construction
 
@@ -48,12 +48,12 @@ flowchart LR
     Host[Trusted Host composition] --> Definition[AgentDefinition]
     Definition --> Plugins[Agent-bind plugins]
     Plugins --> Contributions[Capability contributions]
-    Definition --> Native[Model, tools, Toolsets, Capabilities]
+    Definition --> Native[Model, build-time output, Capabilities]
     Contributions & Native --> FromSpec[Agent.from_spec]
     FromSpec --> Agent[Pydantic Agent]
 ```
 
-`AgentDefinition.agent` is copied and passed to `Agent.from_spec()` with `deps_type=AgentContext`, the native output type, selected Model or model name, direct tools and Toolsets, and the combined explicit Capabilities. The Harness always includes one thin `ResolveModelId` Capability and always defers eager string-model checking until run dependencies exist.
+`AgentDefinition.agent` is copied and passed to `Agent.from_spec()` with `deps_type=AgentContext`, the selected Model or model name, the exact authorized custom Capability types, and the combined explicit Capabilities. Feature tools and Toolsets exist only inside their owning Capabilities. The build selects either an explicit native `OutputSpec` or native `AgentSpec.output_schema`; the latter yields `dict[str, JsonValue]`. The Harness always includes one thin `ResolveModelId` Capability and always defers eager string-model checking until run dependencies exist.
 
 `build_code()` constructs the same `AgentDefinition` as `build()` and adds no second path.
 
@@ -157,4 +157,4 @@ Using Pydantic AI directly provides ecosystem compatibility and upstream fixes. 
 
 ### Public Native Objects vs. Serialized Abstractions
 
-Native Models, tools, Toolsets, Capabilities, and output types preserve full behavior. A Host cannot serialize them generically and must reconstruct them through trusted code.
+Native Models, Capability-owned tools and Toolsets, Capabilities, and code-first output types preserve full behavior. A Host cannot serialize them generically and must reconstruct them through trusted code. An object JSON Schema can remain declarative in native `AgentSpec.output_schema`.

@@ -5,6 +5,8 @@ from converge_agent_harness import (
     AgentContextState,
     AgentContextStateSnapshot,
     CapabilityState,
+    EnvironmentBindingState,
+    EnvironmentState,
     HarnessRunResult,
     HarnessState,
     SafeFailure,
@@ -15,6 +17,23 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.usage import RunUsage
 
 pytestmark = pytest.mark.anyio
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_environment_state_rejects_non_finite_json(value: float) -> None:
+    environment = EnvironmentState(
+        observed_topology_version=1,
+        bindings={
+            "binding-1": EnvironmentBindingState(
+                provider_type="test.provider",
+                state_version="state-1",
+                resource_compatibility="portable",
+                data=value,
+            )
+        },
+    )
+    with pytest.raises(ValueError, match="finite canonical JSON"):
+        HarnessState(environment_state=environment)
 
 
 class CounterState(BaseModel):

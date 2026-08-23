@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Reusable behavior inside the Pydantic Agent loop uses native `AbstractCapability[AgentContext]`. The Harness does not define a second Capability base, lifecycle, ordering graph, or class registry. Trusted native Models, tools, Toolsets, and Capabilities enter `AgentDefinition` directly; fresh run Capabilities enter `RunBindings`.
+Reusable behavior inside the Pydantic Agent loop uses native `AbstractCapability[AgentContext]`. Capability is the only top-level feature-behavior composition plane in `AgentDefinition`: each feature Capability owns its callable tools, private Toolsets, instructions, settings, hooks, and native ordering as one coherent unit. The Harness does not define a second Capability base, lifecycle, or ordering graph. Fresh run attachment Capabilities enter `RunBindings` under a separate source policy.
 
 Environment itself is not a Capability. It is a Harness-entered run lifecycle resource exposed through the fixed `AgentContext.environment` field. The optional `EnvironmentToolsCapability` consumes that field to contribute model tools, stable guidance, dynamic context, and notices; its presence cannot create, activate, replace, authorize, or close an Environment binding.
 
@@ -18,7 +18,60 @@ Harness plugins govern only the outer semantic-input-to-complete-result boundary
 | `RunContext[AgentContext]`         | Messages, usage, limits, tools, run-bound peers, and deps   |
 | Agent/run Capability binding       | Native reentrant and fresh invocation composition           |
 
-Pydantic AI owns `for_agent()`, `for_run()`, Toolset composition, lifecycle hooks, node hooks, and cleanup. Capability authors do not inspect private Agent graph state.
+Pydantic AI owns `for_agent()`, `for_run()`, Toolset composition, lifecycle hooks, node hooks, and cleanup. Capability authors do not inspect private Agent graph state. A direct function tool is authored inside native `Capability(tools=[...])`; an external or custom Toolset is owned by a native Toolset Capability or another feature Capability. `AgentDefinition` and `HarnessBuilder.build_code()` expose no peer `tools` or `toolsets` parameters.
+
+Pydantic's finalized Capability map and ToolManager remain authoritative. Harness stable IDs support uniqueness, lookup, and source provenance only. `CapabilityOrdering.wraps` and `wrapped_by` use concrete Capability types or instances, and `requires` uses concrete types; IDs are not ordering references, and the Harness adds no second Capability sorter.
+
+## Capability Sources and Authorization
+
+Capability availability and Capability grant are distinct. The Harness assigns every Capability to one construction source and rejects a type or reserved ID from any source not explicitly allowed:
+
+| Source                                     | Accepted value                                                        | Authority boundary                                           |
+| ------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Native `AgentSpec.capabilities`            | Native built-ins and exact Host-authorized serializable feature types | Definition behavior only; no fresh Host authority            |
+| `AgentDefinition.capabilities`             | Concrete `AbstractCapability[AgentContext]` feature instances         | Trusted process-local definition behavior                    |
+| `AbstractHarnessPlugin.get_capabilities()` | Concrete plugin-owned feature or infrastructure instances             | Plugin contribution only                                     |
+| Mandatory Harness infrastructure           | Exact Harness-created concrete types                                  | Framework authority; never declarative or caller-replaceable |
+| `RunBindings.capabilities`                 | Exact documented concrete fresh attachment/policy types               | Current-run authority under reserved types and IDs           |
+
+A type is denied from every unlisted source. Mandatory infrastructure and run-only authority types never enter the declarative custom-type catalog. A definition or plugin instance cannot use `for_run()` to replace itself with a run-only reserved type or ID, and a run attachment cannot launder itself into definition or mandatory infrastructure.
+
+Bare Pydantic `CapabilityFunc` values are not accepted in `AgentDefinition`, plugin contributions, or `RunBindings`. Pydantic resolves such a function once per native Agent run, while one logical Harness run can contain several native recovery attempts. Support requires a future Harness-bound form that resolves once per logical run, validates the complete result tree, memoizes it, and reuses the exact result across every attempt. Concrete `AbstractCapability` instances are the current contract.
+
+## Declarative Custom Capability Types
+
+`HarnessBuilder` can receive one exact immutable `CapabilityTypeCatalog` constructed by trusted Host code. The catalog is narrow AgentSpec reconstruction input, not a general class registry or package-discovery service:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CapabilityTypeRegistration:
+    serialization_name: str
+    capability_type: type[AbstractCapability[AgentContext]]
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityTypeCatalog(
+    Mapping[str, CapabilityTypeRegistration]
+):
+    registrations: tuple[CapabilityTypeRegistration, ...] = ()
+
+    @property
+    def custom_capability_types(
+        self,
+    ) -> tuple[type[AbstractCapability[AgentContext]], ...]: ...
+
+    @classmethod
+    def from_types(
+        cls,
+        capability_types: Sequence[
+            type[AbstractCapability[AgentContext]]
+        ],
+    ) -> CapabilityTypeCatalog: ...
+```
+
+Every registered class is a direct dataclass-declared `AbstractCapability`, has a non-blank stable serialization name, does not collide with native or Harness names, is authorized for the `AgentSpec` source, and can participate in deterministic native schema construction. The Host owns package discovery, installation trust, artifact locks, and catalog population. Two builders can use different immutable catalogs in one process without global mutation.
+
+Before `Agent.from_spec()`, the Harness validates every visible `CapabilitySpec` name and nested capability-valued spec against the native registry plus the exact catalog. After construction, it traverses the complete instantiated Capability tree and verifies type/source permission, stable IDs, singleton constraints, and reserved infrastructure provenance before publishing the executable. At each native run boundary it revalidates the finalized Capability mapping so `for_run()` replacement cannot change a protected type, ID, or source. Custom type availability alone grants no Capability; the `AgentSpec` must explicitly select it.
 
 ## AgentContext
 
@@ -140,13 +193,15 @@ The Harness state API itself does not define `CheckpointStore`, choose a latest 
 
 ## Failure Semantics
 
-| Failure                               | Outcome                                          |
-| ------------------------------------- | ------------------------------------------------ |
-| Capability composition/order failure  | Pydantic Agent build or run binding fails        |
-| Blank namespace ID or version         | `StateError`                                     |
-| Version mismatch on typed read        | `capability_state_version_unsupported`           |
-| Payload fails owning model validation | `capability_state_invalid`                       |
-| Capability hook or Toolset fails      | Native Pydantic/Harness failure handling applies |
+| Failure                                               | Outcome                                                   |
+| ----------------------------------------------------- | --------------------------------------------------------- |
+| Capability composition/order failure                  | Pydantic Agent build or run binding fails                 |
+| Unknown, colliding, or source-denied declarative type | Definition build fails before model work                  |
+| Bare `CapabilityFunc` or source-laundered replacement | Definition build or run setup fails before model exposure |
+| Blank namespace ID or version                         | `StateError`                                              |
+| Version mismatch on typed read                        | `capability_state_version_unsupported`                    |
+| Payload fails owning model validation                 | `capability_state_invalid`                                |
+| Capability hook or Toolset fails                      | Native Pydantic/Harness failure handling applies          |
 
 ## Boundaries
 
@@ -160,6 +215,10 @@ The Harness state API itself does not define `CheckpointStore`, choose a latest 
 | Durable checkpoint authority                    | Host                                 |
 
 ## Trade-offs
+
+### Capability-only Composition vs. Peer Tool Fields
+
+One feature owner keeps tools, Toolsets, instructions, settings, hooks, and availability coherent and lets Pydantic own their native lifecycle. Authors wrap a standalone tool or Toolset in a small native Capability instead of granting it through a second top-level plane.
 
 ### Cohesive Context vs. Generic Dependency Container
 

@@ -4,23 +4,23 @@
 
 `agent-harness` is distributed as `converge-agent-harness`. Its public API is async for execution and cleanup, while Agent construction is synchronous and code-first. It exposes native Pydantic AI types where upstream already owns the semantics and adds only the process-local definition, context, plugin, state, model-recovery, event, and result boundaries shared by embedded and hosted callers.
 
-The package does not expose a serialized Agent-definition language, compiler, extension catalog, class manifest, or package discovery API. Hosted systems reconstruct trusted Python inputs through their own adapters and call the same public builder as embedded applications.
+The package does not expose a serialized Agent-definition language, compiler, or universal extension framework. Hosted systems reconstruct trusted Python inputs through their own adapters and call the same public builder as embedded applications. The one package-discovery surface is the explicit Environment plugin catalog: it reads Python distribution entry-point metadata and imports only operator-selected Environment factory classes.
 
 ## Root Public Surface
 
 The package root exports these contract groups:
 
-| Group                 | Public values                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Definition and build  | `AgentDefinition`, `HarnessBuilder`, `ExecutableAgent`, `SubagentDefinition`, `BuiltSubagent`, `SubagentCollection`, `DelegationContextPolicy`                                                                                                                                                                                                                                                                           |
-| Context and identity  | `RunBindings`, `AgentContext`, `AgentIdentityRef`, `AgentInstanceRef`, `AgentInstanceContext`                                                                                                                                                                                                                                                                                                                            |
-| Input                 | `NativeRunInput`, `RunInputValue`, `SemanticRunInput`, `RunInputFactory`, `RunPreparationContext`, `DeferredToolResume`                                                                                                                                                                                                                                                                                                  |
-| Plugins               | `AbstractHarnessPlugin`, `PluginOrdering`, `BoundPluginContext`, `PluginRunExchange`, `PluginRunNext`, `PluginRunResponse`                                                                                                                                                                                                                                                                                               |
-| Models and recovery   | `ModelRunBinding`, `SelfHealingModel`, `ModelRecoveryRule`, `ModelRecoveryPolicy`, `RecoveryPromptFactory`                                                                                                                                                                                                                                                                                                               |
-| Environment           | `EnvironmentRunBinding`, `CompositeEnvironmentRunBinding`, `NoopEnvironmentRunBinding`, `BoundEnvironment`, `NoopBoundEnvironment`, `EnvironmentProviderBinding`, `EnvironmentTopologyController`, `create_environment_run_binding`, `create_noop_environment_run_binding`, topology/binding/readiness/operation values, opaque process/output scalars, Direct Local configuration/binding types, and `EnvironmentError` |
-| State                 | `HarnessState`, `EnvironmentState`, `AgentContextState`, `AgentContextStateSnapshot`, `CapabilityState`                                                                                                                                                                                                                                                                                                                  |
-| Execution and results | `HarnessRunStream`, `HarnessEvent`, `HarnessExtensionEvent`, `HarnessEventEmitter`, `HarnessRunResultEvent`, `HarnessRunResult`, `HarnessStreamItem`, `SafeFailure`                                                                                                                                                                                                                                                      |
-| Errors                | Stable Harness error subclasses including `DefinitionError`, `ModelResolutionError`, `PluginError`, `RunError`, and `StateError`                                                                                                                                                                                                                                                                                         |
+| Group                 | Public values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Definition and build  | `AgentDefinition`, `HarnessBuilder`, `ExecutableAgent`, `CapabilityTypeRegistration`, `CapabilityTypeCatalog`, `SubagentDefinition`, `BuiltSubagent`, `SubagentCollection`, `DelegationContextPolicy`                                                                                                                                                                                                                                                                                                                                                                                |
+| Context and identity  | `RunBindings`, `AgentContext`, `AgentIdentityRef`, `AgentInstanceRef`, `AgentInstanceContext`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Input                 | `NativeRunInput`, `RunInputValue`, `SemanticRunInput`, `RunInputFactory`, `RunPreparationContext`, `DeferredToolResume`                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Plugins               | `AbstractHarnessPlugin`, `PluginOrdering`, `BoundPluginContext`, `PluginRunExchange`, `PluginRunNext`, `PluginRunResponse`                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Models and recovery   | `ModelRunBinding`, `SelfHealingModel`, `ModelRecoveryRule`, `ModelRecoveryPolicy`, `RecoveryPromptFactory`                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Environment           | `EnvironmentRunBinding`, `CompositeEnvironmentRunBinding`, `NoopEnvironmentRunBinding`, `BoundEnvironment`, `NoopBoundEnvironment`, `EnvironmentProviderBinding`, `EnvironmentTopologyController`, `EnvironmentPlugin`, `EnvironmentPluginCatalog`, plugin registration/provenance values, `discover_environment_plugins`, `build_environment_plugin_catalog`, `create_environment_run_binding`, `create_noop_environment_run_binding`, topology/binding/readiness/operation values, opaque process/output scalars, Direct Local configuration/binding types, and `EnvironmentError` |
+| State                 | `HarnessState`, `EnvironmentState`, `AgentContextState`, `AgentContextStateSnapshot`, `CapabilityState`                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Execution and results | `HarnessRunStream`, `HarnessEvent`, `HarnessExtensionEvent`, `HarnessEventEmitter`, `HarnessRunResultEvent`, `HarnessRunResult`, `HarnessStreamItem`, `SafeFailure`                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Errors                | Stable Harness error subclasses including `DefinitionError`, `ModelResolutionError`, `PluginError`, `RunError`, and `StateError`                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 The Environment root also exports `EnvironmentAction` and `ENVIRONMENT_ACTION_CATALOG_VERSION`; persisted or provider-specific code uses the exact catalog values rather than copying action strings or deriving permission from operation families. The Direct Local root exports are `DirectLocalEnvironmentConfiguration`, `DirectLocalRootConfiguration`, `DirectLocalFilePolicy`, `DirectLocalShellProfile`, `DirectLocalProcessPolicy`, `DirectLocalRetentionPolicy`, `DirectLocalPortPolicy`, and `DirectLocalEnvironmentProviderBinding`. The programmatic opaque scalar exports are `OpaqueProcessHandle`, `OpaqueOutputReference`, and `OpaqueOutputCursor`; their bound wrappers and operation models are exported with the rest of the Environment value types, but no generic JSON serializer is exported for an opaque scalar.
 
@@ -32,11 +32,9 @@ Feature packages also expose their Harness-specific typed Capabilities, includin
 @dataclass(frozen=True, slots=True)
 class AgentDefinition[OutputT]:
     agent: AgentSpec
-    output_type: OutputSpec[OutputT]
+    output_type: OutputSpec[OutputT] | None
     definition_id: str = <UUID>
     model: Model | KnownModelName | str | None = None
-    tools: tuple[Tool[AgentContext] | ToolFuncEither[...], ...] = ()
-    toolsets: tuple[AgentToolset[AgentContext], ...] = ()
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     plugins: tuple[AbstractHarnessPlugin, ...] = ()
     subagents: tuple[SubagentDefinition, ...] = ()
@@ -45,11 +43,18 @@ class AgentDefinition[OutputT]:
 
 
 class HarnessBuilder:
+    def __init__(
+        self,
+        *,
+        capability_type_catalog: CapabilityTypeCatalog | None = None,
+    ) -> None: ...
+
     def build[OutputT](
         self,
         definition: AgentDefinition[OutputT],
     ) -> ExecutableAgent[OutputT]: ...
 
+    @overload
     def build_code[OutputT](
         self,
         agent: AgentSpec,
@@ -57,17 +62,30 @@ class HarnessBuilder:
         output_type: OutputSpec[OutputT],
         definition_id: str | None = None,
         model: Model | KnownModelName | str | None = None,
-        tools: Sequence[Tool[AgentContext] | ToolFuncEither[...]] = (),
-        toolsets: Sequence[AgentToolset[AgentContext]] = (),
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         plugins: Sequence[AbstractHarnessPlugin] = (),
         subagents: Sequence[SubagentDefinition] = (),
         self_healing: bool = True,
         model_recovery: ModelRecoveryPolicy | None = None,
     ) -> ExecutableAgent[OutputT]: ...
+
+    @overload
+    def build_code(
+        self,
+        agent: AgentSpec,
+        *,
+        output_type: None,
+        definition_id: str | None = None,
+        model: Model | KnownModelName | str | None = None,
+        capabilities: Sequence[AbstractCapability[AgentContext]] = (),
+        plugins: Sequence[AbstractHarnessPlugin] = (),
+        subagents: Sequence[SubagentDefinition] = (),
+        self_healing: bool = True,
+        model_recovery: ModelRecoveryPolicy | None = None,
+    ) -> ExecutableAgent[dict[str, JsonValue]]: ...
 ```
 
-`build_code()` delegates to `build()`. Both use the one construction contract in [Agent Definition and Build](03-agent-definition-and-build.md).
+`HarnessBuilder` accepts at most one exact immutable custom Capability type catalog constructed by trusted Host code; `None` selects the canonical empty catalog. `build_code()` delegates to `build()`. Its explicit-output overload returns `ExecutableAgent[OutputT]`; its `output_type=None` overload requires `AgentSpec.output_schema` and returns `ExecutableAgent[dict[str, JsonValue]]`. Both use the one build-time construction contract in [Agent Definition and Build](03-agent-definition-and-build.md). Function tools and Toolsets enter only through native Capabilities.
 
 ## Run Bindings
 
@@ -262,11 +280,11 @@ class SafeFailure(BaseModel):
 
 ## Packaging and Compatibility
 
-The base distribution depends on Pydantic, Pydantic AI, and the Environment abstractions it directly exposes. It imports no provider package, scans no plugin entry points, performs no network request, reads no credential, and configures no global instrumentation at import time.
+The base distribution depends on Pydantic, Pydantic AI, and the Environment abstractions it directly exposes. Module import loads no provider package, scans no entry points, performs no network request, reads no credential, and configures no global instrumentation. Environment metadata discovery and selected target loading occur only when the caller invokes the explicit catalog API.
 
 The public Python API, Harness state envelope, Environment provider-state codecs, Pydantic message codec, plugin contract, and model recovery rules evolve independently. The package tracks the repository-selected compatible Pydantic AI release and relies only on documented public Agent, Capability, Model, Toolset, message, deferred, event, output, and usage APIs.
 
-Provider packages, hosted adapters, managed-tool policy integrations, Environment implementations, and observability exporters remain optional composition. They create concrete code-first objects and do not register themselves through a global Harness catalog.
+Provider packages, hosted adapters, managed-tool policy integrations, Environment implementations, and observability exporters remain optional composition. Environment packages may register factory classes under `converge_agent_harness.environments`; the Harness imports only selected names into an immutable caller-owned catalog and keeps every other extension code-first. There is no process-global registration or import-time auto-enable behavior.
 
 ## Boundaries
 

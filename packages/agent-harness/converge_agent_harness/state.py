@@ -9,9 +9,12 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, computed_field, field_validator
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
+from converge_agent_harness._json import dump_json_bytes
+from converge_agent_harness.environment.models import EnvironmentState
 from converge_agent_harness.errors import StateError
 
 _JSON_VALUE_ADAPTER = TypeAdapter(JsonValue)
+_ENVIRONMENT_STATE_ADAPTER = TypeAdapter(EnvironmentState)
 _EMPTY_MESSAGES_JSON = ModelMessagesTypeAdapter.dump_json([])
 
 
@@ -42,7 +45,11 @@ class CapabilityState(BaseModel):
     @field_validator("data_json", mode="before")
     @classmethod
     def _encode_data(cls, value: Any) -> bytes:
-        return _JSON_VALUE_ADAPTER.dump_json(_JSON_VALUE_ADAPTER.validate_python(value))
+        validated = _JSON_VALUE_ADAPTER.validate_python(value)
+        try:
+            return dump_json_bytes(validated, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Capability state must be finite canonical JSON.") from exc
 
     @computed_field
     @property
@@ -96,6 +103,23 @@ class HarnessState(BaseModel):
         repr=False,
     )
     agent_context_state: AgentContextStateSnapshot = Field(default_factory=AgentContextStateSnapshot)
+    environment_state_json: bytes | EnvironmentState | None = Field(
+        default=None,
+        alias="environment_state",
+        exclude=True,
+        repr=False,
+    )
+
+    @field_validator("environment_state_json", mode="before")
+    @classmethod
+    def _encode_environment_state(cls, value: Any) -> bytes | None:
+        if value is None:
+            return None
+        validated = _ENVIRONMENT_STATE_ADAPTER.validate_python(value)
+        try:
+            return dump_json_bytes(validated.model_dump(mode="json"), sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Environment state must be finite canonical JSON.") from exc
 
     @field_validator("message_history_json", mode="before")
     @classmethod
@@ -110,6 +134,14 @@ class HarnessState(BaseModel):
     def message_history(self) -> tuple[ModelMessage, ...]:
         """Return a detached copy of the continuation history."""
         return decode_messages(cast(bytes, self.message_history_json))
+
+    @computed_field
+    @property
+    def environment_state(self) -> EnvironmentState | None:
+        """Return a detached aggregate Environment continuation value."""
+        if self.environment_state_json is None:
+            return None
+        return _ENVIRONMENT_STATE_ADAPTER.validate_json(cast(bytes, self.environment_state_json))
 
 
 class AgentContextState:

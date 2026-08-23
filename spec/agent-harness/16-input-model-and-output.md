@@ -155,9 +155,18 @@ The Harness does not buffer for replay, fan out consumers, persist events, or re
 
 ## Output Boundary
 
-Pydantic `OutputSpec`, output validators, output tools, and retry behavior own output production. `AgentDefinition.output_type` is the sole business-output contract, so `AgentSpec.output_schema` is rejected instead of being allowed to replace a bare `str` through `Agent.from_spec()` default semantics. A business output that directly or transitively includes `DeferredToolRequests` or a subclass through a sequence, union, `Annotated` value, PEP 695 type alias, output marker, or callable return type is also rejected at definition construction; that native value is reserved as the Harness suspension control outcome. Every Harness run passes `[definition.output_type, DeferredToolRequests]` as the native per-run Pydantic output contract; this is the upstream control value needed to end the run cleanly, not another business result type. The Harness builds its process-local `TypeAdapter` only from `definition.output_type`, including return annotations of synchronous, `Awaitable`, and `Coroutine` output functions.
+Pydantic `OutputSpec`, object `AgentSpec.output_schema`, output validators, output tools, and retry behavior own output production. The Harness fixes one business-output contract when `HarnessBuilder` constructs the reusable Agent; `run()` and `stream()` expose no per-run `output_type` override.
 
-On completion, the Harness validates plugin-produced output strictly against that adapter. If Pydantic cannot generate a schema for an otherwise valid arbitrary process-local return type, the adapter permits arbitrary types rather than rejecting the upstream output contract.
+Exactly one build-time source is valid:
+
+1. **Code-first output.** `AgentDefinition.output_type` is a native `OutputSpec[OutputT]` and `AgentSpec.output_schema` is absent. Native Python types including `BaseModel`, dataclasses, `TypedDict`, constrained or annotated types, unions, output markers, and synchronous or asynchronous output functions preserve Pydantic semantics and the resulting `ExecutableAgent[OutputT]` type.
+2. **Declarative object schema.** `AgentDefinition.output_type is None` and `AgentSpec.output_schema` contains a valid object JSON Schema. The Harness constructs native `StructuredDict` from that detached schema, so the provider-facing structured-output schema remains exact and the public executable/result type is `dict[str, JsonValue]`. Native `StructuredDict` validates the returned Python value as a JSON object; it does not claim to be a second independent Draft 2020-12 instance validator.
+
+Neither source silently defaults to text. Callers request text explicitly with `output_type=str`. Supplying both sources is ambiguous and fails with `output_contract_conflict`; supplying neither fails with `output_contract_missing`. Native Pydantic validation rejects a non-object or otherwise invalid declarative schema.
+
+A business output that directly or transitively includes `DeferredToolRequests` or a subclass through a parameterized collection, structured `BaseModel`/`RootModel`, dataclass or `TypedDict` field, union, `Annotated` value, PEP 695 type alias, output marker, or callable return type is rejected at definition construction; that native value is reserved as the Harness suspension control outcome. Completed candidate validation recursively enforces the same reservation across supported structured Python instances and built-in containers. At build time the Harness forms `[effective_business_output, DeferredToolRequests]` and supplies that complete contract once to `Agent.from_spec()`. Every inner attempt uses the built Agent contract without a run override, preserving suspension support, Agent-level output validators, and one stable output Toolset across recovery.
+
+The Harness builds one matching process-local output adapter from the effective build-time contract, including return annotations of synchronous, `Awaitable`, and `Coroutine` output functions, and uses it to validate plugin-produced completed output. If Pydantic cannot generate a schema for an otherwise valid arbitrary process-local code-first return type, the adapter permits arbitrary types rather than rejecting the upstream output contract. Declarative output uses the schema-derived `StructuredDict` adapter and therefore accepts only string-keyed JSON-object values under native semantics.
 
 A Pydantic result whose output is `DeferredToolRequests` becomes a suspended Harness result rather than a completed business output. `.calls` and `.approvals` retain their native distinct meanings. The later Host or caller supplies the exact pending requests and matching Pydantic results through `DeferredToolResume` in a new logical run with prior state and fresh bindings.
 
@@ -165,19 +174,21 @@ Trusted plugins may replace the complete result candidate, including output, usa
 
 ## Failure Semantics
 
-| Failure                                        | Outcome                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------ |
-| Invalid immediate or factory input             | Typed input/run error before model work                      |
-| Invalid or uncorrelated deferred continuation  | Typed run/deferred error before new model or tool work       |
-| Binding raises or returns a non-Model          | `ModelResolutionError`                                       |
-| No binding for a logical string                | Delegate to native Pydantic inference                        |
-| Exact self-healing repair succeeds             | Replay the same request once                                 |
-| Exact repair does not match or changes nothing | Propagate the original Model error                           |
-| Recoverable model interruption with budget     | Start another inner attempt after cancellation-aware backoff |
-| Recovery budget exhausted                      | Failed result with `model_recovery_exhausted`                |
-| Output validation retries exhausted            | No Harness semantic retry                                    |
-| Native deferred/HITL output                    | Suspended result with native `DeferredToolRequests`          |
-| Invalid plugin-completed output                | `PluginError(code="plugin_result_invalid")`                  |
+| Failure                                         | Outcome                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------ |
+| Invalid immediate or factory input              | Typed input/run error before model work                      |
+| Invalid or uncorrelated deferred continuation   | Typed run/deferred error before new model or tool work       |
+| Binding raises or returns a non-Model           | `ModelResolutionError`                                       |
+| No binding for a logical string                 | Delegate to native Pydantic inference                        |
+| Exact self-healing repair succeeds              | Replay the same request once                                 |
+| Exact repair does not match or changes nothing  | Propagate the original Model error                           |
+| Recoverable model interruption with budget      | Start another inner attempt after cancellation-aware backoff |
+| Recovery budget exhausted                       | Failed result with `model_recovery_exhausted`                |
+| Missing or conflicting build-time output source | `DefinitionError` before Agent construction                  |
+| Invalid declarative object JSON Schema          | `DefinitionError` retaining the native validation cause      |
+| Output validation retries exhausted             | No Harness semantic retry                                    |
+| Native deferred/HITL output                     | Suspended result with native `DeferredToolRequests`          |
+| Invalid plugin-completed output                 | `PluginError(code="plugin_result_invalid")`                  |
 
 ## Boundaries
 

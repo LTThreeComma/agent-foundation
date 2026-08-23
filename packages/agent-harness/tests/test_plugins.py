@@ -11,12 +11,14 @@ from converge_agent_harness import (
     AbstractHarnessPlugin,
     AgentContext,
     BoundEnvironment,
+    EnvironmentError,
     EnvironmentRunBinding,
+    EnvironmentTopologyLimits,
+    EnvironmentTopologyRequest,
     HarnessBuilder,
     HarnessEvent,
     HarnessExtensionEvent,
     HarnessRunResult,
-    NoopBoundEnvironment,
     PluginError,
     PluginOrdering,
     PluginRunExchange,
@@ -26,6 +28,7 @@ from converge_agent_harness import (
     RunCleanupError,
     RunError,
     SemanticRunInput,
+    create_noop_environment_run_binding,
 )
 from pydantic import ValidationError
 from pydantic_ai.agent.spec import AgentSpec
@@ -562,6 +565,158 @@ async def test_normal_cleanup_stays_in_the_task_that_entered_the_plugin_iterator
     assert response._item_validator is None
 
 
+class TaskAffineEnvironment(EnvironmentRunBinding):
+    def __init__(self) -> None:
+        self.delegate = create_noop_environment_run_binding()
+        self.closed = asyncio.Event()
+
+    @property
+    def controller(self):
+        return self.delegate.controller
+
+    @property
+    def topology_limits(self):
+        return self.delegate.topology_limits
+
+    @property
+    def state_limits(self):
+        return self.delegate.state_limits
+
+    @asynccontextmanager
+    async def bind(self, *, run_id: str, instance) -> AsyncGenerator[BoundEnvironment]:
+        owner_task = asyncio.current_task()
+        async with self.delegate.bind(run_id=run_id, instance=instance) as environment:
+            try:
+                yield environment
+            finally:
+                assert asyncio.current_task() is owner_task
+                self.closed.set()
+
+
+async def test_terminal_cleanup_exits_environment_scope_in_its_entering_task() -> None:
+    environment = TaskAffineEnvironment()
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+    )
+
+    result = await executable.run("hello", bindings=RunBindings.local(environment=environment))
+
+    assert result.output_or_raise() == "output"
+    assert environment.closed.is_set()
+
+
+class FailingLifecycleEnvironment(TaskAffineEnvironment):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = asyncio.Event()
+
+    @asynccontextmanager
+    async def bind(self, *, run_id: str, instance) -> AsyncGenerator[BoundEnvironment]:
+        async with self.delegate.bind(run_id=run_id, instance=instance) as environment:
+            async with asyncio.TaskGroup() as tasks:
+
+                async def fail_lifecycle() -> None:
+                    await self.fail.wait()
+                    raise RuntimeError("environment lifecycle failed")
+
+                tasks.create_task(fail_lifecycle())
+                yield environment
+
+
+async def test_environment_owner_failure_interrupts_the_logical_run() -> None:
+    environment = FailingLifecycleEnvironment()
+    model_started = asyncio.Event()
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages, info
+        model_started.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+    run_task = asyncio.create_task(executable.run("hello", bindings=RunBindings.local(environment=environment)))
+    await model_started.wait()
+    environment.fail.set()
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        await asyncio.wait_for(run_task, timeout=2)
+
+    assert exc_info.value.subgroup(RuntimeError) is not None
+    assert "environment lifecycle failed" in repr(exc_info.value)
+
+
+async def test_model_stream_stays_in_one_owner_task() -> None:
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages, info
+        owner_task = asyncio.current_task()
+        try:
+            yield "output"
+        finally:
+            assert asyncio.current_task() is owner_task
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run("hello", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "output"
+
+
+class CountingCloseResponse(PluginRunResponse):
+    def __init__(self, iterator: AsyncIterator) -> None:
+        super().__init__(iterator)
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await super().aclose()
+
+
+class CountingClosePlugin(AbstractHarnessPlugin):
+    def __init__(self) -> None:
+        self.response: CountingCloseResponse | None = None
+
+    @property
+    def plugin_id(self) -> str:
+        return "counting-close"
+
+    def wrap_run(
+        self,
+        exchange: PluginRunExchange,
+        call_next: PluginRunNext,
+    ) -> PluginRunResponse:
+        async def iterate():
+            async for item in call_next(exchange):
+                yield item
+
+        self.response = CountingCloseResponse(iterate())
+        return self.response
+
+
+async def test_harness_closes_each_registered_plugin_response_once() -> None:
+    plugin = CountingClosePlugin()
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(plugin,),
+    )
+
+    await executable.run("hello", bindings=RunBindings.local())
+
+    assert plugin.response is not None
+    assert plugin.response.close_calls == 1
+
+
 class SuppressingCancellationPlugin(AbstractHarnessPlugin):
     def __init__(self, cleanup_started: asyncio.Event) -> None:
         self.cleanup_started = cleanup_started
@@ -610,18 +765,145 @@ async def test_cleanup_cannot_suppress_external_cancellation() -> None:
         await close_task
 
 
+async def test_cancellation_during_terminal_pump_cleanup_stays_primary() -> None:
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    plugin = CleanupTrackingPlugin(
+        "terminal-cleanup",
+        [],
+        started=cleanup_started,
+        release=release_cleanup,
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(plugin,),
+    )
+
+    run_task = asyncio.create_task(executable.run("hello", bindings=RunBindings.local()))
+    await cleanup_started.wait()
+    run_task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+
+async def test_early_close_installs_topology_fence_before_plugin_cleanup() -> None:
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    plugin = CleanupTrackingPlugin(
+        "early-close-cleanup",
+        [],
+        started=cleanup_started,
+        release=release_cleanup,
+    )
+    environment = create_noop_environment_run_binding(
+        topology_limits=EnvironmentTopologyLimits(max_bindings=1, max_committed_changes=1)
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(plugin,),
+    )
+    stream = executable.stream("hello", bindings=RunBindings.local(environment=environment))
+    await stream.__aenter__()
+    first = await stream.__anext__()
+    assert isinstance(first, HarnessEvent)
+
+    close_task = asyncio.create_task(stream.__aexit__(None, None, None))
+    await cleanup_started.wait()
+    with pytest.raises(EnvironmentError) as exc_info:
+        await environment.controller.apply(
+            EnvironmentTopologyRequest(topology_version=1, bindings=(), default_binding_id=None)
+        )
+    assert exc_info.value.code == "run_not_active"
+    release_cleanup.set()
+    await close_task
+
+
+class BlockingCloseResponse(PluginRunResponse):
+    def __init__(self, iterator: AsyncIterator, close_started: asyncio.Event) -> None:
+        super().__init__(iterator)
+        self.close_started = close_started
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await super().aclose()
+
+
+class EndAfterTwoEventsPlugin(AbstractHarnessPlugin):
+    def __init__(self, close_started: asyncio.Event) -> None:
+        self.close_started = close_started
+
+    @property
+    def plugin_id(self) -> str:
+        return "end-after-two-events"
+
+    def wrap_run(
+        self,
+        exchange: PluginRunExchange,
+        call_next: PluginRunNext,
+    ) -> PluginRunResponse:
+        async def iterate():
+            event_count = 0
+            async for item in call_next(exchange):
+                if isinstance(item, HarnessEvent):
+                    yield item
+                    event_count += 1
+                    if event_count == 2:
+                        return
+
+        return BlockingCloseResponse(iterate(), self.close_started)
+
+
+async def test_internal_pump_cancellation_cannot_publish_into_an_unconsumed_full_queue() -> None:
+    close_started = asyncio.Event()
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=_model([]),
+        plugins=(EndAfterTwoEventsPlugin(close_started),),
+    )
+    stream = executable.stream("hello", bindings=RunBindings.local())
+    await stream.__aenter__()
+    first = await stream.__anext__()
+    assert isinstance(first, HarnessEvent)
+    await asyncio.wait_for(close_started.wait(), timeout=2)
+
+    await asyncio.wait_for(stream.__aexit__(None, None, None), timeout=2)
+
+
 class FailingTrackingEnvironment(EnvironmentRunBinding):
     def __init__(self, log: list[str]) -> None:
         self.log = log
+        self.delegate = create_noop_environment_run_binding()
+
+    @property
+    def controller(self):
+        return self.delegate.controller
+
+    @property
+    def topology_limits(self):
+        return self.delegate.topology_limits
+
+    @property
+    def state_limits(self):
+        return self.delegate.state_limits
 
     @asynccontextmanager
     async def bind(self, *, run_id: str, instance) -> AsyncGenerator[BoundEnvironment]:
-        del run_id, instance
-        try:
-            yield NoopBoundEnvironment()
-        finally:
-            self.log.append("environment")
-            raise RuntimeError("environment cleanup failed")
+        async with self.delegate.bind(run_id=run_id, instance=instance) as environment:
+            try:
+                yield environment
+            finally:
+                self.log.append("environment")
+                raise RuntimeError("environment cleanup failed")
 
 
 async def test_repeated_external_cancellation_attempts_remaining_cleanup_and_stays_primary() -> None:
