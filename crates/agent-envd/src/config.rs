@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env,
     error::Error,
     fmt, fs,
@@ -10,14 +11,18 @@ use serde::Deserialize;
 
 use crate::eip::EIPLimits;
 
-const DEFAULT_MAX_REQUEST_BYTES: u64 = 1024 * 1024;
-const DEFAULT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
-const DEFAULT_MAX_CONCURRENT_OPERATIONS: u64 = 32;
-const DEFAULT_MAX_TRANSFER_FRAME_BYTES: u64 = 256 * 1024;
-const DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS: u64 = 16;
-const DEFAULT_SESSION_IDLE_TTL_MS: u64 = 5 * 60 * 1000;
-const DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS: u64 = 5_000;
-const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_MAX_CONCURRENT_OPERATIONS: u64 = 128;
+const DEFAULT_MAX_TRANSFER_FRAME_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS: u64 = 64;
+const DEFAULT_SESSION_IDLE_TTL_MS: u64 = 30 * 60 * 1000;
+const DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS: u64 = 30_000;
+const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_COMMAND_ARGUMENTS: usize = 1024;
+const DEFAULT_MAX_COMMAND_ARGUMENT_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_COMMAND_ENVIRONMENT_ENTRIES: usize = 1024;
+const DEFAULT_MAX_COMMAND_ENVIRONMENT_BYTES: usize = 2 * 1024 * 1024;
 
 const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
     "AGENT_ENVD_API_KEY",
@@ -57,11 +62,44 @@ pub(crate) struct TrustedMountConfig {
     pub(crate) allowed_operations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TrustedShellProfileConfig {
+    pub(crate) profile_id: String,
+    pub(crate) display_name: String,
+    pub(crate) native_executable: PathBuf,
+    #[serde(default)]
+    pub(crate) fixed_arguments: Vec<String>,
+    #[serde(default)]
+    pub(crate) safe_base_environment: BTreeMap<String, String>,
+    pub(crate) executable_search_roots: Vec<PathBuf>,
+    pub(crate) max_script_bytes: u64,
+    #[serde(default)]
+    pub(crate) allow_login_mode: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommandConfig {
+    pub(crate) private_home: PathBuf,
+    pub(crate) private_temp: PathBuf,
+    pub(crate) base_environment: BTreeMap<String, String>,
+    pub(crate) trusted_executable_roots: Vec<PathBuf>,
+    pub(crate) shell_profiles: Vec<TrustedShellProfileConfig>,
+    pub(crate) max_arguments: usize,
+    pub(crate) max_argument_bytes: usize,
+    pub(crate) max_environment_entries: usize,
+    pub(crate) max_environment_bytes: usize,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
     mounts: Vec<TrustedMountConfig>,
+    #[serde(default)]
+    trusted_executable_roots: Vec<PathBuf>,
+    #[serde(default)]
+    shell_profiles: Vec<TrustedShellProfileConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +110,7 @@ pub(crate) struct Config {
     pub(crate) session_idle_timeout: Duration,
     pub(crate) staging_scavenge_timeout: Duration,
     pub(crate) mounts: Vec<TrustedMountConfig>,
+    pub(crate) command: Option<CommandConfig>,
 }
 
 impl Config {
@@ -137,9 +176,8 @@ impl Config {
             ));
         }
 
-        if let Some(runtime_dir) = optional_unicode("AGENT_ENVD_RUNTIME_DIR")?
-            && !Path::new(&runtime_dir).is_absolute()
-        {
+        let runtime_dir = optional_unicode("AGENT_ENVD_RUNTIME_DIR")?.map(PathBuf::from);
+        if runtime_dir.as_ref().is_some_and(|path| !path.is_absolute()) {
             return Err(ConfigError::new(
                 "AGENT_ENVD_RUNTIME_DIR must be an absolute path",
             ));
@@ -157,12 +195,18 @@ impl Config {
         }
 
         let limits = default_limits();
+        let command = prepare_command_config(
+            runtime_dir,
+            file.trusted_executable_roots,
+            file.shell_profiles,
+        )?;
         Ok(Self {
             environment_id,
             initialization_timeout: INITIALIZATION_TIMEOUT,
             session_idle_timeout: Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS),
             staging_scavenge_timeout: Duration::from_millis(DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS),
             mounts: file.mounts,
+            command,
             limits,
         })
     }
@@ -176,12 +220,256 @@ impl Config {
             session_idle_timeout: Duration::from_secs(1),
             staging_scavenge_timeout: Duration::from_secs(1),
             mounts: Vec::new(),
+            command: None,
         }
     }
 }
 
 fn default_allow_command_execution() -> bool {
     true
+}
+
+fn prepare_command_config(
+    runtime_dir: Option<PathBuf>,
+    trusted_roots: Vec<PathBuf>,
+    shell_profiles: Vec<TrustedShellProfileConfig>,
+) -> Result<Option<CommandConfig>, ConfigError> {
+    if trusted_roots.is_empty() && shell_profiles.is_empty() {
+        return Ok(None);
+    }
+    let runtime_root = runtime_dir.ok_or_else(|| {
+        ConfigError::new(
+            "AGENT_ENVD_RUNTIME_DIR is required when command execution policy is configured",
+        )
+    })?;
+    fs::create_dir_all(&runtime_root)
+        .map_err(|error| ConfigError::new(format!("cannot create runtime directory: {error}")))?;
+    let runtime_root = canonical_directory(&runtime_root, "AGENT_ENVD_RUNTIME_DIR")?;
+    let private_home = prepare_private_directory(&runtime_root.join("command-home"))?;
+    let private_temp = prepare_private_directory(&runtime_root.join("command-tmp"))?;
+    if !private_home.starts_with(&runtime_root) || !private_temp.starts_with(&runtime_root) {
+        return Err(ConfigError::new(
+            "private command directories must remain inside AGENT_ENVD_RUNTIME_DIR",
+        ));
+    }
+
+    let mut canonical_roots = Vec::with_capacity(trusted_roots.len());
+    for root in trusted_roots {
+        canonical_roots.push(canonical_directory(&root, "trusted executable root")?);
+    }
+    canonical_roots.sort();
+    canonical_roots.dedup();
+
+    let mut profile_ids = BTreeSet::new();
+    let mut prepared_profiles = Vec::with_capacity(shell_profiles.len());
+    for mut profile in shell_profiles {
+        if !valid_policy_id(&profile.profile_id) || !profile_ids.insert(profile.profile_id.clone())
+        {
+            return Err(ConfigError::new(
+                "shell profile IDs must be unique and use 1..=128 ASCII letters, digits, dot, dash, or underscore",
+            ));
+        }
+        if profile.display_name.trim() != profile.display_name
+            || profile.display_name.is_empty()
+            || profile.display_name.len() > 256
+            || profile.display_name.chars().any(char::is_control)
+        {
+            return Err(ConfigError::new("shell profile display_name is invalid"));
+        }
+        if profile.max_script_bytes == 0 {
+            return Err(ConfigError::new(
+                "shell profile max_script_bytes must be positive",
+            ));
+        }
+        validate_string_vector(&profile.fixed_arguments, "shell fixed arguments")?;
+        validate_safe_environment(&profile.safe_base_environment)?;
+        profile.native_executable =
+            canonical_regular_file(&profile.native_executable, "shell native_executable")?;
+        let mut roots = Vec::with_capacity(profile.executable_search_roots.len());
+        for root in profile.executable_search_roots {
+            roots.push(canonical_directory(&root, "shell executable search root")?);
+        }
+        roots.sort();
+        roots.dedup();
+        if roots.is_empty() {
+            return Err(ConfigError::new(
+                "shell profiles require at least one executable search root",
+            ));
+        }
+        profile.executable_search_roots = roots;
+        prepared_profiles.push(profile);
+    }
+    prepared_profiles.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+
+    Ok(Some(CommandConfig {
+        private_home,
+        private_temp,
+        base_environment: inherited_command_environment(),
+        trusted_executable_roots: canonical_roots,
+        shell_profiles: prepared_profiles,
+        max_arguments: DEFAULT_MAX_COMMAND_ARGUMENTS,
+        max_argument_bytes: DEFAULT_MAX_COMMAND_ARGUMENT_BYTES,
+        max_environment_entries: DEFAULT_MAX_COMMAND_ENVIRONMENT_ENTRIES,
+        max_environment_bytes: DEFAULT_MAX_COMMAND_ENVIRONMENT_BYTES,
+    }))
+}
+
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::new(format!("{label} must be absolute")));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| ConfigError::new(format!("cannot canonicalize {label}: {error}")))?;
+    if !fs::metadata(&canonical)
+        .map_err(|error| ConfigError::new(format!("cannot inspect {label}: {error}")))?
+        .is_dir()
+    {
+        return Err(ConfigError::new(format!("{label} must be a directory")));
+    }
+    Ok(canonical)
+}
+
+fn canonical_regular_file(path: &Path, label: &str) -> Result<PathBuf, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::new(format!("{label} must be absolute")));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| ConfigError::new(format!("cannot canonicalize {label}: {error}")))?;
+    if !fs::metadata(&canonical)
+        .map_err(|error| ConfigError::new(format!("cannot inspect {label}: {error}")))?
+        .is_file()
+    {
+        return Err(ConfigError::new(format!("{label} must be a regular file")));
+    }
+    Ok(canonical)
+}
+
+fn prepare_private_directory(path: &Path) -> Result<PathBuf, ConfigError> {
+    fs::create_dir_all(path).map_err(|error| {
+        ConfigError::new(format!("cannot create private command directory: {error}"))
+    })?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        ConfigError::new(format!("cannot inspect private command directory: {error}"))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ConfigError::new(
+            "private command directory must be a directory, not a symlink",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            ConfigError::new(format!("cannot protect private command directory: {error}"))
+        })?;
+    }
+    canonical_directory(path, "private command directory")
+}
+
+fn valid_policy_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn validate_string_vector(values: &[String], label: &str) -> Result<(), ConfigError> {
+    if values.len() > DEFAULT_MAX_COMMAND_ARGUMENTS
+        || values.iter().map(String::len).sum::<usize>() > DEFAULT_MAX_COMMAND_ARGUMENT_BYTES
+        || values.iter().any(|value| value.contains('\0'))
+    {
+        return Err(ConfigError::new(format!(
+            "{label} exceeds command safety limits"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_safe_environment(values: &BTreeMap<String, String>) -> Result<(), ConfigError> {
+    if values.len() > DEFAULT_MAX_COMMAND_ENVIRONMENT_ENTRIES
+        || values
+            .iter()
+            .map(|(name, value)| name.len().saturating_add(value.len()))
+            .sum::<usize>()
+            > DEFAULT_MAX_COMMAND_ENVIRONMENT_BYTES
+    {
+        return Err(ConfigError::new(
+            "shell safe_base_environment exceeds command safety limits",
+        ));
+    }
+    for (name, value) in values {
+        if !valid_environment_name(name) || value.contains('\0') || reserved_environment_name(name)
+        {
+            return Err(ConfigError::new(
+                "shell safe_base_environment contains an unsafe name or value",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+pub(crate) fn reserved_environment_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(upper.as_str(), "PATH" | "HOME" | "TMPDIR" | "TMP" | "TEMP")
+        || upper.starts_with("AGENT_ENVD_")
+        || upper.starts_with("LD_")
+        || upper.starts_with("DYLD_")
+        || upper.starts_with("EIP_")
+}
+
+fn inherited_command_environment() -> BTreeMap<String, String> {
+    env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, value)| {
+            common_environment_name(name)
+                && valid_environment_name(name)
+                && !reserved_environment_name(name)
+                && !value.contains('\0')
+        })
+        .collect()
+}
+
+fn common_environment_name(name: &str) -> bool {
+    matches!(
+        name,
+        "LANG"
+            | "LANGUAGE"
+            | "TZ"
+            | "TERM"
+            | "COLORTERM"
+            | "NO_COLOR"
+            | "FORCE_COLOR"
+            | "SSL_CERT_FILE"
+            | "SSL_CERT_DIR"
+            | "REQUESTS_CA_BUNDLE"
+            | "CURL_CA_BUNDLE"
+            | "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "ALL_PROXY"
+            | "NO_PROXY"
+            | "http_proxy"
+            | "https_proxy"
+            | "all_proxy"
+            | "no_proxy"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "GOPATH"
+            | "GOMODCACHE"
+            | "NPM_CONFIG_PREFIX"
+            | "PNPM_HOME"
+            | "UV_CACHE_DIR"
+            | "PIP_CACHE_DIR"
+            | "XDG_CACHE_HOME"
+            | "XDG_CONFIG_HOME"
+            | "XDG_DATA_HOME"
+    ) || name.starts_with("LC_")
 }
 
 fn config_file_argument() -> Result<Option<PathBuf>, ConfigError> {
@@ -229,26 +517,26 @@ fn default_limits() -> EIPLimits {
         max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         max_concurrent_operations: DEFAULT_MAX_CONCURRENT_OPERATIONS,
-        max_processes: 32,
-        max_operation_duration_ms: 5 * 60 * 1000,
-        max_inline_output_bytes: 64 * 1024,
-        max_output_bytes: 16 * 1024 * 1024,
-        max_retained_bytes: 256 * 1024 * 1024,
-        max_retained_objects: 1024,
-        max_retention_ttl_ms: 60 * 60 * 1000,
-        max_operation_records: 4096,
-        operation_record_ttl_ms: 60 * 60 * 1000,
+        max_processes: 128,
+        max_operation_duration_ms: 24 * 60 * 60 * 1000,
+        max_inline_output_bytes: 2 * 1024 * 1024,
+        max_output_bytes: 256 * 1024 * 1024,
+        max_retained_bytes: 1024 * 1024 * 1024,
+        max_retained_objects: 16_384,
+        max_retention_ttl_ms: 24 * 60 * 60 * 1000,
+        max_operation_records: 16_384,
+        operation_record_ttl_ms: 24 * 60 * 60 * 1000,
         session_idle_ttl_ms: DEFAULT_SESSION_IDLE_TTL_MS,
-        max_process_records: 128,
-        terminal_process_record_ttl_ms: 60 * 60 * 1000,
+        max_process_records: 1024,
+        terminal_process_record_ttl_ms: 24 * 60 * 60 * 1000,
         max_transfer_frame_bytes: DEFAULT_MAX_TRANSFER_FRAME_BYTES,
         max_concurrent_file_transfers: DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS,
-        max_file_transfer_records: 128,
-        file_transfer_record_ttl_ms: 60 * 60 * 1000,
-        max_staged_file_bytes: 512 * 1024 * 1024,
-        max_staged_file_objects: 64,
-        file_transfer_idle_ttl_ms: 60 * 1000,
-        max_file_transfer_duration_ms: 15 * 60 * 1000,
+        max_file_transfer_records: 512,
+        file_transfer_record_ttl_ms: 24 * 60 * 60 * 1000,
+        max_staged_file_bytes: 8 * 1024 * 1024 * 1024,
+        max_staged_file_objects: 512,
+        file_transfer_idle_ttl_ms: 10 * 60 * 1000,
+        max_file_transfer_duration_ms: 2 * 60 * 60 * 1000,
     }
 }
 
@@ -305,7 +593,10 @@ impl Error for ConfigError {}
 mod tests {
     use crate::eip::EipValidate;
 
-    use super::Config;
+    use super::{
+        Config, DEFAULT_MAX_COMMAND_ARGUMENT_BYTES, DEFAULT_MAX_COMMAND_ARGUMENTS,
+        DEFAULT_MAX_COMMAND_ENVIRONMENT_BYTES, DEFAULT_MAX_COMMAND_ENVIRONMENT_ENTRIES,
+    };
 
     #[test]
     fn test_configuration_has_finite_valid_limits() {
@@ -313,5 +604,16 @@ mod tests {
 
         config.limits.validate().expect("limits are valid");
         assert_eq!(config.environment_id, "env-test");
+        assert_eq!(config.limits.max_request_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.limits.max_response_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.limits.max_processes, 128);
+        assert_eq!(config.limits.max_operation_duration_ms, 24 * 60 * 60 * 1000);
+        assert_eq!(config.limits.max_output_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.limits.max_retained_bytes, 1024 * 1024 * 1024);
+        assert_eq!(config.limits.max_staged_file_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_COMMAND_ARGUMENTS, 1024);
+        assert_eq!(DEFAULT_MAX_COMMAND_ARGUMENT_BYTES, 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_COMMAND_ENVIRONMENT_ENTRIES, 1024);
+        assert_eq!(DEFAULT_MAX_COMMAND_ENVIRONMENT_BYTES, 2 * 1024 * 1024);
     }
 }

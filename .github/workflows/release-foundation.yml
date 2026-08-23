@@ -97,9 +97,6 @@ jobs:
           VERSION: ${{ needs.build-python.outputs.version }}
         run: python3 scripts/prepare-release-version.py foundation "$VERSION"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -115,7 +112,8 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # Release publishing is intentionally native amd64 only; other architectures build locally.
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.FOUNDATION_SERVICE_IMAGE }}:${{ needs.build-python.outputs.version }}

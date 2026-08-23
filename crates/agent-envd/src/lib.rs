@@ -5,10 +5,19 @@ mod daemon;
 pub mod eip;
 mod mount;
 mod operation;
+mod process;
 mod resource;
 mod retention;
 mod stdio;
+mod supervisor;
 mod transfer;
+
+/// Runs the private gated command supervisor used by this binary.
+#[doc(hidden)]
+pub async fn run_internal_supervisor() -> Result<(), Box<dyn Error + Send + Sync>> {
+    supervisor::run_internal().await?;
+    Ok(())
+}
 
 /// Runs one stdio agent-envd instance from trusted process configuration.
 pub async fn run_from_environment() -> Result<(), Box<dyn Error + Send + Sync>> {

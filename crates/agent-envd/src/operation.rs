@@ -17,8 +17,9 @@ pub(crate) struct OperationRegistry {
     inner: Arc<RegistryInner>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ShortIdAllocator {
+    namespace: Arc<str>,
     counters: Arc<Mutex<BTreeMap<&'static str, u64>>>,
 }
 
@@ -102,7 +103,7 @@ impl OperationRegistry {
                 max_records,
                 terminal_ttl,
                 max_duration,
-                selector_ids: ShortIdAllocator::default(),
+                selector_ids: ShortIdAllocator::for_generation(generation),
             }),
         }
     }
@@ -267,6 +268,10 @@ impl OperationRegistry {
         } else {
             None
         }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.inner.generation
     }
 
     pub(crate) fn cancellation_requested(&self, operation_id: &str) -> bool {
@@ -489,12 +494,34 @@ pub(crate) fn canonical_request_digest<P: Serialize>(
 }
 
 impl ShortIdAllocator {
+    pub(crate) fn for_generation(generation: u64) -> Self {
+        Self {
+            namespace: encode_base36(generation).into(),
+            counters: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
     pub(crate) fn next(&self, prefix: &'static str) -> Result<String, RegistryError> {
         let mut counters = self.counters.lock().unwrap_or_else(PoisonError::into_inner);
         let counter = counters.entry(prefix).or_default();
         *counter = counter.checked_add(1).ok_or(RegistryError::Encoding)?;
-        Ok(format!("{prefix}-{counter}"))
+        Ok(format!("{prefix}-{}-{counter}", self.namespace))
     }
+}
+
+fn encode_base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut buffer = [0_u8; 13];
+    let mut cursor = buffer.len();
+    loop {
+        cursor -= 1;
+        buffer[cursor] = DIGITS[(value % 36) as usize];
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    String::from_utf8(buffer[cursor..].to_vec()).expect("base36 digits are UTF-8")
 }
 
 #[cfg(test)]
@@ -519,9 +546,9 @@ mod tests {
 
     #[test]
     fn short_ids_are_kind_prefixed_and_concurrently_unique() {
-        let ids = ShortIdAllocator::default();
-        assert_eq!(ids.next("reader").expect("reader ID"), "reader-1");
-        assert_eq!(ids.next("writer").expect("writer ID"), "writer-1");
+        let ids = ShortIdAllocator::for_generation(42);
+        assert_eq!(ids.next("reader").expect("reader ID"), "reader-16-1");
+        assert_eq!(ids.next("writer").expect("writer ID"), "writer-16-1");
 
         let workers = (0..8)
             .map(|_| {
@@ -540,7 +567,7 @@ mod tests {
         generated.sort();
         generated.dedup();
         assert_eq!(generated.len(), 512);
-        assert!(generated.iter().all(|selector| selector.len() <= 11));
+        assert!(generated.iter().all(|selector| selector.len() <= 32));
     }
 
     #[test]

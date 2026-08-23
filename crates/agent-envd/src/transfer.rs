@@ -156,7 +156,10 @@ pub(crate) enum TransferError {
 }
 
 impl TransferRegistry {
-    pub(crate) fn new(config: &crate::config::Config) -> Result<Self, TransferError> {
+    pub(crate) fn new(
+        config: &crate::config::Config,
+        generation: u64,
+    ) -> Result<Self, TransferError> {
         Ok(Self {
             inner: Arc::new(TransferInner {
                 state: StdMutex::new(TransferState::default()),
@@ -173,7 +176,7 @@ impl TransferRegistry {
                 max_operation_duration: Duration::from_millis(
                     config.limits.max_operation_duration_ms,
                 ),
-                selector_ids: ShortIdAllocator::default(),
+                selector_ids: ShortIdAllocator::for_generation(generation),
             }),
         })
     }
@@ -1667,7 +1670,7 @@ mod tests {
             },
         });
         let mounts = MountRegistry::initialize(&config).expect("initializes mount registry");
-        let transfers = TransferRegistry::new(&config).expect("initializes transfer registry");
+        let transfers = TransferRegistry::new(&config, 1).expect("initializes transfer registry");
         let (sender, receiver) = mpsc::channel(16);
         transfers
             .install_outbound(sender)

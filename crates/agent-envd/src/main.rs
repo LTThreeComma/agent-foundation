@@ -11,7 +11,14 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let result = runtime.block_on(converge_agent_envd::run_from_environment());
+    let internal_supervisor = std::env::args_os().nth(1).is_some_and(|argument| {
+        argument == "--internal-supervisor" && std::env::args_os().nth(2).is_none()
+    });
+    let result = if internal_supervisor {
+        runtime.block_on(converge_agent_envd::run_internal_supervisor())
+    } else {
+        runtime.block_on(converge_agent_envd::run_from_environment())
+    };
     // Tokio's portable stdin adapter may have one blocking read in progress when
     // an operator signal wins the shutdown race. Keep process shutdown bounded.
     runtime.shutdown_timeout(Duration::from_secs(1));

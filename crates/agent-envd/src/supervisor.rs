@@ -1,0 +1,803 @@
+use std::{collections::BTreeMap, io, path::PathBuf, process::Stdio, time::Duration};
+
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    process::{Child, ChildStdin, Command},
+    sync::mpsc,
+};
+
+const PROTOCOL_VERSION: u32 = 1;
+const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
+const CLEANUP_GRACE: Duration = Duration::from_secs(2);
+const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaunchPlan {
+    pub(crate) executable: PathBuf,
+    pub(crate) arguments: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) environment: BTreeMap<String, String>,
+    pub(crate) initial_stdin: Option<String>,
+    pub(crate) keep_stdin_open: bool,
+    pub(crate) wall_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ControlSignal {
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StopReason {
+    Kill,
+    Cancelled,
+    Timeout,
+    OutputLimit,
+    Shutdown,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum SupervisorRequest {
+    Prepare {
+        version: u32,
+        plan: LaunchPlan,
+    },
+    Start,
+    WriteStdin {
+        data: String,
+        close_after_write: bool,
+    },
+    CloseStdin,
+    Signal {
+        signal: ControlSignal,
+    },
+    Kill {
+        reason: StopReason,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum SupervisorEvent {
+    Booted {
+        version: u32,
+    },
+    Prepared,
+    Started {
+        stdin_open: bool,
+        accepted_stdin_bytes: u64,
+        initial_stdin_complete: bool,
+    },
+    StartFailed {
+        message: String,
+    },
+    Output {
+        stream: OutputStream,
+        data: String,
+    },
+    StreamClosed {
+        stream: OutputStream,
+    },
+    StdinResult {
+        accepted_bytes: u64,
+        open: bool,
+    },
+    SignalResult {
+        accepted: bool,
+    },
+    Terminal {
+        exit_code: Option<i32>,
+        signal: Option<ControlSignal>,
+        stop_reason: Option<StopReason>,
+    },
+    Cleaned {
+        complete: bool,
+        output_complete: bool,
+    },
+    ProtocolError {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+enum StreamEvent {
+    Data(OutputStream, Vec<u8>),
+    Closed(OutputStream),
+}
+
+struct StdinDeliveryResult {
+    stdin: Option<ChildStdin>,
+    accepted_bytes: u64,
+    complete: bool,
+}
+
+#[derive(Default)]
+struct StreamClosures {
+    stdout: bool,
+    stderr: bool,
+}
+
+impl StreamClosures {
+    fn observe(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::Closed(OutputStream::Stdout) => self.stdout = true,
+            StreamEvent::Closed(OutputStream::Stderr) => self.stderr = true,
+            StreamEvent::Data(_, _) => {}
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.stdout && self.stderr
+    }
+}
+
+pub(crate) async fn run_internal() -> io::Result<()> {
+    let stdin = tokio::io::stdin();
+    let mut requests = BufReader::new(stdin).lines();
+    let mut stdout = tokio::io::stdout();
+    write_event(
+        &mut stdout,
+        &SupervisorEvent::Booted {
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
+
+    let request = read_request(&mut requests).await?;
+    let SupervisorRequest::Prepare { version, plan } = request else {
+        return protocol_failure(&mut stdout, "prepare must be the first supervisor request").await;
+    };
+    if version != PROTOCOL_VERSION {
+        return protocol_failure(&mut stdout, "unsupported supervisor protocol version").await;
+    }
+    validate_plan(&plan)?;
+    write_event(&mut stdout, &SupervisorEvent::Prepared).await?;
+
+    let request = read_request(&mut requests).await?;
+    if !matches!(request, SupervisorRequest::Start) {
+        return protocol_failure(&mut stdout, "start must follow prepare").await;
+    }
+    run_payload(plan, requests, stdout).await
+}
+
+async fn run_payload(
+    plan: LaunchPlan,
+    mut requests: Lines<BufReader<tokio::io::Stdin>>,
+    mut stdout: tokio::io::Stdout,
+) -> io::Result<()> {
+    let mut command = Command::new(&plan.executable);
+    command
+        .args(&plan.arguments)
+        .current_dir(&plan.cwd)
+        .env_clear()
+        .envs(&plan.environment)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_command_tree(&mut command);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            write_event(
+                &mut stdout,
+                &SupervisorEvent::StartFailed {
+                    message: bounded_message(&error),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let tree_id = child.id();
+    let mut payload_stdin = child.stdin.take();
+    let payload_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("payload stdout pipe is unavailable"))?;
+    let payload_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("payload stderr pipe is unavailable"))?;
+
+    let (stream_tx, mut stream_rx) = mpsc::channel(16);
+    let mut stream_closures = StreamClosures::default();
+    tokio::spawn(drain_stream(
+        payload_stdout,
+        OutputStream::Stdout,
+        stream_tx.clone(),
+    ));
+    tokio::spawn(drain_stream(
+        payload_stderr,
+        OutputStream::Stderr,
+        stream_tx,
+    ));
+
+    let wall_deadline = tokio::time::Instant::now() + Duration::from_millis(plan.wall_time_ms);
+    let initial_stdin = plan
+        .initial_stdin
+        .as_deref()
+        .map(decode_bytes)
+        .transpose()?
+        .unwrap_or_default();
+    let initial_stdin_bytes = initial_stdin.len() as u64;
+    let mut initial_delivery = tokio::spawn(deliver_stdin(
+        payload_stdin.take(),
+        initial_stdin,
+        !plan.keep_stdin_open,
+    ));
+    let mut stop_reason = None;
+    let mut forced_cleanup_proven = false;
+    let mut start_allowed = true;
+    let initial_result = loop {
+        tokio::select! {
+            delivered = &mut initial_delivery => {
+                break delivered.unwrap_or(StdinDeliveryResult {
+                    stdin: None,
+                    accepted_bytes: 0,
+                    complete: false,
+                });
+            }
+            stream = stream_rx.recv() => {
+                if let Some(stream) = stream {
+                    stream_closures.observe(&stream);
+                    forward_stream_event(&mut stdout, stream).await?;
+                }
+            }
+            request = read_optional_request(&mut requests) => {
+                match request? {
+                    Some(SupervisorRequest::Signal { signal }) => {
+                        let accepted = signal_tree(tree_id, signal, &mut child).await;
+                        write_event(&mut stdout, &SupervisorEvent::SignalResult { accepted }).await?;
+                    }
+                    Some(SupervisorRequest::Kill { reason }) => {
+                        initial_delivery.abort();
+                        let _ = initial_delivery.await;
+                        stop_reason = Some(reason);
+                        start_allowed = false;
+                        forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                        break StdinDeliveryResult {
+                            stdin: None,
+                            accepted_bytes: 0,
+                            complete: false,
+                        };
+                    }
+                    None => {
+                        initial_delivery.abort();
+                        let _ = initial_delivery.await;
+                        stop_reason = Some(StopReason::Shutdown);
+                        start_allowed = false;
+                        forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                        break StdinDeliveryResult {
+                            stdin: None,
+                            accepted_bytes: 0,
+                            complete: false,
+                        };
+                    }
+                    Some(
+                        SupervisorRequest::Prepare { .. }
+                        | SupervisorRequest::Start
+                        | SupervisorRequest::WriteStdin { .. }
+                        | SupervisorRequest::CloseStdin,
+                    ) => {
+                        initial_delivery.abort();
+                        let _ = initial_delivery.await;
+                        stop_reason = Some(StopReason::Shutdown);
+                        start_allowed = false;
+                        forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                        write_event(&mut stdout, &SupervisorEvent::ProtocolError {
+                            message: "invalid request during initial stdin delivery".to_owned(),
+                        }).await?;
+                        break StdinDeliveryResult {
+                            stdin: None,
+                            accepted_bytes: 0,
+                            complete: false,
+                        };
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(wall_deadline) => {
+                initial_delivery.abort();
+                let _ = initial_delivery.await;
+                stop_reason = Some(StopReason::Timeout);
+                start_allowed = false;
+                forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                break StdinDeliveryResult {
+                    stdin: None,
+                    accepted_bytes: 0,
+                    complete: false,
+                };
+            }
+        }
+    };
+    payload_stdin = initial_result.stdin;
+    if start_allowed {
+        write_event(
+            &mut stdout,
+            &SupervisorEvent::Started {
+                stdin_open: payload_stdin.is_some(),
+                accepted_stdin_bytes: initial_result.accepted_bytes,
+                initial_stdin_complete: initial_result.complete
+                    && initial_result.accepted_bytes == initial_stdin_bytes,
+            },
+        )
+        .await?;
+    }
+
+    let timeout = tokio::time::sleep_until(wall_deadline);
+    tokio::pin!(timeout);
+    let mut stdin_delivery: Option<tokio::task::JoinHandle<StdinDeliveryResult>> = None;
+    let status = loop {
+        tokio::select! {
+            biased;
+            status = child.wait() => break status?,
+            delivered = async {
+                stdin_delivery
+                    .as_mut()
+                    .expect("stdin delivery branch requires a task")
+                    .await
+            }, if stdin_delivery.is_some() => {
+                let delivered = delivered.unwrap_or(StdinDeliveryResult {
+                    stdin: None,
+                    accepted_bytes: 0,
+                    complete: false,
+                });
+                stdin_delivery = None;
+                payload_stdin = delivered.stdin;
+                write_event(&mut stdout, &SupervisorEvent::StdinResult {
+                    accepted_bytes: delivered.accepted_bytes,
+                    open: payload_stdin.is_some(),
+                }).await?;
+            }
+            _ = &mut timeout, if stop_reason.is_none() => {
+                stop_reason = Some(StopReason::Timeout);
+                abort_stdin_delivery(&mut stdin_delivery).await;
+                close_payload_stdin(&mut payload_stdin).await;
+                forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+            }
+            stream = stream_rx.recv() => {
+                if let Some(stream) = stream {
+                    stream_closures.observe(&stream);
+                    forward_stream_event(&mut stdout, stream).await?;
+                }
+            }
+            request = read_optional_request(&mut requests) => {
+                match request? {
+                    Some(SupervisorRequest::WriteStdin { data, close_after_write }) => {
+                        if stdin_delivery.is_some() {
+                            write_event(&mut stdout, &SupervisorEvent::ProtocolError {
+                                message: "concurrent stdin delivery is invalid".to_owned(),
+                            }).await?;
+                        } else {
+                            let bytes = decode_bytes(&data)?;
+                            stdin_delivery = Some(tokio::spawn(deliver_stdin(
+                                payload_stdin.take(),
+                                bytes,
+                                close_after_write,
+                            )));
+                        }
+                    }
+                    Some(SupervisorRequest::CloseStdin) => {
+                        abort_stdin_delivery(&mut stdin_delivery).await;
+                        close_payload_stdin(&mut payload_stdin).await;
+                        write_event(&mut stdout, &SupervisorEvent::StdinResult {
+                            accepted_bytes: 0,
+                            open: false,
+                        }).await?;
+                    }
+                    Some(SupervisorRequest::Signal { signal }) => {
+                        let accepted = signal_tree(tree_id, signal, &mut child).await;
+                        write_event(&mut stdout, &SupervisorEvent::SignalResult { accepted }).await?;
+                    }
+                    Some(SupervisorRequest::Kill { reason }) => {
+                        stop_reason = Some(reason);
+                        abort_stdin_delivery(&mut stdin_delivery).await;
+                        close_payload_stdin(&mut payload_stdin).await;
+                        forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                    }
+                    Some(SupervisorRequest::Prepare { .. } | SupervisorRequest::Start) => {
+                        write_event(&mut stdout, &SupervisorEvent::ProtocolError {
+                            message: "invalid request after payload start".to_owned(),
+                        }).await?;
+                    }
+                    None => {
+                        stop_reason = Some(StopReason::Shutdown);
+                        abort_stdin_delivery(&mut stdin_delivery).await;
+                        close_payload_stdin(&mut payload_stdin).await;
+                        forced_cleanup_proven |= force_tree(tree_id, &mut child).await;
+                    }
+                }
+            }
+        }
+    };
+    abort_stdin_delivery(&mut stdin_delivery).await;
+    close_payload_stdin(&mut payload_stdin).await;
+
+    let (exit_code, signal) = portable_exit_status(status);
+    write_event(
+        &mut stdout,
+        &SupervisorEvent::Terminal {
+            exit_code,
+            signal,
+            stop_reason,
+        },
+    )
+    .await?;
+
+    let cleanup_complete =
+        forced_cleanup_proven || cleanup_tree(tree_id, &mut child, stop_reason.is_none()).await;
+    let drain_deadline = tokio::time::sleep(CLEANUP_GRACE);
+    tokio::pin!(drain_deadline);
+    while !stream_closures.complete() {
+        tokio::select! {
+            stream = stream_rx.recv() => {
+                match stream {
+                    Some(stream) => {
+                        stream_closures.observe(&stream);
+                        forward_stream_event(&mut stdout, stream).await?;
+                    }
+                    None => break,
+                }
+            }
+            _ = &mut drain_deadline => break,
+        }
+    }
+    write_event(
+        &mut stdout,
+        &SupervisorEvent::Cleaned {
+            complete: cleanup_complete,
+            output_complete: stream_closures.complete(),
+        },
+    )
+    .await
+}
+
+fn validate_plan(plan: &LaunchPlan) -> io::Result<()> {
+    if !plan.executable.is_absolute()
+        || !plan.cwd.is_absolute()
+        || plan.wall_time_ms == 0
+        || plan.arguments.iter().any(|value| value.contains('\0'))
+        || plan
+            .environment
+            .iter()
+            .any(|(name, value)| name.contains(['\0', '=']) || value.contains('\0'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid supervisor launch plan",
+        ));
+    }
+    Ok(())
+}
+
+async fn drain_stream<R>(mut reader: R, stream: OutputStream, sender: mpsc::Sender<StreamEvent>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buffer = vec![0_u8; OUTPUT_CHUNK_BYTES];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                if sender
+                    .send(StreamEvent::Data(stream, buffer[..read].to_vec()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = sender.send(StreamEvent::Closed(stream)).await;
+}
+
+async fn forward_stream_event<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    event: StreamEvent,
+) -> io::Result<()> {
+    match event {
+        StreamEvent::Data(stream, data) => {
+            write_event(
+                writer,
+                &SupervisorEvent::Output {
+                    stream,
+                    data: base64::engine::general_purpose::STANDARD.encode(data),
+                },
+            )
+            .await
+        }
+        StreamEvent::Closed(stream) => {
+            write_event(writer, &SupervisorEvent::StreamClosed { stream }).await
+        }
+    }
+}
+
+async fn deliver_stdin(
+    mut stdin: Option<ChildStdin>,
+    bytes: Vec<u8>,
+    close_after_write: bool,
+) -> StdinDeliveryResult {
+    let mut accepted = 0_usize;
+    let mut complete = true;
+    while accepted < bytes.len() {
+        let Some(open) = stdin.as_mut() else {
+            complete = false;
+            break;
+        };
+        match open.write(&bytes[accepted..]).await {
+            Ok(0) | Err(_) => {
+                complete = false;
+                close_payload_stdin(&mut stdin).await;
+                break;
+            }
+            Ok(written) => accepted = accepted.saturating_add(written),
+        }
+    }
+    if close_after_write {
+        close_payload_stdin(&mut stdin).await;
+    }
+    StdinDeliveryResult {
+        stdin,
+        accepted_bytes: accepted as u64,
+        complete,
+    }
+}
+
+async fn abort_stdin_delivery(delivery: &mut Option<tokio::task::JoinHandle<StdinDeliveryResult>>) {
+    if let Some(delivery) = delivery.take() {
+        delivery.abort();
+        let _ = delivery.await;
+    }
+}
+
+async fn close_payload_stdin(stdin: &mut Option<ChildStdin>) {
+    if let Some(mut open) = stdin.take() {
+        let _ = open.shutdown().await;
+    }
+}
+
+async fn read_request(
+    lines: &mut Lines<BufReader<tokio::io::Stdin>>,
+) -> io::Result<SupervisorRequest> {
+    read_optional_request(lines)
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "supervisor control EOF"))
+}
+
+async fn read_optional_request(
+    lines: &mut Lines<BufReader<tokio::io::Stdin>>,
+) -> io::Result<Option<SupervisorRequest>> {
+    let Some(line) = lines.next_line().await? else {
+        return Ok(None);
+    };
+    if line.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor request exceeds its byte limit",
+        ));
+    }
+    serde_json::from_str(&line)
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor request"))
+}
+
+pub(crate) async fn write_request<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    request: &SupervisorRequest,
+) -> io::Result<()> {
+    write_json_line(writer, request).await
+}
+
+pub(crate) async fn read_event<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+) -> io::Result<Option<SupervisorEvent>> {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).await?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor event exceeds its byte limit",
+        ));
+    }
+    serde_json::from_str(line.trim_end())
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor event"))
+}
+
+async fn write_event<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    event: &SupervisorEvent,
+) -> io::Result<()> {
+    write_json_line(writer, event).await
+}
+
+async fn write_json_line<W, T>(writer: &mut W, value: &T) -> io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    T: Serialize,
+{
+    let mut encoded = serde_json::to_vec(value)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "supervisor encoding failed"))?;
+    if encoded.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor message exceeds its byte limit",
+        ));
+    }
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await?;
+    writer.flush().await
+}
+
+async fn protocol_failure<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    message: &str,
+) -> io::Result<()> {
+    write_event(
+        writer,
+        &SupervisorEvent::ProtocolError {
+            message: message.to_owned(),
+        },
+    )
+    .await
+}
+
+fn decode_bytes(value: &str) -> io::Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor bytes"))
+}
+
+fn bounded_message(error: &io::Error) -> String {
+    let message = error.to_string();
+    message.chars().take(512).collect()
+}
+
+#[cfg(unix)]
+fn configure_command_tree(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_command_tree(_command: &mut Command) {}
+
+#[cfg(unix)]
+async fn signal_tree(tree_id: Option<u32>, signal: ControlSignal, _child: &mut Child) -> bool {
+    let Some(tree_id) = tree_id else {
+        return false;
+    };
+    let native_signal = match signal {
+        ControlSignal::Interrupt => libc::SIGINT,
+        ControlSignal::Terminate => libc::SIGTERM,
+        ControlSignal::Kill => libc::SIGKILL,
+    };
+    let result = unsafe { libc::kill(-(tree_id as i32), native_signal) };
+    result == 0
+}
+
+#[cfg(not(unix))]
+async fn signal_tree(_tree_id: Option<u32>, _signal: ControlSignal, child: &mut Child) -> bool {
+    child.start_kill().is_ok()
+}
+
+#[cfg(unix)]
+async fn force_tree(tree_id: Option<u32>, child: &mut Child) -> bool {
+    if let Some(tree_id) = tree_id {
+        unsafe {
+            libc::kill(-(tree_id as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+    false
+}
+
+#[cfg(not(unix))]
+async fn force_tree(tree_id: Option<u32>, child: &mut Child) -> bool {
+    let complete = if let Some(tree_id) = tree_id {
+        let pid = tree_id.to_string();
+        Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    } else {
+        false
+    };
+    let _ = child.start_kill();
+    complete
+}
+
+#[cfg(unix)]
+async fn cleanup_tree(tree_id: Option<u32>, child: &mut Child, _natural_completion: bool) -> bool {
+    let Some(tree_id) = tree_id else {
+        return false;
+    };
+    let group = -(tree_id as i32);
+    let present = unsafe { libc::kill(group, 0) } == 0
+        || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    if !present {
+        return true;
+    }
+    unsafe {
+        libc::kill(group, libc::SIGKILL);
+    }
+    let _ = child.start_kill();
+    let deadline = tokio::time::Instant::now() + CLEANUP_GRACE;
+    loop {
+        let result = unsafe { libc::kill(group, 0) };
+        if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn cleanup_tree(tree_id: Option<u32>, child: &mut Child, natural_completion: bool) -> bool {
+    let Some(tree_id) = tree_id else {
+        return false;
+    };
+    let pid = tree_id.to_string();
+    let complete = Command::new("taskkill")
+        .args(["/PID", pid.as_str(), "/T", "/F"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success());
+    let _ = child.start_kill();
+    complete || natural_completion
+}
+
+#[cfg(unix)]
+fn portable_exit_status(status: std::process::ExitStatus) -> (Option<i32>, Option<ControlSignal>) {
+    use std::os::unix::process::ExitStatusExt;
+    let signal = match status.signal() {
+        Some(libc::SIGINT) => Some(ControlSignal::Interrupt),
+        Some(libc::SIGTERM) => Some(ControlSignal::Terminate),
+        Some(libc::SIGKILL) => Some(ControlSignal::Kill),
+        _ => None,
+    };
+    (status.code(), signal)
+}
+
+#[cfg(not(unix))]
+fn portable_exit_status(status: std::process::ExitStatus) -> (Option<i32>, Option<ControlSignal>) {
+    (status.code(), None)
+}

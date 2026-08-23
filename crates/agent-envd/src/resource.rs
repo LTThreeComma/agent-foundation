@@ -153,8 +153,8 @@ impl ResourceRegistry {
                 max_inline_bytes: config.limits.max_inline_output_bytes,
                 max_output_bytes: config.limits.max_output_bytes,
                 max_response_bytes: config.limits.max_response_bytes,
+                selector_ids: ShortIdAllocator::for_generation(operations.generation()),
                 operations,
-                selector_ids: ShortIdAllocator::default(),
             }),
         })
     }

@@ -43,7 +43,6 @@ pub(crate) struct MountRegistry {
 
 pub(crate) struct Mount {
     pub(crate) mount_id: String,
-    #[allow(dead_code)] // Required by the command plane's native execution mapping.
     pub(crate) native_root: PathBuf,
     pub(crate) root: Arc<Dir>,
     #[allow(dead_code)] // Retained for diagnostics without exposing it through EIP.
@@ -51,7 +50,6 @@ pub(crate) struct Mount {
     pub(crate) staging: Option<Arc<Dir>>,
     pub(crate) writable: bool,
     exclusive_mutation_control: bool,
-    #[allow(dead_code)] // Required by the command plane's cwd/source authorization.
     pub(crate) allow_command_execution: bool,
     pub(crate) max_file_bytes: u64,
     allowed_operations: BTreeSet<String>,
@@ -63,6 +61,13 @@ pub(crate) struct Mount {
 pub(crate) struct OpenedFile {
     pub(crate) file: fs::File,
     pub(crate) metadata: fs::Metadata,
+}
+
+#[derive(Clone)]
+pub(crate) struct CommandCwd {
+    mount: Arc<Mount>,
+    relative: PathBuf,
+    pub(crate) native_path: PathBuf,
 }
 
 pub(crate) struct StagedCandidate {
@@ -184,6 +189,94 @@ impl MountRegistry {
     pub(crate) fn supports_anywhere(&self, operation: &str) -> bool {
         self.mounts.values().any(|mount| mount.allows(operation))
     }
+
+    pub(crate) fn supports_commands(&self) -> bool {
+        self.mounts
+            .values()
+            .any(|mount| mount.allow_command_execution && mount.allows("command_cwd"))
+    }
+
+    pub(crate) fn resolve_command_cwd(&self, path: &EIPPath) -> Result<CommandCwd, MountPathError> {
+        let mount = self.get(&path.mount_id).ok_or(MountPathError::Denied)?;
+        if !mount.allow_command_execution || !mount.allows("command_cwd") {
+            return Err(MountPathError::Denied);
+        }
+        let relative = mount.relative_path(path)?;
+        let canonical = mount
+            .root
+            .canonicalize(&relative)
+            .map_err(MountPathError::from_io)?;
+        let metadata = mount
+            .root
+            .metadata(&canonical)
+            .map_err(MountPathError::from_io)?;
+        if !metadata.is_dir() {
+            return Err(MountPathError::Denied);
+        }
+        validate_canonical_relative(&canonical)?;
+        Ok(CommandCwd {
+            native_path: mount.native_root.join(&canonical),
+            mount,
+            relative: canonical,
+        })
+    }
+}
+
+impl CommandCwd {
+    pub(crate) fn resolve_relative_executable(
+        &self,
+        executable: &str,
+    ) -> Result<PathBuf, MountPathError> {
+        if !self.mount.allows("executable_source") {
+            return Err(MountPathError::Denied);
+        }
+        let requested = Path::new(executable);
+        if requested.is_absolute()
+            || requested
+                .components()
+                .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+        {
+            return Err(MountPathError::Denied);
+        }
+        let candidate = self.relative.join(requested);
+        let canonical = self
+            .mount
+            .root
+            .canonicalize(candidate)
+            .map_err(MountPathError::from_io)?;
+        validate_canonical_relative(&canonical)?;
+        let metadata = self
+            .mount
+            .root
+            .metadata(&canonical)
+            .map_err(MountPathError::from_io)?;
+        if !metadata.is_file() {
+            return Err(MountPathError::NotRegular);
+        }
+        #[cfg(unix)]
+        {
+            use cap_std::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(MountPathError::Denied);
+            }
+        }
+        Ok(self.mount.native_root.join(canonical))
+    }
+}
+
+fn validate_canonical_relative(path: &Path) -> Result<(), MountPathError> {
+    for component in path.components() {
+        let Component::Normal(segment) = component else {
+            if component == Component::CurDir {
+                continue;
+            }
+            return Err(MountPathError::Denied);
+        };
+        if segment.is_empty() {
+            return Err(MountPathError::Denied);
+        }
+    }
+    Ok(())
 }
 
 impl StagingQuota {

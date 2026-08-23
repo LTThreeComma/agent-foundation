@@ -113,7 +113,7 @@ Network mode requires at least one of `AGENT_ENVD_HTTP_ENABLED` or `AGENT_ENVD_W
 
 An API key is at least 32 bytes after UTF-8 encoding, contains no surrounding whitespace or control character, and is compared in constant time. Envd cannot prove entropy from a string, so deployment tooling generates a uniformly random value rather than using a human password. Empty or malformed keys fail startup. The key is immutable for one daemon process; rotation restarts envd, creates a fresh generation, and invalidates every prior volatile selector.
 
-`AGENT_ENVD_*` names are reserved daemon configuration. EIP command-environment input cannot override them. The daemon process environment is not inherited wholesale by child commands, and `AGENT_ENVD_API_KEY` is always removed before any supervisor, sandbox helper, or payload starts.
+`AGENT_ENVD_*` names are reserved daemon configuration. EIP command-environment input cannot override them. Child commands receive only the finite ordinary compatibility values selected by daemon policy rather than wholesale daemon-environment inheritance. `AGENT_ENVD_API_KEY`, transport state, ambient credentials, dynamic-loader values, and internal control names are always removed before any supervisor, sandbox helper, or payload starts.
 
 The endpoint can bind port `0`. In that case envd discovers the assigned port from its bound listener before reporting readiness. A provider adapter never guesses the selected port and never interprets a log line as readiness.
 
@@ -230,7 +230,7 @@ Every staged candidate created by inline resource mutation or binary writer part
 
 A session-resource open idempotency mapping is attached to its live transfer record and counts under `max_file_transfer_records`; it disappears with that record or session. A terminal operation record owns its canonical request digest, optional provider-idempotency mapping, bounded result, and receipt selector/evidence. All of those count as one `max_operation_records` entry and share `operation_record_ttl_ms` plus oldest-terminal-first capacity reclamation. There is no independent unbounded receipt or idempotency store and no guaranteed minimum retention under capacity pressure. Missing reclaimed evidence never proves that native dispatch or mutation did not occur.
 
-An EIP-visible process or output record never independently owns the corresponding native resource. This single ownership rule prevents duplicate cleanup, conflicting status, and detached native children.
+An EIP-visible process or output record never independently owns the corresponding native resource. This single ownership rule prevents duplicate cleanup and conflicting status inside the active backend's advertised lifecycle boundary. Disabled `outer_host` mode does not claim containment of a descendant that deliberately escapes envd's managed process group.
 
 ## Draining and Shutdown
 
@@ -244,7 +244,7 @@ The daemon then:
 04. closes every file reader and aborts every writer whose candidate remains session-owned;
 05. lets a handoff-complete commit operation finish or preserve unknown-outcome evidence within the bounded drain budget;
 06. closes every daemon-owned process stdin and output writer;
-07. terminates every non-terminal command tree using the strongest backend cleanup operation;
+07. applies the strongest backend cleanup operation to every non-terminal managed command;
 08. waits within a finite daemon shutdown budget and records each cleanup outcome;
 09. deletes generation-local transfer, staging, output, and volatile registry state, retaining conservative fault evidence if physical cleanup cannot be proven;
 10. closes transports and exits.

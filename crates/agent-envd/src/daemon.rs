@@ -22,7 +22,10 @@ use crate::{
         SessionCloseParams, SessionCloseResult,
     },
     mount::MountRegistry,
-    operation::{BeginOutcome, OperationLease, OperationRegistry, RegistryError},
+    operation::{
+        BeginOutcome, OperationInterruption, OperationLease, OperationRegistry, RegistryError,
+    },
+    process::{ExecutionManager, ProcessError},
     resource::{ResourceError, ResourceRegistry},
     retention::{RetentionError, RetentionQuota, RetentionStore},
     transfer::{TransferError, TransferRegistry},
@@ -30,19 +33,6 @@ use crate::{
 
 const MAX_STRING_REQUEST_ID_BYTES: usize = 128;
 const BASE_CAPABILITIES: [&str; 2] = ["environment.describe", "session.close"];
-
-macro_rules! unsupported_methods {
-    ($($name:ident($params:ty) -> $result:ty;)+) => {
-        $(
-            async fn $name(&self, _params: $params) -> Result<$result, EIPError> {
-                Err(protocol_error(
-                    ErrorType::Unsupported,
-                    "method capability is not available",
-                ))
-            }
-        )+
-    };
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionState {
@@ -98,6 +88,7 @@ pub(crate) struct Daemon {
     mounts: MountRegistry,
     resources: ResourceRegistry,
     retention: RetentionStore,
+    execution: Option<ExecutionManager>,
     transfers: TransferRegistry,
     closed: watch::Sender<bool>,
     max_response_bytes: usize,
@@ -299,7 +290,7 @@ impl Daemon {
         let mounts = MountRegistry::initialize(config).map_err(|error| {
             DaemonInitError::new(format!("mount initialization failed: {error}"))
         })?;
-        let transfers = TransferRegistry::new(config)
+        let transfers = TransferRegistry::new(config, generation)
             .map_err(|_| DaemonInitError::new("transfer registry initialization failed"))?;
         let operations = OperationRegistry::new(
             config.environment_id.clone(),
@@ -314,6 +305,9 @@ impl Daemon {
             .map_err(|_| DaemonInitError::new("resource registry initialization failed"))?;
         let retention = RetentionStore::new(config, generation, retention_quota)
             .map_err(|_| DaemonInitError::new("retention store initialization failed"))?;
+        let execution =
+            ExecutionManager::new(config, generation, mounts.clone(), retention.clone())
+                .map_err(|_| DaemonInitError::new("execution manager initialization failed"))?;
         let mut capabilities = BASE_CAPABILITIES
             .iter()
             .map(ToString::to_string)
@@ -335,13 +329,23 @@ impl Daemon {
         if mounts.supports_anywhere("search") {
             capabilities.push("file.search".to_owned());
         }
+        if execution.is_some() {
+            capabilities.extend([
+                "output.read".to_owned(),
+                "process.manage".to_owned(),
+                "shell.exec".to_owned(),
+            ]);
+        }
         capabilities.sort();
         let descriptor = EnvironmentDescriptor {
             environment_id: config.environment_id.clone(),
             generation,
             capabilities,
             mounts: mounts.descriptors(),
-            shell_profiles: Vec::new(),
+            shell_profiles: execution
+                .as_ref()
+                .map(ExecutionManager::shell_profiles)
+                .unwrap_or_default(),
             limits: config.limits.clone(),
             isolation: IsolationPosture {
                 mode: IsolationMode::Disabled,
@@ -369,6 +373,7 @@ impl Daemon {
             mounts,
             resources,
             retention,
+            execution,
             transfers,
             closed,
             max_response_bytes,
@@ -415,6 +420,13 @@ impl Daemon {
         .await
         .is_ok();
         admission_idle && transfers_closed
+    }
+
+    pub(crate) async fn drain_processes(&self, budget: Duration) -> bool {
+        match &self.execution {
+            Some(execution) => execution.drain(budget).await,
+            None => true,
+        }
     }
 
     pub(crate) async fn drain_owned_operations(&self, budget: Duration) -> bool {
@@ -466,6 +478,9 @@ impl Daemon {
     pub(crate) async fn maintenance(&self) {
         self.retention.expire();
         self.resources.expire();
+        if let Some(execution) = &self.execution {
+            execution.maintenance();
+        }
         self.transfers.expire().await;
     }
 
@@ -600,6 +615,16 @@ impl Daemon {
             state.lifecycle = SessionState::Closed;
             self.closed.send_replace(true);
         }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn execution_manager(&self) -> Result<&ExecutionManager, EIPError> {
+        self.execution.as_ref().ok_or_else(|| {
+            protocol_error(
+                ErrorType::Unsupported,
+                "command and process execution is not configured",
+            )
+        })
     }
 
     #[allow(clippy::result_large_err)]
@@ -1495,7 +1520,12 @@ impl EipHandler for Daemon {
         let released = if let Some(reference) = &params.reference {
             self.retention.release_reference(reference)
         } else if let Some(cursor) = &params.cursor {
-            self.retention.release_cursor(cursor) || self.resources.release_cursor(cursor)
+            self.retention.release_cursor(cursor)
+                || self.resources.release_cursor(cursor)
+                || self
+                    .execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.release_cursor(cursor))
         } else {
             false
         };
@@ -1580,18 +1610,590 @@ impl EipHandler for Daemon {
         }
     }
 
-    unsupported_methods! {
-        process_close_stdin(eip::ProcessCloseStdinParams) -> eip::ProcessCloseStdinResult;
-        process_inspect(eip::ProcessInspectParams) -> eip::ProcessInspectResult;
-        process_kill(eip::ProcessKillParams) -> eip::ProcessKillResult;
-        process_read_output(eip::ProcessReadOutputParams) -> eip::ProcessReadOutputResult;
-        process_release(eip::ProcessReleaseParams) -> eip::ProcessReleaseResult;
-        process_signal(eip::ProcessSignalParams) -> eip::ProcessSignalResult;
-        process_start(eip::ProcessStartParams) -> eip::ProcessStartResult;
-        process_wait(eip::ProcessWaitParams) -> eip::ProcessWaitResult;
-        process_write_stdin(eip::ProcessWriteStdinParams) -> eip::ProcessWriteStdinResult;
-        shell_exec(eip::ShellExecParams) -> eip::ShellExecResult;
+    async fn process_start(
+        &self,
+        params: eip::ProcessStartParams,
+    ) -> Result<eip::ProcessStartResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let execution = self.execution_manager()?;
+        let operation = self
+            .operations
+            .begin("process.start", &params.context, &params, true)
+            .map_err(map_registry_error)?;
+        let operation = match operation {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let started = match execution
+            .start(&params.request, true, || {
+                match self.operations.interruption(&params.context.operation_id) {
+                    Some(OperationInterruption::Cancelled) => {
+                        return Err(ProcessError::PreDispatchCancelled);
+                    }
+                    Some(OperationInterruption::TimedOut) => {
+                        return Err(ProcessError::PreDispatchTimeout);
+                    }
+                    None => {}
+                }
+                if params
+                    .context
+                    .deadline
+                    .is_some_and(|deadline| deadline <= chrono::Utc::now())
+                {
+                    return Err(ProcessError::PreDispatchTimeout);
+                }
+                Ok(())
+            })
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let mapped = map_process_error(error);
+                return Err(
+                    if matches!(
+                        error,
+                        ProcessError::PreDispatchCancelled | ProcessError::PreDispatchTimeout
+                    ) {
+                        mutation_pre_dispatch_failure(operation, "process.start", mapped)
+                    } else {
+                        mutation_failure(operation, "process.start", mapped)
+                    },
+                );
+            }
+        };
+        if let Some(interruption) = self.operations.interruption(&params.context.operation_id) {
+            let reason = match interruption {
+                OperationInterruption::Cancelled => crate::supervisor::StopReason::Cancelled,
+                OperationInterruption::TimedOut => crate::supervisor::StopReason::Timeout,
+            };
+            if let Err(error) = execution
+                .interrupt_started(&started, reason, Instant::now() + Duration::from_secs(3))
+                .await
+            {
+                let process = started.info(execution);
+                return Err(mutation_failure(
+                    operation,
+                    "process.start",
+                    map_process_error_with_evidence(error, &process),
+                ));
+            }
+            execution.release_started(&started);
+            let error_type = match interruption {
+                OperationInterruption::Cancelled => ErrorType::Cancelled,
+                OperationInterruption::TimedOut => ErrorType::Timeout,
+            };
+            return Err(mutation_failure(
+                operation,
+                "process.start",
+                protocol_error(error_type, "process start was interrupted"),
+            ));
+        }
+        let (operation, receipt) =
+            mutation_receipt_at(operation, "process.start", ReceiptStage::ExecConfirmed)?;
+        let result = eip::ProcessStartResult {
+            process: started.info(execution),
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
     }
+
+    async fn process_inspect(
+        &self,
+        params: eip::ProcessInspectParams,
+    ) -> Result<eip::ProcessInspectResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("process.inspect", &params.context, &params, false)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let result = eip::ProcessInspectResult {
+            process: self
+                .execution_manager()?
+                .inspect(&params.handle)
+                .map_err(map_process_error)?,
+        };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_wait(
+        &self,
+        params: eip::ProcessWaitParams,
+    ) -> Result<eip::ProcessWaitResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("process.wait", &params.context, &params, false)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let process = loop {
+            if let Some(interruption) = self.operations.interruption(&params.context.operation_id) {
+                let error_type = match interruption {
+                    OperationInterruption::Cancelled => ErrorType::Cancelled,
+                    OperationInterruption::TimedOut => ErrorType::Timeout,
+                };
+                return Err(protocol_error(error_type, "process wait was interrupted"));
+            }
+            let slice = (Instant::now() + Duration::from_millis(25)).min(deadline);
+            match self
+                .execution_manager()?
+                .wait(&params.handle, params.condition, slice)
+                .await
+            {
+                Ok(process) => break process,
+                Err(ProcessError::Timeout) if Instant::now() < deadline => continue,
+                Err(error) => return Err(map_process_error(error)),
+            }
+        };
+        let result = eip::ProcessWaitResult { process };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_read_output(
+        &self,
+        params: eip::ProcessReadOutputParams,
+    ) -> Result<eip::ProcessReadOutputResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("process.read_output", &params.context, &params, false)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let (process, stdout, stderr) = self
+            .execution_manager()?
+            .read_output(
+                &params.handle,
+                params.stdout_cursor.as_ref(),
+                params.stderr_cursor.as_ref(),
+                params.wait_ms,
+                params.output_policy.as_ref(),
+                deadline,
+            )
+            .await
+            .map_err(map_process_error)?;
+        let result = eip::ProcessReadOutputResult {
+            process,
+            stdout,
+            stderr,
+        };
+        operation
+            .finish(&result, None)
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_write_stdin(
+        &self,
+        params: eip::ProcessWriteStdinParams,
+    ) -> Result<eip::ProcessWriteStdinResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("process.write_stdin", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let (accepted_bytes, stdin_open) = match self
+            .execution_manager()?
+            .write_stdin(&params.handle, &params.data, params.close_after_write)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "process.write_stdin",
+                    map_process_error(error),
+                ));
+            }
+        };
+        let (operation, receipt) = mutation_receipt(operation, "process.write_stdin")?;
+        let result = eip::ProcessWriteStdinResult {
+            accepted_bytes,
+            stdin_open,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_close_stdin(
+        &self,
+        params: eip::ProcessCloseStdinParams,
+    ) -> Result<eip::ProcessCloseStdinResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("process.close_stdin", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        if let Err(error) = self.execution_manager()?.close_stdin(&params.handle).await {
+            return Err(mutation_failure(
+                operation,
+                "process.close_stdin",
+                map_process_error(error),
+            ));
+        }
+        let (operation, receipt) = mutation_receipt(operation, "process.close_stdin")?;
+        let result = eip::ProcessCloseStdinResult {
+            stdin_open: false,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_signal(
+        &self,
+        params: eip::ProcessSignalParams,
+    ) -> Result<eip::ProcessSignalResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("process.signal", &params.context, &params, true)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let (accepted, process) = match self
+            .execution_manager()?
+            .signal(&params.handle, params.signal)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "process.signal",
+                    map_process_error(error),
+                ));
+            }
+        };
+        let (operation, receipt) =
+            mutation_receipt_at(operation, "process.signal", ReceiptStage::Dispatched)?;
+        let result = eip::ProcessSignalResult {
+            accepted,
+            process,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_kill(
+        &self,
+        params: eip::ProcessKillParams,
+    ) -> Result<eip::ProcessKillResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("process.kill", &params.context, &params, true)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let execution = self.execution_manager()?;
+        let process = match execution
+            .kill(
+                &params.handle,
+                crate::supervisor::StopReason::Kill,
+                deadline,
+            )
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                let mapped = match execution.inspect(&params.handle) {
+                    Ok(process) => map_process_error_with_evidence(error, &process),
+                    Err(_) => map_process_error(error),
+                };
+                return Err(mutation_failure(operation, "process.kill", mapped));
+            }
+        };
+        let (operation, receipt) = mutation_receipt(operation, "process.kill")?;
+        let result = eip::ProcessKillResult {
+            process,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn process_release(
+        &self,
+        params: eip::ProcessReleaseParams,
+    ) -> Result<eip::ProcessReleaseResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation =
+            match self.admit_record("process.release", &params.context, &params, true)? {
+                BeginOutcome::Replay(value) => return self.decode_replay(value),
+                BeginOutcome::ReplayFailure(error) => return Err(*error),
+                BeginOutcome::New(operation) => operation,
+            };
+        let released = match self.execution_manager()?.release(&params.handle) {
+            Ok(released) => released,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "process.release",
+                    map_process_error(error),
+                ));
+            }
+        };
+        let (operation, receipt) = mutation_receipt(operation, "process.release")?;
+        let result = eip::ProcessReleaseResult {
+            released,
+            receipt: receipt.clone(),
+        };
+        operation
+            .finish(&result, Some(receipt))
+            .map_err(map_registry_error)?;
+        Ok(result)
+    }
+
+    async fn shell_exec(
+        &self,
+        params: eip::ShellExecParams,
+    ) -> Result<eip::ShellExecResult, EIPError> {
+        self.ensure_initialized()?;
+        ensure_deadline(&params.context)?;
+        let operation = match self.admit_record("shell.exec", &params.context, &params, true)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
+        let execution = self.execution_manager()?;
+        let hard_deadline =
+            effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let started = match execution
+            .start(&params.request, false, || {
+                match self.operations.interruption(&params.context.operation_id) {
+                    Some(OperationInterruption::Cancelled) => {
+                        return Err(ProcessError::PreDispatchCancelled);
+                    }
+                    Some(OperationInterruption::TimedOut) => {
+                        return Err(ProcessError::PreDispatchTimeout);
+                    }
+                    None => {}
+                }
+                if params
+                    .context
+                    .deadline
+                    .is_some_and(|deadline| deadline <= chrono::Utc::now())
+                {
+                    return Err(ProcessError::PreDispatchTimeout);
+                }
+                Ok(())
+            })
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let mapped = map_process_error(error);
+                return Err(
+                    if matches!(
+                        error,
+                        ProcessError::PreDispatchCancelled | ProcessError::PreDispatchTimeout
+                    ) {
+                        mutation_pre_dispatch_failure(operation, "shell.exec", mapped)
+                    } else {
+                        mutation_failure(operation, "shell.exec", mapped)
+                    },
+                );
+            }
+        };
+        let process = loop {
+            if let Some(interruption) = self.operations.interruption(&params.context.operation_id) {
+                let reason = match interruption {
+                    OperationInterruption::Cancelled => crate::supervisor::StopReason::Cancelled,
+                    OperationInterruption::TimedOut => crate::supervisor::StopReason::Timeout,
+                };
+                match execution
+                    .interrupt_started(&started, reason, Instant::now() + Duration::from_secs(3))
+                    .await
+                {
+                    Ok(process) => break process,
+                    Err(error) => {
+                        let process = started.info(execution);
+                        return Err(mutation_failure(
+                            operation,
+                            "shell.exec",
+                            map_process_error_with_evidence(error, &process),
+                        ));
+                    }
+                }
+            }
+            let slice = (Instant::now() + Duration::from_millis(25)).min(hard_deadline);
+            match execution
+                .wait_started(&started, eip::ProcessWaitCondition::TreeCleaned, slice)
+                .await
+            {
+                Ok(process) => break process,
+                Err(ProcessError::Timeout) if Instant::now() < hard_deadline => continue,
+                Err(ProcessError::Timeout) => {
+                    match execution
+                        .interrupt_started(
+                            &started,
+                            crate::supervisor::StopReason::Timeout,
+                            Instant::now() + Duration::from_secs(3),
+                        )
+                        .await
+                    {
+                        Ok(process) => break process,
+                        Err(error) => {
+                            let process = started.info(execution);
+                            return Err(mutation_failure(
+                                operation,
+                                "shell.exec",
+                                map_process_error_with_evidence(error, &process),
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    execution.release_started(&started);
+                    return Err(mutation_failure(
+                        operation,
+                        "shell.exec",
+                        map_process_error(error),
+                    ));
+                }
+            }
+        };
+        if process.status.termination_reason == Some(eip::TerminationReason::BackendLost) {
+            let mut error = map_process_error(ProcessError::UnknownOutcome);
+            error.data.process_status = Some(process.status.clone());
+            error.data.produced_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .produced_bytes
+                    .saturating_add(process.output.stderr.capture.produced_bytes),
+            );
+            error.data.captured_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .captured_bytes
+                    .saturating_add(process.output.stderr.capture.captured_bytes),
+            );
+            error.data.dropped_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .dropped_bytes
+                    .saturating_add(process.output.stderr.capture.dropped_bytes),
+            );
+            execution.release_started(&started);
+            return Err(mutation_failure(operation, "shell.exec", error));
+        }
+        if process.status.termination_reason == Some(eip::TerminationReason::OutputLimit) {
+            let mut error = map_process_error(ProcessError::OutputLimit);
+            error.data.process_status = Some(process.status.clone());
+            error.data.produced_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .produced_bytes
+                    .saturating_add(process.output.stderr.capture.produced_bytes),
+            );
+            error.data.captured_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .captured_bytes
+                    .saturating_add(process.output.stderr.capture.captured_bytes),
+            );
+            error.data.dropped_bytes = Some(
+                process
+                    .output
+                    .stdout
+                    .capture
+                    .dropped_bytes
+                    .saturating_add(process.output.stderr.capture.dropped_bytes),
+            );
+            execution.release_started(&started);
+            return Err(mutation_failure(operation, "shell.exec", error));
+        }
+        let outcome = match process.status.phase {
+            eip::ProcessPhase::TimedOut => ReceiptOutcome::TimedOut,
+            eip::ProcessPhase::Cancelled => ReceiptOutcome::Cancelled,
+            eip::ProcessPhase::Failed => ReceiptOutcome::Failed,
+            _ => ReceiptOutcome::Succeeded,
+        };
+        let (operation, mut receipt) =
+            mutation_receipt_at(operation, "shell.exec", ReceiptStage::Completed)?;
+        receipt.outcome = Some(outcome);
+        let result = eip::ShellExecResult {
+            status: process.status,
+            output: process.output,
+            receipt: receipt.clone(),
+        };
+        let pending_release = execution.prepare_started_release(&started);
+        if let Err(error) = operation.finish(&result, Some(receipt)) {
+            return Err(map_registry_error(error));
+        }
+        if let Some(release) = pending_release {
+            release.preserve_output();
+        }
+        Ok(result)
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn mutation_pre_dispatch_failure(
+    operation: OperationLease,
+    method: &str,
+    mut error: EIPError,
+) -> EIPError {
+    let outcome = match error.data.error_type {
+        ErrorType::Cancelled => ReceiptOutcome::Cancelled,
+        ErrorType::Timeout => ReceiptOutcome::TimedOut,
+        _ => ReceiptOutcome::Failed,
+    };
+    if let Ok(receipt) = operation.receipt(method, ReceiptStage::Accepted, Some(outcome)) {
+        error.data.dispatch_stage = DispatchStage::PreDispatch;
+        error.data.operation_id = Some(receipt.operation_id.clone());
+        error.data.environment_id = Some(receipt.environment_id.clone());
+        error.data.generation = Some(receipt.generation);
+        error.data.receipt = Some(receipt.clone());
+        operation.finish_failure(receipt, error.clone());
+    }
+    error
 }
 
 #[allow(clippy::result_large_err)]
@@ -1619,15 +2221,20 @@ fn mutation_failure(operation: OperationLease, method: &str, mut error: EIPError
 
 #[allow(clippy::result_large_err)]
 fn mutation_receipt(
-    mut operation: OperationLease,
+    operation: OperationLease,
     method: &str,
 ) -> Result<(OperationLease, eip::OperationReceipt), EIPError> {
+    mutation_receipt_at(operation, method, ReceiptStage::Completed)
+}
+
+#[allow(clippy::result_large_err)]
+fn mutation_receipt_at(
+    mut operation: OperationLease,
+    method: &str,
+    stage: ReceiptStage,
+) -> Result<(OperationLease, eip::OperationReceipt), EIPError> {
     let receipt = operation
-        .receipt(
-            method,
-            ReceiptStage::Completed,
-            Some(ReceiptOutcome::Succeeded),
-        )
+        .receipt(method, stage, Some(ReceiptOutcome::Succeeded))
         .map_err(map_registry_error)?;
     let mut unknown_receipt = receipt.clone();
     unknown_receipt.stage = ReceiptStage::Unknown;
@@ -1798,6 +2405,119 @@ fn map_resource_error(error: ResourceError) -> EIPError {
     };
     let mut mapped = protocol_error(error_type, message);
     mapped.data.retry_hint = retry_hint;
+    mapped
+}
+
+fn map_process_error(error: ProcessError) -> EIPError {
+    let (error_type, message, retry_hint) = match error {
+        ProcessError::Invalid => (
+            ErrorType::InvalidParams,
+            "command or process parameters are invalid",
+            RetryHint::Never,
+        ),
+        ProcessError::Unsupported => (
+            ErrorType::Unsupported,
+            "requested command behavior is unsupported by the active backend",
+            RetryHint::Never,
+        ),
+        ProcessError::Denied => (
+            ErrorType::Denied,
+            "command execution was denied by configured policy",
+            RetryHint::AfterAuthorityChange,
+        ),
+        ProcessError::NotFound => (
+            ErrorType::NotFoundOrDenied,
+            "process handle was not found",
+            RetryHint::Never,
+        ),
+        ProcessError::InvalidHandle => (
+            ErrorType::InvalidHandle,
+            "process output cursor is invalid",
+            RetryHint::Never,
+        ),
+        ProcessError::Busy => (
+            ErrorType::Busy,
+            "process capacity is unavailable",
+            RetryHint::AfterCapacity,
+        ),
+        ProcessError::Conflict => (
+            ErrorType::Conflict,
+            "process state conflicts with the requested operation",
+            RetryHint::Never,
+        ),
+        ProcessError::OutputLimit => (
+            ErrorType::OutputLimitExceeded,
+            "process input or output limit was exceeded",
+            RetryHint::Never,
+        ),
+        ProcessError::Timeout => (
+            ErrorType::Timeout,
+            "process operation deadline expired",
+            RetryHint::Never,
+        ),
+        ProcessError::Cancelled | ProcessError::PreDispatchCancelled => (
+            ErrorType::Cancelled,
+            "process operation was cancelled",
+            RetryHint::Never,
+        ),
+        ProcessError::PreDispatchTimeout => (
+            ErrorType::Timeout,
+            "process operation deadline expired before dispatch",
+            RetryHint::Never,
+        ),
+        ProcessError::UnknownOutcome => (
+            ErrorType::UnknownOutcome,
+            "process control outcome could not be confirmed",
+            RetryHint::ReconcileFirst,
+        ),
+        ProcessError::StartFailed => (
+            ErrorType::CommandStartFailed,
+            "requested executable could not be started",
+            RetryHint::Never,
+        ),
+        ProcessError::CleanupFailed => (
+            ErrorType::CleanupFailed,
+            "command tree cleanup failed",
+            RetryHint::ReconcileFirst,
+        ),
+        ProcessError::Internal => (
+            ErrorType::InternalError,
+            "process manager failed",
+            RetryHint::Never,
+        ),
+    };
+    let mut mapped = protocol_error(error_type, message);
+    mapped.data.retry_hint = retry_hint;
+    mapped
+}
+
+fn map_process_error_with_evidence(error: ProcessError, process: &eip::ProcessInfo) -> EIPError {
+    let mut mapped = map_process_error(error);
+    mapped.data.process_status = Some(process.status.clone());
+    mapped.data.produced_bytes = Some(
+        process
+            .output
+            .stdout
+            .capture
+            .produced_bytes
+            .saturating_add(process.output.stderr.capture.produced_bytes),
+    );
+    mapped.data.captured_bytes = Some(
+        process
+            .output
+            .stdout
+            .capture
+            .captured_bytes
+            .saturating_add(process.output.stderr.capture.captured_bytes),
+    );
+    mapped.data.dropped_bytes = Some(
+        process
+            .output
+            .stdout
+            .capture
+            .dropped_bytes
+            .saturating_add(process.output.stderr.capture.dropped_bytes),
+    );
     mapped
 }
 
@@ -2546,7 +3266,7 @@ mod tests {
         )
         .expect("reader open response");
         let reader = opened["result"]["reader"].clone();
-        assert_eq!(reader, "reader-1");
+        assert_eq!(reader, "reader-c-1");
         let replayed: Value = serde_json::from_slice(
             &daemon
                 .handle_payload(&request(
@@ -2583,7 +3303,7 @@ mod tests {
                 .await,
         )
         .expect("reader reopen response");
-        assert_eq!(reopened["result"]["reader"], "reader-2");
+        assert_eq!(reopened["result"]["reader"], "reader-c-2");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2631,7 +3351,7 @@ mod tests {
         )
         .expect("writer response");
         let writer = opened["result"]["writer"].clone();
-        assert_eq!(writer, "writer-1");
+        assert_eq!(writer, "writer-21-1");
 
         let blocked: Value = serde_json::from_slice(
             &daemon

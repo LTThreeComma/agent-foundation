@@ -239,6 +239,14 @@ where
             "session transfer drain exceeded its shutdown deadline",
         ))
     };
+    let process_result = if daemon.drain_processes(SHUTDOWN_DRAIN_TIMEOUT).await {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "owned process drain exceeded its shutdown deadline",
+        ))
+    };
     let operation_result = if daemon.drain_owned_operations(SHUTDOWN_DRAIN_TIMEOUT).await {
         Ok(())
     } else {
@@ -282,6 +290,7 @@ where
     };
     inbound_data_result?;
     session_result?;
+    process_result?;
     operation_result?;
     request_result?;
     writer_result

@@ -326,9 +326,6 @@ jobs:
           git apply --whitespace=error release-version.patch
           git clean -f -- release-version.patch
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -344,7 +341,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.sandbox
-          platforms: linux/amd64,linux/arm64
+          # Release publishing is intentionally native amd64 only; other architectures build locally.
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.SANDBOX_IMAGE }}:${{ needs.prepare.outputs.version }}

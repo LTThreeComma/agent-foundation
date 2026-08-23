@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -55,12 +58,25 @@ struct RetentionState {
 }
 
 struct RetainedObject {
-    data: Arc<Vec<u8>>,
+    capture: Arc<Mutex<RetainedCapture>>,
+    expires_at: Instant,
+    expires_at_utc: chrono::DateTime<chrono::Utc>,
+}
+
+struct RetainedCapture {
+    data: Vec<u8>,
     producer_complete: bool,
     produced_bytes: u64,
     dropped_bytes: u64,
-    expires_at: Instant,
-    expires_at_utc: chrono::DateTime<chrono::Utc>,
+    readable: bool,
+}
+
+pub(crate) struct LiveOutput {
+    store: RetentionStore,
+    reference: OutputReference,
+    capture: Arc<Mutex<RetainedCapture>>,
+    capture_limit: u64,
+    release_on_drop: AtomicBool,
 }
 
 struct RetainedCursor {
@@ -125,7 +141,7 @@ impl RetentionQuota {
 impl RetentionStore {
     pub(crate) fn new(
         config: &crate::config::Config,
-        _generation: u64,
+        generation: u64,
         quota: RetentionQuota,
     ) -> Result<Self, RetentionError> {
         Ok(Self {
@@ -138,14 +154,91 @@ impl RetentionStore {
                 max_inline_bytes: config.limits.max_inline_output_bytes,
                 max_output_bytes: config.limits.max_output_bytes,
                 max_response_bytes: config.limits.max_response_bytes,
-                selector_ids: ShortIdAllocator::default(),
+                selector_ids: ShortIdAllocator::for_generation(generation),
             }),
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn create_live(
+        &self,
+        policy: Option<&OutputPolicy>,
+    ) -> Result<LiveOutput, RetentionError> {
+        self.create_live_many(policy, 1)?
+            .pop()
+            .ok_or(RetentionError::Internal)
+    }
+
+    pub(crate) fn create_live_pair(
+        &self,
+        policy: Option<&OutputPolicy>,
+    ) -> Result<(LiveOutput, LiveOutput), RetentionError> {
+        let mut outputs = self.create_live_many(policy, 2)?.into_iter();
+        let stdout = outputs.next().ok_or(RetentionError::Internal)?;
+        let stderr = outputs.next().ok_or(RetentionError::Internal)?;
+        Ok((stdout, stderr))
+    }
+
+    fn create_live_many(
+        &self,
+        policy: Option<&OutputPolicy>,
+        count: usize,
+    ) -> Result<Vec<LiveOutput>, RetentionError> {
+        let policy = self.effective_policy(policy)?;
+        if policy.overflow != OutputOverflow::Retain || count == 0 {
+            return Err(RetentionError::Invalid);
+        }
+        let expires_at_utc = chrono::Duration::from_std(self.inner.ttl)
+            .map(|ttl| chrono::Utc::now() + ttl)
+            .map_err(|_| RetentionError::Internal)?;
+        let mut state = self.state();
+        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
+        if !self.inner.quota.reserve(0, count) {
+            return Err(RetentionError::Busy);
+        }
+        let mut selectors = Vec::with_capacity(count);
+        for _ in 0..count {
+            match self.inner.selector_ids.next("output") {
+                Ok(selector) => selectors.push(selector),
+                Err(_) => {
+                    self.inner.quota.release(0, count);
+                    return Err(RetentionError::Internal);
+                }
+            }
+        }
+        let expires_at = Instant::now() + self.inner.ttl;
+        let capture_limit = policy.max_output_bytes.min(self.inner.max_output_bytes);
+        let mut outputs = Vec::with_capacity(count);
+        for selector in selectors {
+            let capture = Arc::new(Mutex::new(RetainedCapture {
+                data: Vec::new(),
+                producer_complete: false,
+                produced_bytes: 0,
+                dropped_bytes: 0,
+                readable: true,
+            }));
+            state.objects.insert(
+                selector.clone(),
+                RetainedObject {
+                    capture: Arc::clone(&capture),
+                    expires_at,
+                    expires_at_utc,
+                },
+            );
+            outputs.push(LiveOutput {
+                store: self.clone(),
+                reference: OutputReference(selector),
+                capture,
+                capture_limit,
+                release_on_drop: AtomicBool::new(true),
+            });
+        }
+        Ok(outputs)
+    }
+
     /// Applies producer-side output policy to an already bounded byte sequence.
     /// Producers must call this incrementally or provide bytes bounded by max_output_bytes.
-    #[allow(dead_code)] // Internal producer API consumed by the command/process plane.
+    #[allow(dead_code)] // Also retained as the bounded producer API for future structured outputs.
     pub(crate) fn retain_bytes(
         &self,
         bytes: Vec<u8>,
@@ -217,7 +310,17 @@ impl RetentionStore {
             available_start: 0,
             available_end: 0,
         })?;
-        let captured_bytes = object.data.len() as u64;
+        let capture = object
+            .capture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !capture.readable {
+            return Err(RetentionError::Gap {
+                available_start: 0,
+                available_end: 0,
+            });
+        }
+        let captured_bytes = capture.data.len() as u64;
         let start = if let Some(cursor) = &params.cursor {
             let cursor = state
                 .cursors
@@ -252,12 +355,13 @@ impl RetentionStore {
             return Err(RetentionError::OutputLimit);
         }
         let end = start.saturating_add(maximum).min(captured_bytes);
-        let data = encoded(&object.data[start as usize..end as usize]);
-        let producer_complete = object.producer_complete;
-        let produced_bytes = object.produced_bytes;
-        let dropped_bytes = object.dropped_bytes;
+        let data = encoded(&capture.data[start as usize..end as usize]);
+        let producer_complete = capture.producer_complete;
+        let produced_bytes = capture.produced_bytes;
+        let dropped_bytes = capture.dropped_bytes;
         let expires_at = object.expires_at;
         let expires_at_utc = object.expires_at_utc;
+        drop(capture);
         let next_cursor = if end < captured_bytes {
             if !self.inner.quota.reserve(0, 1) {
                 return Err(RetentionError::Busy);
@@ -315,6 +419,14 @@ impl RetentionStore {
             .prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
     }
 
+    pub(crate) fn reserve_external_cursor(&self) -> bool {
+        self.inner.quota.reserve(0, 1)
+    }
+
+    pub(crate) fn release_external_cursors(&self, count: usize) {
+        self.inner.quota.release(0, count);
+    }
+
     pub(crate) fn release_reference(&self, reference: &OutputReference) -> bool {
         let mut state = self.state();
         state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
@@ -327,9 +439,15 @@ impl RetentionStore {
             state
                 .cursors
                 .retain(|_, cursor| cursor.reference != reference.0);
-            self.inner
-                .quota
-                .release(object.data.len() as u64, 1 + cursor_count);
+            let captured_bytes = {
+                let mut capture = object
+                    .capture
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                capture.readable = false;
+                std::mem::take(&mut capture.data).len() as u64
+            };
+            self.inner.quota.release(captured_bytes, 1 + cursor_count);
             state.remember_release(format!("reference:{}", reference.0), self.inner.max_objects);
             true
         } else {
@@ -414,10 +532,13 @@ impl RetentionStore {
         state.objects.insert(
             selector.clone(),
             RetainedObject {
-                data: Arc::new(bytes),
-                producer_complete,
-                produced_bytes,
-                dropped_bytes,
+                capture: Arc::new(Mutex::new(RetainedCapture {
+                    data: bytes,
+                    producer_complete,
+                    produced_bytes,
+                    dropped_bytes,
+                    readable: true,
+                })),
                 expires_at,
                 expires_at_utc,
             },
@@ -467,6 +588,139 @@ impl RetentionStore {
     }
 }
 
+impl LiveOutput {
+    pub(crate) fn append_limited(
+        &self,
+        bytes: &[u8],
+        shared_allowance: u64,
+    ) -> Result<u64, RetentionError> {
+        let mut capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
+        capture.produced_bytes = capture
+            .produced_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(RetentionError::Internal)?;
+        if !capture.readable {
+            capture.dropped_bytes = capture
+                .dropped_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or(RetentionError::Internal)?;
+            return Ok(0);
+        }
+        let remaining = self.capture_limit.saturating_sub(capture.data.len() as u64);
+        let requested = remaining.min(shared_allowance).min(bytes.len() as u64);
+        let retained = if requested > 0 && self.store.inner.quota.reserve(requested, 0) {
+            capture.data.extend_from_slice(&bytes[..requested as usize]);
+            requested
+        } else {
+            0
+        };
+        capture.dropped_bytes = capture
+            .dropped_bytes
+            .checked_add((bytes.len() as u64).saturating_sub(retained))
+            .ok_or(RetentionError::Internal)?;
+        Ok(retained)
+    }
+
+    pub(crate) fn complete(&self) {
+        self.capture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .producer_complete = true;
+    }
+
+    pub(crate) fn snapshot(&self) -> OutputCapture {
+        let (expires_at, retained) = {
+            let state = self.store.state();
+            state
+                .objects
+                .get(&self.reference.0)
+                .map(|object| (Some(object.expires_at_utc), true))
+                .unwrap_or((None, false))
+        };
+        let capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
+        let captured_bytes = capture.data.len() as u64;
+        if retained && capture.readable {
+            OutputCapture {
+                kind: OutputKind::Retained,
+                producer_complete: capture.producer_complete,
+                content_complete: capture.producer_complete && capture.dropped_bytes == 0,
+                produced_bytes: capture.produced_bytes,
+                captured_bytes,
+                dropped_bytes: capture.dropped_bytes,
+                inline: None,
+                preview: None,
+                reference: Some(self.reference.clone()),
+                cursor: None,
+                available_start: 0,
+                available_end: captured_bytes,
+                expires_at,
+            }
+        } else {
+            OutputCapture {
+                kind: if capture.produced_bytes == 0 {
+                    OutputKind::Empty
+                } else {
+                    OutputKind::Truncated
+                },
+                producer_complete: capture.producer_complete,
+                content_complete: capture.producer_complete && capture.produced_bytes == 0,
+                produced_bytes: capture.produced_bytes,
+                captured_bytes: 0,
+                dropped_bytes: capture.produced_bytes,
+                inline: None,
+                preview: None,
+                reference: None,
+                cursor: None,
+                available_start: 0,
+                available_end: 0,
+                expires_at: None,
+            }
+        }
+    }
+
+    pub(crate) fn read_range(
+        &self,
+        start: u64,
+        maximum: u64,
+    ) -> Result<(Vec<u8>, OutputCapture), RetentionError> {
+        let snapshot = self.snapshot();
+        if start < snapshot.available_start || start > snapshot.available_end {
+            return Err(RetentionError::Gap {
+                available_start: snapshot.available_start,
+                available_end: snapshot.available_end,
+            });
+        }
+        let capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
+        if !capture.readable {
+            return Err(RetentionError::Gap {
+                available_start: 0,
+                available_end: 0,
+            });
+        }
+        let end = start.saturating_add(maximum).min(capture.data.len() as u64);
+        Ok((
+            capture.data[start as usize..end as usize].to_vec(),
+            snapshot,
+        ))
+    }
+
+    pub(crate) fn reference(&self) -> OutputReference {
+        self.reference.clone()
+    }
+
+    pub(crate) fn detach(&self) {
+        self.release_on_drop.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for LiveOutput {
+    fn drop(&mut self) {
+        if self.release_on_drop.swap(false, Ordering::AcqRel) {
+            self.store.release_reference(&self.reference);
+        }
+    }
+}
+
 impl RetentionState {
     fn prune(&mut self, now: Instant, max_tombstones: usize, quota: &RetentionQuota) {
         let expired_objects = self
@@ -482,7 +736,15 @@ impl RetentionState {
                 .filter(|cursor| cursor.reference == reference)
                 .count();
             if let Some(object) = self.objects.remove(&reference) {
-                quota.release(object.data.len() as u64, 1 + cursor_count);
+                let captured_bytes = {
+                    let mut capture = object
+                        .capture
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    capture.readable = false;
+                    std::mem::take(&mut capture.data).len() as u64
+                };
+                quota.release(captured_bytes, 1 + cursor_count);
             }
             self.cursors
                 .retain(|_, cursor| cursor.reference != reference);
@@ -582,6 +844,104 @@ mod tests {
     }
 
     #[test]
+    fn live_retention_reserves_before_growth_and_reports_exact_drops() {
+        let config = Config::for_test("env");
+        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
+            .expect("store");
+        let live = store
+            .create_live(Some(&OutputPolicy {
+                max_inline_bytes: 1,
+                max_output_bytes: 4,
+                overflow: OutputOverflow::Retain,
+            }))
+            .expect("live output");
+        assert_eq!(live.append_limited(b"abc", 2).expect("append"), 2);
+        assert_eq!(live.append_limited(b"def", 2).expect("append"), 2);
+        live.complete();
+        let capture = live.snapshot();
+        assert_eq!(capture.produced_bytes, 6);
+        assert_eq!(capture.captured_bytes, 4);
+        assert_eq!(capture.dropped_bytes, 2);
+        assert!(capture.producer_complete);
+        assert!(!capture.content_complete);
+        assert_eq!(store.quota(), (4, 1));
+
+        let reference = live.reference();
+        assert!(store.release_reference(&reference));
+        assert_eq!(store.quota(), (0, 0));
+        assert_eq!(
+            live.capture.lock().expect("capture lock").data.capacity(),
+            0,
+            "quota is returned only after the retained allocation is dropped",
+        );
+        assert_eq!(live.append_limited(b"gh", 2).expect("dropped append"), 0);
+        let released = live.snapshot();
+        assert_eq!(released.produced_bytes, 8);
+        assert_eq!(released.captured_bytes, 0);
+        assert_eq!(released.dropped_bytes, 8);
+    }
+
+    #[test]
+    fn detached_live_output_remains_readable_until_explicit_release() {
+        let config = Config::for_test("env");
+        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
+            .expect("store");
+        let live = store
+            .create_live(Some(&OutputPolicy {
+                max_inline_bytes: 1,
+                max_output_bytes: 3,
+                overflow: OutputOverflow::Retain,
+            }))
+            .expect("live output");
+        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
+        live.complete();
+        let reference = live.reference();
+        live.detach();
+        drop(live);
+
+        assert_eq!(store.quota(), (3, 1));
+        assert!(
+            store
+                .read(&OutputReadParams {
+                    context: crate::eip::EIPCallContext {
+                        operation_id: "detached-read".to_owned(),
+                        deadline: None,
+                        idempotency_key: None,
+                    },
+                    reference: reference.clone(),
+                    cursor: None,
+                    start_offset: Some(0),
+                    output_policy: None,
+                })
+                .is_ok()
+        );
+        assert!(store.release_reference(&reference));
+        assert_eq!(store.quota(), (0, 0));
+    }
+
+    #[test]
+    fn live_output_pair_reserves_object_slots_atomically() {
+        let mut config = Config::for_test("env");
+        config.limits.max_retained_objects = 1;
+        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
+            .expect("store");
+        let policy = OutputPolicy {
+            max_inline_bytes: 1,
+            max_output_bytes: 4,
+            overflow: OutputOverflow::Retain,
+        };
+        assert!(matches!(
+            store.create_live_pair(Some(&policy)),
+            Err(RetentionError::Busy)
+        ));
+        assert_eq!(store.quota(), (0, 0));
+        assert!(store.reserve_external_cursor());
+        assert_eq!(store.quota(), (0, 1));
+        store.release_external_cursors(1);
+        assert_eq!(store.quota(), (0, 0));
+    }
+
+    #[test]
     fn retention_quota_falls_back_to_explicit_truncation_without_losing_counts() {
         let mut config = Config::for_test("env");
         config.limits.max_retained_bytes = 1;
@@ -604,6 +964,32 @@ mod tests {
         assert_eq!(capture.dropped_bytes, 6);
         assert!(capture.reference.is_none());
         assert_eq!(store.quota(), (0, 0));
+    }
+
+    #[test]
+    fn expiry_drops_live_capture_allocation_while_the_producer_handle_survives() {
+        let mut config = Config::for_test("env");
+        config.limits.max_retention_ttl_ms = 1;
+        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
+            .expect("store");
+        let live = store
+            .create_live(Some(&OutputPolicy {
+                max_inline_bytes: 1,
+                max_output_bytes: 3,
+                overflow: OutputOverflow::Retain,
+            }))
+            .expect("live output");
+        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
+        assert_eq!(store.quota(), (3, 1));
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.expire();
+
+        assert_eq!(store.quota(), (0, 0));
+        let capture = live.capture.lock().expect("capture lock");
+        assert!(!capture.readable);
+        assert_eq!(capture.data.len(), 0);
+        assert_eq!(capture.data.capacity(), 0);
     }
 
     #[test]

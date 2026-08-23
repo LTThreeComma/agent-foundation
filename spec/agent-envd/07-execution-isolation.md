@@ -66,7 +66,7 @@ Each command captures one policy snapshot containing:
 - final payload identity and environment;
 - backend-independent wall-time, output, and process lifecycle limits.
 
-A later provider topology change does not mutate a running command's sandbox. Revoking the mount or authority held by an existing process requires terminating and cleaning that process tree before the revocation is acknowledged. A daemon restart terminates all old-generation trees and never retargets them.
+A later provider topology change does not mutate a running command's sandbox. Revoking the mount or authority held by an existing process requires completing the active backend's cleanup contract before the revocation is acknowledged. A required backend terminates old-generation trees on daemon restart; disabled mode delegates any process that escaped envd's managed native lifecycle to outer-Host generation teardown. Generation-namespaced selectors are never retargeted.
 
 The isolation manager returns a backend-neutral execution object to the sole command execution manager. Callers cannot assume the host child PID is the requested executable, process-group leader, or complete tree. Status, signaling, force cleanup, initial-command wait, and tree-cleanup wait use semantic operations defined by [Command and Process Execution](05-command-and-process-execution.md).
 
@@ -105,7 +105,9 @@ This symmetric rule avoids relying on platform-specific nested allow/deny preced
 
 ### Disabled-mode meaning
 
-In `disabled` mode, envd still validates the requested cwd, executable policy, command schema, and EIP file operations. It does not claim that the child is restricted to configured mounts. The payload can access every path, process, device, IPC endpoint, and network resource made visible by its outer container/VM or the native host OS user.
+In `disabled` mode, envd still validates the requested cwd, executable policy, command schema, and EIP file operations. Those cwd and relative-executable checks are admission-time path snapshots, not descriptor-pinned execution identities: a concurrently mutable native directory can change after validation and before spawn. This mode does not claim that the child is restricted to configured mounts or that native path authorization is race-free. The payload can access every path, process, device, IPC endpoint, and network resource made visible by its outer container/VM or the native host OS user.
+
+Envd's disabled native supervisor targets the initial Unix process group and uses best-effort task-tree operations on Windows. A payload can deliberately call `setsid`, create a new process group, or use an equivalent platform mechanism to leave Unix observation; Windows cannot recover a complete descendant set after the initial process exits without an outer Job Object. `cleanup="complete"` in this mode proves cleanup only for that platform-native managed target; the descriptor therefore reports `process_containment=false` and `cleanup_guarantee="outer_host"`. The outer Host must provide PID namespace, Job Object, container/VM destruction, or an equivalent generation boundary when escaped descendants must not survive.
 
 The outer host must also prevent payloads from inspecting envd memory, its original process environment, service configuration, trusted proxy headers, retained output, or private per-mount staging roots; otherwise a payload can steal `AGENT_ENVD_API_KEY`, alter a sealed candidate, or bypass the EIP boundary. A distinct final payload UID/GID, outer mount and process/PID isolation, protected process filesystems, and removal of debugger/root capability are valid mechanisms. Explicit `disabled` mode accepts the outer boundary only when it provides that separation, not merely because a container exists.
 
@@ -123,7 +125,7 @@ Request-controlled environment is dangerous before isolation because dynamic loa
 
 Command arguments are structured argv. Paths become backend parameters or descriptor-backed sources and are never concatenated into a Seatbelt profile or shell wrapper. Trusted helpers resolve by verified absolute identity, not the workspace or child `PATH`.
 
-The final payload environment is cleared and rebuilt as defined by [Command and Process Execution](05-command-and-process-execution.md#environment-construction). `HOME` and temporary-directory variables always point to private execution roots. `AGENT_ENVD_API_KEY`, transport/session values, daemon state paths, internal carrier names, and ambient host credentials are absent.
+The final payload environment is cleared and rebuilt as defined by [Command and Process Execution](05-command-and-process-execution.md#environment-construction). It can include only daemon-allowlisted ordinary compatibility values, including operator proxy configuration, plus explicit trusted and request layers. `HOME` and temporary-directory variables always point to private execution roots. `AGENT_ENVD_API_KEY`, transport/session values, daemon state paths, internal carrier names, dynamic-loader values, and ambient cloud or service credentials are absent.
 
 ## Transactional Spawn
 
@@ -147,7 +149,7 @@ sequenceDiagram
     Payload-->>Manager: exec success by close-on-exec acknowledgement
 ```
 
-No requested executable or payload launcher with request environment runs before final sandbox entry and store commit. Every precommit failure leaves the gate closed and forces bounded helper cleanup. Gate-release, identity, or exec failure rolls back public records and never retries with disabled isolation.
+No requested executable or payload launcher with request environment runs before final sandbox entry and store commit. Every precommit failure leaves the gate closed and forces bounded helper cleanup. A confirmed pre-exec failure safely releases unpublished state. Loss of evidence after gate release retains conservative ownership and returns `unknown_outcome`; it never rolls possible dispatch back into a pre-dispatch result or retries with disabled isolation.
 
 The supervisor protocol separately reports:
 
