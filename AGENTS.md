@@ -56,6 +56,7 @@ make lint
 make deps-check
 make typecheck
 make test
+make examples-check
 make rust-check
 make build
 make image-foundation-service

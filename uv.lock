@@ -301,6 +301,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
     { name = "pydantic-core" },
+    { name = "pyyaml" },
     { name = "typing-extensions" },
 ]
 
@@ -314,6 +315,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-slim", specifier = ">=2.31.1,<2.32" },
     { name = "pydantic-core", specifier = ">=2.41,<3" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "typing-extensions", specifier = ">=4.15,<5" },
 ]
 

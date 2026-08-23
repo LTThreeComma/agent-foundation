@@ -4,14 +4,21 @@
 
 A Harness plugin is trusted, code-first Python middleware around the complete process-local Harness run. It can transform semantic input, observe or transform stream events, short-circuit execution, replace a complete result candidate, and contribute ordinary Pydantic AI `AbstractCapability[AgentContext]` instances at Agent construction.
 
-Plugins are concrete Python objects supplied in `AgentDefinition.plugins`. The Harness defines no Harness-middleware plugin document format, `PluginSpec`, compiler, package discovery protocol, or runtime catalog. A Host that wants durable middleware configuration owns that schema and reconstructs trusted plugin objects before calling the Harness. The separately owned [Environment package entry-point catalog](08-environment-integration.md#environment-package-plugins) discovers Environment provider factories only; loading one never creates or grants an `AbstractHarnessPlugin`.
+Plugins always become concrete Python objects before Agent composition. A caller may supply them directly in `AgentDefinition.plugins`, or opt one `HarnessBuilder` into the Harness-owned plugin configuration boundary. That boundary reads a small versioned preferred YAML or supported JSON document, selects installed factory entry points, and appends freshly created plugin instances to every definition built by that builder. The Host need not understand plugin factories or perform this reconstruction itself.
 
-Pydantic Capabilities remain the extension point inside the Agent loop. Harness plugins exist only for the wider semantic-input-to-complete-result boundary.
+Automatic configuration is disabled by default. Importing the package never reads environment variables or files, scans package metadata, imports a plugin target, or enables middleware. A builder with no explicit `HarnessBuildContext` inspects only the enable environment variable; it performs further loading only when that switch explicitly enables the feature. An explicit context bypasses ambient discovery entirely.
+
+This narrow document is not a serialized Agent definition, general object compiler, arbitrary import mechanism, process-global registry, or Environment configuration language. The separately owned [Environment provider factory catalog](08-environment-integration.md#environment-provider-factories) remains run-scoped and caller-controlled because provider topology, lifecycle, and reconciliation require Host authority. Pydantic Capabilities remain the extension point inside the Agent loop; Harness plugins exist only for the wider semantic-input-to-complete-result boundary.
 
 ```mermaid
 flowchart LR
-    Host[Trusted Python composition] --> Plugins[Concrete plugin instances]
-    Plugins --> Order[Stable-ID ordering]
+    Direct[AgentDefinition plugins] --> Merge[Direct then configured plugins]
+    Source[Explicit context or opted-in environment] --> Document[Versioned plugin document]
+    Document --> Selected[Enabled factory keys]
+    Selected --> Catalog[Builder-owned factory catalog]
+    Catalog --> Fresh[Fresh configured instances per definition]
+    Fresh --> Merge
+    Merge --> Order[Stable-ID ordering]
     Order --> AgentBind[Agent-bound plugins]
     AgentBind --> Caps[Pydantic Capability contributions]
     AgentBind --> RunBind[Fresh run-bound plugins]
@@ -19,6 +26,216 @@ flowchart LR
     Caps --> Agent[Pydantic AI Agent]
     Chain --> Agent
 ```
+
+## Configuration Document
+
+The Harness owns one strict versioned data document for optional plugin construction. YAML is the preferred human-authored file form; JSON is the exact machine-oriented equivalent:
+
+```yaml
+schema_version: "1"
+plugins:
+  - plugin_id: audit-1
+    plugin_key: acme.audit
+    enabled: true
+    configuration:
+      mode: metadata
+```
+
+| Field                     | Contract                                                                                                              |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `schema_version`          | Required exact string `"1"`; unsupported versions fail explicitly                                                     |
+| `plugins`                 | Required ordered array with at most 128 entries                                                                       |
+| `plugins[].plugin_id`     | Required unique bounded non-blank instance ID; it must equal the created plugin's `plugin_id`                         |
+| `plugins[].plugin_key`    | Required bounded non-blank installed entry-point key; several instances may use the same key                          |
+| `plugins[].enabled`       | Required boolean; a disabled entry is validated structurally but is neither selected, imported, nor created           |
+| `plugins[].configuration` | Required finite JSON object copied into the factory context; package-owned code validates its plugin-specific meaning |
+
+Unknown fields, non-finite numbers, non-JSON data values, duplicate plugin IDs, oversized input, excessive nesting, and unsupported versions fail before package discovery. The complete UTF-8 source and each programmatic data value are bounded to 1 MiB. IDs and keys are bounded to 200 characters. Configuration order is significant and becomes the configured-plugin tie-breaker after direct plugins.
+
+This document deliberately contains no Python import target, artifact URL, credential, Agent definition, Capability, Environment provider topology, or Host lifecycle value. A Host may persist or generate this exact Harness-owned document, but it retains responsibility for artifact installation and trust. Factory-specific configuration schemas remain owned by each plugin package.
+
+## Build Context and Source Resolution
+
+```python
+HARNESS_PLUGIN_CONFIG_ENABLED_ENV = "CONVERGE_HARNESS_PLUGIN_CONFIG_ENABLED"
+HARNESS_PLUGIN_CONFIG_JSON_ENV = "CONVERGE_HARNESS_PLUGIN_CONFIG_JSON"
+HARNESS_PLUGIN_CONFIG_FILE_ENV = (
+    "CONVERGE_HARNESS_PLUGIN_CONFIG_FILE"
+)
+DEFAULT_HARNESS_PLUGIN_CONFIG_FILE = "harness-plugins.yaml"
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessPluginConfigurationEntry:
+    plugin_id: str
+    plugin_key: str
+    enabled: bool
+    configuration: Mapping[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessPluginConfiguration:
+    schema_version: Literal["1"]
+    plugins: tuple[HarnessPluginConfigurationEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessBuildContext:
+    configured_plugins_enabled: bool = False
+    plugin_configuration: HarnessPluginConfiguration | None = None
+    extensions: Mapping[str, JsonValue] = {}
+
+    @classmethod
+    def from_configuration(
+        cls,
+        configuration: Mapping[str, JsonValue],
+        *,
+        extensions: Mapping[str, JsonValue] | None = None,
+    ) -> HarnessBuildContext: ...
+
+    @classmethod
+    def from_json(
+        cls,
+        value: str | bytes,
+        *,
+        extensions: Mapping[str, JsonValue] | None = None,
+    ) -> HarnessBuildContext: ...
+
+    @classmethod
+    def from_yaml(
+        cls,
+        value: str | bytes,
+        *,
+        extensions: Mapping[str, JsonValue] | None = None,
+    ) -> HarnessBuildContext: ...
+
+    @classmethod
+    def from_file(
+        cls,
+        path: str | PathLike[str],
+        *,
+        extensions: Mapping[str, JsonValue] | None = None,
+    ) -> HarnessBuildContext: ...
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        enabled: bool | None = None,
+        environ: Mapping[str, str] | None = None,
+        extensions: Mapping[str, JsonValue] | None = None,
+    ) -> HarnessBuildContext: ...
+```
+
+`extensions` is a detached, finite JSON object with bounded non-blank top-level namespace keys for a downstream embedding layer. For example, Foundation may pass `{"foundation": {...}}`. It is copied into every factory context, but it is non-authoritative: it cannot carry live clients, credentials, import targets, lifecycle handles, or arbitrary Python objects. Namespace meaning and compatibility belong to the producer and consuming plugin; the Harness only owns the bounded JSON envelope. Subclassing the context is not the extension mechanism.
+
+An explicit `HarnessBuildContext` passed to `HarnessBuilder` is the authoritative source and causes no environment lookup. A call-site `configured_plugins_enabled` value may still override whether that explicit source is applied for the executable being created; `True` requires the context to contain a configuration, while `False` ignores its entries without metadata discovery. The class constructors select exactly one explicit programmatic mapping, inline JSON or restricted YAML value, or file. `from_environment(enabled=None)` behaves as follows:
+
+1. When `enabled` is `True` or `False`, that trusted call-site override decides application without reading `CONVERGE_HARNESS_PLUGIN_CONFIG_ENABLED`. This lets a Host keep the deployment default false while explicitly enabling one Agent construction path. `False` returns the disabled context without inspecting any configuration source.
+2. When `enabled` is `None`, read `CONVERGE_HARNESS_PLUGIN_CONFIG_ENABLED`. Missing or a recognized false value returns the disabled context without reading either configuration variable, resolving the current directory, opening a file, or scanning package metadata. A recognized true value enables loading; invalid boolean text fails explicitly.
+3. If `CONVERGE_HARNESS_PLUGIN_CONFIG_JSON` is present, parse it as strict inline JSON. It takes precedence even when the file variable is also present.
+4. Otherwise, if `CONVERGE_HARNESS_PLUGIN_CONFIG_FILE` is present, read the `.yaml`, `.yml`, or `.json` path according to its suffix.
+5. Otherwise, read the preferred `harness-plugins.yaml` from the current working directory at call time.
+6. If the selected source is absent, unreadable, malformed, unsupported, or oversized, fail closed. Enabling configuration never silently becomes an empty plugin set because a source is missing.
+
+Boolean parsing is case-insensitive and accepts `1`, `true`, `yes`, and `on` as true and `0`, `false`, `no`, and `off` as false. Surrounding whitespace and every other value are invalid. YAML uses a restricted safe loader: it accepts exactly one mapping document and rejects aliases, anchors, merge keys, explicit tags, duplicate keys, custom objects, and values outside the finite JSON data model. Composition stops before object construction above 10,000 nodes, 64 document nesting levels, or 256 Ki characters in one scalar; these failures use `plugin_configuration_too_large`. TOML and unknown file suffixes are unsupported. Configuration and file boundaries suppress standard chaining of raw parser, I/O, metadata, import, and factory exceptions so ordinary traceback logging cannot render source content, credentials, raw exception text, or private paths. Configuration loading uses stable `PluginError` codes: `plugin_configuration_enablement_invalid`, `plugin_configuration_source_missing`, `plugin_configuration_read_failed`, `plugin_configuration_format_unsupported`, `plugin_configuration_invalid`, `plugin_configuration_version_unsupported`, `plugin_configuration_too_large`, and `plugin_configuration_plugin_id_duplicate`.
+
+## Package Factory Catalog
+
+A trusted distribution may register a no-argument Harness plugin factory class under `converge_agent_harness.plugins`:
+
+```toml
+[project.entry-points."converge_agent_harness.plugins"]
+"acme.audit" = "acme_harness.plugin:AuditPluginFactory"
+```
+
+The entry-point name is the stable plugin factory key. It selects installed integration code; the configured `plugin_id` identifies one concrete instance.
+
+```python
+HARNESS_PLUGIN_ENTRY_POINT_GROUP = "converge_agent_harness.plugins"
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessPluginFactoryReference:
+    plugin_key: str
+    import_target: str
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessPluginFactoryRegistration:
+    plugin_key: str
+    class_module: str
+    class_qualname: str
+    import_target: str | None
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessPluginFactoryContext:
+    plugin_key: str
+    plugin_id: str
+    configuration: Mapping[str, JsonValue]
+    extensions: Mapping[str, JsonValue]
+
+
+class HarnessPluginFactory(ABC):
+    @classmethod
+    @abstractmethod
+    def plugin_key(cls) -> str: ...
+
+    @abstractmethod
+    def create_plugin(
+        self,
+        context: HarnessPluginFactoryContext,
+    ) -> AbstractHarnessPlugin: ...
+
+
+class HarnessPluginFactoryCatalog(
+    Mapping[str, HarnessPluginFactory]
+):
+    def create_plugin(
+        self,
+        context: HarnessPluginFactoryContext,
+    ) -> AbstractHarnessPlugin: ...
+
+
+def discover_harness_plugin_factory_references(
+) -> tuple[HarnessPluginFactoryReference, ...]: ...
+
+
+def build_harness_plugin_factory_catalog(
+    *,
+    plugin_keys: Iterable[str] = (),
+    explicit_factories: Iterable[HarnessPluginFactory] = (),
+) -> HarnessPluginFactoryCatalog: ...
+```
+
+The public reference, registration, discovery, and catalog-construction values remain the explicit API defined by [Public API and Packaging](14-public-api-and-packaging.md). Metadata discovery does not import target code. Catalog construction validates every requested key and explicit factory, preflights missing names, duplicates, and collisions before loading a target, imports only explicitly selected names, requires a concrete `HarnessPluginFactory` subclass with a no-argument constructor, instantiates it once, and requires its non-blank `plugin_key()` to equal the entry-point name. Explicit factories support embedding and tests without distribution metadata. The immutable catalog records class module and qualified name plus optional entry-point target, distribution, and version provenance. There is no global mutable registration.
+
+Installed metadata is availability, not authorization. The explicit catalog API imports only caller-selected keys. Automatic Builder configuration selects only distinct keys referenced by enabled entries, in first-enabled-entry order. Disabled entries are not authorization and cannot cause target import. An Agent definition, API request, model value, state payload, plugin configuration object, or database row cannot provide an arbitrary `module:object` target.
+
+`HarnessPluginFactoryCatalog.create_plugin()` validates and detaches the complete `HarnessPluginFactoryContext`, requires the context key to select that catalog factory, calls it exactly once, and requires an `AbstractHarnessPlugin` whose exact `plugin_id` equals the requested context ID. It does not bind, order, or globally register the result. Catalog failures use stable `PluginError` codes: `plugin_factory_key_invalid`, `plugin_factory_missing`, `plugin_factory_duplicate`, `plugin_factory_target_invalid`, `plugin_factory_load_failed`, `plugin_factory_context_invalid`, `plugin_factory_failed`, and `plugin_factory_result_invalid`. Safe details contain only bounded keys, IDs, and distribution fields, never configuration or extension values, object representations, credentials, raw exception text, or private installation paths. These catalog errors suppress standard chaining of the raw target, metadata, constructor, and factory exceptions; callers receive the stable stage code rather than a traceback path to untrusted content.
+
+A factory owns its configuration semantics and must return a plugin suitable for ordinary Agent binding and concurrent executable use. Mutable per-Agent or per-run state still follows `for_agent()` and `for_run()`; package construction does not weaken those lifecycle requirements.
+
+## Builder Application
+
+`HarnessBuilder(build_context=None, configured_plugins_enabled=None)` calls `HarnessBuildContext.from_environment(enabled=configured_plugins_enabled)` once during synchronous builder construction. `None` follows the deployment switch; `True` or `False` is the trusted Host call-site override. When configuration is disabled it performs no other ambient work. When enabled, it resolves and validates the document, builds one immutable catalog from distinct enabled keys, and retains the context and catalog for that builder. `HarnessBuilder(build_context=<explicit>)` uses only that source; the optional application override replaces the context's apply state without consulting ambient sources. Enabling an explicit context with no configuration fails, while disabling one imports and creates nothing.
+
+The decision is fixed for the resulting executable graph. `run()` and `stream()` do not expose a later plugin toggle: configured plugins may contribute Agent-bound Capabilities, tools, instructions, settings, or hooks, so bypassing only their outer middleware would be a partial and unsafe disable, while a previously disabled executable cannot acquire those contributions at run time. A Host that offers create-and-run or create-and-stream operations applies its per-operation override when it constructs the builder/executable and includes the resolved plugin context in any executable-cache identity.
+
+For every root or nested `AgentDefinition` recursively built by the builder:
+
+1. create a fresh concrete plugin for each enabled entry in document order, using a fresh detached `HarnessPluginFactoryContext`;
+2. append those values after the definition's direct `plugins` tuple;
+3. run the ordinary stable-ID validation, ordering, `for_agent()`, Capability contribution, and executable construction path.
+
+A factory is therefore selected once per builder but invoked once per enabled entry per definition. Separate definitions never share the same factory-created plugin prototype. Direct plugins precede configured plugins only as the stable topological tie-breaker; explicit ordering constraints still determine the final middleware graph. An ID collision between direct and configured plugins fails through ordinary plugin validation. Any configuration, discovery, factory, or result failure aborts construction before the affected executable is returned.
+
+Automatic configuration is builder-local, not definition-local. The same configured entries apply to root and nested definitions because one builder owns their process-local construction. A caller that needs a different plugin set constructs a different builder or supplies plugins directly. Environment providers are not auto-applied: their bindings remain fresh run inputs with Host-owned topology, lifecycle, authority, and reconciliation.
 
 ## Plugin Contract
 
@@ -191,6 +408,10 @@ Untrusted or separately governed behavior belongs behind a tool, Environment, mo
 
 | Failure                                            | Outcome                                                                    |
 | -------------------------------------------------- | -------------------------------------------------------------------------- |
+| Invalid enable value or missing enabled source     | Builder/context construction fails before metadata discovery               |
+| Invalid, unsupported, or oversized configuration   | Builder/context construction fails before target import                    |
+| Missing, duplicate, or invalid selected factory    | Catalog construction fails before Agent composition                        |
+| Factory failure, invalid result, or mismatched ID  | Build fails before the affected executable is returned                     |
 | Invalid plugin value, blank/duplicate ID           | Build fails                                                                |
 | Unknown ordering reference or cycle                | Build fails deterministically                                              |
 | Agent/run replacement changes type, ID, or order   | Build or run setup fails                                                   |
@@ -202,19 +423,28 @@ Untrusted or separately governed behavior belongs behind a tool, Environment, mo
 
 ## Boundaries
 
-| Concern                                         | Owner                                  |
-| ----------------------------------------------- | -------------------------------------- |
-| Concrete plugin construction and configuration  | Trusted embedding code or Host adapter |
-| Ordering, binding, middleware, and validation   | Harness                                |
-| Agent-loop hooks and Capability lifecycle       | Pydantic AI                            |
-| Durable plugin configuration and artifact locks | Host                                   |
-| Durable completion and checkpoint selection     | Host                                   |
+| Concern                                                | Owner                                  |
+| ------------------------------------------------------ | -------------------------------------- |
+| Direct concrete plugin construction                    | Trusted embedding code or Host adapter |
+| Versioned plugin configuration envelope and loading    | Harness                                |
+| Context extensions and their namespaced meaning        | Producing Host and consuming plugin    |
+| Selected package factory loading and result validation | Harness catalog and selecting caller   |
+| Factory-specific configuration semantics               | Owning plugin package                  |
+| Ordering, binding, middleware, and validation          | Harness                                |
+| Agent-loop hooks and Capability lifecycle              | Pydantic AI                            |
+| Configuration persistence and artifact trust/locks     | Host or embedding deployment           |
+| Environment topology and provider lifecycle            | Host and owning Environment provider   |
+| Durable completion and checkpoint selection            | Host                                   |
 
 ## Trade-offs
 
-### Trusted Code-first Plugins vs. a Serialized Extension Framework
+### Narrow Configuration vs. a Serialized Extension Framework
 
-Direct Python composition is simple, lossless, and aligned with Pydantic AI. Hosts must reconstruct plugins from their own trusted configuration and cannot treat plugin objects as wire data.
+The Harness-owned document removes repetitive plugin loading logic from Hosts while keeping one intentionally small envelope: instance identity, selected installed key, enable state, and package-owned JSON. Direct objects and configured factories still end in the same concrete Python composition. Hosts may persist the document but still own artifact authorization and cannot treat plugin objects, factory classes, import targets, or Environment lifecycle values as wire data.
+
+### Opt-in Ambient Loading vs. Implicit Behavior
+
+An explicit enable switch makes file- and environment-based deployment convenient without making ordinary library use depend on ambient process state. This adds one synchronous I/O path to opted-in builder construction; disabled construction remains inert, and explicit contexts provide deterministic embedding and testing.
 
 ### Complete-result Freedom vs. Provenance Enforcement
 

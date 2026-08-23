@@ -7,10 +7,10 @@ from typing import Any, ClassVar
 import pytest
 from converge_agent_harness import (
     EnvironmentError,
-    EnvironmentPlugin,
     EnvironmentProviderBinding,
-    build_environment_plugin_catalog,
-    discover_environment_plugins,
+    EnvironmentProviderFactory,
+    build_environment_provider_factory_catalog,
+    discover_environment_provider_factory_references,
 )
 
 
@@ -36,11 +36,11 @@ class _Binding(EnvironmentProviderBinding):
         self.discarded = True
 
 
-class _Plugin(EnvironmentPlugin):
+class _Factory(EnvironmentProviderFactory):
     calls: ClassVar[list[dict[str, Any]]] = []
 
     @classmethod
-    def plugin_key(cls) -> str:
+    def provider_key(cls) -> str:
         return "test.plugin"
 
     def create_provider_binding(self, configuration):
@@ -49,25 +49,25 @@ class _Plugin(EnvironmentPlugin):
         return _Binding(str(detached.get("name", "default")))
 
 
-class _OtherPlugin(_Plugin):
+class _OtherFactory(_Factory):
     @classmethod
-    def plugin_key(cls) -> str:
+    def provider_key(cls) -> str:
         return "test.other"
 
 
-class _MismatchedPlugin(_Plugin):
+class _MismatchedFactory(_Factory):
     @classmethod
-    def plugin_key(cls) -> str:
+    def provider_key(cls) -> str:
         return "wrong.key"
 
 
-class _InvalidBindingPlugin(_Plugin):
+class _InvalidBindingFactory(_Factory):
     def create_provider_binding(self, configuration):
         del configuration
         return object()
 
 
-class _FailingPlugin(_Plugin):
+class _FailingFactory(_Factory):
     def create_provider_binding(self, configuration):
         del configuration
         raise RuntimeError("secret factory detail")
@@ -97,14 +97,14 @@ class _FakeEntryPoint:
 
 
 def test_discovery_reads_metadata_without_importing_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    first = _FakeEntryPoint("test.plugin", _Plugin)
-    second = _FakeEntryPoint("test.other", _OtherPlugin, distribution="other-plugin", version="2.0")
+    first = _FakeEntryPoint("test.plugin", _Factory)
+    second = _FakeEntryPoint("test.other", _OtherFactory, distribution="other-plugin", version="2.0")
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (second, first),
     )
 
-    references = discover_environment_plugins()
+    references = discover_environment_provider_factory_references()
 
     assert [reference.provider_key for reference in references] == ["test.other", "test.plugin"]
     assert references[1].distribution_name == "test-environment-plugin"
@@ -116,23 +116,23 @@ def test_empty_selection_does_not_scan_entry_points(monkeypatch: pytest.MonkeyPa
     def reject_scan() -> tuple[()]:
         raise AssertionError("empty selection must not scan installed metadata")
 
-    monkeypatch.setattr("converge_agent_harness.environment.plugins._entry_points", reject_scan)
+    monkeypatch.setattr("converge_agent_harness.environment.provider_factories._entry_points", reject_scan)
 
-    assert len(build_environment_plugin_catalog()) == 0
+    assert len(build_environment_provider_factory_catalog()) == 0
 
 
 def test_catalog_loads_only_selected_target_and_records_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    selected = _FakeEntryPoint("test.plugin", _Plugin)
+    selected = _FakeEntryPoint("test.plugin", _Factory)
     unselected = _FakeEntryPoint("test.other", RuntimeError("must not load"))
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (unselected, selected),
     )
 
-    catalog = build_environment_plugin_catalog(selected_entry_points=("test.plugin",))
+    catalog = build_environment_provider_factory_catalog(provider_keys=("test.plugin",))
 
     assert list(catalog) == ["test.plugin"]
-    assert isinstance(catalog.require("test.plugin"), _Plugin)
+    assert isinstance(catalog.require("test.plugin"), _Factory)
     assert selected.load_count == 1
     assert unselected.load_count == 0
     registration = catalog.registrations[0]
@@ -142,28 +142,28 @@ def test_catalog_loads_only_selected_target_and_records_provenance(monkeypatch: 
     assert registration.import_target == selected.value
 
 
-def test_explicit_plugins_need_no_metadata_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_factories_need_no_metadata_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (_ for _ in ()).throw(AssertionError("must not scan")),
     )
 
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_Plugin(),))
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_Factory(),))
 
-    assert isinstance(catalog["test.plugin"], _Plugin)
+    assert isinstance(catalog["test.plugin"], _Factory)
     assert catalog.registrations[0].import_target is None
 
 
 @pytest.mark.parametrize(
     ("selected", "entries", "code"),
     [
-        (("missing.plugin",), (), "environment_plugin_missing"),
+        (("missing.plugin",), (), "environment_provider_factory_missing"),
         (
             ("test.plugin",),
-            (_FakeEntryPoint("test.plugin", _Plugin), _FakeEntryPoint("test.plugin", _Plugin)),
-            "environment_plugin_duplicate",
+            (_FakeEntryPoint("test.plugin", _Factory), _FakeEntryPoint("test.plugin", _Factory)),
+            "environment_provider_factory_duplicate",
         ),
-        (("test.plugin", "test.plugin"), (), "environment_plugin_duplicate"),
+        (("test.plugin", "test.plugin"), (), "environment_provider_factory_duplicate"),
     ],
 )
 def test_catalog_rejects_missing_and_duplicate_selection(
@@ -172,28 +172,28 @@ def test_catalog_rejects_missing_and_duplicate_selection(
     entries: tuple[_FakeEntryPoint, ...],
     code: str,
 ) -> None:
-    monkeypatch.setattr("converge_agent_harness.environment.plugins._entry_points", lambda: entries)
+    monkeypatch.setattr("converge_agent_harness.environment.provider_factories._entry_points", lambda: entries)
 
     with pytest.raises(EnvironmentError) as exc_info:
-        build_environment_plugin_catalog(selected_entry_points=selected)
+        build_environment_provider_factory_catalog(provider_keys=selected)
 
     assert exc_info.value.code == code
 
 
 def test_catalog_preflights_explicit_collision_before_import(monkeypatch: pytest.MonkeyPatch) -> None:
-    entry_point = _FakeEntryPoint("test.plugin", _Plugin)
+    entry_point = _FakeEntryPoint("test.plugin", _Factory)
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (entry_point,),
     )
 
     with pytest.raises(EnvironmentError) as exc_info:
-        build_environment_plugin_catalog(
-            selected_entry_points=("test.plugin",),
-            explicit_plugins=(_Plugin(),),
+        build_environment_provider_factory_catalog(
+            provider_keys=("test.plugin",),
+            explicit_factories=(_Factory(),),
         )
 
-    assert exc_info.value.code == "environment_plugin_duplicate"
+    assert exc_info.value.code == "environment_provider_factory_duplicate"
     assert entry_point.load_count == 0
 
 
@@ -204,32 +204,32 @@ def test_catalog_rejects_invalid_entry_point_target(
 ) -> None:
     entry_point = _FakeEntryPoint("test.plugin", target)
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (entry_point,),
     )
 
     with pytest.raises(EnvironmentError) as exc_info:
-        build_environment_plugin_catalog(selected_entry_points=("test.plugin",))
+        build_environment_provider_factory_catalog(provider_keys=("test.plugin",))
 
-    assert exc_info.value.code == "environment_plugin_target_invalid"
+    assert exc_info.value.code == "environment_provider_factory_target_invalid"
 
 
-def test_catalog_rejects_mismatched_plugin_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    entry_point = _FakeEntryPoint("test.plugin", _MismatchedPlugin)
+def test_catalog_rejects_mismatched_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry_point = _FakeEntryPoint("test.plugin", _MismatchedFactory)
     monkeypatch.setattr(
-        "converge_agent_harness.environment.plugins._entry_points",
+        "converge_agent_harness.environment.provider_factories._entry_points",
         lambda: (entry_point,),
     )
 
     with pytest.raises(EnvironmentError) as exc_info:
-        build_environment_plugin_catalog(selected_entry_points=("test.plugin",))
+        build_environment_provider_factory_catalog(provider_keys=("test.plugin",))
 
-    assert exc_info.value.code == "environment_plugin_key_invalid"
+    assert exc_info.value.code == "environment_provider_factory_key_invalid"
 
 
 def test_catalog_validates_factory_configuration_and_binding() -> None:
-    _Plugin.calls.clear()
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_Plugin(),))
+    _Factory.calls.clear()
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_Factory(),))
     configuration = {"name": "first", "nested": {"values": [1]}}
 
     binding = catalog.create_provider_binding("test.plugin", configuration)
@@ -237,7 +237,7 @@ def test_catalog_validates_factory_configuration_and_binding() -> None:
 
     assert isinstance(binding, _Binding)
     assert binding.name == "first"
-    assert _Plugin.calls == [{"name": "first", "nested": {"values": [1]}}]
+    assert _Factory.calls == [{"name": "first", "nested": {"values": [1]}}]
 
 
 @pytest.mark.parametrize(
@@ -249,39 +249,39 @@ def test_catalog_validates_factory_configuration_and_binding() -> None:
     ],
 )
 def test_catalog_rejects_non_json_factory_configuration(configuration: dict[str, Any]) -> None:
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_Plugin(),))
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_Factory(),))
 
     with pytest.raises(EnvironmentError) as exc_info:
         catalog.create_provider_binding("test.plugin", configuration)
 
-    assert exc_info.value.code == "environment_plugin_configuration_invalid"
+    assert exc_info.value.code == "environment_provider_factory_configuration_invalid"
 
 
 def test_catalog_rejects_invalid_factory_result() -> None:
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_InvalidBindingPlugin(),))
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_InvalidBindingFactory(),))
 
     with pytest.raises(EnvironmentError) as exc_info:
         catalog.create_provider_binding("test.plugin", {})
 
-    assert exc_info.value.code == "environment_plugin_binding_invalid"
+    assert exc_info.value.code == "environment_provider_factory_result_invalid"
 
 
 def test_catalog_sanitizes_factory_failure() -> None:
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_FailingPlugin(),))
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_FailingFactory(),))
 
     with pytest.raises(EnvironmentError) as exc_info:
         catalog.create_provider_binding("test.plugin", {"token": "do-not-render"})
 
-    assert exc_info.value.code == "environment_plugin_factory_failed"
+    assert exc_info.value.code == "environment_provider_factory_failed"
     assert "secret" not in str(exc_info.value)
     assert "token" not in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 def test_catalog_require_rejects_unselected_key() -> None:
-    catalog = build_environment_plugin_catalog(explicit_plugins=(_Plugin(),))
+    catalog = build_environment_provider_factory_catalog(explicit_factories=(_Factory(),))
 
     with pytest.raises(EnvironmentError) as exc_info:
         catalog.require("missing.plugin")
 
-    assert exc_info.value.code == "environment_plugin_missing"
+    assert exc_info.value.code == "environment_provider_factory_missing"

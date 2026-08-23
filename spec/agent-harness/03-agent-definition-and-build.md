@@ -4,14 +4,15 @@
 
 `AgentDefinition` is the immutable process-local input used to build one reusable Harness executable. It is a Python composition boundary, not a durable document or wire format. It combines the native Pydantic AI `AgentSpec` with one build-time output contract, a trusted native model, top-level Capabilities, Harness plugins, and named complete child definitions. Capability is the only top-level feature-behavior composition plane: function tools and Toolsets are owned by a Capability rather than supplied through peer `AgentDefinition` fields.
 
-The Harness does not compile, serialize, reload, or discover Agent definitions. A hosted system owns its own serializable definition and dependency-lock schemas, then reconstructs the trusted Python objects required by `AgentDefinition` inside the execution process. Python objects never pass through a hosted API or durable record.
+The Harness does not compile, serialize, reload, or discover Agent definitions. A hosted system owns its serializable Agent definition and dependency-lock schemas, then reconstructs the trusted Python objects required by `AgentDefinition` inside the execution process. Direct plugins remain such inputs. Separately, one builder may apply the narrow [Harness-owned plugin configuration](05-plugin-system.md#configuration-document) after definition construction; this removes plugin reconstruction from the Host without turning the document into an Agent format. Python objects, factory classes, and import targets never pass through a hosted API or durable record.
 
 ```mermaid
 flowchart LR
-    Host[Embedded caller or hosted worker] --> Reconstruct[Reconstruct trusted Python inputs]
+    Host[Embedded caller or hosted worker] --> Reconstruct[Reconstruct trusted direct inputs]
     Reconstruct --> Definition[AgentDefinition]
-    Definition --> Builder[HarnessBuilder]
-    Builder --> Plugins[Bind Agent plugins and collect Capabilities]
+    Config[Explicit or opted-in plugin context] --> Builder[HarnessBuilder]
+    Definition --> Builder
+    Builder --> Plugins[Create configured plugins, bind all plugins, and collect Capabilities]
     Plugins --> FromSpec[Agent.from_spec]
     FromSpec --> Executable[ExecutableAgent]
 ```
@@ -41,7 +42,7 @@ class AgentDefinition[OutputT]:
 | `definition_id`  | Non-blank logical correlation value; it grants no authority                                                      |
 | `model`          | Optional native Model or model name overriding the `AgentSpec` selection                                         |
 | `capabilities`   | The only top-level feature plane; each native Capability owns its tools, Toolsets, guidance, settings, and hooks |
-| `plugins`        | Trusted code-first Harness middleware instances                                                                  |
+| `plugins`        | Trusted concrete Harness middleware instances supplied directly with this definition                             |
 | `subagents`      | Named complete process-local child definitions and authored edge ceilings                                        |
 | `self_healing`   | Enables narrow one-shot provider-history repairs on each resolved native Model                                   |
 | `model_recovery` | Optional bounded semantic attempt policy for recoverable model interruption inside one logical Harness run       |
@@ -58,6 +59,8 @@ class HarnessBuilder:
         self,
         *,
         capability_type_catalog: CapabilityTypeCatalog | None = None,
+        build_context: HarnessBuildContext | None = None,
+        configured_plugins_enabled: bool | None = None,
     ) -> None: ...
 
     def build[OutputT](
@@ -100,12 +103,12 @@ class HarnessBuilder:
     ) -> ExecutableAgent[dict[str, JsonValue]]: ...
 ```
 
-Builder construction and both build methods are synchronous because they perform no I/O. `capability_type_catalog=None` selects the canonical empty catalog; a supplied catalog is exact, immutable, and builder-local. `build_code()` creates an `AgentDefinition` and delegates to `build()`; it is not a second construction path.
+Builder construction and both build methods are synchronous. `capability_type_catalog=None` selects the canonical empty catalog; a supplied catalog is exact, immutable, and builder-local. An explicit `build_context` bypasses ambient discovery. With `build_context=None`, `configured_plugins_enabled=None` follows the environment enable switch, while `True` or `False` provides a trusted call-site override without reading that switch. Enabled construction performs synchronous JSON/file loading and package discovery. For an explicit context, the override changes only its application state and never consults ambient sources; enabling requires that context to contain a configuration. The detailed source, bounds, run-time immutability, and failure contract belongs to [Harness Plugin System](05-plugin-system.md#build-context-and-source-resolution). `build_code()` creates an `AgentDefinition` and delegates to `build()`; it is not a second construction path.
 
 The build flow is:
 
 01. Validate the finite child graph and unique names, recursively build children before their parent, and freeze one immediate-child `SubagentCollection`.
-02. Validate and deterministically order the supplied plugin instances.
+02. Create fresh configured plugin instances for the current definition, append them after direct definition plugins, and validate and deterministically order the combined tuple.
 03. Call each plugin's `for_agent()` and validate stable concrete type, ID, and ordering.
 04. Collect the Agent-bound plugins' ordinary Pydantic `AbstractCapability[AgentContext]` contributions.
 05. Install one thin `ResolveModelId` Capability and one inert-by-default outer invocation-boundary Capability for every Agent.
@@ -117,7 +120,7 @@ The build flow is:
 
 `defer_model_check=True` is always used so a logical string can reach the run-scoped resolver after fresh `RunBindings` exist. The resolver delegates to native Pydantic inference when the run has no `ModelRunBinding`; this is ordinary embedded behavior, not a second settings or registry system. The exact resolution and recovery contract is owned by [Input, Model, and Output Boundaries](16-input-model-and-output.md).
 
-The builder does not accept a general class registry, compiler, serialized plugin spec, resolved-component envelope, or Host lifecycle object. It may receive the exact immutable custom Capability type catalog authorized for declarative `AgentSpec` reconstruction; that narrow catalog neither discovers packages nor constructs unrelated Python values. Trusted code constructs all process-local instances directly.
+The builder does not accept a general class registry, externally mutable plugin factory catalog, Agent compiler, serialized Agent spec, resolved-component envelope, or Host lifecycle object. It may receive the exact immutable custom Capability type catalog authorized for declarative `AgentSpec` reconstruction and one immutable `HarnessBuildContext`. The plugin context selects only the narrow Harness configuration contract and bounded namespaced JSON extensions; it cannot construct unrelated Python values or configure run-scoped Environment topology.
 
 ## Executable Ownership
 
@@ -144,29 +147,30 @@ flowchart LR
     Revision[Host-owned definition revision] --> Verify[Verify Host dependency locks]
     Verify --> Adapters[Trusted Host reconstruction adapters]
     Adapters --> Spec[AgentSpec and optional OutputSpec]
-    Adapters --> Native[Model name, Capabilities, plugins]
+    Adapters --> Native[Model name, Capabilities, and direct plugins]
     Spec & Native --> Definition[AgentDefinition]
-    Definition --> Builder[HarnessBuilder]
+    PluginConfig[Optional Harness plugin context] --> Builder[HarnessBuilder]
+    Definition --> Builder
 ```
 
-The Host may use typed Presets, plugin configuration, provider integration revisions, or artifact locks, but those are Host contracts. It is free to change their serialized representation without changing the Harness API as long as reconstruction produces the same accepted process-local values. The Harness neither verifies a Host artifact digest nor derives Python import paths from untrusted definition data.
+The Host may use typed Presets, provider integration revisions, or artifact locks under its own contracts. It may persist or generate the exact Harness plugin document and pass an explicit context, or let deployment environment variables opt the builder in; it need not own a plugin factory adapter. The Harness neither verifies a Host artifact digest nor derives Python import paths from untrusted definition data.
 
 Fresh current-run authority does not belong in `AgentDefinition`. Identity, the Environment aggregate, run-scoped model resolution, policy, credentials, and other invocation collaborators enter through `RunBindings` or their narrowly owning fresh Pydantic Capabilities. `AgentDefinition` deliberately has no `environment`, provider selector, desired topology, or `environment.operations` field. Environment consumers declare and enforce scoped readiness at the operation or owning feature boundary; the optional `EnvironmentToolsCapability` configures only model projection.
 
 ## Failure Semantics
 
-| Failure                                                                  | Outcome                                                                                        |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| Blank `definition_id`                                                    | `DefinitionError(code="definition_id_invalid")`                                                |
-| Invalid, duplicate, or cyclic child topology                             | `DefinitionError` before the affected parent executable is returned                            |
-| Invalid plugin type, ID, ordering, or replacement                        | Plugin construction fails before an executable is returned                                     |
-| Invalid plugin Capability contribution                                   | Build fails before Pydantic Agent construction                                                 |
-| Explicit output and `AgentSpec.output_schema` are both present           | `DefinitionError(code="output_contract_conflict")` before Pydantic construction                |
-| Neither explicit output nor `AgentSpec.output_schema` is present         | `DefinitionError(code="output_contract_missing")` before Pydantic construction                 |
-| Business output directly or transitively includes `DeferredToolRequests` | `DefinitionError(code="output_contract_reserved")` before Pydantic construction                |
-| Invalid `AgentSpec`, model, Capability-owned tool/Toolset, or output     | `DefinitionError(code="agent_build_failed")` with the original exception retained as the cause |
-| Host revision or artifact cannot be reconstructed                        | Host failure before calling the Harness                                                        |
-| Run-scoped model cannot be resolved                                      | Typed run failure owned by the model boundary                                                  |
+| Failure                                                                   | Outcome                                                                                        |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Blank `definition_id`                                                     | `DefinitionError(code="definition_id_invalid")`                                                |
+| Invalid, duplicate, or cyclic child topology                              | `DefinitionError` before the affected parent executable is returned                            |
+| Invalid plugin configuration, factory, type, ID, ordering, or replacement | Plugin or builder construction fails before an affected executable is returned                 |
+| Invalid plugin Capability contribution                                    | Build fails before Pydantic Agent construction                                                 |
+| Explicit output and `AgentSpec.output_schema` are both present            | `DefinitionError(code="output_contract_conflict")` before Pydantic construction                |
+| Neither explicit output nor `AgentSpec.output_schema` is present          | `DefinitionError(code="output_contract_missing")` before Pydantic construction                 |
+| Business output directly or transitively includes `DeferredToolRequests`  | `DefinitionError(code="output_contract_reserved")` before Pydantic construction                |
+| Invalid `AgentSpec`, model, Capability-owned tool/Toolset, or output      | `DefinitionError(code="agent_build_failed")` with the original exception retained as the cause |
+| Host revision or artifact cannot be reconstructed                         | Host failure before calling the Harness                                                        |
+| Run-scoped model cannot be resolved                                       | Typed run failure owned by the model boundary                                                  |
 
 Errors do not serialize arbitrary Python object representations, credentials, or private installation paths.
 

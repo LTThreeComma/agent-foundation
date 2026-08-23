@@ -1,4 +1,4 @@
-"""Explicit package discovery for trusted Environment provider plugins."""
+"""Explicit package discovery for trusted Environment provider factories."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from converge_agent_harness._json import require_finite_json
 from .models import EnvironmentError
 from .providers import EnvironmentProviderBinding
 
-ENVIRONMENT_PLUGIN_ENTRY_POINT_GROUP = "converge_agent_harness.environments"
+ENVIRONMENT_PROVIDER_ENTRY_POINT_GROUP = "converge_agent_harness.environments"
 _MAX_PROVIDER_KEY_LENGTH = 200
 _MAX_DIAGNOSTIC_VALUE_LENGTH = 200
 _CONFIGURATION_ADAPTER = TypeAdapter(dict[str, JsonValue])
 
 
 @dataclass(frozen=True, slots=True)
-class EnvironmentPluginReference:
+class EnvironmentProviderFactoryReference:
     """Installed entry-point metadata without importing its target."""
 
     provider_key: str
@@ -33,8 +33,8 @@ class EnvironmentPluginReference:
 
 
 @dataclass(frozen=True, slots=True)
-class EnvironmentPluginRegistration:
-    """One validated plugin and its process-local provenance."""
+class EnvironmentProviderFactoryRegistration:
+    """One validated provider factory and its process-local provenance."""
 
     provider_key: str
     class_module: str
@@ -44,12 +44,12 @@ class EnvironmentPluginRegistration:
     distribution_version: str | None
 
 
-class EnvironmentPlugin(ABC):
+class EnvironmentProviderFactory(ABC):
     """Trusted factory for one pre-entry-inert provider binding."""
 
     @classmethod
     @abstractmethod
-    def plugin_key(cls) -> str:
+    def provider_key(cls) -> str:
         """Return the stable Host-facing provider key."""
 
     @abstractmethod
@@ -60,52 +60,52 @@ class EnvironmentPlugin(ABC):
         """Create one fresh provider binding without acquiring external resources."""
 
 
-class EnvironmentPluginCatalog(Mapping[str, EnvironmentPlugin]):
-    """Immutable caller-owned snapshot of selected Environment plugins."""
+class EnvironmentProviderFactoryCatalog(Mapping[str, EnvironmentProviderFactory]):
+    """Immutable caller-owned snapshot of selected Environment provider factories."""
 
-    __slots__ = ("_plugins", "_registrations")
+    __slots__ = ("_factories", "_registrations")
 
     def __init__(
         self,
-        entries: Sequence[tuple[EnvironmentPluginRegistration, EnvironmentPlugin]],
+        entries: Sequence[tuple[EnvironmentProviderFactoryRegistration, EnvironmentProviderFactory]],
     ) -> None:
-        registrations = tuple(registration for registration, _plugin in entries)
-        plugins = {registration.provider_key: plugin for registration, plugin in entries}
-        if len(plugins) != len(entries):
+        registrations = tuple(registration for registration, _factory in entries)
+        factories = {registration.provider_key: factory for registration, factory in entries}
+        if len(factories) != len(entries):
             raise EnvironmentError(
-                "Environment plugin provider keys must be unique.",
-                code="environment_plugin_duplicate",
+                "Environment provider factory keys must be unique.",
+                code="environment_provider_factory_duplicate",
             )
         self._registrations = registrations
-        self._plugins = MappingProxyType(plugins)
+        self._factories = MappingProxyType(factories)
 
-    def __getitem__(self, provider_key: str) -> EnvironmentPlugin:
-        return self._plugins[provider_key]
+    def __getitem__(self, provider_key: str) -> EnvironmentProviderFactory:
+        return self._factories[provider_key]
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._plugins)
+        return iter(self._factories)
 
     def __len__(self) -> int:
-        return len(self._plugins)
+        return len(self._factories)
 
     @property
-    def registrations(self) -> tuple[EnvironmentPluginRegistration, ...]:
+    def registrations(self) -> tuple[EnvironmentProviderFactoryRegistration, ...]:
         """Return registrations in selected-then-explicit order."""
 
         return self._registrations
 
-    def require(self, provider_key: str) -> EnvironmentPlugin:
-        """Return one selected plugin or fail with a stable Environment error."""
+    def require(self, provider_key: str) -> EnvironmentProviderFactory:
+        """Return one selected provider factory or fail with a stable Environment error."""
 
         key = _validate_provider_key(provider_key)
-        plugin = self._plugins.get(key)
-        if plugin is None:
+        factory = self._factories.get(key)
+        if factory is None:
             raise EnvironmentError(
-                "The required Environment plugin is not selected.",
-                code="environment_plugin_missing",
+                "The required Environment provider factory is not selected.",
+                code="environment_provider_factory_missing",
                 details={"provider_key": key},
             )
-        return plugin
+        return factory
 
     def create_provider_binding(
         self,
@@ -115,35 +115,35 @@ class EnvironmentPluginCatalog(Mapping[str, EnvironmentPlugin]):
         """Invoke one selected factory and validate its public return boundary."""
 
         key = _validate_provider_key(provider_key)
-        plugin = self.require(key)
+        factory = self.require(key)
         try:
             detached_configuration = _CONFIGURATION_ADAPTER.validate_python(configuration)
             require_finite_json(detached_configuration)
         except (ValidationError, ValueError) as exc:
             raise EnvironmentError(
-                "Environment plugin configuration must be a JSON object.",
-                code="environment_plugin_configuration_invalid",
+                "Environment provider factory configuration must be a JSON object.",
+                code="environment_provider_factory_configuration_invalid",
                 details={"provider_key": key},
             ) from exc
         try:
-            binding = plugin.create_provider_binding(detached_configuration)
+            binding = factory.create_provider_binding(detached_configuration)
         except Exception as exc:
             raise EnvironmentError(
-                "Environment plugin factory failed.",
-                code="environment_plugin_factory_failed",
+                "Environment provider factory failed.",
+                code="environment_provider_factory_failed",
                 details={"provider_key": key},
             ) from exc
         if not isinstance(binding, EnvironmentProviderBinding):
             raise EnvironmentError(
-                "Environment plugin factory returned an invalid provider binding.",
-                code="environment_plugin_binding_invalid",
+                "Environment provider factory returned an invalid provider binding.",
+                code="environment_provider_factory_result_invalid",
                 details={"provider_key": key},
             )
         return binding
 
 
-def discover_environment_plugins() -> tuple[EnvironmentPluginReference, ...]:
-    """Discover deterministic plugin metadata without importing target code."""
+def discover_environment_provider_factory_references() -> tuple[EnvironmentProviderFactoryReference, ...]:
+    """Discover deterministic provider-factory metadata without importing target code."""
 
     references = tuple(_entry_point_reference(entry_point) for entry_point in _entry_points())
     return tuple(
@@ -159,43 +159,43 @@ def discover_environment_plugins() -> tuple[EnvironmentPluginReference, ...]:
     )
 
 
-def build_environment_plugin_catalog(
+def build_environment_provider_factory_catalog(
     *,
-    selected_entry_points: Iterable[str] = (),
-    explicit_plugins: Iterable[EnvironmentPlugin] = (),
-) -> EnvironmentPluginCatalog:
+    provider_keys: Iterable[str] = (),
+    explicit_factories: Iterable[EnvironmentProviderFactory] = (),
+) -> EnvironmentProviderFactoryCatalog:
     """Load an immutable catalog without importing unselected entry points."""
 
-    selected = tuple(_validate_provider_key(value) for value in selected_entry_points)
+    selected = tuple(_validate_provider_key(value) for value in provider_keys)
     _require_unique_keys(selected)
 
-    explicit_entries: list[tuple[EnvironmentPluginRegistration, EnvironmentPlugin]] = []
+    explicit_entries: list[tuple[EnvironmentProviderFactoryRegistration, EnvironmentProviderFactory]] = []
     explicit_keys: set[str] = set()
-    for plugin in explicit_plugins:
-        if not isinstance(plugin, EnvironmentPlugin):
+    for factory in explicit_factories:
+        if not isinstance(factory, EnvironmentProviderFactory):
             raise EnvironmentError(
-                "Explicit Environment plugins must implement EnvironmentPlugin.",
-                code="environment_plugin_target_invalid",
+                "Explicit Environment provider factories must implement EnvironmentProviderFactory.",
+                code="environment_provider_factory_target_invalid",
             )
-        key = _plugin_key(plugin)
+        key = _provider_key(factory)
         if key in explicit_keys:
             raise EnvironmentError(
-                "An Environment plugin provider key was supplied more than once.",
-                code="environment_plugin_duplicate",
+                "An Environment provider factory key was supplied more than once.",
+                code="environment_provider_factory_duplicate",
                 details={"provider_key": key},
             )
         explicit_keys.add(key)
-        explicit_entries.append((_explicit_registration(key, plugin), plugin))
+        explicit_entries.append((_explicit_registration(key, factory), factory))
 
     collisions = sorted(set(selected) & explicit_keys)
     if collisions:
         raise EnvironmentError(
-            "Selected and explicit Environment plugins have colliding provider keys.",
-            code="environment_plugin_duplicate",
+            "Selected and explicit Environment provider factories have colliding keys.",
+            code="environment_provider_factory_duplicate",
             details={"provider_key": collisions[0]},
         )
 
-    selected_entries: list[tuple[EnvironmentPluginRegistration, EnvironmentPlugin]] = []
+    selected_entries: list[tuple[EnvironmentProviderFactoryRegistration, EnvironmentProviderFactory]] = []
     if selected:
         discovered: dict[str, list[importlib.metadata.EntryPoint]] = {}
         selected_set = set(selected)
@@ -206,30 +206,30 @@ def build_environment_plugin_catalog(
         missing = [key for key in selected if key not in discovered]
         if missing:
             raise EnvironmentError(
-                "A selected Environment plugin entry point was not found.",
-                code="environment_plugin_missing",
+                "A selected Environment provider factory entry point was not found.",
+                code="environment_provider_factory_missing",
                 details={"provider_key": missing[0]},
             )
         for key in selected:
             matches = discovered[key]
             if len(matches) != 1:
                 raise EnvironmentError(
-                    "An Environment plugin provider key is supplied by more than one distribution.",
-                    code="environment_plugin_duplicate",
+                    "An Environment provider factory key is supplied by more than one distribution.",
+                    code="environment_provider_factory_duplicate",
                     details={"provider_key": key},
                 )
 
         for key in selected:
             selected_entries.append(_load_entry_point(key, discovered[key][0]))
 
-    return EnvironmentPluginCatalog((*selected_entries, *explicit_entries))
+    return EnvironmentProviderFactoryCatalog((*selected_entries, *explicit_entries))
 
 
 def _entry_points() -> tuple[importlib.metadata.EntryPoint, ...]:
-    return tuple(importlib.metadata.entry_points(group=ENVIRONMENT_PLUGIN_ENTRY_POINT_GROUP))
+    return tuple(importlib.metadata.entry_points(group=ENVIRONMENT_PROVIDER_ENTRY_POINT_GROUP))
 
 
-def _entry_point_reference(entry_point: importlib.metadata.EntryPoint) -> EnvironmentPluginReference:
+def _entry_point_reference(entry_point: importlib.metadata.EntryPoint) -> EnvironmentProviderFactoryReference:
     distribution = entry_point.dist
     distribution_name: str | None = None
     distribution_version: str | None = None
@@ -240,7 +240,7 @@ def _entry_point_reference(entry_point: importlib.metadata.EntryPoint) -> Enviro
         version = distribution.version
         if isinstance(version, str) and version:
             distribution_version = version
-    return EnvironmentPluginReference(
+    return EnvironmentProviderFactoryReference(
         provider_key=entry_point.name,
         import_target=entry_point.value,
         distribution_name=distribution_name,
@@ -251,81 +251,81 @@ def _entry_point_reference(entry_point: importlib.metadata.EntryPoint) -> Enviro
 def _load_entry_point(
     provider_key: str,
     entry_point: importlib.metadata.EntryPoint,
-) -> tuple[EnvironmentPluginRegistration, EnvironmentPlugin]:
+) -> tuple[EnvironmentProviderFactoryRegistration, EnvironmentProviderFactory]:
     reference = _entry_point_reference(entry_point)
     try:
         loaded = entry_point.load()
     except Exception as exc:
         raise EnvironmentError(
-            "A selected Environment plugin could not be loaded.",
-            code="environment_plugin_load_failed",
+            "A selected Environment provider factory could not be loaded.",
+            code="environment_provider_factory_load_failed",
             details=_reference_details(reference),
         ) from exc
-    if not isinstance(loaded, type) or not issubclass(loaded, EnvironmentPlugin):
+    if not isinstance(loaded, type) or not issubclass(loaded, EnvironmentProviderFactory):
         raise EnvironmentError(
-            "An Environment plugin entry point must load an EnvironmentPlugin class.",
-            code="environment_plugin_target_invalid",
+            "An Environment provider factory entry point must load an EnvironmentProviderFactory class.",
+            code="environment_provider_factory_target_invalid",
             details=_reference_details(reference),
         )
-    plugin_type = cast(type[EnvironmentPlugin], loaded)
+    factory_type = cast(type[EnvironmentProviderFactory], loaded)
     try:
-        plugin = plugin_type()
+        factory = factory_type()
     except Exception as exc:
         raise EnvironmentError(
-            "An Environment plugin class must support safe no-argument construction.",
-            code="environment_plugin_load_failed",
+            "An Environment provider factory class must support safe no-argument construction.",
+            code="environment_provider_factory_load_failed",
             details=_reference_details(reference),
         ) from exc
-    actual_key = _plugin_key(plugin, reference=reference)
+    actual_key = _provider_key(factory, reference=reference)
     if actual_key != provider_key:
         raise EnvironmentError(
-            "Environment plugin entry-point name and plugin key do not match.",
-            code="environment_plugin_key_invalid",
+            "Environment provider factory entry-point name and provider key do not match.",
+            code="environment_provider_factory_key_invalid",
             details=_reference_details(reference),
         )
-    registration = EnvironmentPluginRegistration(
+    registration = EnvironmentProviderFactoryRegistration(
         provider_key=provider_key,
-        class_module=plugin_type.__module__,
-        class_qualname=plugin_type.__qualname__,
+        class_module=factory_type.__module__,
+        class_qualname=factory_type.__qualname__,
         import_target=reference.import_target,
         distribution_name=reference.distribution_name,
         distribution_version=reference.distribution_version,
     )
-    return registration, plugin
+    return registration, factory
 
 
-def _plugin_key(
-    plugin: EnvironmentPlugin,
+def _provider_key(
+    factory: EnvironmentProviderFactory,
     *,
-    reference: EnvironmentPluginReference | None = None,
+    reference: EnvironmentProviderFactoryReference | None = None,
 ) -> str:
     try:
-        return _validate_provider_key(plugin.plugin_key())
+        return _validate_provider_key(factory.provider_key())
     except EnvironmentError as exc:
         details = _reference_details(reference) if reference is not None else None
         raise EnvironmentError(
-            "Environment plugin key is invalid.",
-            code="environment_plugin_key_invalid",
+            "Environment provider factory key is invalid.",
+            code="environment_provider_factory_key_invalid",
             details=details,
         ) from exc
     except Exception as exc:
         details = _reference_details(reference) if reference is not None else None
         raise EnvironmentError(
-            "Environment plugin key could not be read.",
-            code="environment_plugin_key_invalid",
+            "Environment provider factory key could not be read.",
+            code="environment_provider_factory_key_invalid",
             details=details,
         ) from exc
 
 
 def _explicit_registration(
     provider_key: str,
-    plugin: EnvironmentPlugin,
-) -> EnvironmentPluginRegistration:
-    plugin_type = type(plugin)
-    return EnvironmentPluginRegistration(
+    factory: EnvironmentProviderFactory,
+) -> EnvironmentProviderFactoryRegistration:
+    factory_type = type(factory)
+    return EnvironmentProviderFactoryRegistration(
         provider_key=provider_key,
-        class_module=plugin_type.__module__,
-        class_qualname=plugin_type.__qualname__,
+        class_module=factory_type.__module__,
+        class_qualname=factory_type.__qualname__,
         import_target=None,
         distribution_name=None,
         distribution_version=None,
@@ -335,8 +335,8 @@ def _explicit_registration(
 def _validate_provider_key(value: object) -> str:
     if not isinstance(value, str) or not value or value != value.strip() or len(value) > _MAX_PROVIDER_KEY_LENGTH:
         raise EnvironmentError(
-            "Environment plugin provider keys must be bounded non-blank strings without surrounding whitespace.",
-            code="environment_plugin_key_invalid",
+            "Environment provider factory keys must be bounded non-blank strings without surrounding whitespace.",
+            code="environment_provider_factory_key_invalid",
         )
     return value
 
@@ -346,14 +346,14 @@ def _require_unique_keys(keys: Sequence[str]) -> None:
     for key in keys:
         if key in seen:
             raise EnvironmentError(
-                "An Environment plugin provider key was selected more than once.",
-                code="environment_plugin_duplicate",
+                "An Environment provider factory key was selected more than once.",
+                code="environment_provider_factory_duplicate",
                 details={"provider_key": key},
             )
         seen.add(key)
 
 
-def _reference_details(reference: EnvironmentPluginReference) -> dict[str, JsonValue]:
+def _reference_details(reference: EnvironmentProviderFactoryReference) -> dict[str, JsonValue]:
     details: dict[str, JsonValue] = {
         "provider_key": reference.provider_key[:_MAX_DIAGNOSTIC_VALUE_LENGTH],
     }

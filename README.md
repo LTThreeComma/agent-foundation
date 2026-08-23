@@ -24,6 +24,10 @@ Applications will be able to embed the harness directly, use the hosted service,
 - SDK releases are independent per language under `release/sdk/<language>/X.Y.Z` tags.
 - Every `main` revision publishes `dev` service and sandbox images to GHCR.
 
+## Examples
+
+Start with the runnable, tested [examples](examples/README.md) to see public extension points in complete integration paths. The [integration package examples](examples/plugins/README.md) show installed entry-point and explicit code composition for Environment provider factories and Harness plugins, and require no model credentials.
+
 ## Documentation
 
 - Start with the [user documentation](docs/index.md).

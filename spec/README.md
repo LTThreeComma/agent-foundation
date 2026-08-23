@@ -78,13 +78,13 @@ Dependency direction is one-way: Hosts embed the Harness; the Harness uses provi
 
 ## Component Responsibilities
 
-| Component            | Owns                                                                                                                                                       | Does not own                                                                                         |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `agent-harness`      | Process-local code-first Agent construction, trusted plugins, run context, model resolution/recovery, execution, events, results, and continuation state   | Durable authoring schemas, Presets, package installation, worker lifecycle, delivery, billing        |
-| `agent-envd-client`  | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                               | Harness routing, product-user authorization, provider provisioning, Host lifecycle                   |
-| `agent-envd`         | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, retained output, daemon generation, and native command containment        | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy     |
-| `foundation-service` | Host-owned definition/Presets/revisions, reconstruction locks, Executions/Attempts, client tools, APIs, events, usage records, and optional web projection | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning |
-| Product              | Caller authentication, business policy, user experience, and final delivery                                                                                | Harness internals and provider implementation                                                        |
+| Component            | Owns                                                                                                                                                       | Does not own                                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `agent-harness`      | Process-local Agent construction, narrow plugin configuration/loading, trusted plugins, run context, recovery, execution, results, and continuation state  | Durable Agent authoring schemas, Presets, package installation/trust, worker lifecycle, delivery, billing |
+| `agent-envd-client`  | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                               | Harness routing, product-user authorization, provider provisioning, Host lifecycle                        |
+| `agent-envd`         | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, retained output, daemon generation, and native command containment        | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy          |
+| `foundation-service` | Host-owned definition/Presets/revisions, reconstruction locks, Executions/Attempts, client tools, APIs, events, usage records, and optional web projection | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning      |
+| Product              | Caller authentication, business policy, user experience, and final delivery                                                                                | Harness internals and provider implementation                                                             |
 
 ## Harness Foundation
 
@@ -92,14 +92,14 @@ The Harness is built directly on Pydantic AI 2:
 
 - `AgentDefinition` is an immutable process-local Python value containing native `AgentSpec`, one build-time explicit or schema-derived output contract, a Model/model name, top-level Capabilities, plugins, and recovery configuration;
 - Capability is the only top-level feature-behavior plane; each feature Capability owns its tools, Toolsets, instructions, settings, and hooks;
-- `HarnessBuilder` authorizes declarative custom Capability types, binds trusted plugins, installs the thin model resolver and inert outer invocation boundary, and calls `Agent.from_spec()` once;
+- `HarnessBuilder` resolves an explicit or disabled-by-default ambient plugin Build Context, creates fresh configured instances, binds all trusted plugins, authorizes custom Capability types, and calls `Agent.from_spec()` once;
 - `RunBindings` supplies fresh Agent instance, Environment, optional `ModelRunBinding`, run Capabilities, and metadata;
 - one logical Harness run owns one context, Environment, plugin graph, state coordinator, usage accumulator, and public run ID;
 - bounded model recovery can start several Pydantic inner attempts with unique inner run IDs inside that logical run;
 - `HarnessState` carries public messages, detached Capability JSON namespaces, and optional portable Environment backend data; desired topology, provider incarnation envelope, and launch payload remain Host-owned;
 - Pydantic AI owns native Model profiles, transport/output retries, provider-suspended continuation, deferred external calls/approvals, Toolsets, messages, events, and usage.
 
-Harness middleware plugins are trusted code-first objects, and the Harness does not compile serialized Agent definitions. Environment providers alone have a narrow package-discovery boundary: `importlib.metadata` exposes installed `converge_agent_harness.environments` entries, and a caller-owned immutable catalog imports only explicitly selected factory classes. A hosted Host owns serializable definition schemas, artifact authorization, and reconstruction of every other process-local Python value through trusted locked adapters.
+Harness middleware plugins are trusted concrete objects, and the Harness does not compile serialized Agent definitions. It owns a narrow versioned preferred YAML or supported JSON plugin document and Build Context that may, when explicitly enabled, select `converge_agent_harness.plugins` factories and append fresh concrete plugins during each definition build. `converge_agent_harness.environments` remains a caller-selected catalog because Environment topology and lifecycle are run-scoped. A Host owns serializable Agent schemas, artifact locks, package trust, and durable execution; package presence and Harness import alone never enable behavior or supply an arbitrary import target.
 
 The complete design is indexed in [agent-harness/README.md](agent-harness/README.md).
 
@@ -176,19 +176,21 @@ A Host definition revision contains only serializable Host data and exact locks.
 
 ```mermaid
 flowchart LR
-    HostConfig[Host-owned typed configuration] --> Adapter[Trusted reconstruction adapter]
-    Adapter --> Plugin[Harness plugin]
+    HostConfig[Host-owned Agent configuration] --> Adapter[Trusted reconstruction adapter]
+    Adapter --> DirectPlugin[Direct Harness plugin]
+    PluginConfig[Harness plugin document] --> Builder[HarnessBuilder]
+    Builder --> ConfiguredPlugin[Configured Harness plugin]
     Adapter --> Capability[Pydantic Capability]
     Adapter --> Native[Model, tool, or Toolset]
     RunAuthority[Fresh RunBindings] --> Capability
     RunAuthority --> Environment[Environment lifecycle resource]
-    Plugin --> Harness[Harness run]
+    DirectPlugin & ConfiguredPlugin --> Harness[Harness run]
     Capability & Native --> Agent[Pydantic Agent]
     Environment --> Harness
     Agent --> Provider[Feature provider]
 ```
 
-Installed plugins and native objects are trusted in-process code. Environment package presence is only availability; an operator must explicitly select and authorize the provider key before import/use. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
+Installed plugins and native objects are trusted in-process code. Harness plugin and Environment package presence is only availability; an operator explicitly enables or selects the relevant key before import/use. Factory-produced Harness plugins and directly constructed plugins enter the same concrete composition path. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
 
 ## Observability and Cost
 

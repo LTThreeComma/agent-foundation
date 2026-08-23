@@ -66,6 +66,12 @@ from converge_agent_harness.input import (
     normalize_input,
 )
 from converge_agent_harness.models import resolve_run_model, wrap_self_healing_model
+from converge_agent_harness.plugin_configuration import HarnessBuildContext, HarnessPluginConfiguration
+from converge_agent_harness.plugin_factories import (
+    HarnessPluginFactoryCatalog,
+    HarnessPluginFactoryContext,
+    build_harness_plugin_factory_catalog,
+)
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
     BoundPluginContext,
@@ -315,13 +321,67 @@ class AgentDefinition[OutputT]:
 class HarnessBuilder:
     """Build executable Agents through one authoritative Agent.from_spec path."""
 
-    def __init__(self, *, capability_type_catalog: CapabilityTypeCatalog | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        capability_type_catalog: CapabilityTypeCatalog | None = None,
+        build_context: HarnessBuildContext | None = None,
+        configured_plugins_enabled: bool | None = None,
+    ) -> None:
         if capability_type_catalog is not None and not isinstance(capability_type_catalog, CapabilityTypeCatalog):
             raise DefinitionError(
                 "capability_type_catalog must be a CapabilityTypeCatalog or None.",
                 code="capability_type_catalog_invalid",
             )
+        if build_context is not None and not isinstance(build_context, HarnessBuildContext):
+            raise PluginError(
+                "build_context must be a HarnessBuildContext or None.",
+                code="plugin_configuration_invalid",
+            )
+        if configured_plugins_enabled is not None and not isinstance(configured_plugins_enabled, bool):
+            raise PluginError(
+                "configured_plugins_enabled must be a boolean or None.",
+                code="plugin_configuration_enablement_invalid",
+            )
         self._capability_type_catalog = capability_type_catalog or _EMPTY_CAPABILITY_TYPE_CATALOG
+        if build_context is None:
+            resolved_build_context = HarnessBuildContext.from_environment(enabled=configured_plugins_enabled)
+        else:
+            effective_application = (
+                build_context.configured_plugins_enabled
+                if configured_plugins_enabled is None
+                else configured_plugins_enabled
+            )
+            if effective_application and not isinstance(
+                build_context.plugin_configuration,
+                HarnessPluginConfiguration,
+            ):
+                raise PluginError(
+                    "Enabling configured plugins in an explicit build context requires a configuration document.",
+                    code="plugin_configuration_invalid",
+                )
+            resolved_build_context = HarnessBuildContext(
+                configured_plugins_enabled=effective_application,
+                plugin_configuration=build_context.plugin_configuration if effective_application else None,
+                extensions=build_context.extensions,
+            )
+        self._build_context = HarnessBuildContext(
+            configured_plugins_enabled=resolved_build_context.configured_plugins_enabled,
+            plugin_configuration=resolved_build_context.plugin_configuration,
+            extensions=resolved_build_context.extensions,
+        )
+        self._plugin_factory_catalog: HarnessPluginFactoryCatalog | None = None
+        if self._build_context.configured_plugins_enabled:
+            configuration = self._build_context.plugin_configuration
+            if not isinstance(configuration, HarnessPluginConfiguration):
+                raise PluginError(
+                    "Enabled configured plugins require a configuration document.",
+                    code="plugin_configuration_invalid",
+                )
+            selected_keys = tuple(dict.fromkeys(entry.plugin_key for entry in configuration.enabled_plugins))
+            self._plugin_factory_catalog = build_harness_plugin_factory_catalog(
+                plugin_keys=selected_keys,
+            )
 
     def build[BuildOutputT](self, definition: AgentDefinition[BuildOutputT]) -> ExecutableAgent[BuildOutputT]:
         """Validate code-first composition and recursively construct a reusable executable."""
@@ -346,7 +406,8 @@ class HarnessBuilder:
             for child in definition.subagents
         )
         subagents = SubagentCollection({child.declaration.name: child for child in built_children})
-        plugins, plugin_capabilities = bind_agent_plugins(definition.plugins)
+        configured_plugins = self._create_configured_plugins()
+        plugins, plugin_capabilities = bind_agent_plugins((*definition.plugins, *configured_plugins))
         authored_capabilities = (*definition.capabilities, *plugin_capabilities)
         definition_reserved_ids = _validate_capability_source(authored_capabilities, source="definition")
 
@@ -400,6 +461,28 @@ class HarnessBuilder:
             plugins=plugins,
             subagents=subagents,
             definition_reserved_capability_ids=definition_reserved_ids,
+        )
+
+    def _create_configured_plugins(self) -> tuple[AbstractHarnessPlugin, ...]:
+        catalog = self._plugin_factory_catalog
+        if catalog is None:
+            return ()
+        configuration = self._build_context.plugin_configuration
+        if not isinstance(configuration, HarnessPluginConfiguration):
+            raise PluginError(
+                "Enabled configured plugins require a configuration document.",
+                code="plugin_configuration_invalid",
+            )
+        return tuple(
+            catalog.create_plugin(
+                HarnessPluginFactoryContext(
+                    plugin_key=entry.plugin_key,
+                    plugin_id=entry.plugin_id,
+                    configuration=entry.configuration,
+                    extensions=self._build_context.extensions,
+                )
+            )
+            for entry in configuration.enabled_plugins
         )
 
     @overload

@@ -16,6 +16,7 @@ This document defines the normative content and workflow boundaries of the Agent
 | `DEVELOPMENT.md`  | Repository-wide engineering standards for deployable services, persistence, migrations, and images    | Product semantics, package-specific commands, and rollout history                                                 |
 | `AGENTS.md`       | Concise operational guidance for coding agents working in the repository                              | Detailed design owned by `spec/` or engineering standards owned by `DEVELOPMENT.md`                               |
 | `apps/`           | Deployable application sources, including browser applications bundled into service images            | Independently published libraries or language package workspaces                                                  |
+| `examples/`       | Runnable, tested developer examples of public integration and extension boundaries                    | Normative design, published user documentation, production packages, and release artifacts                        |
 | `packages/`       | Python 3.13 uv workspace packages whose distribution names use the `converge-` prefix                 | Design discussion and unrelated generated artifacts                                                               |
 | `crates/`         | Rust workspace crates whose package names use the `converge-` prefix                                  | Python packages and local reference repositories                                                                  |
 | `proto/`          | Language-neutral protocol IDL consumed by deterministic repository generators                         | Handwritten language-local implementations, release artifacts, and normative design prose                         |
@@ -23,6 +24,8 @@ This document defines the normative content and workflow boundaries of the Agent
 There is no repository-local `issues/` directory. "Issues" means the repository's GitHub Issues.
 
 Workspace membership does not by itself select a release group. `packages/agent-envd-client` participates in root Python development and validation but is versioned and published with `crates/agent-envd` by the agent-envd release workflow. Foundation releases exclude that package and consume a compatible published version. Other release-group exceptions require an explicit owning specification and release workflow rather than inference from directory placement.
+
+Projects under `examples/` may carry their own manifests and lock files when realistic packaging is part of the integration being demonstrated. They remain outside production package workspaces and release groups; example distribution names and artifacts are not platform packages.
 
 `apps/foundation-web` is the source for the Foundation Service browser application. It is a private application rather than an npm-distributed library: repository automation validates and builds it, and the Foundation Service container image receives its production assets. Browser dependencies and lock state remain local to that application rather than joining a language-library release group.
 
@@ -84,8 +87,9 @@ The root `Makefile` is the stable local entry point. `pre-commit` provides fast 
 - `make lint` runs non-mutating file, Markdown, Ruff, and configuration checks;
 - `make typecheck` runs Pyright over Python package sources;
 - `make test` runs the Python workspace test suite;
+- `make examples-check` validates independent example locks, style, types, tests, and offline smoke paths;
 - `make build` builds every Python workspace package;
-- `make check` runs the complete Python and documentation merge gate.
+- `make check` runs the fast repository merge gate, including the independent examples.
 
 Rust validation remains separate until Rust CI is accepted.
 

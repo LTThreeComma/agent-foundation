@@ -66,6 +66,8 @@ Use the Makefile as the stable development interface:
 | `make docs-serve`           | Start the local MkDocs development server                         |
 | `make docs-build`           | Build the documentation site in strict mode                       |
 | `make test`                 | Run Python workspace tests                                        |
+| `make examples-check`       | Run the fast independent examples gate                            |
+| `make examples-check-all`   | Build and run the complete independent examples gate              |
 | `make eip-check`            | Verify generated EIP artifacts and shared Python/Rust wire models |
 | `make rust-check`           | Run the fast root Rust workspace gate                             |
 | `make sdk-check`            | Run the fast Python, Go, Rust, and TypeScript SDK gates           |

@@ -27,6 +27,7 @@ jobs:
       agent_envd_client: ${{ steps.filter.outputs.agent_envd_client }}
       agent_harness: ${{ steps.filter.outputs.agent_harness }}
       eip_protocol: ${{ steps.filter.outputs.eip_protocol }}
+      examples: ${{ steps.filter.outputs.examples }}
       foundation_web: ${{ steps.filter.outputs.foundation_web }}
       automation: ${{ steps.filter.outputs.automation }}
       containers: ${{ steps.filter.outputs.containers }}
@@ -92,6 +93,13 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'packages/agent-harness/**'
               - 'packages/logging/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            examples:
+              - '.github/workflows/ci.yml'
+              - 'Makefile'
+              - 'examples/**'
+              - 'packages/agent-harness/**'
               - 'pyproject.toml'
               - 'uv.lock'
             foundation_web:
@@ -242,6 +250,31 @@ jobs:
 
       - name: Run Python checks and build distributions
         run: make typecheck test python-build
+
+  examples:
+    name: Plugin examples
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.examples == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: examples/plugins/uv.lock
+
+      - name: Run complete plugin examples gate
+        run: make examples-check-all
 
   foundation-web:
     name: Foundation Web

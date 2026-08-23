@@ -4,7 +4,7 @@
 
 This directory defines `agent-harness`, the Pydantic AI-based process-local execution library used by embedded applications and hosted workers.
 
-The Harness owns code-first Agent construction, trusted outer plugins, fresh typed run context, the Environment aggregate lifecycle and dynamic topology core, optional run-scoped model resolution, bounded model-interruption recovery, native Pydantic execution, portable continuation state, normalized events, results, and cleanup. It does not own durable Agent schemas, Presets, artifact installation, execution records, queues, worker leases, delivery, or billing.
+The Harness owns code-first Agent construction, a narrow optional plugin configuration/loading boundary, trusted outer plugins, fresh typed run context, the Environment aggregate lifecycle and dynamic topology core, optional run-scoped model resolution, bounded model-interruption recovery, native Pydantic execution, portable continuation state, normalized events, results, and cleanup. It does not own durable Agent schemas, Presets, artifact installation or trust, execution records, queues, worker leases, delivery, or billing.
 
 ## Document Catalog
 
@@ -15,7 +15,7 @@ The Harness owns code-first Agent construction, trusted outer plugins, fresh typ
 | [02-domain-model.md](02-domain-model.md)                                                 | Process-local identities, entities, and version boundaries                                                                         |
 | [03-agent-definition-and-build.md](03-agent-definition-and-build.md)                     | Code-first `AgentDefinition`, builder, executable ownership, and Host reconstruction                                               |
 | [04-capability-model.md](04-capability-model.md)                                         | Native Capability composition, `AgentContext`, and namespaced state                                                                |
-| [05-plugin-system.md](05-plugin-system.md)                                               | Trusted code-first plugins, ordering, binding, middleware, result/state composition, and cleanup                                   |
+| [05-plugin-system.md](05-plugin-system.md)                                               | Plugin document/Build Context, selected factories, concrete middleware, ordering, binding, result/state composition, and cleanup   |
 | [06-execution-context-and-lifecycle.md](06-execution-context-and-lifecycle.md)           | Logical run lifecycle, inner model attempts, cancellation, terminal results, and cleanup                                           |
 | [07-tool-execution.md](07-tool-execution.md)                                             | Native and managed function tools, client-side external tools, policy, credentials, and deferred results                           |
 | [08-environment-integration.md](08-environment-integration.md)                           | Environment lifecycle resource, provider bindings, dynamic topology, optional model projection, operations, state, and enforcement |
@@ -55,7 +55,7 @@ Read `10`, `12`, `13`, and `14`, then the Foundation Service catalog.
 
 - Pydantic AI owns the Agent loop and its native Model, Capability, Toolset, message, deferred, output, event, and usage contracts.
 - The Harness owns process-local code-first construction and logical-run behavior.
-- Concrete plugins and other native Python inputs are trusted in-process objects.
+- Concrete plugins and other native Python inputs are trusted in-process objects; the narrow Harness plugin document is an optional builder-local source, not an Agent definition format.
 - A Host owns durable definition schemas, Presets, revisions, artifact locks, reconstruction adapters, execution lifecycle, and delivery.
 - Providers own external side effects and authoritative reconciliation evidence.
 - A telemetry backend observes execution but never becomes lifecycle authority.

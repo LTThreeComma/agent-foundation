@@ -58,11 +58,11 @@ A native unmanaged tool does not acquire these guarantees merely because it can 
 
 ## Code-first Build Trust
 
-A Host owns its durable definition schemas and artifact locks. The worker verifies those locks and uses trusted adapters to reconstruct native Python values. The Harness does not deserialize import paths or compile plugin specs. Its narrow Environment catalog exposes installed distribution provenance and loads only explicitly selected entry-point names; the Host still verifies the artifact lock and authorizes the provider key. Its narrow custom Capability catalog contains only exact Host-trusted classes and performs no package discovery.
+A Host owns its durable Agent definition schemas and artifact locks. The worker verifies those locks and uses trusted adapters to reconstruct native Python values. The Harness does not deserialize import paths or compile Agent specs. Its narrow plugin document contains only IDs, installed entry-point keys, enable state, and bounded JSON. An explicit or opted-in ambient Build Context loads only enabled keys and produces concrete plugins before Pydantic Agent composition. The separate Environment catalog remains Host-selected because run topology and lifecycle require current authority. The narrow custom Capability catalog contains only exact Host-trusted classes and performs no package discovery.
 
-A mismatch between Host revision and installed adapter fails before the Host calls `HarnessBuilder`. Installed, selected, and definition-authorized are separate states: package presence alone imports no code and grants no behavior. Missing, duplicate, colliding, wrongly typed, or lock-incompatible Environment entries fail before model work. An API request, model value, durable row, state payload, or provider parameter map cannot name an arbitrary import target.
+A mismatch between Host revision and installed adapter fails before the Host calls `HarnessBuilder`. Invalid plugin configuration or an incompatible installed package fails during context or builder construction before model work. Installed, enabled, loaded, and deployment-trusted are separate states: package presence alone imports no code and grants no behavior. Missing, duplicate, colliding, wrongly typed, lock-incompatible, factory-invalid, or ID-mismatched entries fail closed. Factory configuration and extensions are detached, bounded JSON but remain untrusted input to trusted in-process package code. Configuration, metadata, import, constructor, and factory failures suppress raw standard exception chaining so normal traceback logging cannot disclose those inputs or private installation paths. An API request, model value, durable row, state payload, plugin configuration, extension map, or provider parameter map cannot name an arbitrary import target.
 
-Once supplied or loaded, concrete Python objects execute with process authority. A hostile plugin can bypass managed tool policy by performing direct Python I/O; deployments that do not trust it must isolate it outside the process.
+Once supplied or loaded, concrete Python objects execute with process authority. Enabling an ambient plugin document therefore trusts the deployment-controlled installed key selection, not merely valid YAML or JSON syntax. A hostile plugin can bypass managed tool policy by performing direct Python I/O; deployments that do not trust it must isolate it outside the process.
 
 ## Plugin Result and State Trust
 
@@ -151,18 +151,18 @@ Matching logical IDs or definition digests do not prove artifact or state compat
 
 ## Failure Semantics
 
-| Failure                                      | Outcome                                                       |
-| -------------------------------------------- | ------------------------------------------------------------- |
-| Missing/invalid trusted binding              | Stop before dependent dispatch                                |
-| Policy denial                                | Typed denial; no broader fallback                             |
-| Invalid client feedback                      | Reject without changing pending state                         |
-| Invalid plugin ID/order/replacement          | Build or run setup fails                                      |
-| Invalid Environment entry point or catalog   | Catalog/setup fails before provider or model work             |
-| Invalid plugin event/result                  | Reject; retain nearest earlier valid candidate when available |
-| State version/payload mismatch on typed read | Fail the owning operation without mutating stored state       |
-| Provider timeout after possible dispatch     | Unknown until idempotent reconciliation                       |
-| Cleanup failure after a candidate            | `RunCleanupError` carries the candidate; no terminal event    |
-| External task cancellation                   | Propagate after cleanup; cannot be suppressed                 |
+| Failure                                                          | Outcome                                                          |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Missing/invalid trusted binding                                  | Stop before dependent dispatch                                   |
+| Policy denial                                                    | Typed denial; no broader fallback                                |
+| Invalid client feedback                                          | Reject without changing pending state                            |
+| Invalid plugin ID/order/replacement                              | Build or run setup fails                                         |
+| Invalid plugin document, Harness factory, or Environment catalog | Context/build/setup fails before affected provider or model work |
+| Invalid plugin event/result                                      | Reject; retain nearest earlier valid candidate when available    |
+| State version/payload mismatch on typed read                     | Fail the owning operation without mutating stored state          |
+| Provider timeout after possible dispatch                         | Unknown until idempotent reconciliation                          |
+| Cleanup failure after a candidate                                | `RunCleanupError` carries the candidate; no terminal event       |
+| External task cancellation                                       | Propagate after cleanup; cannot be suppressed                    |
 
 ## Trade-offs
 

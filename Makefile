@@ -2,6 +2,7 @@
 
 FOUNDATION_SERVICE_IMAGE ?= agent-foundation-service:local
 SANDBOX_IMAGE ?= agent-foundation-sandbox:local
+PLUGIN_EXAMPLES_DIR := examples/plugins
 
 .PHONY: install
 install: ## Install locked dependencies and Git hooks
@@ -23,6 +24,44 @@ install: ## Install locked dependencies and Git hooks
 .PHONY: sync
 sync: ## Synchronize the locked Python workspace
 	@uv sync --locked --all-packages
+
+.PHONY: examples-sync
+examples-sync: ## Synchronize the independent plugin examples project
+	@uv sync --project "$(PLUGIN_EXAMPLES_DIR)" --locked
+
+.PHONY: examples-lock-check
+examples-lock-check: ## Verify the plugin examples lock file
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv lock --check)
+
+.PHONY: examples-format-check
+examples-format-check: examples-sync ## Check plugin example lint and formatting
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked ruff check --no-fix .)
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked ruff format --check .)
+
+.PHONY: examples-typecheck
+examples-typecheck: examples-sync ## Type-check plugin example sources and tests
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked pyright)
+
+.PHONY: examples-test
+examples-test: examples-sync ## Run focused plugin example tests
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked pytest)
+
+.PHONY: examples-smoke
+examples-smoke: examples-sync ## Run all four offline plugin composition paths
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-environment-entrypoint)
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-environment-code)
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-harness-entrypoint)
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-harness-code)
+
+.PHONY: examples-build
+examples-build: examples-sync ## Build the plugin examples distribution
+	@(cd "$(PLUGIN_EXAMPLES_DIR)" && rm -rf dist && uv build)
+
+.PHONY: examples-check
+examples-check: examples-lock-check examples-format-check examples-typecheck examples-test examples-smoke ## Run the fast plugin examples gate
+
+.PHONY: examples-check-all
+examples-check-all: examples-check examples-build ## Run the complete plugin examples gate
 
 .PHONY: setup
 setup: sync ## Start local PostgreSQL and Redis
@@ -339,14 +378,14 @@ python-check: lint typecheck test ## Run the fast Python workspace gate
 python-check-all: python-check python-build docs-build ## Run the complete Python and documentation gate
 
 .PHONY: check
-check: eip-check foundation-web-check python-check rust-check sdk-check ## Run the fast repository gate
+check: eip-check examples-check foundation-web-check python-check rust-check sdk-check ## Run the fast repository gate
 
 .PHONY: check-all
-check-all: eip-check foundation-web-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
+check-all: eip-check examples-check-all foundation-web-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
-	@rm -rf .pytest_cache .ruff_cache dist site target sdk/python/dist sdk/rust/target
+	@rm -rf .pytest_cache .ruff_cache dist examples/plugins/dist site target sdk/python/dist sdk/rust/target
 	@npm --prefix apps/foundation-web run clean
 	@npm --prefix sdk/typescript run clean
 

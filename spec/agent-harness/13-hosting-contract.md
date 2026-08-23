@@ -2,22 +2,23 @@
 
 ## Design Position
 
-Embedded applications and hosted execution workers use the same code-first Harness API. The Harness does not expose a separate hosted build format. A hosted service owns durable definition schemas, Presets, immutable revisions, dependency locks, and reconstruction adapters; the worker reconstructs one process-local `AgentDefinition` and calls `HarnessBuilder`.
+Embedded applications and hosted execution workers use the same code-first Harness API. The Harness does not expose a separate hosted Agent format. A hosted service owns durable Agent definition schemas, Presets, immutable revisions, dependency locks, and reconstruction adapters; the worker reconstructs one process-local `AgentDefinition` and calls `HarnessBuilder`. Plugin middleware may instead use the narrow Harness-owned configuration document and Build Context, so the Host need not expose or implement plugin factory concepts.
 
 The Host also owns durable acceptance, worker Attempts, leases, checkpoint selection, deferred delivery, recovery, and terminal commit. The Harness returns only process-local observations and state candidates.
 
 ## Boundary
 
-| Concern                                    | Host                                           | Harness                                 |
-| ------------------------------------------ | ---------------------------------------------- | --------------------------------------- |
-| Authoring schema, Presets, revision, locks | Owns                                           | No durable schema                       |
-| Trusted Python object reconstruction       | Owns                                           | Validates process-local composition     |
-| Agent Identity and provider policy         | Issues/evaluates                               | Carries through fresh bindings          |
-| Environment and model binding              | Constructs fresh values and retains controller | Enters/uses and owns run resource scope |
-| Agent loop and outer middleware            | Delegates                                      | Owns process-locally                    |
-| Internal model semantic attempts           | Observes one logical run                       | Owns bounded recovery                   |
-| Worker crash and durable replay            | Owns                                           | Exports portable state only             |
-| Durable completion and delivery            | Owns                                           | Returns a candidate                     |
+| Concern                                     | Host                                           | Harness                                 |
+| ------------------------------------------- | ---------------------------------------------- | --------------------------------------- |
+| Authoring schema, Presets, revision, locks  | Owns                                           | No durable schema                       |
+| Trusted direct Python object reconstruction | Owns                                           | Validates process-local composition     |
+| Optional plugin configuration/loading       | Persists or supplies deployment input          | Owns document, loading, and application |
+| Agent Identity and provider policy          | Issues/evaluates                               | Carries through fresh bindings          |
+| Environment and model binding               | Constructs fresh values and retains controller | Enters/uses and owns run resource scope |
+| Agent loop and outer middleware             | Delegates                                      | Owns process-locally                    |
+| Internal model semantic attempts            | Observes one logical run                       | Owns bounded recovery                   |
+| Worker crash and durable replay             | Owns                                           | Exports portable state only             |
+| Durable completion and delivery             | Owns                                           | Returns a candidate                     |
 
 ## Definition Mapping
 
@@ -26,9 +27,10 @@ flowchart LR
     Source[Host source or Preset] --> Materialize[Host materialization]
     Materialize --> Revision[Immutable Host definition revision]
     Revision --> Verify[Verify Host dependency locks]
-    Verify --> Adapters[Trusted reconstruction adapters]
+    Verify --> Adapters[Trusted direct-input reconstruction adapters]
     Adapters --> Definition[Process-local AgentDefinition]
-    Definition --> Builder[HarnessBuilder]
+    PluginConfig[Optional Harness plugin document or environment] --> Builder[HarnessBuilder]
+    Definition --> Builder
     Builder --> Executable[ExecutableAgent]
 ```
 
@@ -39,12 +41,14 @@ At execution time trusted installed adapters create:
 - native `AgentSpec` and, for code-first output, a process-local `OutputSpec`;
 - optional Model or logical model name;
 - Agent-bound Capabilities that own all function tools, Toolsets, guidance, settings, and hooks;
-- concrete Harness plugin instances;
+- optional direct concrete Harness plugin instances;
 - self-healing and semantic recovery policy.
+
+Configured plugin instances are created by `HarnessBuilder` from an explicit `HarnessBuildContext` or the ambient source. The deployment switch remains false by default, while a trusted create-and-run or create-and-stream Host path can pass `configured_plugins_enabled=True` when constructing that operation's executable. They need not be reconstructed by a Host adapter, and the choice cannot change after Agent construction.
 
 A declarative object JSON Schema remains in native `AgentSpec.output_schema` and is the build-time output source when no process-local `OutputSpec` is supplied. The worker never changes output type per run.
 
-The resulting value is an ordinary `AgentDefinition`. The Harness does not verify Host artifact digests, reconstruct import paths from input, or inspect Preset provenance.
+The resulting value is an ordinary `AgentDefinition`. An operator may pass an explicit Harness Build Context from the Harness plugin document or opt deployment environment loading in. The builder imports only enabled `converge_agent_harness.plugins` keys, creates fresh instances for each root and nested definition, and merges them after direct plugins. Entry-point availability never grants trust, and configuration identifies a key rather than an import target. The Harness does not verify Host artifact digests or inspect Preset provenance.
 
 ## Run Mapping
 
@@ -58,7 +62,7 @@ For each logical run the Host constructs `RunBindings` with:
 
 The Harness enters the Environment aggregate and activates the paired controller for the complete logical run. A Host reconciliation task can start before stream entry and await `controller.wait_until_active()` without polling, so an authorized Host path can materialize fresh provider bindings and add, refresh, or remove bindings during input preparation, model attempts, tool work, or recovery backoff. The controller is a process-local mutation handle: it is never put in metadata, `AgentContext`, a Capability namespace, a model tool, or a durable record, and it cannot be reused after the run terminal fence.
 
-An operator may populate its Environment provider registry from explicitly selected `converge_agent_harness.environments` entry-point metadata after verifying the exact dependency/artifact lock. Entry-point availability never authorizes a definition, and a durable row never carries an import target. A provider that allocates before Harness entry still implements the stronger Host materialization, launch-state, reconciliation, and unentered-discard contract rather than using the simple pre-entry-inert factory path.
+An operator may populate its Environment provider registry from explicitly selected `converge_agent_harness.environments` entry-point metadata after verifying the exact dependency/artifact lock. As with Harness plugin factories, entry-point availability never authorizes a definition, and a durable row never carries an import target. A provider that allocates before Harness entry still implements the stronger Host materialization, launch-state, reconciliation, and unentered-discard contract rather than using the simple pre-entry-inert factory path.
 
 A hosted model integration normally implements `ModelRunBinding`, resolves its own trusted configuration, current policy, credentials, and route selection, and returns a native Model or raises. The Harness applies no special catalog role validation and, if a Host omits the binding for a string model, deliberately delegates to native Pydantic inference. A fail-closed hosted profile therefore requires its worker adapter to supply and test the binding; this is a Host invariant, not a different Harness API.
 
@@ -127,12 +131,12 @@ Compatibility is evaluated separately for:
 - Harness and Capability state codecs;
 - provider-specific launch/continuation data.
 
-A Host rejects an incompatible revision or adapter before building process-local objects. The Harness does not turn an unknown Host schema into a generic Python import or fallback configuration.
+A Host rejects an incompatible revision or adapter before building process-local direct objects. The Harness rejects an incompatible plugin document before importing selected targets and does not turn an unknown Host schema into a generic Python import or fallback configuration.
 
 ## Invariants
 
 1. Hosted and embedded callers use the same `AgentDefinition`, builder, bindings, stream, result, and state contracts.
-2. Durable schemas and dependency locks belong to the Host.
+2. Durable Agent schemas and dependency locks belong to the Host; the optional plugin document schema belongs to the Harness even when the Host persists it.
 3. Python objects are reconstructed in-process and never stored in Host records.
 4. Fresh authority enters every logical run through typed bindings and narrowly owned run Capabilities; Environment authority never enters through `EnvironmentToolsCapability`.
 5. Internal model attempts do not create additional Host Attempt generations.
@@ -143,6 +147,6 @@ A Host rejects an incompatible revision or adapter before building process-local
 
 ## Trade-offs
 
-### Host-owned Reconstruction vs. Harness Compilation
+### Host-owned Agent Reconstruction vs. Narrow Plugin Configuration
 
-Host-owned schemas keep durable compatibility where it belongs and allow native Python composition in the worker. Every Host must maintain explicit adapters, but the Harness avoids becoming a package manager or universal configuration language.
+Host-owned Agent schemas keep broad durable compatibility where it belongs and allow native Python composition in the worker. The Harness-owned plugin envelope removes repetitive middleware loading adapters without becoming an Agent compiler, Environment lifecycle format, or universal configuration language.

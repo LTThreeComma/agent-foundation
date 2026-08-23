@@ -61,9 +61,10 @@ sequenceDiagram
     Control->>Control: durably create Execution and schedule Attempt
     Worker->>Control: acquire fenced Attempt and revision
     Worker->>Worker: verify Host dependency/artifact locks
-    Worker->>Adapter: reconstruct native AgentSpec, output, tools, Capabilities, plugins
+    Worker->>Adapter: reconstruct native AgentSpec, output, tools, and Capabilities
     Adapter-->>Worker: process-local AgentDefinition
-    Worker->>Harness: HarnessBuilder.build
+    Worker->>Harness: construct HarnessBuilder with Foundation extensions and build
+    Harness->>Harness: optionally apply deployment-scoped Harness plugin configuration
     Worker->>Worker: resolve locked Environment providers and current desired topology
     Worker->>Worker: persist provider operation identities before allocative I/O
     Worker->>Worker: materialize/reconcile bindings, stage launch envelope, and bump replacement incarnation revisions
