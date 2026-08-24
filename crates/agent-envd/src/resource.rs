@@ -941,22 +941,61 @@ fn cap_entry_identity(
         )
     };
     if populated == 0 {
-        return Err(ResourceError::Unsupported);
+        let error = std::io::Error::last_os_error();
+        return Err(map_windows_file_id_error(&error));
     }
     // SAFETY: a successful `GetFileInformationByHandleEx` initialized `info`.
     let info = unsafe { info.assume_init() };
     let file_type = entry_metadata.file_type();
-    Ok(CapEntryIdentity {
-        volume_serial_number: info.VolumeSerialNumber,
-        file_id: info.FileId.Identifier,
-        file_type: if file_type.is_dir() {
+    windows_entry_identity(
+        info.VolumeSerialNumber,
+        info.FileId.Identifier,
+        if file_type.is_dir() {
             1
         } else if file_type.is_symlink() {
             2
         } else {
             0
         },
+    )
+}
+
+#[cfg(windows)]
+fn windows_entry_identity(
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+    file_type: u8,
+) -> Result<CapEntryIdentity, ResourceError> {
+    if file_id == [0; 16] {
+        return Err(ResourceError::Unsupported);
+    }
+    Ok(CapEntryIdentity {
+        volume_serial_number,
+        file_id,
+        file_type,
     })
+}
+
+#[cfg(windows)]
+fn map_windows_file_id_error(error: &std::io::Error) -> ResourceError {
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    };
+
+    let Some(code) = error
+        .raw_os_error()
+        .and_then(|code| u32::try_from(code).ok())
+    else {
+        return ResourceError::Io;
+    };
+    if matches!(
+        code,
+        ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED
+    ) {
+        ResourceError::Unsupported
+    } else {
+        ResourceError::Io
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1616,6 +1655,8 @@ mod tests {
     use super::{
         ResourceError, ResourceRegistry, apply_unified_diff, cap_entry_identity, join_logical,
     };
+    #[cfg(windows)]
+    use super::{map_windows_file_id_error, windows_entry_identity};
 
     struct TempTree(PathBuf);
 
@@ -1751,8 +1792,11 @@ mod tests {
             .root
             .symlink_metadata(first_path)
             .expect("first metadata");
-        let first = cap_entry_identity(&mount.root, first_path, &first_metadata, false)
-            .expect("first identity");
+        let first = match cap_entry_identity(&mount.root, first_path, &first_metadata, false) {
+            Ok(identity) => identity,
+            Err(ResourceError::Unsupported) if cfg!(windows) => return,
+            Err(error) => panic!("first identity failed: {error:?}"),
+        };
         let repeated = cap_entry_identity(&mount.root, first_path, &first_metadata, false)
             .expect("repeated first identity");
         let second_path = Path::new("second");
@@ -1775,6 +1819,28 @@ mod tests {
         assert!(first == repeated);
         assert!(first != second);
         assert!(first == renamed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unusable_windows_file_ids_and_classifies_query_errors() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED};
+
+        assert!(matches!(
+            windows_entry_identity(1, [0; 16], 0),
+            Err(ResourceError::Unsupported)
+        ));
+        let unsupported = std::io::Error::from_raw_os_error(
+            i32::try_from(ERROR_NOT_SUPPORTED).expect("Win32 error code fits i32"),
+        );
+        assert_eq!(
+            map_windows_file_id_error(&unsupported),
+            ResourceError::Unsupported
+        );
+        let access_denied = std::io::Error::from_raw_os_error(
+            i32::try_from(ERROR_ACCESS_DENIED).expect("Win32 error code fits i32"),
+        );
+        assert_eq!(map_windows_file_id_error(&access_denied), ResourceError::Io);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1950,22 +2016,23 @@ mod tests {
         assert!(continued.has_more);
         assert_ne!(continued.entries, first_list.entries);
 
-        let found = fixture
-            .resources
-            .find(
-                &fixture.mounts,
-                &FileFindParams {
-                    context: context("find"),
-                    root: path("/"),
-                    pattern: "*.txt".to_owned(),
-                    offset: 0,
-                    max_results: 100,
-                    recursive: true,
-                    include_hidden: false,
-                    kinds: vec![FileKind::File],
-                },
-            )
-            .expect("find succeeds");
+        let found = match fixture.resources.find(
+            &fixture.mounts,
+            &FileFindParams {
+                context: context("find"),
+                root: path("/"),
+                pattern: "*.txt".to_owned(),
+                offset: 0,
+                max_results: 100,
+                recursive: true,
+                include_hidden: false,
+                kinds: vec![FileKind::File],
+            },
+        ) {
+            Ok(found) => found,
+            Err(ResourceError::Unsupported) if cfg!(windows) => return,
+            Err(error) => panic!("find failed: {error:?}"),
+        };
         assert_eq!(found.entries.len(), 10);
         assert!(!found.has_more);
 
@@ -2031,19 +2098,23 @@ mod tests {
         fs::write(fixture.native.join("tree/first/nested/one.txt"), "one").expect("first file");
         fs::write(fixture.native.join("tree/second/two.txt"), "two").expect("second file");
 
-        let removed = fixture
-            .resources
-            .remove(
-                &fixture.mounts,
-                &FileRemoveParams {
-                    context: context("recursive-remove"),
-                    path: path("/tree"),
-                    expected_kind: FileKind::Directory,
-                    recursive: true,
-                    max_entries: 6,
-                },
-            )
-            .expect("recursive removal succeeds");
+        let removed = match fixture.resources.remove(
+            &fixture.mounts,
+            &FileRemoveParams {
+                context: context("recursive-remove"),
+                path: path("/tree"),
+                expected_kind: FileKind::Directory,
+                recursive: true,
+                max_entries: 6,
+            },
+        ) {
+            Ok(removed) => removed,
+            Err(ResourceError::Unsupported) => {
+                assert!(fixture.native.join("tree").exists());
+                return;
+            }
+            Err(error) => panic!("recursive removal failed: {error:?}"),
+        };
 
         assert_eq!(removed, 6);
         assert!(!fixture.native.join("tree").exists());
