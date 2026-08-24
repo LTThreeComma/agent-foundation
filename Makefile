@@ -448,30 +448,28 @@ python-check: lint typecheck ## Run Python workspace lint and type checks
 python-check-all: python-check test python-build docs-build ## Run the complete Python and documentation gate
 
 .PHONY: check
-check: ## Format, lint, and type-check the repository
-	@printf '\n==> [1/11] Format repository\n'
-	@$(MAKE) --no-print-directory format
-	@printf '\n==> [2/11] Lint repository and Python workspace\n'
+check: ## Check formatting, lint, and types without rewriting repository sources
+	@printf '\n==> [1/10] Lint repository and check Python/Markdown formatting\n'
 	@$(MAKE) --no-print-directory lint
-	@printf '\n==> [3/11] Type-check Python workspace with Pyright\n'
+	@printf '\n==> [2/10] Type-check Python workspace with Pyright\n'
 	@$(MAKE) --no-print-directory typecheck
-	@printf '\n==> [4/11] Check examples with Ruff and Pyright\n'
+	@printf '\n==> [3/10] Check examples with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory examples-check
-	@printf '\n==> [5/11] Check Foundation Web with Prettier and TypeScript\n'
+	@printf '\n==> [4/10] Check Foundation Web with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory foundation-web-check
-	@printf '\n==> [6/11] Check Harness UI with Prettier and TypeScript\n'
+	@printf '\n==> [5/10] Check Harness UI with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory harness-ui-check
-	@printf '\n==> [7/11] Check Rust workspace with rustfmt and Clippy\n'
+	@printf '\n==> [6/10] Check Rust workspace with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory rust-check
-	@printf '\n==> [8/11] Check Python SDK with Ruff and Pyright\n'
+	@printf '\n==> [7/10] Check Python SDK with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory sdk-python-check
-	@printf '\n==> [9/11] Check Go SDK with gofmt and vet\n'
+	@printf '\n==> [8/10] Check Go SDK with gofmt and vet\n'
 	@$(MAKE) --no-print-directory sdk-go-check
-	@printf '\n==> [10/11] Check Rust SDK with rustfmt and Clippy\n'
+	@printf '\n==> [9/10] Check Rust SDK with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory sdk-rust-check
-	@printf '\n==> [11/11] Check TypeScript SDK with Prettier and TypeScript\n'
+	@printf '\n==> [10/10] Check TypeScript SDK with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory sdk-typescript-check
-	@printf '\n==> Check completed\n'
+	@printf '\n==> Check completed without rewriting repository sources\n'
 
 .PHONY: check-all
 check-all: eip-check examples-check-all foundation-web-check-all harness-ui-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate

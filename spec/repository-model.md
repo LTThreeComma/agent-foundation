@@ -94,7 +94,7 @@ Generated notes for a stable release compare with the preceding stable tag and t
 
 ## Repository Automation
 
-The root `Makefile` is the stable local entry point. `pre-commit` provides fast file hygiene and Markdown/configuration checks. Local contributors and CI use the same commands:
+The root `Makefile` is the stable local entry point. `pre-commit` provides fast file hygiene and formatting across repository languages and applications. Local contributors and CI use the same commands:
 
 - `make install` prepares the locked Python environment and Git hooks;
 - `make format` applies repository formatting hooks;
@@ -104,7 +104,7 @@ The root `Makefile` is the stable local entry point. `pre-commit` provides fast 
 - `make examples-check` validates independent example locks, style, and types;
 - `make examples-check-all` additionally runs example tests, offline smoke paths, and builds;
 - `make build` builds every workspace package, private browser application, and standalone SDK, preparing generated package assets before Python distribution builds;
-- `make check` formats repository sources, then runs repository-wide lint, static-analysis, and type checks without tests;
+- `make check` verifies repository formatting, lint, static analysis, and types without rewriting repository sources or running tests;
 - `make check-all` runs the complete EIP, example, browser application, Python, Rust, and standalone SDK gates, including tests and builds.
 
 As implementation packages are added, their focused lint, type-check, test, and build commands must be added behind these stable Make targets rather than requiring contributors to discover unrelated tool-specific commands.

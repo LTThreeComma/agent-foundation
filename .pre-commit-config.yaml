@@ -28,3 +28,43 @@ repos:
       - id: ruff
         args: [--exit-non-zero-on-fix]
       - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        types: [go]
+
+      - id: root-rustfmt
+        name: rustfmt (root workspace)
+        entry: cargo fmt --all
+        language: system
+        files: ^crates/.*\.rs$
+        pass_filenames: false
+
+      - id: sdk-rustfmt
+        name: rustfmt (Rust SDK)
+        entry: cargo fmt --manifest-path sdk/rust/Cargo.toml
+        language: system
+        files: ^sdk/rust/.*\.rs$
+        pass_filenames: false
+
+      - id: foundation-web-prettier
+        name: Prettier (Foundation Web)
+        entry: npm exec --offline --prefix apps/foundation-web -- prettier --write
+        language: system
+        files: ^apps/foundation-web/.*\.(css|html|js|json|jsx|md|mjs|ts|tsx|yaml|yml)$
+
+      - id: harness-ui-prettier
+        name: Prettier (Harness UI)
+        entry: npm exec --offline --prefix apps/harness-ui -- prettier --write
+        language: system
+        files: ^apps/harness-ui/.*\.(css|html|js|json|jsx|md|mjs|ts|tsx|yaml|yml)$
+
+      - id: sdk-typescript-prettier
+        name: Prettier (TypeScript SDK)
+        entry: npm exec --offline --prefix sdk/typescript -- prettier --write
+        language: system
+        files: ^sdk/typescript/.*\.(css|html|js|json|jsx|md|mjs|ts|tsx|yaml|yml)$

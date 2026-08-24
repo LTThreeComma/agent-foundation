@@ -76,10 +76,10 @@ Use the Makefile as the stable development interface:
 | `make build`                | Build all workspace packages, applications, and standalone SDKs   |
 | `make images`               | Build the foundation-service and sandbox images                   |
 | `make image-check`          | Build and smoke-check both container images                       |
-| `make check`                | Format, lint, and type-check the repository without tests         |
+| `make check`                | Check formatting, lint, and types without rewriting sources       |
 | `make check-all`            | Run the complete component gates, including tests and builds      |
 
-Use `make check` while iterating. Run the full local gate before opening or updating a broad pull request:
+Use `make format` when you want to apply formatting changes, and use the source-preserving `make check` for fast feedback while iterating. Run the full local gate before opening or updating a broad pull request:
 
 ```bash
 make check-all
