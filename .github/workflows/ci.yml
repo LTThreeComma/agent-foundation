@@ -305,21 +305,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux arm64
-            runner: ubuntu-24.04-arm
-            architecture: arm64
-          - name: Windows x64
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: Windows
             runner: windows-2025
-            architecture: x64
-          - name: Windows arm64
-            runner: windows-11-arm
-            architecture: arm64
-          - name: macOS x64
-            runner: macos-15-intel
-            architecture: x64
-          - name: macOS arm64
+          - name: macOS
             runner: macos-15
-            architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -331,7 +322,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          architecture: ${{ matrix.architecture }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -345,29 +335,10 @@ jobs:
           --group test python -m pytest packages/agent-harness/tests
 
   agent-envd-client:
-    name: agent-envd client (${{ matrix.name }})
+    name: agent-envd client
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.agent_envd_client == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux arm64
-            runner: ubuntu-24.04-arm
-            architecture: arm64
-          - name: Windows x64
-            runner: windows-2025
-            architecture: x64
-          - name: Windows arm64
-            runner: windows-11-arm
-            architecture: arm64
-          - name: macOS x64
-            runner: macos-15-intel
-            architecture: x64
-          - name: macOS arm64
-            runner: macos-15
-            architecture: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -378,7 +349,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          architecture: ${{ matrix.architecture }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -399,34 +369,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux x64
+          - name: Linux
             runner: ubuntu-24.04
-            cache-key: linux-x64
+            cache-key: linux
             complete: true
             components: clippy, rustfmt
-          - name: Linux arm64
-            runner: ubuntu-24.04-arm
-            cache-key: linux-arm64
-            complete: false
-            components: ""
-          - name: Windows x64
+          - name: Windows
             runner: windows-2025
-            cache-key: windows-x64
+            cache-key: windows
             complete: false
             components: ""
-          - name: Windows arm64
-            runner: windows-11-arm
-            cache-key: windows-arm64
-            complete: false
-            components: ""
-          - name: macOS x64
-            runner: macos-15-intel
-            cache-key: macos-x64
-            complete: false
-            components: ""
-          - name: macOS arm64
+          - name: macOS
             runner: macos-15
-            cache-key: macos-arm64
+            cache-key: macos
             complete: false
             components: ""
     runs-on: ${{ matrix.runner }}
