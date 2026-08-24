@@ -9,6 +9,7 @@ import itertools
 import os
 import re
 import shutil
+import sys
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -60,45 +61,57 @@ class _LocalWriter:
         self._committed = False
 
     async def open(self) -> None:
-        fd, name = await asyncio.to_thread(
-            tempfile.mkstemp,
-            prefix=".converge-write-",
-            dir=self._native_path.parent,
-        )
+        try:
+            fd, name = await asyncio.to_thread(
+                tempfile.mkstemp,
+                prefix=".converge-write-",
+                dir=self._native_path.parent,
+            )
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="open a staged file") from exc
         self._temp_path = Path(name)
         self._file = os.fdopen(fd, "wb")
         if self._mode == "append" and self._native_path.exists():
             await self._copy_append_source()
 
     async def _copy_append_source(self) -> None:
-        source = await asyncio.to_thread(self._native_path.open, "rb")
+        try:
+            source = await asyncio.to_thread(self._native_path.open, "rb")
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="open an append source") from exc
         decoder = codecs.getincrementaldecoder("utf-8")("strict") if self._validate_text_append else None
         try:
-            while chunk := await asyncio.to_thread(source.read, 65_536):
+            try:
+                while chunk := await asyncio.to_thread(source.read, 65_536):
+                    if decoder is not None:
+                        if b"\x00" in chunk:
+                            raise EnvironmentError(
+                                "Text append source contains NUL.",
+                                code="environment_unsupported",
+                            )
+                        try:
+                            decoder.decode(chunk, final=False)
+                        except UnicodeDecodeError as exc:
+                            raise EnvironmentError(
+                                "Text append source is not valid UTF-8.",
+                                code="environment_unsupported",
+                            ) from exc
+                    await self._write(chunk, payload=False)
                 if decoder is not None:
-                    if b"\x00" in chunk:
-                        raise EnvironmentError(
-                            "Text append source contains NUL.",
-                            code="environment_unsupported",
-                        )
                     try:
-                        decoder.decode(chunk, final=False)
+                        decoder.decode(b"", final=True)
                     except UnicodeDecodeError as exc:
                         raise EnvironmentError(
                             "Text append source is not valid UTF-8.",
                             code="environment_unsupported",
                         ) from exc
-                await self._write(chunk, payload=False)
-            if decoder is not None:
-                try:
-                    decoder.decode(b"", final=True)
-                except UnicodeDecodeError as exc:
-                    raise EnvironmentError(
-                        "Text append source is not valid UTF-8.",
-                        code="environment_unsupported",
-                    ) from exc
+            except OSError as exc:
+                raise _environment_error_from_os(exc, action="read an append source") from exc
         finally:
-            await asyncio.to_thread(source.close)
+            try:
+                await asyncio.to_thread(source.close)
+            except OSError:
+                pass
 
     async def write(self, chunk: bytes) -> None:
         await self._write(chunk, payload=True)
@@ -108,23 +121,37 @@ class _LocalWriter:
             raise EnvironmentError("File writer is not writable.", code="environment_conflict")
         if not isinstance(chunk, bytes):
             raise TypeError("raw writer chunks must be bytes")
-        await asyncio.to_thread(self._file.write, chunk)
+        try:
+            await asyncio.to_thread(self._file.write, chunk)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="write a staged file") from exc
         if payload:
             self._payload_bytes += len(chunk)
 
     async def commit(self) -> FileWriteResult:
         if self._file is None or self._temp_path is None or self._committed:
             raise EnvironmentError("File writer cannot commit.", code="environment_conflict")
-        await asyncio.to_thread(self._file.flush)
-        await asyncio.to_thread(os.fsync, self._file.fileno())
-        await asyncio.to_thread(self._file.close)
+        try:
+            await asyncio.to_thread(self._file.flush)
+            await asyncio.to_thread(os.fsync, self._file.fileno())
+            await asyncio.to_thread(self._file.close)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="commit a staged file") from exc
         self._file = None
-        await asyncio.to_thread(
-            self._operator._publish_staged,
-            self._temp_path,
-            self._native_path,
-            self._mode,
+        publication = asyncio.create_task(
+            asyncio.to_thread(
+                self._operator._publish_staged,
+                self._temp_path,
+                self._native_path,
+                self._mode,
+            )
         )
+        while not publication.done():
+            try:
+                await asyncio.shield(publication)
+            except asyncio.CancelledError:
+                continue
+        publication.result()
         self._temp_path = None
         self._committed = True
         return FileWriteResult(
@@ -134,12 +161,27 @@ class _LocalWriter:
         )
 
     async def abort(self) -> None:
+        failure: EnvironmentError | None = None
         if self._file is not None:
-            await asyncio.to_thread(self._file.close)
-            self._file = None
+            try:
+                await asyncio.to_thread(self._file.close)
+            except OSError as exc:
+                failure = _environment_error_from_os(exc, action="close a staged file")
+            finally:
+                self._file = None
         if self._temp_path is not None:
-            await asyncio.to_thread(self._temp_path.unlink, missing_ok=True)
-            self._temp_path = None
+            try:
+                await asyncio.to_thread(self._temp_path.unlink, missing_ok=True)
+            except OSError as exc:
+                cleanup = _environment_error_from_os(exc, action="remove a staged file")
+                if failure is None:
+                    failure = cleanup
+                else:
+                    failure.add_note(f"Staged file removal also failed: {cleanup!r}")
+            finally:
+                self._temp_path = None
+        if failure is not None:
+            raise failure
 
 
 class LocalFileOperator:
@@ -188,17 +230,20 @@ class LocalFileOperator:
     def _resolve(self, path: str, *, follow_final: bool = True, require_exists: bool = True) -> Path:
         parts = self._lexical(path)
         candidate = self._root.joinpath(*parts)
-        if follow_final:
-            try:
-                resolved = candidate.resolve(strict=require_exists)
-            except FileNotFoundError:
+        try:
+            if follow_final:
                 if require_exists:
-                    raise EnvironmentError("File path does not exist.", code="environment_not_found") from None
-                parent = candidate.parent.resolve(strict=True)
+                    resolved = candidate.resolve(strict=True)
+                else:
+                    parent = candidate.parent.resolve(strict=True)
+                    resolved = parent / candidate.name
+            elif candidate == self._root:
+                resolved = self._root
+            else:
+                parent = candidate.parent.resolve(strict=require_exists)
                 resolved = parent / candidate.name
-        else:
-            parent = candidate.parent.resolve(strict=True) if candidate != self._root else self._root
-            resolved = parent / candidate.name if candidate != self._root else self._root
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="resolve a file path") from exc
         try:
             resolved.relative_to(self._root)
         except ValueError:
@@ -230,18 +275,30 @@ class LocalFileOperator:
         exists = destination.exists() or destination.is_symlink()
         if destination.is_symlink():
             raise EnvironmentError("Writing through a symlink is denied.", code="environment_denied")
-        if mode == "create" and exists:
-            raise EnvironmentError("Destination already exists.", code="environment_conflict")
         if mode in {"replace", "append"} and not exists:
             raise EnvironmentError("Destination does not exist.", code="environment_not_found")
-        parent = destination.parent.resolve(strict=True)
+        try:
+            parent = destination.parent.resolve(strict=True)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="resolve a destination parent") from exc
         try:
             parent.relative_to(self._root)
         except ValueError:
             raise EnvironmentError(
                 "Destination parent escaped the configured root.", code="environment_denied"
             ) from None
-        os.replace(staged, destination)
+        try:
+            if mode == "create":
+                os.link(staged, destination)
+            else:
+                os.replace(staged, destination)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="publish a staged file") from exc
+        if mode == "create":
+            try:
+                staged.unlink()
+            except OSError:
+                pass
 
     async def read_text(
         self,
@@ -528,7 +585,10 @@ class LocalFileOperator:
     async def mkdir(self, path: str, *, parents: bool = False, exist_ok: bool = False) -> FileMutationResult:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False, require_exists=False)
         self._require_writable(native)
-        await asyncio.to_thread(native.mkdir, parents=parents, exist_ok=exist_ok)
+        try:
+            await asyncio.to_thread(native.mkdir, parents=parents, exist_ok=exist_ok)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="create a directory") from exc
         return FileMutationResult(path=path, receipt=self._receipt())
 
     async def move(
@@ -551,7 +611,10 @@ class LocalFileOperator:
             raise EnvironmentError("Move destination exists.", code="environment_conflict")
         if destination_native.is_symlink():
             raise EnvironmentError("Move destination symlink is denied.", code="environment_denied")
-        await asyncio.to_thread(os.replace if replace else os.rename, source_native, destination_native)
+        try:
+            await asyncio.to_thread(os.replace if replace else os.rename, source_native, destination_native)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="move a file") from exc
         return FileMutationResult(path=destination, receipt=self._receipt())
 
     async def remove(
@@ -562,15 +625,18 @@ class LocalFileOperator:
     ) -> FileMutationResult:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False)
         self._require_writable(native)
-        if native.is_symlink() or native.is_file():
-            await asyncio.to_thread(native.unlink)
-        elif native.is_dir():
-            if recursive:
-                await asyncio.to_thread(shutil.rmtree, native)
+        try:
+            if native.is_symlink() or native.is_file():
+                await asyncio.to_thread(native.unlink)
+            elif native.is_dir():
+                if recursive:
+                    await asyncio.to_thread(shutil.rmtree, native)
+                else:
+                    await asyncio.to_thread(native.rmdir)
             else:
-                await asyncio.to_thread(native.rmdir)
-        else:
-            raise EnvironmentError("Unsupported file kind.", code="environment_unsupported")
+                raise EnvironmentError("Unsupported file kind.", code="environment_unsupported")
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="remove a file") from exc
         return FileMutationResult(path=path, receipt=self._receipt())
 
     @asynccontextmanager
@@ -595,7 +661,13 @@ class LocalFileOperator:
             yield writer
         finally:
             if not writer._committed:
-                await writer.abort()
+                active_error = sys.exception()
+                try:
+                    await writer.abort()
+                except BaseException as cleanup_error:
+                    if active_error is None:
+                        raise
+                    active_error.add_note(f"Staged file cleanup also failed: {cleanup_error!r}")
 
     async def copy(
         self,
@@ -689,6 +761,20 @@ def _read_text_page(
 
         has_more = bool(file.read(1))
     return "".join(selected), len(selected), has_more, tuple(truncated_lines)
+
+
+def _environment_error_from_os(exc: OSError, *, action: str) -> EnvironmentError:
+    if isinstance(exc, FileNotFoundError):
+        code = "environment_not_found"
+    elif isinstance(exc, FileExistsError):
+        code = "environment_conflict"
+    elif isinstance(exc, PermissionError):
+        code = "environment_denied"
+    elif isinstance(exc, NotADirectoryError | IsADirectoryError):
+        code = "environment_request_invalid"
+    else:
+        code = "environment_provider_failure"
+    return EnvironmentError(f"Direct Local could not {action}.", code=code)
 
 
 def _validate_query_pattern(pattern: str) -> None:

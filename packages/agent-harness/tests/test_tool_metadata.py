@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 
 def test_harness_tool_metadata_is_detached_and_normalized() -> None:
-    policy = ToolOutputPolicy(max_inline_bytes=128, max_output_bytes=1024)
+    policy = ToolOutputPolicy(max_inline_bytes=512, max_output_bytes=1024)
     metadata = normalize_harness_tool_metadata(
         {
             "tool_id": " files.read ",
@@ -65,7 +65,7 @@ def test_credential_audience_uniqueness_is_checked_after_normalization() -> None
             effects=frozenset({"read"}),
             credential_audiences=("storage", " storage "),
             idempotency="read_only",
-            output_policy=ToolOutputPolicy(max_inline_bytes=128, max_output_bytes=1024),
+            output_policy=ToolOutputPolicy(max_inline_bytes=512, max_output_bytes=1024),
         )
 
     assert exc_info.value.code == "tool_metadata_invalid"

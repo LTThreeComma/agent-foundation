@@ -655,6 +655,8 @@ async def test_native_cancellation_becomes_a_cancelled_result() -> None:
         await started.wait()
         stream.cancel()
         terminal = await asyncio.wait_for(next_item, timeout=2)
+        while isinstance(terminal, HarnessEvent):
+            terminal = await asyncio.wait_for(stream.__anext__(), timeout=2)
 
         assert isinstance(terminal, HarnessRunResultEvent)
         assert terminal.result.status == "cancelled"
@@ -723,6 +725,8 @@ async def test_concurrent_next_is_rejected_without_closing_the_active_stream() -
 
         stream.cancel()
         terminal = await asyncio.wait_for(active_next, timeout=2)
+        while isinstance(terminal, HarnessEvent):
+            terminal = await asyncio.wait_for(stream.__anext__(), timeout=2)
         assert isinstance(terminal, HarnessRunResultEvent)
         assert terminal.result.status == "cancelled"
 

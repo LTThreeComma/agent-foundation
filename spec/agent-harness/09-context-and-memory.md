@@ -35,7 +35,7 @@ Instruction ordering follows Pydantic AI Capability composition. A Capability de
 
 The standard Capability set performs the following semantic work without creating a global stage API:
 
-1. validate imported message structure and tool-call/result integrity without rewriting provider semantics;
+1. validate imported message structure and apply the mandatory message-integrity Filter without rewriting provider semantics;
 2. apply handoff, accepted enqueue content, completed background work, and explicit file references;
 3. compact history when the configured budget requires it;
 4. resolve current Environment projection, working-state, memory, and skill guidance;
@@ -117,7 +117,7 @@ Small operational behaviors remain separate when their state and lifecycle diffe
 
 These Capabilities use native instructions, history/request hooks, native enqueue, or Toolsets. A global context-injection switch is unnecessary; a Host enables, disables, or configures the owning Capability without rewriting other instruction sources.
 
-A monitored-process Capability requires the finalized `DynamicEnvironmentCapability`, shares its single run-local compact-reference domain, and starts work only through the live `BoundEnvironment`. One fresh `MonitoredProcessRunCapability` supplies the typed Host collaborator; a missing or incompatible projection or collaborator fails before model exposure. The model Capability gives the exact bound process value to that collaborator, which owns waiting, wake-up, bounded completion retention, duplicate suppression, and accepted delivery. The model Capability owns only its tool and injection of accepted completions. Process status exposes only processes already started or observed in that scoped model surface and is not provider-wide or operating-system process discovery.
+A monitored-process Capability requires the finalized `DynamicEnvironmentCapability`, shares its single run-local compact-reference domain, and composes `MonitoredProcessToolset` to start work only through the live `BoundEnvironment`. One fresh `MonitoredProcessRunCapability` supplies the typed Host collaborator; a missing or incompatible projection or collaborator fails before model exposure. The Toolset gives the exact bound process value to that collaborator, which owns waiting, wake-up, bounded completion retention, duplicate suppression, and accepted delivery. The Capability owns run binding, lifecycle hooks, and injection of accepted completions rather than duplicating per-call tool semantics. Process status exposes only processes already started or observed in that scoped model surface and is not provider-wide or operating-system process discovery.
 
 Live observation cannot outlive the entered Environment. Run termination cancels and drains process-local monitoring before Environment close. A Host can deliver an already completed bounded record to a later Harness run, but it cannot restore or reattach a run-local compact reference from `HarnessState`. A durable Host that deliberately owns work beyond one run must also own a separate provider attachment and completion ledger outside the Harness.
 
@@ -131,9 +131,9 @@ Loaded skill identities enter versioned Capability state only when continuation 
 
 ## Media, Documents, and Web Resources
 
-Media, document conversion, and web acquisition are separate optional Capabilities that can share narrow bounded content values without becoming a catch-all Toolset. Media inputs preserve supported native Pydantic content where possible. Document conversion produces bounded text and explicitly owned extracted assets. Unavoidable blocking parsers run outside the event loop, and every temporary asset has one cleanup owner.
+Media, document conversion, and web acquisition are separate optional Capabilities, each composing a reusable feature Toolset rather than contributing a catch-all Toolset. The Toolset owns model-visible schemas and per-call semantics directly over its natural provider ports; the Capability selects and binds fresh run collaborators, preserves provenance, and owns only Agent-loop lifecycle or hooks. Media inputs preserve supported native Pydantic content where possible. Document conversion produces bounded text and explicitly owned extracted assets. Unavoidable blocking parsers run outside the event loop, and every temporary asset has one cleanup owner.
 
-Web search is backed by an explicitly selected provider. Fetch, scrape, and download use an explicitly selected async network client and policy with finite redirects, deadlines, and byte limits. Every redirect is re-evaluated under current policy, and credentials remain audience-bound. A download reaches the workspace only through `BoundEnvironment` streaming operations and current Environment authorization; a URL never becomes Environment authority.
+Web search is backed by an explicitly selected provider. The Web Toolset applies an explicitly selected async network client and live policy with finite redirects, deadlines, and byte limits. Every redirect is re-evaluated under current policy, and credentials remain audience-bound. A download reaches the workspace only through `BoundEnvironment` streaming operations and current Environment authorization; a URL never becomes Environment authority.
 
 Remote content, converted text, metadata, and skill resources retain provenance and remain untrusted model context. Raw credentials, provider clients, temporary native paths, and live response objects never enter model results or `HarnessState`. Optional providers and conversion dependencies are inert until a Host selects the corresponding Capability.
 
@@ -177,7 +177,7 @@ The Capability preserves:
 - configured recent turns;
 - provenance needed to distinguish summary content from new user input.
 
-Transient Environment and working-state context is omitted from the summarized history prefix and resolved again after compaction. Media and large tool returns can be replaced by bounded descriptions according to provider policy.
+Transient Environment and working-state context is omitted from the summarized history prefix and resolved again after compaction. Native multimodal content is normalized by the request content compatibility filter owned by [Input, Model, and Output Boundaries](16-input-model-and-output.md#request-and-history-filters). Oversized function-tool text/JSON is already represented by the inline preview and optional run-local file path owned by [Tool Execution](07-tool-execution.md#dispatch-retry-and-results); compaction does not create another spill or retention mechanism.
 
 The original history remains active until structured summary validation and message-integrity checks succeed. Compaction failure leaves history unchanged or stops the request according to the configured policy.
 

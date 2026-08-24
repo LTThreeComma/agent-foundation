@@ -22,7 +22,8 @@ The current mandatory build contribution is deliberately narrow:
 | Logical model resolver   | Pydantic `ResolveModelId`                     | Consult fresh `ModelRunBinding` or delegate to native inference                                               | [Input, Model, and Output](16-input-model-and-output.md)                 |
 | Typed run dependencies   | `AgentContext`                                | Carry Identity, Environment, model binding, events, usage attribution, plugins, children, metadata, and state | [Capability Model](04-capability-model.md)                               |
 | Usage reporting          | Mandatory `UsageCapability`                   | Attribute mixed usage and flush pending records after every committed model request                           | [Events, Observability, and Usage](12-events-observability-and-usage.md) |
-| Invocation boundary      | Capability-contributed outer `WrapperToolset` | Validate reserved metadata, preserve unmanaged dispatch, and enforce managed policy when selected             | [Tool Execution](07-tool-execution.md)                                   |
+| Tool execution boundary  | Capability-contributed outer `WrapperToolset` | Bound all function text/JSON returns and enforce managed policy when metadata selects it                      | [Tool Execution](07-tool-execution.md)                                   |
+| Message integrity Filter | Innermost request Filter Capability           | Remove orphan or duplicate ordinary function-tool results before provider dispatch                            | [Input, Model, and Output](16-input-model-and-output.md)                 |
 | Continuation coordinator | `AgentContextState` typed methods             | Provide detached versioned JSON namespaces without a second Capability registry                               | [Harness State and Resume](10-snapshot-and-resume.md)                    |
 
 Model self-healing is a Model wrapper, not a Capability. Interrupted-stream semantic recovery is owned by `HarnessRunStream`, not a Capability. Plugin input/result middleware remains outside the Agent loop.
@@ -45,6 +46,8 @@ Model self-healing is a Model wrapper, not a Capability. Interrupted-stream sema
 | Delegation                        | Capability-owned Toolsets over `SubagentCollection`                                                        | [Delegation and Subagents](11-delegation-and-subagents.md)               |
 | Telemetry                         | Pydantic instrumentation and focused Capabilities                                                          | [Events, Observability, and Usage](12-events-observability-and-usage.md) |
 | Checkpoint observation            | Capability using public complete message boundaries                                                        | [Harness State and Resume](10-snapshot-and-resume.md)                    |
+| Request content compatibility     | Copy-on-write request Filter over native multimodal content                                                | [Input, Model, and Output](16-input-model-and-output.md)                 |
+| Cold-start history reduction      | Copy-on-write Filter over already-consumed ordinary tool returns                                           | [Input, Model, and Output](16-input-model-and-output.md)                 |
 | Provider-specific Agent behavior  | Capability public hooks only when profile/adapter is insufficient                                          | [Input, Model, and Output](16-input-model-and-output.md)                 |
 
 Native function tools and Toolsets remain valid code-first Pydantic inputs only inside a Capability. A small native `Capability(tools=[...])` or Toolset Capability is the ordinary one-to-one adapter; it does not require a Harness-specific subclass. The owning Capability also owns any tool timeout and stable Capability/Toolset identity because top-level `AgentSpec.tool_timeout` does not implicitly configure Capability-owned Toolsets. `DynamicEnvironmentCapability` is richer because it combines stable Toolsets with request-dynamic topology context and native notices; the Environment resource itself still enters through the fixed `RunBindings.environment` field.
@@ -59,7 +62,8 @@ flowchart LR
     Run[RunBindings capabilities] --> PAI
     Resolver[Mandatory ResolveModelId] --> PAI
     Usage[Mandatory usage reporting] --> PAI
-    Boundary[Mandatory invocation boundary] --> PAI
+    Boundary[Mandatory tool execution boundary] --> PAI
+    Integrity[Mandatory message integrity Filter] --> PAI
     PAI --> Agent[Pydantic AI Agent loop]
 ```
 
@@ -69,7 +73,7 @@ A Capability needing another run-bound Capability uses Pydantic's public run-bou
 
 ## State
 
-Stateful Capabilities use `AgentContextState.read()` and `write()` with a stable non-blank namespace ID, exact version, and typed Pydantic model. The Harness snapshots all namespaces but does not inspect a global list of active owners. Unknown entries can remain opaque across a run; only the owning read accepts their semantics. Environment portable state uses the explicit core-owned `HarnessState.environment_state` field and is never stored as an `DynamicEnvironmentCapability` namespace.
+Stateful Capabilities use `AgentContextState.read()` and `write()` with a stable non-blank namespace ID, exact version, and typed Pydantic model. The Harness snapshots all namespaces but does not inspect a global list of active owners. Unknown entries can remain opaque across a run; only the owning read accepts their semantics. Environment portable state uses the explicit core-owned `HarnessState.environment_state` field and is never stored as a `DynamicEnvironmentCapability` namespace.
 
 A trusted plugin can also transform the complete `HarnessState` at the result boundary. This does not create a second Capability lifecycle or provenance system.
 
@@ -105,4 +109,4 @@ A documentation catalog provides shared vocabulary without a second factory or c
 
 ### Small Mandatory Core vs. Uniform Feature Set
 
-Only model resolution, shared context/state coordination, mixed-usage reporting, and the inert-by-default invocation boundary are mandatory. Optional Agents may expose very different tool and behavior surfaces, while native Pydantic composition stays authoritative. Without reserved managed metadata or a client definition marker, the wrapper preserves ordinary native dispatch.
+Only model resolution, shared context/state coordination, mixed-usage reporting, the message-integrity Filter, and the code-owned tool execution boundary are mandatory. Optional Agents may expose very different tool and behavior surfaces, while native Pydantic composition stays authoritative. Without reserved managed metadata or a client definition marker, the boundary preserves ordinary native dispatch and adds only the default redaction, bound, and spill policy for native JSON and textual `ToolReturn` fields; managed authorization, credentials, grants, retries, and events remain opt-in through complete trusted metadata.

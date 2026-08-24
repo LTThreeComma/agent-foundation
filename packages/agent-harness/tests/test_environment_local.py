@@ -199,6 +199,19 @@ async def test_direct_local_text_patch_copy_and_routing(tmp_path: Path) -> None:
         assert _read_utf8(tmp_path / "copied.txt") == "alpha\ngamma\n"
 
 
+async def test_exact_dot_selects_the_default_working_directory_without_allowing_traversal(tmp_path: Path) -> None:
+    binding = _aggregate(tmp_path)
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        selected = environment.resolve_path(".")
+        assert selected.binding_id == "binding-1"
+        assert selected.path == "/"
+
+        for invalid in ("./note.txt", "..", "nested/../note.txt"):
+            with pytest.raises(EnvironmentError) as exc_info:
+                environment.resolve_path(invalid)
+            assert exc_info.value.code == "environment_request_invalid"
+
+
 @pytest.mark.parametrize(
     ("source", "patch", "expected"),
     [
@@ -410,6 +423,15 @@ async def test_raw_reads_are_at_most_and_stream_writes_publish_only_on_success(t
         assert missing_append.value.code == "environment_not_found"
         assert not (tmp_path / "missing.txt").exists()
 
+        (tmp_path / "append-directory").mkdir()
+        with pytest.raises(EnvironmentError) as directory_append:
+            await environment.files.write_text(
+                "/workspace/append-directory",
+                "x",
+                mode="append",
+            )
+        assert directory_append.value.code == "environment_request_invalid"
+
         invalid_append = tmp_path / "invalid-append.bin"
         invalid_append.write_bytes(b"\xff")
         with pytest.raises(EnvironmentError) as unsupported_append:
@@ -459,6 +481,67 @@ async def test_raw_reads_are_at_most_and_stream_writes_publish_only_on_success(t
         assert streamed_write.bytes_written == 9
         assert (tmp_path / "streamed.bin").read_bytes() == b"123456789"
         assert not tuple(tmp_path.glob(".converge-write-*"))
+
+
+async def test_create_publish_succeeds_when_staging_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_unlink = Path.unlink
+    cleanup_failed = False
+
+    def fail_staging_cleanup_once(path: Path, *args, **kwargs) -> None:
+        nonlocal cleanup_failed
+        if path.name.startswith(".converge-write-") and not cleanup_failed:
+            cleanup_failed = True
+            raise OSError("injected staging cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_staging_cleanup_once)
+    binding = _aggregate(tmp_path)
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        result = await environment.files.write_text(
+            "/workspace/published.txt",
+            "published",
+            mode="create",
+        )
+
+    assert cleanup_failed
+    assert result.receipt.outcome == "succeeded"
+    assert (tmp_path / "published.txt").read_bytes() == b"published"
+
+
+async def test_file_publication_returns_committed_outcome_after_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication_started = threading.Event()
+    continue_publication = threading.Event()
+    original_publish = local_files_module.LocalFileOperator._publish_staged
+
+    def blocking_publish(operator, staged, destination, mode) -> None:
+        publication_started.set()
+        assert continue_publication.wait(timeout=1)
+        original_publish(operator, staged, destination, mode)
+
+    monkeypatch.setattr(local_files_module.LocalFileOperator, "_publish_staged", blocking_publish)
+    binding = _aggregate(tmp_path)
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        write = asyncio.create_task(
+            environment.files.write_text(
+                "/workspace/published.txt",
+                "published",
+                mode="create",
+            )
+        )
+        assert await asyncio.to_thread(publication_started.wait, 1)
+        write.cancel()
+        continue_publication.set()
+        result = await asyncio.wait_for(write, timeout=0.5)
+
+    assert result.receipt.outcome == "succeeded"
+    assert (tmp_path / "published.txt").read_bytes() == b"published"
+    assert not tuple(tmp_path.glob(".converge-write-*"))
 
 
 @pytest.mark.parametrize("cross_binding", [False, True])

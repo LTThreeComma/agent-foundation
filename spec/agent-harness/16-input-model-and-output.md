@@ -94,6 +94,50 @@ Pydantic AI retains the complete layering:
 
 The Harness does not serialize `ModelProfile`, merge profile keys, copy provider settings into a Host schema, or translate `AgentSpec` field by field. A hosted model-integration adapter may own a durable configuration, but it constructs a native Model before returning from `ModelRunBinding`.
 
+## Request and History Filters
+
+Filter Capabilities are the narrow family of copy-on-write transformations applied to native Pydantic messages at the public model-request boundary. They do not form a second pipeline API, model profile, retry framework, or authority plane. Each Filter owns one request/history invariant and composes through ordinary Pydantic Capability ordering.
+
+`MessageIntegrityFilterCapability` is mandatory and innermost. For ordinary function tools, a `ToolReturnPart` or tool-specific `RetryPromptPart` is retained only when its call ID belongs to the most recent `ModelResponse` and has not already received a result. A model-level retry prompt abandons that response's pending function calls. Orphan and duplicate results are removed while the active final `ModelRequest` envelope is preserved. Provider-native call/return rendering and validation remain with the native Model adapter; interrupted-response repair remains with Harness state recovery.
+
+`ContentFilterCapability` is an optional definition-selected request filter for native multimodal content. It inspects both `UserPromptPart` and ordinary `ToolReturnPart` content because user input and native function tools can introduce the same Pydantic AI content types. Its frozen configuration explicitly declares the accepted media families and finite request limits:
+
+```python
+class ContentFilterConfiguration(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    accepted_media: frozenset[Literal[
+        "image", "audio", "video", "document", "uploaded_file"
+    ]]
+    max_media_items: int
+    max_binary_bytes: int
+```
+
+The configuration is compatibility policy selected by trusted embedding code, not a second `ModelProfile`, provider capability registry, or inference from a model name. A dynamic `ModelRunBinding` that routes among incompatible media surfaces selects an Agent definition or trusted policy valid for that route; model content never widens the policy.
+
+The Content Filter preserves accepted native Pydantic values. It classifies `BinaryContent` by canonical media type, treats image/audio/video/document URLs and `UploadedFile` as their native families, rejects credential-bearing URLs, and enforces aggregate item and inline-binary byte limits before provider serialization. An unsupported, unsafe, or over-limit item is replaced in place by one bounded explanatory text value; non-media content, tool-call identity, and request ordering remain unchanged. Scalar content remains scalar for a one-to-one replacement, while list and tuple shapes retain their sequence shape. This filter does not upload, fetch, decode, compress, spill, or persist content and grants no authority.
+
+`ColdStartFilterCapability` is optional. After its configured idle interval since the latest `ModelResponse`, it shortens oversized string leaves in ordinary tool results strictly before that latest response. Those results have already been consumed by the model; the latest response and every later request, including pending tool results, remain exact. Structured dictionaries, lists, and tuples retain their shape and short hint fields; native media and non-string values remain unchanged. The filter does not spill content or replace explicit compaction.
+
+The tool execution boundary does not duplicate Filter behavior. It preserves native multimodal parts and owns oversized current function-tool text/JSON before message integration as specified by [Tool Execution](07-tool-execution.md#dispatch-retry-and-results). Conversely, Filter Capabilities never authorize a tool or spill its return.
+
+Former global history processors resolve to one current owner:
+
+| Behavior                                                                | Owner                                                   |
+| ----------------------------------------------------------------------- | ------------------------------------------------------- |
+| Orphan and duplicate ordinary tool results                              | Mandatory `MessageIntegrityFilterCapability`            |
+| Unsupported, unsafe, or over-limit request media                        | Optional `ContentFilterCapability`                      |
+| Cold-cache reduction of already-consumed tool-result strings            | Optional `ColdStartFilterCapability`                    |
+| Current tool-return redaction, bounds, and spill                        | `ToolExecutionBoundaryCapability`                       |
+| Runtime, file, Environment, handoff, working-state, and process notices | Their focused context or Environment Capabilities       |
+| Accepted live user or Agent messages                                    | Native enqueue plus Host delivery acceptance            |
+| Media acquisition, transformation, or upload                            | Optional Media Capability/provider integration          |
+| System instructions and provider request rendering                      | `AgentSpec`, native Model profile, and provider adapter |
+| Exact provider-history rejection repair                                 | `SelfHealingModel`                                      |
+| Interrupted-history normalization and semantic retry                    | Harness state recovery and `HarnessRunStream`           |
+
+Malformed current tool arguments, ordinary provider reasoning projection, and transport retry remain upstream Model/adapter/client concerns rather than generic Filters. An exact residual provider incompatibility uses `SelfHealingModel` or a narrowly scoped compatibility Capability only when the native profile lacks the required public behavior.
+
 ## Narrow Self-Healing
 
 When `AgentDefinition.self_healing` is true, every concrete build-time or run-resolved Model is wrapped exactly once in `SelfHealingModel`. The wrapper preserves the native Model interface and profile.

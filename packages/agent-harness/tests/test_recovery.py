@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 
 import pytest
-from converge_agent_harness import HarnessBuilder, HarnessState, ModelRecoveryPolicy, RunBindings
+from converge_agent_harness import HarnessBuilder, HarnessEvent, HarnessState, ModelRecoveryPolicy, RunBindings
 from converge_agent_harness.recovery import INTERRUPTED_TOOL_RESULT, normalize_interrupted_history
 from pydantic import BaseModel
 from pydantic_ai.agent.spec import AgentSpec
@@ -728,6 +728,8 @@ async def test_cancel_interrupts_recovery_backoff_without_starting_another_attem
         await started.wait()
         run_stream.cancel()
         terminal = await asyncio.wait_for(pending, timeout=2)
+        while isinstance(terminal, HarnessEvent):
+            terminal = await asyncio.wait_for(run_stream.__anext__(), timeout=2)
 
     assert terminal.result.status == "cancelled"
     assert calls == 1
@@ -757,6 +759,8 @@ async def test_cancelled_stream_does_not_export_unfinished_thinking() -> None:
         await started.wait()
         run_stream.cancel()
         terminal = await asyncio.wait_for(pending, timeout=2)
+        while isinstance(terminal, HarnessEvent):
+            terminal = await asyncio.wait_for(run_stream.__anext__(), timeout=2)
 
     assert terminal.result.status == "cancelled"
     assert terminal.result.state is not None
@@ -795,6 +799,8 @@ async def test_cancel_fence_wins_when_provider_translates_cancellation() -> None
         await started.wait()
         run_stream.cancel()
         terminal = await asyncio.wait_for(pending, timeout=2)
+        while isinstance(terminal, HarnessEvent):
+            terminal = await asyncio.wait_for(run_stream.__anext__(), timeout=2)
 
     assert terminal.result.status == "cancelled"
     assert calls == 1

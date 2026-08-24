@@ -6,13 +6,32 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
+from .commands import (
+    BoundProcessHandle,
+    CommandRequest,
+    PortObservation,
+    PortTarget,
+    ProcessControlResult,
+    ProcessInfo,
+    ProcessReadOutputResult,
+    ProcessSignalResult,
+    ProcessStartResult,
+    ProcessWriteStdinResult,
+    ProviderPortOperations,
+    ProviderProcessOperations,
+    ProviderShellOperations,
+    ShellExecResult,
+)
+from .files import FileOperator
 from .models import (
     EnvironmentAvailability,
     EnvironmentBindingObservation,
     EnvironmentBindingState,
+    EnvironmentDescriptor,
     EnvironmentOperationFamily,
+    EnvironmentOperationReceipt,
     EnvironmentPath,
     EnvironmentReadinessRequirement,
     EnvironmentState,
@@ -21,6 +40,13 @@ from .models import (
     EnvironmentTopologyChange,
     EnvironmentTopologyLimits,
     EnvironmentTopologyRequest,
+)
+from .retention import (
+    BoundOutputCursor,
+    BoundOutputReference,
+    EnvironmentOutputPolicy,
+    EnvironmentOutputReadResult,
+    ProviderOutputOperations,
 )
 
 if TYPE_CHECKING:
@@ -31,11 +57,116 @@ if TYPE_CHECKING:
 class EnvironmentProviderOperations:
     """Provider-local semantic operation facets captured at entry."""
 
-    files: Any | None = None
-    shell: Any | None = None
-    processes: Any | None = None
-    ports: Any | None = None
-    outputs: Any | None = None
+    files: FileOperator | None = None
+    shell: ProviderShellOperations | None = None
+    processes: ProviderProcessOperations | None = None
+    ports: ProviderPortOperations | None = None
+    outputs: ProviderOutputOperations | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FileScopeSelection:
+    """One exact logical file route captured before a compound operation."""
+
+    logical_path: str
+    resolved_path: EnvironmentPath
+    observed_generation: str
+
+
+class FileScopeProvider(Protocol):
+    """Select and hold one revision-pinned FileOperator for compound operations."""
+
+    def select_files(self, path: str) -> FileScopeSelection: ...
+
+    def open_files(self, selection: FileScopeSelection) -> AbstractAsyncContextManager[FileOperator]: ...
+
+
+class BoundShellOperations(Protocol):
+    """Alias-aware shell operations routed by one BoundEnvironment."""
+
+    async def exec(self, request: CommandRequest, *, alias: str | None = None) -> ShellExecResult: ...
+
+
+class BoundProcessOperations(Protocol):
+    """Revision-fenced process operations routed by one BoundEnvironment."""
+
+    async def start(self, request: CommandRequest, *, alias: str | None = None) -> ProcessStartResult: ...
+
+    async def inspect(self, handle: BoundProcessHandle) -> ProcessInfo: ...
+
+    async def read_output(
+        self,
+        handle: BoundProcessHandle,
+        *,
+        stdout_cursor: BoundOutputCursor | None = None,
+        stderr_cursor: BoundOutputCursor | None = None,
+        stdout_start_offset: int | None = None,
+        stderr_start_offset: int | None = None,
+        wait_seconds: float = 0,
+        policy: EnvironmentOutputPolicy,
+    ) -> ProcessReadOutputResult: ...
+
+    async def write_stdin(
+        self,
+        handle: BoundProcessHandle,
+        data: bytes,
+        *,
+        close_after_write: bool = False,
+    ) -> ProcessWriteStdinResult: ...
+
+    async def close_stdin(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt: ...
+
+    async def signal(
+        self,
+        handle: BoundProcessHandle,
+        signal: Literal["interrupt", "terminate"],
+    ) -> ProcessSignalResult: ...
+
+    async def wait(
+        self,
+        handle: BoundProcessHandle,
+        *,
+        condition: Literal["initial_terminal", "tree_cleaned"],
+        timeout_seconds: float,
+    ) -> ProcessInfo: ...
+
+    async def kill(self, handle: BoundProcessHandle) -> ProcessControlResult: ...
+
+    async def release(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt: ...
+
+
+class BoundPortOperations(Protocol):
+    """Alias-aware port observations routed by one BoundEnvironment."""
+
+    async def inspect(self, target: PortTarget) -> PortObservation: ...
+
+    async def wait(
+        self,
+        target: PortTarget,
+        *,
+        desired: Literal["listening", "not_listening"],
+        timeout_seconds: float,
+    ) -> PortObservation: ...
+
+
+class BoundOutputOperations(Protocol):
+    """Revision-fenced retained-output operations routed by one BoundEnvironment."""
+
+    async def read(
+        self,
+        reference: BoundOutputReference,
+        *,
+        cursor: BoundOutputCursor | None = None,
+        start_offset: int | None = None,
+        policy: EnvironmentOutputPolicy,
+    ) -> EnvironmentOutputReadResult: ...
+
+    async def release(
+        self,
+        *,
+        reference: BoundOutputReference | None = None,
+        cursor: BoundOutputCursor | None = None,
+    ) -> EnvironmentOperationReceipt: ...
 
 
 class BoundEnvironmentProvider(Protocol):
@@ -48,7 +179,7 @@ class BoundEnvironmentProvider(Protocol):
     def environment_id(self) -> str: ...
 
     @property
-    def descriptor(self) -> Any: ...
+    def descriptor(self) -> EnvironmentDescriptor: ...
 
     @property
     def availability(self) -> EnvironmentAvailability: ...
@@ -140,23 +271,31 @@ class BoundEnvironment(ABC):
 
     @property
     @abstractmethod
-    def files(self) -> Any: ...
+    def files(self) -> FileOperator: ...
+
+    @abstractmethod
+    def select_files(self, path: str) -> FileScopeSelection:
+        """Capture one exact binding revision for a logical file path."""
+
+    @abstractmethod
+    def open_files(self, selection: FileScopeSelection) -> AbstractAsyncContextManager[FileOperator]:
+        """Hold the selected revision and route all scoped paths through it."""
 
     @property
     @abstractmethod
-    def shell(self) -> Any: ...
+    def shell(self) -> BoundShellOperations: ...
 
     @property
     @abstractmethod
-    def processes(self) -> Any: ...
+    def processes(self) -> BoundProcessOperations: ...
 
     @property
     @abstractmethod
-    def ports(self) -> Any: ...
+    def ports(self) -> BoundPortOperations: ...
 
     @property
     @abstractmethod
-    def outputs(self) -> Any: ...
+    def outputs(self) -> BoundOutputOperations: ...
 
     @abstractmethod
     def resolve_path(self, path: str, *, alias: str | None = None) -> EnvironmentPath:

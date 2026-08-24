@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+import asyncio
+import hashlib
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
     from converge_agent_harness.models import ModelRunBinding
     from converge_agent_harness.plugins import BoundPluginContext
     from converge_agent_harness.tools.deferred import DeferredToolResume
+    from converge_agent_harness.usage import ProviderUsage, ProviderUsageRecord, UsageRecord, _RunUsageLedger
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -150,6 +153,7 @@ class AgentContext:
     plugins: BoundPluginContext
     subagents: SubagentCollection
     events: HarnessEventEmitter
+    _usage_attribution: _RunUsageLedger = field(repr=False)
     deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
     _capability_provenance: _CapabilityProvenance = field(default_factory=_CapabilityProvenance, repr=False)
@@ -159,6 +163,16 @@ class AgentContext:
     )
     _run_capability_instances: dict[str, AbstractCapability[AgentContext]] = field(
         default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    _run_cleanup_callbacks: dict[str, Callable[[], Awaitable[None]]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    _tool_result_spill_store: _ToolResultSpillStore | None = field(
+        default=None,
         repr=False,
         compare=False,
     )
@@ -180,10 +194,64 @@ class AgentContext:
         if existing is not capability:
             raise RuntimeError(f"Run Capability {capability_id!r} is already bound")
 
+    def _register_run_cleanup(
+        self,
+        owner_id: str,
+        cleanup: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Register one owner-bound live collaborator for logical-run teardown."""
+        if owner_id in self._run_cleanup_callbacks:
+            raise RuntimeError(f"Run cleanup owner {owner_id!r} is already registered")
+        self._run_cleanup_callbacks[owner_id] = cleanup
+
+    async def _close_run_cleanups(self) -> None:
+        """Close owner-bound collaborators in reverse registration order."""
+        callbacks = tuple(reversed(tuple(self._run_cleanup_callbacks.values())))
+        self._run_cleanup_callbacks.clear()
+        first_error: BaseException | None = None
+        for cleanup in callbacks:
+            try:
+                await cleanup()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    async def _spill_tool_result(self, data: bytes, *, suffix: str) -> str | None:
+        """Write one bounded managed result through the current Environment when possible."""
+        store = self._tool_result_spill_store
+        if store is None:
+            store = _ToolResultSpillStore(self)
+            object.__setattr__(self, "_tool_result_spill_store", store)
+            self._register_run_cleanup("converge.tool-result-spills", store.close)
+        return await store.write(data, suffix=suffix)
+
     @property
     def identity(self) -> AgentIdentityRef:
         """Return the identity carried by the trusted instance binding."""
         return self.instance.identity
+
+    @property
+    def usage_records(self) -> tuple[UsageRecord, ...]:
+        """Return a detached snapshot of mixed run-local usage attribution."""
+        return self._usage_attribution._snapshot()
+
+    async def record_provider_usage(
+        self,
+        usage: ProviderUsage,
+        *,
+        source: str,
+        tool_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ProviderUsageRecord:
+        """Record one stable non-model usage receipt for the next reporting boundary."""
+        return await self._usage_attribution._record_provider(
+            usage,
+            source=source,
+            tool_id=tool_id,
+            tool_call_id=tool_call_id,
+        )
 
     async def export_state(self, message_history: Sequence[ModelMessage]) -> HarnessState:
         """Export a detached continuation envelope without persistence side effects."""
@@ -192,3 +260,52 @@ class AgentContext:
             agent_context_state=await self.state.snapshot(),
             environment_state=await self.environment.export_state(),
         )
+
+
+class _ToolResultSpillStore:
+    """One best-effort run-private spill directory over the logical file facade."""
+
+    def __init__(self, context: AgentContext) -> None:
+        run_digest = hashlib.sha256(context.run_id.encode("utf-8")).hexdigest()[:12]
+        self._files = context.environment.files
+        self._directory = f"/workspace/.converge/tmp/tool-results/run-{run_digest}"
+        self._next_sequence = 1
+        self._ready = False
+        self._closed = False
+        self._lock = asyncio.Lock()
+
+    async def write(self, data: bytes, *, suffix: str) -> str | None:
+        if suffix not in {".json", ".txt"}:
+            raise ValueError("tool result spill suffix is invalid")
+        async with self._lock:
+            if self._closed:
+                return None
+            try:
+                if not self._ready:
+                    await self._files.mkdir(self._directory, parents=True, exist_ok=True)
+                    self._ready = True
+                path = f"{self._directory}/tool-result-{self._next_sequence}{suffix}"
+                self._next_sequence += 1
+                await self._files.write_bytes_stream(path, _byte_chunks(data), mode="create")
+            except Exception:
+                return None
+            return path
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if not self._ready:
+                return
+            try:
+                await self._files.remove(self._directory, recursive=True)
+            except Exception:
+                # Spill cleanup is finite best effort. It must not turn a completed
+                # tool side effect or run into a retry-shaped failure.
+                return
+
+
+async def _byte_chunks(data: bytes) -> AsyncIterator[bytes]:
+    for offset in range(0, len(data), 64 * 1024):
+        yield data[offset : offset + 64 * 1024]

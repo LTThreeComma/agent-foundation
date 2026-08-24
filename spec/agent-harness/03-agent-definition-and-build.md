@@ -111,7 +111,7 @@ The build flow is:
 02. Create fresh configured plugin instances for the current definition, append them after direct definition plugins, and validate and deterministically order the combined tuple.
 03. Call each plugin's `for_agent()` and validate stable concrete type, ID, and ordering.
 04. Collect the Agent-bound plugins' ordinary Pydantic `AbstractCapability[AgentContext]` contributions.
-05. Install one thin `ResolveModelId` Capability and one inert-by-default outer invocation-boundary Capability for every Agent.
+05. Install one thin `ResolveModelId` Capability, exactly one outer `ToolExecutionBoundaryCapability`, and exactly one innermost `MessageIntegrityFilterCapability` for every Agent.
 06. Wrap a concrete build-time Model in `SelfHealingModel` when self-healing is enabled.
 07. Resolve exactly one build-time business output. Prepare an explicit `OutputSpec`, or construct native `StructuredDict` from a detached `AgentSpec.output_schema` and clear that field only on the temporary construction copy.
 08. Form the complete native output contract as `[business_output, DeferredToolRequests]`; the reserved control type is outside every business output marker.

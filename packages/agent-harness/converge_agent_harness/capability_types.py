@@ -16,9 +16,13 @@ from converge_agent_harness.errors import DefinitionError
 def _reserved_harness_capability_contract() -> tuple[
     tuple[type[AbstractCapability[AgentContext]], ...], frozenset[str]
 ]:
-    from converge_agent_harness.environment.tools import (
-        ENVIRONMENT_TOOLS_CAPABILITY_ID,
-        EnvironmentToolsCapability,
+    from converge_agent_harness.environment.dynamic import (
+        DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
+        DynamicEnvironmentCapability,
+    )
+    from converge_agent_harness.filters.integrity import (
+        MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
+        MessageIntegrityFilterCapability,
     )
     from converge_agent_harness.tools.client import (
         CLIENT_TOOLS_CAPABILITY_ID,
@@ -27,8 +31,8 @@ def _reserved_harness_capability_contract() -> tuple[
         ClientToolsRunCapability,
     )
     from converge_agent_harness.tools.invocation import (
-        INVOCATION_AUTHORIZATION_CAPABILITY_ID,
-        InvocationAuthorizationCapability,
+        TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+        ToolExecutionBoundaryCapability,
     )
     from converge_agent_harness.tools.policy import (
         INVOCATION_POLICY_CAPABILITY_ID,
@@ -36,20 +40,22 @@ def _reserved_harness_capability_contract() -> tuple[
     )
 
     capability_types = (
-        InvocationAuthorizationCapability,
+        ToolExecutionBoundaryCapability,
+        MessageIntegrityFilterCapability,
         InvocationPolicyCapability,
         ClientToolsCapability,
         ClientToolsRunCapability,
-        EnvironmentToolsCapability,
+        DynamicEnvironmentCapability,
     )
     names = frozenset(
         {
             *(capability_type.__name__ for capability_type in capability_types),
-            INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+            TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+            MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
             INVOCATION_POLICY_CAPABILITY_ID,
             CLIENT_TOOLS_CAPABILITY_ID,
             CLIENT_TOOLS_RUN_CAPABILITY_ID,
-            ENVIRONMENT_TOOLS_CAPABILITY_ID,
+            DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
         }
     )
     return capability_types, names

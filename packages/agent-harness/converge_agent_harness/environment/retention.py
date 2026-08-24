@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, final
+from typing import Any, Literal, Protocol, final
 
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import CoreSchema, core_schema
@@ -148,7 +148,7 @@ class EnvironmentOutputReadResult(BaseModel):
     capture: EnvironmentOutputCapture
 
 
-class ProviderOutputOperations:
+class ProviderOutputOperations(Protocol):
     async def read(
         self,
         reference: BoundOutputReference,
@@ -156,13 +156,11 @@ class ProviderOutputOperations:
         cursor: BoundOutputCursor | None = None,
         start_offset: int | None = None,
         policy: EnvironmentOutputPolicy,
-    ) -> EnvironmentOutputReadResult:
-        raise NotImplementedError
+    ) -> EnvironmentOutputReadResult: ...
 
     async def release(
         self,
         *,
         reference: BoundOutputReference | None = None,
         cursor: BoundOutputCursor | None = None,
-    ) -> EnvironmentOperationReceipt:
-        raise NotImplementedError
+    ) -> EnvironmentOperationReceipt: ...

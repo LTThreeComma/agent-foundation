@@ -1,4 +1,4 @@
-"""Outer managed-invocation boundary over Pydantic AI's assembled Toolset."""
+"""Outer execution boundary over Pydantic AI's assembled function Toolset."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
-from pydantic_ai import RunContext
+from pydantic_ai import RunContext, TextContent, ToolReturn
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
@@ -35,6 +35,7 @@ from converge_agent_harness.tools.metadata import (
     HARNESS_TOOL_METADATA_KEY,
     CanonicalResource,
     HarnessToolMetadata,
+    ToolOutputPolicy,
     normalize_harness_tool_metadata,
 )
 from converge_agent_harness.tools.policy import (
@@ -47,8 +48,14 @@ from converge_agent_harness.tools.policy import (
     ToolInvocationContext,
 )
 
-INVOCATION_AUTHORIZATION_CAPABILITY_ID = "converge.invocation-authorization"
+TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID = "converge.tool-execution-boundary"
 MAX_ARGUMENT_BYTES = 64 * 1024
+_UNMANAGED_OUTPUT_POLICY = ToolOutputPolicy(
+    max_inline_bytes=256 * 1024,
+    max_output_bytes=4 * 1024 * 1024,
+    overflow="spill",
+    redact=True,
+)
 
 _ANY_ADAPTER = TypeAdapter(Any)
 _JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, JsonValue])
@@ -88,20 +95,20 @@ def current_invocation_scope() -> InvocationScope:
 
 
 @dataclass
-class InvocationAuthorizationCapability(AbstractCapability[AgentContext]):
+class ToolExecutionBoundaryCapability(AbstractCapability[AgentContext]):
     """Mandatory code-owned outer wrapper for every non-output Toolset."""
 
-    id: str | None = INVOCATION_AUTHORIZATION_CAPABILITY_ID
+    id: str | None = TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID
 
     def __post_init__(self) -> None:
-        if self.id != INVOCATION_AUTHORIZATION_CAPABILITY_ID:
-            raise ValueError(f"InvocationAuthorizationCapability.id must be {INVOCATION_AUTHORIZATION_CAPABILITY_ID!r}")
+        if self.id != TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID:
+            raise ValueError(f"ToolExecutionBoundaryCapability.id must be {TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID!r}")
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="outermost", wraps=(AbstractCapability,))
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentContext]) -> AbstractToolset[AgentContext]:
-        return InvocationAuthorizationToolset(toolset)
+        return ToolExecutionBoundaryToolset(toolset)
 
     async def wrap_run_event_stream(
         self,
@@ -115,12 +122,11 @@ class InvocationAuthorizationCapability(AbstractCapability[AgentContext]):
 
 
 @dataclass
-class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
-    """Normalize final definitions and dispatch only opted-in function tools."""
+class ToolExecutionBoundaryToolset(WrapperToolset[AgentContext]):
+    """Normalize definitions, authorize managed calls, and bound function results."""
 
     async def get_tools(self, ctx: RunContext[AgentContext]) -> dict[str, ToolsetTool[AgentContext]]:
         _validate_client_run_attachment(ctx)
-        _resolve_environment_result_projector(ctx)
         tools = await self.wrapped.get_tools(ctx)
         policy = _resolve_policy(ctx)
         managed_ids: dict[str, str] = {}
@@ -184,7 +190,13 @@ class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
         metadata_values = tool_def.metadata or {}
         raw_metadata = metadata_values.get(HARNESS_TOOL_METADATA_KEY)
         if raw_metadata is None:
-            return await self.wrapped.call_tool(name, tool_args, ctx, tool)
+            result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
+            return await _apply_result_policy(
+                result,
+                _UNMANAGED_OUTPUT_POLICY,
+                context=ctx.deps,
+                reject_non_json=False,
+            )
         managed = normalize_harness_tool_metadata(raw_metadata)
         policy = _resolve_policy(ctx)
         if policy is None:
@@ -284,10 +296,10 @@ class InvocationAuthorizationToolset(WrapperToolset[AgentContext]):
             finally:
                 _INVOCATION_SCOPE.reset(token)
             try:
-                safe_result = _apply_result_policy(
+                safe_result = await _apply_result_policy(
                     result,
                     managed,
-                    environment_projector=_resolve_environment_result_projector(ctx),
+                    context=ctx.deps,
                 )
             except ToolFailed:
                 await _emit(ctx, managed, "result_rejected", invocation_id=invocation.invocation_id)
@@ -369,10 +381,65 @@ async def _require_policy_allow(
 
 def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> None:
     """Reject protected Capability replacement after native for_run finalization."""
-    from converge_agent_harness.environment.tools import (
-        ENVIRONMENT_TOOLS_CAPABILITY_ID,
-        EnvironmentToolsCapability,
-        _EnvironmentToolsRunCapability,
+    from converge_agent_harness.capabilities.context import (
+        COMPACTION_CAPABILITY_ID,
+        FILE_CONTEXT_CAPABILITY_ID,
+        HANDOFF_CAPABILITY_ID,
+        RUNTIME_CONTEXT_CAPABILITY_ID,
+        CompactionCapability,
+        FileContextCapability,
+        HandoffCapability,
+        RuntimeContextCapability,
+        _FileContextRunCapability,
+    )
+    from converge_agent_harness.capabilities.documents import (
+        DOCUMENTS_CAPABILITY_ID,
+        DOCUMENTS_RUN_CAPABILITY_ID,
+        DocumentsRunCapability,
+        _DocumentsActiveCapability,
+    )
+    from converge_agent_harness.capabilities.interaction import (
+        USER_INTERACTION_CAPABILITY_ID,
+        UserInteractionCapability,
+    )
+    from converge_agent_harness.capabilities.media import (
+        MEDIA_CAPABILITY_ID,
+        MEDIA_RUN_CAPABILITY_ID,
+        MediaRunCapability,
+        _MediaActiveCapability,
+    )
+    from converge_agent_harness.capabilities.process_monitor import (
+        MONITORED_PROCESS_CAPABILITY_ID,
+        MONITORED_PROCESS_RUN_CAPABILITY_ID,
+        MonitoredProcessRunCapability,
+        _MonitoredProcessActiveCapability,
+    )
+    from converge_agent_harness.capabilities.skills import (
+        SKILLS_CAPABILITY_ID,
+        SkillsCapability,
+        _SkillsRunCapability,
+    )
+    from converge_agent_harness.capabilities.web import (
+        WEB_CAPABILITY_ID,
+        WEB_RUN_CAPABILITY_ID,
+        WebRunCapability,
+        _WebActiveCapability,
+    )
+    from converge_agent_harness.capabilities.working_state import (
+        TASK_STATE_RUN_CAPABILITY_ID,
+        WORKING_STATE_CAPABILITY_ID,
+        TaskStateRunCapability,
+        WorkingStateCapability,
+        _WorkingStateRunCapability,
+    )
+    from converge_agent_harness.environment.dynamic import (
+        DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
+        DynamicEnvironmentCapability,
+        _DynamicEnvironmentRunCapability,
+    )
+    from converge_agent_harness.filters.integrity import (
+        MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
+        MessageIntegrityFilterCapability,
     )
     from converge_agent_harness.tools.client import (
         CLIENT_TOOLS_CAPABILITY_ID,
@@ -380,15 +447,33 @@ def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> 
         ClientToolsCapability,
         ClientToolsRunCapability,
     )
+    from converge_agent_harness.usage import (
+        MODEL_COST_RUN_CAPABILITY_ID,
+        USAGE_CAPABILITY_ID,
+        ModelCostRunCapability,
+        _UsageActiveCapability,
+    )
 
     provenance = ctx.deps._capability_provenance
     expected = {
-        INVOCATION_AUTHORIZATION_CAPABILITY_ID: (
-            (InvocationAuthorizationCapability,),
+        TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID: (
+            (ToolExecutionBoundaryCapability,),
+            None,
+        ),
+        MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID: (
+            (MessageIntegrityFilterCapability,),
             None,
         ),
         INVOCATION_POLICY_CAPABILITY_ID: (
             (InvocationPolicyCapability,),
+            provenance.run_ids,
+        ),
+        USAGE_CAPABILITY_ID: (
+            (_UsageActiveCapability,),
+            None,
+        ),
+        MODEL_COST_RUN_CAPABILITY_ID: (
+            (ModelCostRunCapability,),
             provenance.run_ids,
         ),
         CLIENT_TOOLS_CAPABILITY_ID: (
@@ -399,9 +484,73 @@ def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> 
             (ClientToolsRunCapability,),
             provenance.run_ids,
         ),
-        ENVIRONMENT_TOOLS_CAPABILITY_ID: (
-            (EnvironmentToolsCapability, _EnvironmentToolsRunCapability),
+        DYNAMIC_ENVIRONMENT_CAPABILITY_ID: (
+            (DynamicEnvironmentCapability, _DynamicEnvironmentRunCapability),
             provenance.definition_ids,
+        ),
+        RUNTIME_CONTEXT_CAPABILITY_ID: (
+            (RuntimeContextCapability,),
+            provenance.definition_ids,
+        ),
+        FILE_CONTEXT_CAPABILITY_ID: (
+            (FileContextCapability, _FileContextRunCapability),
+            provenance.definition_ids,
+        ),
+        HANDOFF_CAPABILITY_ID: (
+            (HandoffCapability,),
+            provenance.definition_ids,
+        ),
+        COMPACTION_CAPABILITY_ID: (
+            (CompactionCapability,),
+            provenance.definition_ids,
+        ),
+        MONITORED_PROCESS_CAPABILITY_ID: (
+            (_MonitoredProcessActiveCapability,),
+            provenance.definition_ids,
+        ),
+        MONITORED_PROCESS_RUN_CAPABILITY_ID: (
+            (MonitoredProcessRunCapability,),
+            provenance.run_ids,
+        ),
+        USER_INTERACTION_CAPABILITY_ID: (
+            (UserInteractionCapability,),
+            provenance.definition_ids,
+        ),
+        SKILLS_CAPABILITY_ID: (
+            (SkillsCapability, _SkillsRunCapability),
+            provenance.definition_ids,
+        ),
+        MEDIA_CAPABILITY_ID: (
+            (_MediaActiveCapability,),
+            provenance.definition_ids,
+        ),
+        MEDIA_RUN_CAPABILITY_ID: (
+            (MediaRunCapability,),
+            provenance.run_ids,
+        ),
+        DOCUMENTS_CAPABILITY_ID: (
+            (_DocumentsActiveCapability,),
+            provenance.definition_ids,
+        ),
+        DOCUMENTS_RUN_CAPABILITY_ID: (
+            (DocumentsRunCapability,),
+            provenance.run_ids,
+        ),
+        WEB_CAPABILITY_ID: (
+            (_WebActiveCapability,),
+            provenance.definition_ids,
+        ),
+        WEB_RUN_CAPABILITY_ID: (
+            (WebRunCapability,),
+            provenance.run_ids,
+        ),
+        WORKING_STATE_CAPABILITY_ID: (
+            (WorkingStateCapability, _WorkingStateRunCapability),
+            provenance.definition_ids,
+        ),
+        TASK_STATE_RUN_CAPABILITY_ID: (
+            (TaskStateRunCapability,),
+            provenance.run_ids,
         ),
     }
     reserved_types = tuple(capability_type for item in expected.values() for capability_type in item[0])
@@ -419,10 +568,19 @@ def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> 
 
     for capability_id, (expected_types, allowed_ids) in expected.items():
         capability = ctx.capabilities.get(capability_id)
-        if capability_id == INVOCATION_AUTHORIZATION_CAPABILITY_ID:
-            if type(capability) is not InvocationAuthorizationCapability:
+        if capability_id in {
+            TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+            MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
+            USAGE_CAPABILITY_ID,
+        }:
+            mandatory_type = {
+                TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID: ToolExecutionBoundaryCapability,
+                MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID: MessageIntegrityFilterCapability,
+                USAGE_CAPABILITY_ID: _UsageActiveCapability,
+            }[capability_id]
+            if type(capability) is not mandatory_type:
                 raise DefinitionError(
-                    "The finalized run is missing its exact mandatory invocation Capability.",
+                    "The finalized run is missing an exact mandatory Harness Capability.",
                     code="capability_scope_invalid",
                     details={"capability_id": capability_id, "source": "run_finalized"},
                 )
@@ -445,6 +603,64 @@ def _validate_finalized_capability_provenance(ctx: RunContext[AgentContext]) -> 
                     "source": "run_finalized",
                 },
             )
+
+    monitored_owner = ctx.capabilities.get(MONITORED_PROCESS_CAPABILITY_ID)
+    monitored_attachment = ctx.capabilities.get(MONITORED_PROCESS_RUN_CAPABILITY_ID)
+    if monitored_attachment is not None and monitored_owner is None:
+        raise DefinitionError(
+            "A monitored-process run attachment requires its definition owner.",
+            code="monitored_process_owner_missing",
+        )
+    if monitored_owner is not None and monitored_attachment is None:
+        raise DefinitionError(
+            "MonitoredProcessCapability requires one fresh run attachment.",
+            code="monitored_process_binding_missing",
+        )
+
+    content_pairs = (
+        (
+            MEDIA_CAPABILITY_ID,
+            MEDIA_RUN_CAPABILITY_ID,
+            "media_owner_missing",
+            "media_binding_missing",
+            "Media",
+        ),
+        (
+            DOCUMENTS_CAPABILITY_ID,
+            DOCUMENTS_RUN_CAPABILITY_ID,
+            "documents_owner_missing",
+            "documents_binding_missing",
+            "Documents",
+        ),
+        (
+            WEB_CAPABILITY_ID,
+            WEB_RUN_CAPABILITY_ID,
+            "web_owner_missing",
+            "web_binding_missing",
+            "Web",
+        ),
+    )
+    for owner_id, attachment_id, owner_code, binding_code, label in content_pairs:
+        owner = ctx.capabilities.get(owner_id)
+        attachment = ctx.capabilities.get(attachment_id)
+        if attachment is not None and owner is None:
+            raise DefinitionError(
+                f"A {label} run attachment requires its definition owner.",
+                code=owner_code,
+            )
+        if owner is not None and attachment is None:
+            raise DefinitionError(
+                f"{label}Capability requires one fresh run attachment.",
+                code=binding_code,
+            )
+
+    working_state_owner = ctx.capabilities.get(WORKING_STATE_CAPABILITY_ID)
+    task_state_attachment = ctx.capabilities.get(TASK_STATE_RUN_CAPABILITY_ID)
+    if task_state_attachment is not None and working_state_owner is None:
+        raise DefinitionError(
+            "A task-state run attachment requires its definition owner.",
+            code="task_state_owner_missing",
+        )
 
 
 def _resolve_policy(ctx: RunContext[AgentContext]) -> InvocationPolicyCapability | None:
@@ -527,67 +743,267 @@ async def _prepare_invocation(
     )
 
 
-def _apply_result_policy(
+async def _apply_result_policy(
     result: Any,
-    metadata: HarnessToolMetadata,
+    source: HarnessToolMetadata | ToolOutputPolicy,
     *,
-    environment_projector: Any | None = None,
+    context: AgentContext | None = None,
+    reject_non_json: bool = True,
+) -> Any:
+    """Apply the textual result boundary without rewriting native media."""
+    policy = source.output_policy if isinstance(source, HarnessToolMetadata) else source
+    if isinstance(result, ToolReturn):
+        return await _apply_native_tool_return_policy(
+            result,
+            policy,
+            context=context,
+            reject_non_json=reject_non_json,
+        )
+    if not reject_non_json and not _is_native_json_result(result):
+        return result
+    return await _apply_json_result_policy(result, policy, context=context)
+
+
+async def _apply_json_result_policy(
+    result: Any,
+    policy: ToolOutputPolicy,
+    *,
+    context: AgentContext | None,
 ) -> JsonValue:
-    from converge_agent_harness.environment.models import EnvironmentError
-    from converge_agent_harness.environment.tools import _EnvironmentRetainedToolResult
-
-    policy = metadata.output_policy
-    retained = result if isinstance(result, _EnvironmentRetainedToolResult) else None
-    candidate = retained.value if retained is not None else result
     try:
-        value = _project_json_result(candidate)
-        limit = policy.max_inline_bytes if policy.overflow == "fail" else policy.max_output_bytes
-        captured, complete = _capture_json(value, limit=limit, redact=policy.redact)
+        value = _project_json_result(result)
+        safe_value = redact_json(value) if policy.redact else deepcopy(value)
+        output_bytes, head, tail = _scan_json(safe_value, keep_bytes=policy.max_inline_bytes // 2)
     except (RecursionError, TypeError, ValueError, ValidationError) as exc:
-        raise ToolFailed("Managed tool returned an invalid result.") from exc
+        raise ToolFailed("Tool returned an invalid result.") from exc
 
-    if complete and len(captured) <= policy.max_inline_bytes:
-        return redact_json(value) if policy.redact else deepcopy(value)
+    if output_bytes <= policy.max_inline_bytes:
+        return safe_value
     if policy.overflow == "fail":
-        raise ToolFailed("Managed tool result exceeded its output limit.")
+        raise ToolFailed("Tool result exceeded its output limit.")
 
-    compact_reference: str | None = None
-    if policy.overflow == "environment_reference" and retained is not None and environment_projector is not None:
-        try:
-            _, compact_reference = environment_projector.project_retained_result(retained)
-        except EnvironmentError:
-            # A live Environment may legitimately have no compatible retained-output
-            # sink after a topology change or reference-table exhaustion. Preserve the
-            # bounded no-reference fallback rather than turning completed work into a
-            # retry-shaped tool failure.
-            compact_reference = None
-        except DefinitionError:
-            raise
-        except Exception as exc:
-            raise ToolFailed("Managed tool retained output could not be projected.") from exc
+    output_file_path: str | None = None
+    if policy.overflow == "spill" and output_bytes <= policy.max_output_bytes and context is not None:
+        encoded = dump_json_bytes(safe_value)
+        output_file_path = await context._spill_tool_result(encoded, suffix=".json")
 
-    fallback: dict[str, JsonValue] = {
-        "content": captured[: policy.max_inline_bytes].decode("utf-8", errors="ignore"),
-        "complete": False,
+    return _bounded_json_preview(
+        safe_value,
+        output_bytes=output_bytes,
+        output_file_path=output_file_path,
+        head=head,
+        tail=tail,
+        limit=policy.max_inline_bytes,
+    )
+
+
+async def _apply_native_tool_return_policy(
+    result: ToolReturn,
+    policy: ToolOutputPolicy,
+    *,
+    context: AgentContext | None,
+    reject_non_json: bool,
+) -> ToolReturn:
+    """Bound textual fields while preserving every native multimodal value."""
+    try:
+        return_value = await _apply_optional_json_result_policy(
+            result.return_value,
+            policy,
+            context=context,
+            reject_non_json=reject_non_json,
+        )
+        content: str | list[Any] | tuple[Any, ...] | None
+        if isinstance(result.content, str):
+            content = await _apply_text_result_policy(result.content, policy, context=context)
+        elif result.content is None:
+            content = None
+        else:
+            projected_content: list[Any] = []
+            for item in result.content:
+                if isinstance(item, str):
+                    projected_content.append(await _apply_text_result_policy(item, policy, context=context))
+                elif isinstance(item, TextContent):
+                    projected_content.append(
+                        TextContent(
+                            content=await _apply_text_result_policy(item.content, policy, context=context),
+                            metadata=(
+                                None
+                                if item.metadata is None
+                                else await _apply_optional_json_result_policy(
+                                    item.metadata,
+                                    policy,
+                                    context=context,
+                                    reject_non_json=reject_non_json,
+                                )
+                            ),
+                        )
+                    )
+                else:
+                    projected_content.append(item)
+            content = tuple(projected_content) if isinstance(result.content, tuple) else projected_content
+        projected_metadata = (
+            None
+            if result.metadata is None
+            else await _apply_optional_json_result_policy(
+                result.metadata,
+                policy,
+                context=context,
+                reject_non_json=reject_non_json,
+            )
+        )
+        tools = (
+            None
+            if result.tools is None
+            else [await _apply_text_result_policy(item, policy, context=context) for item in result.tools]
+        )
+        return ToolReturn(
+            return_value=return_value,
+            content=content,
+            metadata=projected_metadata,
+            tools=tools,
+        )
+    except ToolFailed:
+        raise
+    except (RecursionError, TypeError, ValueError, ValidationError) as exc:
+        raise ToolFailed("Tool returned invalid native content.") from exc
+
+
+async def _apply_optional_json_result_policy(
+    value: Any,
+    policy: ToolOutputPolicy,
+    *,
+    context: AgentContext | None,
+    reject_non_json: bool,
+) -> Any:
+    if not reject_non_json and not _is_native_json_result(value):
+        return value
+    return await _apply_json_result_policy(value, policy, context=context)
+
+
+async def _apply_text_result_policy(
+    value: str,
+    policy: ToolOutputPolicy,
+    *,
+    context: AgentContext | None,
+) -> str:
+    if not isinstance(value, str):
+        raise TypeError("native text fields must be strings")
+    safe_value = redact_bearer(value) if policy.redact else value
+    encoded = safe_value.encode("utf-8")
+    output_bytes = len(encoded)
+    if output_bytes <= policy.max_inline_bytes:
+        return safe_value
+    if policy.overflow == "fail":
+        raise ToolFailed("Tool result exceeded its output limit.")
+
+    output_file_path: str | None = None
+    if policy.overflow == "spill" and output_bytes <= policy.max_output_bytes and context is not None:
+        output_file_path = await context._spill_tool_result(encoded, suffix=".txt")
+    marker = (
+        f"\n[tool result truncated; output_bytes={output_bytes}; "
+        f"output_file_path={output_file_path or 'unavailable'}]\n"
+    )
+    return _bounded_head_tail_text(safe_value, marker=marker, limit=policy.max_inline_bytes)
+
+
+def _bounded_json_preview(
+    value: JsonValue,
+    *,
+    output_bytes: int,
+    output_file_path: str | None,
+    head: bytes,
+    tail: bytes,
+    limit: int,
+) -> dict[str, JsonValue]:
+    leaf_limit = max(8, limit // 4)
+    while leaf_limit >= 8:
+        result = _truncate_json_strings(value, leaf_limit)
+        envelope: dict[str, JsonValue] = {
+            "result": result,
+            "truncated": True,
+            "output_bytes": output_bytes,
+            "output_file_path": output_file_path,
+        }
+        if len(dump_json_bytes(envelope)) <= limit:
+            return envelope
+        leaf_limit //= 2
+
+    head_text = head.decode("utf-8", errors="ignore")
+    tail_text = tail.decode("utf-8", errors="ignore")
+    omitted = max(0, output_bytes - len(head) - len(tail))
+    preview = f"{head_text}\n[... {omitted} bytes omitted ...]\n{tail_text}"
+    envelope = {
+        "result": preview,
         "truncated": True,
-        "captured_bytes": len(captured),
-        "reference": compact_reference,
+        "output_bytes": output_bytes,
+        "output_file_path": output_file_path,
     }
-    if complete:
-        fallback["dropped_bytes"] = 0
-    return fallback
+    while len(dump_json_bytes(envelope)) > limit and preview:
+        preview = _truncate_utf8(preview, max(0, len(preview.encode("utf-8")) - 32))
+        envelope["result"] = preview
+    return envelope
 
 
-def _resolve_environment_result_projector(ctx: RunContext[AgentContext]) -> Any | None:
-    from converge_agent_harness.environment.tools import _resolve_environment_result_projector as resolve
+def _truncate_json_strings(value: JsonValue, limit: int) -> JsonValue:
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        if len(encoded) <= limit:
+            return value
+        marker = "\n[... truncated ...]\n"
+        return _bounded_head_tail_text(value, marker=marker, limit=limit)
+    if isinstance(value, list):
+        return [_truncate_json_strings(item, limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _truncate_json_strings(item, limit) for key, item in value.items()}
+    return value
 
-    return resolve(ctx)
+
+def _bounded_head_tail_text(value: str, *, marker: str, limit: int) -> str:
+    marker_bytes = marker.encode("utf-8")
+    if len(marker_bytes) >= limit:
+        return _truncate_utf8(marker, limit)
+    encoded = value.encode("utf-8")
+    available = limit - len(marker_bytes)
+    head_size = available // 2
+    tail_size = available - head_size
+    head = encoded[:head_size].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_size:].decode("utf-8", errors="ignore") if tail_size else ""
+    candidate = f"{head}{marker}{tail}"
+    return _truncate_utf8(candidate, limit)
+
+
+def _truncate_utf8(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+
+
+def _scan_json(value: JsonValue, *, keep_bytes: int) -> tuple[int, bytes, bytes]:
+    total = 0
+    head = bytearray()
+    tail = bytearray()
+    for chunk in _iter_json(value, redact=False):
+        total += len(chunk)
+        if len(head) < keep_bytes:
+            head.extend(chunk[: keep_bytes - len(head)])
+        if keep_bytes:
+            tail.extend(chunk)
+            if len(tail) > keep_bytes:
+                del tail[: len(tail) - keep_bytes]
+    return total, bytes(head), bytes(tail)
 
 
 def _project_json_result(result: Any) -> JsonValue:
     if not _is_native_json(result):
-        raise TypeError("Managed tool results must be native JSON values")
+        raise TypeError("Tool results must be native JSON values")
     return cast(JsonValue, result)
+
+
+def _is_native_json_result(value: Any) -> bool:
+    try:
+        return _is_native_json(value)
+    except ValueError:
+        return False
 
 
 def _is_native_json(value: Any, active: set[int] | None = None) -> bool:

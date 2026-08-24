@@ -244,6 +244,8 @@ class ProviderProcessOperations(Protocol):
         *,
         stdout_cursor: BoundOutputCursor | None = None,
         stderr_cursor: BoundOutputCursor | None = None,
+        stdout_start_offset: int | None = None,
+        stderr_start_offset: int | None = None,
         wait_seconds: float = 0,
         policy: EnvironmentOutputPolicy,
     ) -> ProcessReadOutputResult: ...

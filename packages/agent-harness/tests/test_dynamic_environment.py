@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,20 +12,22 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import converge_agent_harness.execution as execution_module
+import converge_agent_harness.toolsets.files as file_toolset_module
 import pytest
 from converge_agent_harness import (
+    ArgvCommand,
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
     DirectLocalProcessPolicy,
     DirectLocalRootConfiguration,
+    DynamicEnvironmentCapability,
+    DynamicEnvironmentConfiguration,
     EnvironmentAction,
     EnvironmentBindingRequest,
     EnvironmentError,
     EnvironmentPath,
     EnvironmentPermissionSet,
     EnvironmentStateLimits,
-    EnvironmentToolsCapability,
-    EnvironmentToolsConfiguration,
     EnvironmentTopologyLimits,
     EnvironmentTopologyRequest,
     HarnessBuilder,
@@ -34,14 +38,11 @@ from converge_agent_harness import (
     create_environment_run_binding,
     create_noop_environment_run_binding,
 )
+from converge_agent_harness.environment.dynamic import _DynamicEnvironmentRunCapability
 from converge_agent_harness.environment.files import FileWriteResult
+from converge_agent_harness.environment.local.binding import DirectLocalFilePolicy
+from converge_agent_harness.environment.local.files import LocalFileOperator
 from converge_agent_harness.environment.models import EnvironmentOperationReceipt
-from converge_agent_harness.environment.retention import BoundOutputReference, OpaqueOutputReference
-from converge_agent_harness.environment.tools import (
-    _CompactReferenceTable,
-    _EnvironmentRetainedToolResult,
-    _EnvironmentToolsRunCapability,
-)
 from converge_agent_harness.environment.virtual_files import VirtualFileOperator, _PreparedFile
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
@@ -59,8 +60,9 @@ from converge_agent_harness.tools import (
     InvocationPolicyDecision,
     ToolOutputPolicy,
 )
-from converge_agent_harness.tools.invocation import _apply_result_policy
-from pydantic_ai import RunContext
+from converge_agent_harness.toolsets.files import FileToolset
+from converge_agent_harness.toolsets.shell import ShellToolset, _CompactReferenceTable
+from pydantic_ai import BinaryContent
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import Capability
 from pydantic_ai.messages import ModelMessage, ModelRequest, RetryPromptPart, ToolReturnPart, UserPromptPart
@@ -70,8 +72,8 @@ pytestmark = pytest.mark.anyio
 _PROCESS_EXECUTABLE = Path(sys.executable).resolve()
 
 
-def _configuration(**updates: Any) -> EnvironmentToolsConfiguration:
-    return EnvironmentToolsConfiguration(
+def _configuration(**updates: Any) -> DynamicEnvironmentConfiguration:
+    return DynamicEnvironmentConfiguration(
         max_topology_bindings=8,
         max_topology_bytes=4096,
         max_reference_entries=64,
@@ -92,7 +94,7 @@ def _policy() -> InvocationPolicyCapability:
 def _local_binding(root: Path, *, process_output: bool = False):
     provider = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
-            environment_id="environment-tools-test",
+            environment_id="dynamic-environment-test",
             root=DirectLocalRootConfiguration(path=root, ownership="caller_owned"),
             processes=(
                 DirectLocalProcessPolicy(allowed_executables=frozenset({_PROCESS_EXECUTABLE}))
@@ -144,7 +146,7 @@ async def test_dynamic_topology_emits_an_independent_harness_context_event(tmp_p
     )
     provider = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
-            environment_id="environment-tools-test",
+            environment_id="dynamic-environment-test",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
         )
     )
@@ -189,7 +191,7 @@ async def test_capability_projects_stable_tools_and_one_bounded_fresh_topology_s
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run("inspect", bindings=RunBindings.local())
 
@@ -197,7 +199,8 @@ async def test_capability_projects_stable_tools_and_one_bounded_fresh_topology_s
     assert len(calls) == 1
     messages, info = calls[0]
     names = {tool.name for tool in info.function_tools}
-    assert "environment_read_text" in names
+    assert {"view", "write", "edit", "multi_edit", "ls", "glob", "grep"} <= names
+    assert "environment_read_text" not in names
     assert "environment_process_start" in names
     assert "environment_port_inspect" not in names
     metadata = {
@@ -205,12 +208,15 @@ async def test_capability_projects_stable_tools_and_one_bounded_fresh_topology_s
         for tool in info.function_tools
         if tool.metadata is not None and HARNESS_TOOL_METADATA_KEY in tool.metadata
     }
-    assert metadata["environment_copy"].effects == frozenset({"read", "write"})
-    assert metadata["environment_move"].effects == frozenset({"write", "delete"})
+    assert {"mkdir", "move", "copy", "delete"}.isdisjoint(names)
+    assert metadata["edit"].effects == frozenset({"read", "write"})
     assert metadata["environment_shell_exec"].effects == frozenset(
         {"read", "write", "delete", "execute", "external_communication"}
     )
     assert metadata["environment_process_start"].effects == metadata["environment_shell_exec"].effects
+    grep_tool = next(tool for tool in info.function_tools if tool.name == "grep")
+    ignored_description = grep_tool.parameters_json_schema["properties"]["include_ignored"]["description"]
+    assert "do not interpret repository ignore files" in ignored_description
     assert info.instructions is not None
     assert "Agent-wide tool timeout" in info.instructions
     topology_parts = [
@@ -245,20 +251,20 @@ async def test_file_tools_omit_file_revisions_and_use_native_managed_policy(tmp_
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_write_text",
-                    json_args=json.dumps({"path": "note.txt", "text": "one", "mode": "overwrite"}),
+                    name="write",
+                    json_args=json.dumps({"file_path": "note.txt", "content": "one", "mode": "w"}),
                     tool_call_id="write-1",
                 )
             }
         elif len(returns) == 1:
             yield {
                 0: DeltaToolCall(
-                    name="environment_write_text",
+                    name="write",
                     json_args=json.dumps(
                         {
-                            "path": "/workspace/note.txt",
-                            "text": "two",
-                            "mode": "overwrite",
+                            "file_path": "/workspace/note.txt",
+                            "content": "two",
+                            "mode": "w",
                         }
                     ),
                     tool_call_id="write-2",
@@ -271,7 +277,7 @@ async def test_file_tools_omit_file_revisions_and_use_native_managed_policy(tmp_
         AgentSpec(model="logical:test", retries={"tools": 2}),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run(
         "write",
@@ -286,6 +292,191 @@ async def test_file_tools_omit_file_revisions_and_use_native_managed_policy(tmp_
     assert tool_results[1]["bytes_written"] == 3
     assert "revision" not in tool_results[0]
     assert "revision" not in tool_results[1]
+
+
+async def test_view_attaches_common_environment_media_natively(tmp_path: Path) -> None:
+    (tmp_path / "image.png").write_bytes(b"\x89PNG")
+    seen: list[list[ModelMessage]] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        seen.append(messages)
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="view",
+                    json_args=json.dumps(
+                        {
+                            "file_path": "/workspace/image.png",
+                            "instructions": "Read visible text.",
+                        }
+                    ),
+                    tool_call_id="view-image-1",
+                )
+            }
+        else:
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
+    )
+    result = await executable.run(
+        "view",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+    )
+
+    assert result.output_or_raise() == "done"
+    binaries = [
+        item
+        for call in seen
+        for message in call
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, UserPromptPart) and isinstance(part.content, list)
+        for item in part.content
+        if isinstance(item, BinaryContent)
+    ]
+    assert len(binaries) == 1
+    assert binaries[0].data == b"\x89PNG"
+    assert binaries[0].media_type == "image/png"
+
+
+async def test_exact_edits_are_agent_friendly_and_failed_batch_is_not_published(tmp_path: Path) -> None:
+    target = tmp_path / "edit.txt"
+    target.write_text("alpha\nbeta\nbeta\n")
+    observed: list[dict[str, Any]] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and isinstance(part.content, dict)
+        ]
+        observed[:] = returns
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="multi_edit",
+                    json_args=json.dumps(
+                        {
+                            "file_path": "/workspace/edit.txt",
+                            "edits": [
+                                {"old_string": "alpha", "new_string": "changed"},
+                                {"old_string": "missing", "new_string": "never-written"},
+                            ],
+                        }
+                    ),
+                    tool_call_id="multi-edit-1",
+                )
+            }
+        elif len(returns) == 1:
+            assert target.read_text() == "alpha\nbeta\nbeta\n"
+            yield {
+                0: DeltaToolCall(
+                    name="edit",
+                    json_args=json.dumps(
+                        {
+                            "file_path": "/workspace/edit.txt",
+                            "old_string": "beta",
+                            "new_string": "gamma",
+                            "replace_all": True,
+                        }
+                    ),
+                    tool_call_id="edit-2",
+                )
+            }
+        else:
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
+    )
+    result = await executable.run(
+        "edit",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert observed[0]["error"]["code"] == "environment_edit_not_found"
+    assert observed[0]["error"]["details"] == {"edit_index": 2}
+    assert observed[1]["ok"] is True
+    assert target.read_text() == "alpha\ngamma\ngamma\n"
+
+
+async def test_grep_returns_requested_context_at_file_boundaries(tmp_path: Path) -> None:
+    (tmp_path / "context.txt").write_text("needle0 top\nbefore middle\nneedle1 middle\nafter middle\nneedle2 bottom\n")
+    observed: list[dict[str, Any]] = []
+    requests = (
+        {"pattern": "needle0", "context_lines": 0},
+        {"pattern": "needle1", "context_lines": 1},
+        {"pattern": "needle2", "context_lines": 2},
+    )
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and isinstance(part.content, dict)
+        ]
+        observed[:] = returns
+        if not returns:
+            yield {
+                index: DeltaToolCall(
+                    name="grep",
+                    json_args=json.dumps(request),
+                    tool_call_id=f"grep-context-{index}",
+                )
+                for index, request in enumerate(requests)
+            }
+        else:
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
+    )
+    result = await executable.run(
+        "grep",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+    )
+
+    assert result.output_or_raise() == "done"
+    matches = {match["matching_line"]: match for item in observed for match in item["matches"].values()}
+    assert matches["needle0 top"]["context_start_line"] == 1
+    assert matches["needle0 top"]["context"].splitlines() == ["needle0 top"]
+    assert matches["needle1 middle"]["context_start_line"] == 2
+    assert matches["needle1 middle"]["context"].splitlines() == [
+        "before middle",
+        "needle1 middle",
+        "after middle",
+    ]
+    assert matches["needle2 bottom"]["context_start_line"] == 3
+    assert matches["needle2 bottom"]["context"].splitlines() == [
+        "needle1 middle",
+        "after middle",
+        "needle2 bottom",
+    ]
 
 
 async def test_explicit_file_offsets_survive_inner_model_recovery_attempts(tmp_path: Path) -> None:
@@ -305,8 +496,8 @@ async def test_explicit_file_offsets_survive_inner_model_recovery_attempts(tmp_p
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_read_text",
-                    json_args=json.dumps({"path": "/workspace/recovered.txt", "line_offset": 0, "line_limit": 1}),
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/recovered.txt", "line_offset": 0, "line_limit": 1}),
                     tool_call_id="recover-read-1",
                 )
             }
@@ -316,10 +507,10 @@ async def test_explicit_file_offsets_survive_inner_model_recovery_attempts(tmp_p
         elif len(returns) == 1:
             yield {
                 0: DeltaToolCall(
-                    name="environment_read_text",
+                    name="view",
                     json_args=json.dumps(
                         {
-                            "path": "/workspace/recovered.txt",
+                            "file_path": "/workspace/recovered.txt",
                             "line_offset": returns[0]["line_offset"] + returns[0]["lines_read"],
                             "line_limit": 1,
                         }
@@ -334,7 +525,7 @@ async def test_explicit_file_offsets_survive_inner_model_recovery_attempts(tmp_p
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
         model_recovery=ModelRecoveryPolicy(
             enabled=True,
             max_attempts=2,
@@ -364,10 +555,213 @@ def test_compact_reference_table_is_bounded_monotonic_and_tombstoned() -> None:
         table.resolve("process-1", "process")
     assert getattr(stale.value, "code", None) == "environment_reference_stale"
 
-    assert table.register("output", object()) == "output-1"
+    assert table.register("process", object()) == "process-2"
     with pytest.raises(Exception) as exhausted:
         table.register("process", object())
     assert getattr(exhausted.value, "code", None) == "environment_reference_exhausted"
+
+
+async def test_process_start_reserves_reference_capacity_before_provider_side_effect() -> None:
+    class CountingProcesses:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def start(self, request: Any, *, alias: str | None = None) -> Any:
+            del request, alias
+            self.calls += 1
+            raise AssertionError("process provider must not be called")
+
+    processes = CountingProcesses()
+    toolset = ShellToolset(
+        processes=cast(Any, processes),
+        outputs=cast(Any, object()),
+        max_reference_entries=2,
+    )
+    toolset._references.register("process", object())
+    toolset._references.register("process", object())
+
+    result = await toolset.environment_process_start(
+        cast(Any, object()),
+        ArgvCommand(executable="command", arguments=()),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "environment_reference_exhausted"
+    assert processes.calls == 0
+
+
+async def test_process_start_cleans_up_when_projection_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = SimpleNamespace(handle=object())
+
+    class Processes:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def start(self, request: Any, *, alias: str | None = None) -> Any:
+            del request, alias
+            self.calls.append("start")
+            return SimpleNamespace(process=process)
+
+        async def kill(self, handle: object) -> None:
+            assert handle is process.handle
+            self.calls.append("kill")
+
+        async def wait(self, handle: object, *, condition: str, timeout_seconds: float) -> None:
+            assert handle is process.handle
+            assert condition == "tree_cleaned"
+            assert timeout_seconds == 5.0
+            self.calls.append("wait")
+
+        async def release(self, handle: object) -> None:
+            assert handle is process.handle
+            self.calls.append("release")
+
+    processes = Processes()
+    toolset = ShellToolset(
+        processes=cast(Any, processes),
+        outputs=cast(Any, object()),
+        max_reference_entries=3,
+    )
+
+    def fail_projection(value: Any, **kwargs: Any) -> Any:
+        del kwargs
+        toolset._references.register(
+            "process",
+            value.handle,
+            reservation=toolset._reference_reservation.get(),
+        )
+        raise EnvironmentError("projection failed", code="environment_provider_failure")
+
+    monkeypatch.setattr(toolset, "_project_process", fail_projection)
+    result = await toolset.environment_process_start(
+        cast(Any, object()),
+        ArgvCommand(executable="command", arguments=()),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "environment_provider_failure"
+    assert processes.calls == ["start", "kill", "wait", "release"]
+    assert toolset._references._entries == {}
+
+
+async def test_invalid_compact_reference_returns_stable_managed_tool_result(tmp_path: Path) -> None:
+    observed: dict[str, Any] = {}
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and isinstance(part.content, dict)
+        ]
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="environment_process_inspect",
+                    json_args=json.dumps({"process": "process-999"}),
+                    tool_call_id="invalid-process-1",
+                )
+            }
+        else:
+            observed.update(returns[-1])
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
+    )
+    result = await executable.run(
+        "inspect",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert observed["ok"] is False
+    assert observed["error"]["code"] == "environment_reference_invalid"
+
+
+def test_compact_reference_reservation_rolls_back_partial_projection() -> None:
+    table = _CompactReferenceTable(max_entries=2)
+    first = object()
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        with table.reserve(2) as reservation:
+            table.register("process", first, reservation=reservation)
+            raise RuntimeError("projection failed")
+
+    with table.reserve(2) as reservation:
+        assert table.register("process", first, reservation=reservation) == "process-2"
+        assert table.register("process", object(), reservation=reservation) == "process-3"
+
+
+def test_compact_reference_projection_hides_entries_until_rollback_finishes() -> None:
+    table = _CompactReferenceTable(max_entries=2)
+    value = object()
+    registered = threading.Event()
+    competing = threading.Event()
+    competing_done = threading.Event()
+    release = threading.Event()
+    observed: list[str] = []
+
+    def failing_projection() -> None:
+        with pytest.raises(RuntimeError, match="projection failed"):
+            with table.reserve(1) as reservation:
+                with table.projection(reservation):
+                    table.register("process", value, reservation=reservation)
+                    registered.set()
+                    assert release.wait(timeout=2)
+                    raise RuntimeError("projection failed")
+
+    def competing_projection() -> None:
+        assert registered.wait(timeout=2)
+        competing.set()
+        observed.append(table.register("process", value))
+        competing_done.set()
+
+    first = threading.Thread(target=failing_projection)
+    second = threading.Thread(target=competing_projection)
+    first.start()
+    assert registered.wait(timeout=2)
+    second.start()
+    assert competing.wait(timeout=2)
+    assert not competing_done.wait(timeout=0.05)
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert observed == ["process-2"]
+    assert table.resolve("process-2", "process") is value
+
+
+def test_compact_reference_table_pages_without_materializing_all_active_values() -> None:
+    table = _CompactReferenceTable(max_entries=4)
+    values = [object() for _ in range(4)]
+    references = [table.register("process", value) for value in values]
+
+    first, first_cursor = table.active_page("process", cursor=0, limit=2)
+    second, second_cursor = table.active_page("process", cursor=first_cursor or 0, limit=2)
+
+    assert [reference for reference, _ in first] == references[:2]
+    assert first_cursor == 2
+    assert [reference for reference, _ in second] == references[2:]
+    assert second_cursor is None
+
+    shrinking = _CompactReferenceTable(max_entries=3)
+    shrinking_references = [shrinking.register("process", object()) for _ in range(3)]
+    first, cursor = shrinking.active_page("process", cursor=0, limit=2)
+    shrinking.tombstone(shrinking_references[0], "process")
+    remaining, final_cursor = shrinking.active_page("process", cursor=cursor or 0, limit=2)
+
+    assert [reference for reference, _ in first] == shrinking_references[:2]
+    assert cursor == 2
+    assert [reference for reference, _ in remaining] == shrinking_references[2:]
+    assert final_cursor is None
 
 
 async def test_managed_dispatch_fails_stale_when_policy_wait_refreshes_binding(tmp_path: Path) -> None:
@@ -375,7 +769,7 @@ async def test_managed_dispatch_fails_stale_when_policy_wait_refreshes_binding(t
     aggregate = _local_binding(tmp_path)
     replacement = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
-            environment_id="environment-tools-test",
+            environment_id="dynamic-environment-test",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
         )
     )
@@ -418,8 +812,8 @@ async def test_managed_dispatch_fails_stale_when_policy_wait_refreshes_binding(t
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_stat",
-                    json_args=json.dumps({"path": "/workspace/value.txt"}),
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/value.txt"}),
                     tool_call_id="stat-refresh-1",
                 )
             }
@@ -432,7 +826,7 @@ async def test_managed_dispatch_fails_stale_when_policy_wait_refreshes_binding(t
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run(
         "inspect",
@@ -452,7 +846,7 @@ async def test_managed_authorization_is_fenced_by_binding_revision(tmp_path: Pat
     run_bindings = RunBindings.local(environment=aggregate)
     replacement = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
-            environment_id="environment-tools-test",
+            environment_id="dynamic-environment-test",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
         )
     )
@@ -473,14 +867,14 @@ async def test_managed_authorization_is_fenced_by_binding_revision(tmp_path: Pat
 
     async with aggregate.bind(run_id="run-1", instance=run_bindings.instance) as environment:
         await environment.activate()
-        capability = _EnvironmentToolsRunCapability(
+        capability = _DynamicEnvironmentRunCapability(
             _configuration(),
             run_id="run-1",
             environment=environment,
         )
-        resolver = capability._resource_resolver("environment.stat")
+        resolver = capability._resource_resolver("filesystem.view")
         resources = await resolver(
-            {"path": "/workspace/relative.txt"},
+            {"file_path": "/workspace/relative.txt"},
             context=cast(Any, SimpleNamespace(environment=environment)),
         )
         assert len(resources) == 1
@@ -491,47 +885,120 @@ async def test_managed_authorization_is_fenced_by_binding_revision(tmp_path: Pat
         assert getattr(stale_authorization.value, "code", None) == "environment_stale_binding"
 
 
-def test_ineligible_retained_output_uses_bounded_no_reference_fallback() -> None:
-    retained = _EnvironmentRetainedToolResult(
-        value={"content": "x" * 1000},
-        reference=BoundOutputReference(
-            binding_id="binding-1",
-            binding_revision=1,
-            observed_generation="generation-1",
-            reference=OpaqueOutputReference._from_payload("retained-1"),
+async def test_managed_large_json_result_spills_for_the_run_and_is_cleaned(tmp_path: Path) -> None:
+    def produce() -> dict[str, str]:
+        return {"content": "x" * 4_000, "hint": "keep-this-field"}
+
+    tool = HarnessTool(
+        produce,
+        harness_metadata=HarnessToolMetadata(
+            tool_id="test.large-result",
+            effects=frozenset({"read"}),
+            credential_audiences=(),
+            idempotency="read_only",
+            output_policy=ToolOutputPolicy(
+                max_inline_bytes=512,
+                max_output_bytes=8 * 1024,
+                overflow="spill",
+                redact=True,
+            ),
         ),
     )
-    metadata = HarnessToolMetadata(
-        tool_id="test.retained-fallback",
-        effects=frozenset({"read"}),
-        credential_audiences=(),
-        idempotency="read_only",
-        output_policy=ToolOutputPolicy(
-            max_inline_bytes=64,
-            max_output_bytes=2048,
-            overflow="environment_reference",
-            redact=True,
+    observed_path: str | None = None
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        nonlocal observed_path
+        del info
+        returns = [
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {0: DeltaToolCall(name="produce", json_args="{}", tool_call_id="large-result-1")}
+            return
+        content = returns[-1]
+        assert isinstance(content, dict)
+        assert content["truncated"] is True
+        assert content["output_bytes"] > 4_000
+        result = content["result"]
+        assert isinstance(result, dict)
+        assert result["hint"] == "keep-this-field"
+        observed_path = cast(str, content["output_file_path"])
+        relative = observed_path.removeprefix("/workspace/")
+        spilled = tmp_path / relative
+        assert json.loads(spilled.read_text(encoding="utf-8")) == produce()
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            Capability(tools=[tool], id="large-result-tools"),
+            DynamicEnvironmentCapability(_configuration()),
         ),
     )
+    result = await executable.run(
+        "produce",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+    )
 
-    class RejectingProjector:
-        def project_retained_result(self, result: Any) -> Any:
-            del result
-            raise EnvironmentError("stale", code="environment_reference_stale")
+    assert result.output_or_raise() == "done"
+    assert observed_path is not None
+    assert not (tmp_path / observed_path.removeprefix("/workspace/")).exists()
 
-    projected = _apply_result_policy(retained, metadata, environment_projector=RejectingProjector())
-    assert isinstance(projected, dict)
-    assert projected["complete"] is False
-    assert projected["reference"] is None
+
+async def test_unmanaged_large_json_result_crosses_the_same_spill_boundary(tmp_path: Path) -> None:
+    def produce() -> dict[str, str]:
+        return {"content": "x" * (300 * 1024), "hint": "native-tool"}
+
+    observed_path: str | None = None
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        nonlocal observed_path
+        del info
+        returns = [
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {0: DeltaToolCall(name="produce", json_args="{}", tool_call_id="native-large-result-1")}
+            return
+        content = returns[-1]
+        assert isinstance(content, dict)
+        assert content["truncated"] is True
+        assert content["output_bytes"] > 300 * 1024
+        result = content["result"]
+        assert isinstance(result, dict)
+        assert result["hint"] == "native-tool"
+        observed_path = cast(str, content["output_file_path"])
+        spilled = tmp_path / observed_path.removeprefix("/workspace/")
+        assert json.loads(spilled.read_text(encoding="utf-8")) == produce()
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(Capability(tools=[produce], id="native-large-result-tools"),),
+    )
+    result = await executable.run(
+        "produce",
+        bindings=RunBindings.local(environment=_local_binding(tmp_path)),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert observed_path is not None
+    assert not (tmp_path / observed_path.removeprefix("/workspace/")).exists()
 
 
 async def test_model_error_projection_omits_internal_environment_details() -> None:
-    capability = _EnvironmentToolsRunCapability(
-        _configuration(),
-        run_id="run-1",
-        environment=SimpleNamespace(),
-    )
-
     async def fail() -> None:
         raise EnvironmentError(
             "internal provider detail",
@@ -545,73 +1012,9 @@ async def test_model_error_projection_omits_internal_environment_details() -> No
             },
         )
 
-    result = await capability._execute(fail, lambda value: {})
+    result = await FileToolset(cast(Any, SimpleNamespace()))._execute(fail, lambda value: {})
     assert result["ok"] is False
     assert result["error"]["details"] == {"timeout_seconds": 3, "missing": ["files"]}
-
-
-async def test_managed_environment_reference_uses_the_run_capability_table(tmp_path: Path) -> None:
-    def produce(ctx: RunContext[Any]) -> Any:
-        binding = ctx.deps.environment.topology.bindings[0]
-        retained = BoundOutputReference(
-            binding_id=binding.binding_id,
-            binding_revision=binding.binding_revision,
-            observed_generation=binding.descriptor.generation,
-            reference=OpaqueOutputReference._from_payload("retained-1"),
-        )
-        return _EnvironmentRetainedToolResult(value={"content": "x" * 1000}, reference=retained)
-
-    tool = HarnessTool(
-        produce,
-        harness_metadata=HarnessToolMetadata(
-            tool_id="test.retained",
-            effects=frozenset({"read"}),
-            credential_audiences=(),
-            idempotency="read_only",
-            output_policy=ToolOutputPolicy(
-                max_inline_bytes=64,
-                max_output_bytes=2048,
-                overflow="environment_reference",
-                redact=True,
-            ),
-        ),
-    )
-
-    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
-        del info
-        returns = [
-            part
-            for message in messages
-            if isinstance(message, ModelRequest)
-            for part in message.parts
-            if isinstance(part, ToolReturnPart)
-        ]
-        if not returns:
-            yield {0: DeltaToolCall(name="produce", json_args="{}", tool_call_id="produce-1")}
-        else:
-            content = returns[-1].content
-            assert isinstance(content, dict)
-            assert content["reference"] == "output-1"
-            yield "done"
-
-    executable = HarnessBuilder().build_code(
-        AgentSpec(model="logical:test"),
-        output_type=str,
-        model=FunctionModel(stream_function=stream),
-        capabilities=(
-            Capability(tools=[tool], id="test-tools"),
-            EnvironmentToolsCapability(_configuration()),
-        ),
-    )
-    result = await executable.run(
-        "produce",
-        bindings=RunBindings.local(
-            environment=_local_binding(tmp_path, process_output=True),
-            capabilities=(_policy(),),
-        ),
-    )
-
-    assert result.output_or_raise() == "done"
 
 
 async def test_empty_topology_tool_returns_typed_unavailable_result_after_policy_allow() -> None:
@@ -629,8 +1032,8 @@ async def test_empty_topology_tool_returns_typed_unavailable_result_after_policy
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_stat",
-                    json_args=json.dumps({"path": "/workspace/missing"}),
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/missing"}),
                     tool_call_id="stat-1",
                 )
             }
@@ -643,7 +1046,7 @@ async def test_empty_topology_tool_returns_typed_unavailable_result_after_policy
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run("inspect", bindings=RunBindings.local(capabilities=(_policy(),)))
 
@@ -668,8 +1071,8 @@ async def test_large_environment_result_is_bounded_without_retry_shaped_failure(
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_read_text",
-                    json_args=json.dumps({"path": "/workspace/large.txt", "line_limit": 1}),
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/large.txt", "line_limit": 1}),
                     tool_call_id="large-read-1",
                 )
             }
@@ -682,7 +1085,7 @@ async def test_large_environment_result_is_bounded_without_retry_shaped_failure(
         AgentSpec(model="logical:test"),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run(
         "read",
@@ -693,8 +1096,8 @@ async def test_large_environment_result_is_bounded_without_retry_shaped_failure(
     assert observed["ok"] is True
     assert observed["has_more"] is False
     assert observed["truncated_lines"] == [1]
-    assert isinstance(observed["text"], str)
-    assert len(observed["text"]) == 2_000
+    assert isinstance(observed["content"], str)
+    assert len(observed["content"]) == 2_000
 
 
 async def test_agent_spec_tool_retries_exhaust_once_without_environment_retry_loop() -> None:
@@ -706,7 +1109,7 @@ async def test_agent_spec_tool_retries_exhaust_once_without_environment_retry_lo
         model_calls += 1
         yield {
             0: DeltaToolCall(
-                name="environment_stat",
+                name="view",
                 json_args="{}",
                 tool_call_id=f"invalid-{model_calls}",
             )
@@ -716,7 +1119,7 @@ async def test_agent_spec_tool_retries_exhaust_once_without_environment_retry_lo
         AgentSpec(model="logical:test", retries={"tools": 2}),
         output_type=str,
         model=FunctionModel(stream_function=stream),
-        capabilities=(EnvironmentToolsCapability(_configuration()),),
+        capabilities=(DynamicEnvironmentCapability(_configuration()),),
     )
     result = await executable.run("inspect", bindings=RunBindings.local(capabilities=(_policy(),)))
 
@@ -907,7 +1310,10 @@ async def test_topology_event_adapter_survives_model_recovery_boundary(tmp_path:
         pending = asyncio.create_task(run.__anext__())
         await prompt_started.wait()
         await aggregate.controller.apply(_dynamic_local_request(tmp_path))
-        topology_event = await asyncio.wait_for(pending, timeout=2)
+        observed = [await asyncio.wait_for(pending, timeout=2)]
+        while not _topology_context_events(observed):
+            observed.append(await asyncio.wait_for(run.__anext__(), timeout=2))
+        topology_event = _topology_context_events(observed)[0]
         assert _topology_context_events([topology_event]) == [topology_event]
         release_prompt.set()
         remaining = [item async for item in run]
@@ -1120,3 +1526,243 @@ async def test_terminal_waits_for_delayed_topology_adapter_drain(
     assert len(topology_events) == 1
     assert items.index(topology_events[0]) < len(items) - 1
     assert items[-1].result.output_or_raise() == "done"
+
+
+async def test_dynamic_file_operations_accept_non_virtual_file_operator(tmp_path: Path) -> None:
+    source = tmp_path / "sample.txt"
+    source.write_text("provider-neutral\n", encoding="utf-8")
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+    environment = SimpleNamespace(files=files)
+    toolset = FileToolset(files)
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=environment)))
+
+    result = await toolset.view(ctx, "/sample.txt")
+
+    assert result == {
+        "ok": True,
+        "file_path": "/sample.txt",
+        "content": "provider-neutral\n",
+        "line_offset": 0,
+        "lines_read": 1,
+        "has_more": False,
+        "truncated_lines": [],
+    }
+
+
+async def test_process_output_is_drained_once_without_model_output_references(tmp_path: Path) -> None:
+    aggregate = _local_binding(tmp_path, process_output=True)
+    run_bindings = RunBindings.local(environment=aggregate)
+
+    async with aggregate.bind(run_id="run-drain", instance=run_bindings.instance) as environment:
+        toolset = ShellToolset(
+            processes=environment.processes,
+            outputs=environment.outputs,
+        )
+        ctx = cast(Any, SimpleNamespace())
+        started = await toolset.environment_process_start(
+            ctx,
+            ArgvCommand(
+                executable=str(_PROCESS_EXECUTABLE),
+                arguments=("-c", "import sys; sys.stdout.write('once-out'); sys.stderr.write('once-err')"),
+            ),
+        )
+        assert started["ok"] is True
+        process = started["process"]
+        assert isinstance(process, str)
+        waited = await toolset.environment_process_wait(
+            ctx,
+            process,
+            timeout_seconds=5,
+        )
+        second = await toolset.environment_process_read_output(ctx, process)
+
+        initial_stdout = started["stdout"]["text"]
+        initial_stderr = started["stderr"]["text"]
+        assert initial_stdout + waited["stdout"]["text"] == "once-out"
+        assert initial_stderr + waited["stderr"]["text"] == "once-err"
+        assert second["stdout"]["text"] == ""
+        assert second["stderr"]["text"] == ""
+        assert "output" not in started["stdout"]
+        assert "output" not in waited["stdout"]
+        released = await toolset.environment_process_release(ctx, process)
+        assert released == {"ok": True, "released": True}
+
+
+async def test_shell_toolset_composes_directly_over_bound_provider_ports(tmp_path: Path) -> None:
+    aggregate = _local_binding(tmp_path)
+    run_bindings = RunBindings.local(environment=aggregate)
+
+    async with aggregate.bind(run_id="run-1", instance=run_bindings.instance) as environment:
+        toolset = ShellToolset(
+            shell=environment.shell,
+            processes=environment.processes,
+            outputs=environment.outputs,
+            ports=environment.ports,
+        )
+
+        names = set(toolset.get_toolset().tools)
+
+    assert {
+        "environment_shell_exec",
+        "environment_process_start",
+        "environment_process_inspect",
+        "environment_process_read_output",
+        "environment_port_inspect",
+    } <= names
+
+
+async def test_file_toolset_creates_nested_parents_and_returns_stable_missing_error(tmp_path: Path) -> None:
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+    toolset = FileToolset(files)
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+
+    written = await toolset.write(ctx, "/one/two/value.txt", "written")
+    created = await toolset.edit(ctx, "/three/four/value.txt", "", "created")
+    missing = await toolset.view(ctx, "/missing/ancestor/value.txt")
+
+    assert written["ok"] is True
+    assert created["ok"] is True
+    assert (tmp_path / "one" / "two" / "value.txt").read_text() == "written"
+    assert (tmp_path / "three" / "four" / "value.txt").read_text() == "created"
+    assert missing["ok"] is False
+    assert missing["error"]["code"] == "environment_not_found"
+
+
+async def test_file_toolset_rechecks_authorization_between_compound_operations(tmp_path: Path) -> None:
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+    revision = 1
+    writes = 0
+
+    class RefreshingFiles:
+        async def mkdir(self, path: str, *, parents: bool, exist_ok: bool):
+            nonlocal revision
+            result = await files.mkdir(path, parents=parents, exist_ok=exist_ok)
+            revision = 2
+            return result
+
+        async def write_text(self, path: str, text: str, *, mode: str):
+            nonlocal writes
+            writes += 1
+            return await files.write_text(path, text, mode=cast(Any, mode))
+
+    def guard() -> None:
+        if revision != 1:
+            raise EnvironmentError("Binding changed.", code="environment_stale_binding")
+
+    toolset = FileToolset(cast(Any, RefreshingFiles()), execution_guard=guard)
+    ctx = cast(Any, SimpleNamespace())
+
+    result = await toolset.write(ctx, "/nested/value.txt", "must-not-write")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "environment_stale_binding"
+    assert writes == 0
+    assert not (tmp_path / "nested" / "value.txt").exists()
+
+
+async def test_file_toolset_serializes_concurrent_exact_edits(tmp_path: Path) -> None:
+    target = tmp_path / "value.txt"
+    target.write_text("first\nsecond\n")
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+    toolset = FileToolset(files)
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+
+    first, second = await asyncio.gather(
+        toolset.edit(ctx, "/value.txt", "first", "FIRST"),
+        toolset.edit(ctx, "/value.txt", "second", "SECOND"),
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert target.read_text() == "FIRST\nSECOND\n"
+
+
+async def test_direct_local_create_is_exclusive_under_concurrency(tmp_path: Path) -> None:
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+
+    async def create(content: str) -> FileWriteResult | EnvironmentError:
+        try:
+            return await files.write_text("/value.txt", content, mode="create")
+        except EnvironmentError as exc:
+            return exc
+
+    results = await asyncio.gather(create("first"), create("second"))
+
+    assert sum(isinstance(result, FileWriteResult) for result in results) == 1
+    errors = [result for result in results if isinstance(result, EnvironmentError)]
+    assert len(errors) == 1
+    assert errors[0].code == "environment_conflict"
+    assert (tmp_path / "value.txt").read_text() in {"first", "second"}
+
+
+async def test_large_exact_edit_transformation_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "value.txt"
+    target.write_text("before\n")
+    files = LocalFileOperator(
+        root=tmp_path,
+        read_only=False,
+        policy=DirectLocalFilePolicy(),
+        binding_id="binding-1",
+        binding_revision=1,
+        generation="generation-1",
+    )
+    toolset = FileToolset(files)
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+    started = threading.Event()
+    original = file_toolset_module._apply_text_edits
+
+    def slow_transform(content, edits, start_index=1):
+        started.set()
+        time.sleep(0.1)
+        return original(content, edits, start_index)
+
+    monkeypatch.setattr(file_toolset_module, "_apply_text_edits", slow_transform)
+    edit_task = asyncio.create_task(toolset.edit(ctx, "/value.txt", "before", "after"))
+    for _ in range(100):
+        if started.is_set():
+            break
+        await asyncio.sleep(0)
+
+    assert started.is_set()
+    await asyncio.sleep(0.01)
+    assert not edit_task.done()
+    result = await edit_task
+    assert result["ok"] is True

@@ -15,12 +15,12 @@ from converge_agent_harness.errors import DefinitionError
 HARNESS_TOOL_METADATA_KEY = "converge.harness.tool"
 MAX_TOOL_ID_LENGTH = 256
 MAX_CREDENTIAL_AUDIENCES = 16
-MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 MAX_INLINE_BYTES = 256 * 1024
 
 type ToolEffect = Literal["read", "write", "delete", "execute", "external_communication"]
 type IdempotencySemantics = Literal["none", "read_only", "provider_key"]
-type OutputOverflow = Literal["fail", "truncate", "environment_reference"]
+type OutputOverflow = Literal["fail", "truncate", "spill"]
 
 _VALID_EFFECTS = frozenset({"read", "write", "delete", "execute", "external_communication"})
 _VALID_IDEMPOTENCY = frozenset({"none", "read_only", "provider_key"})
@@ -41,9 +41,9 @@ class ToolOutputPolicy(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_inline_bytes: int = Field(gt=0, le=MAX_INLINE_BYTES)
+    max_inline_bytes: int = Field(ge=512, le=MAX_INLINE_BYTES)
     max_output_bytes: int = Field(gt=0, le=MAX_OUTPUT_BYTES)
-    overflow: OutputOverflow = "environment_reference"
+    overflow: OutputOverflow = "spill"
     redact: bool = True
 
     @field_validator("max_output_bytes")

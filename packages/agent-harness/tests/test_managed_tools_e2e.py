@@ -303,18 +303,18 @@ async def test_managed_dispatch_cancellation_releases_credentials_and_preserves_
     assert closed.is_set()
 
 
-async def test_result_redaction_and_environment_reference_fallback_are_bounded() -> None:
+async def test_result_redaction_and_unavailable_spill_fallback_are_bounded() -> None:
     def produce() -> dict[str, str]:
-        return {"token": "top-secret", "content": "x" * 1000}
+        return {"token": "top-secret", "content": "x" * 2000}
 
     result = await _run(
         HarnessTool(
             produce,
             harness_metadata=_metadata(
                 output_policy=ToolOutputPolicy(
-                    max_inline_bytes=128,
-                    max_output_bytes=256,
-                    overflow="environment_reference",
+                    max_inline_bytes=512,
+                    max_output_bytes=1024,
+                    overflow="spill",
                     redact=True,
                 )
             ),
@@ -332,11 +332,12 @@ async def test_result_redaction_and_environment_reference_fallback_are_bounded()
     content = returns[-1].content
     assert isinstance(content, dict)
     assert content["truncated"] is True
-    assert content["reference"] is None
-    assert content["captured_bytes"] == 256
+    assert content["output_file_path"] is None
+    assert content["output_bytes"] > 1024
+    assert len(json.dumps(content).encode()) <= 512
     assert "top-secret" not in repr(content)
 
 
-def test_managed_results_reject_non_native_values_before_json_projection() -> None:
+async def test_managed_results_reject_non_native_values_before_json_projection() -> None:
     with pytest.raises(ToolFailed, match="invalid result"):
-        _apply_result_policy(tuple(range(10_000)), _metadata())
+        await _apply_result_policy(tuple(range(10_000)), _metadata())

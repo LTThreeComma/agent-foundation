@@ -497,6 +497,8 @@ class LocalProcessManager:
         *,
         stdout_cursor: BoundOutputCursor | None = None,
         stderr_cursor: BoundOutputCursor | None = None,
+        stdout_start_offset: int | None = None,
+        stderr_start_offset: int | None = None,
         wait_seconds: float = 0,
         policy: EnvironmentOutputPolicy,
     ) -> ProcessReadOutputResult:
@@ -510,19 +512,41 @@ class LocalProcessManager:
                 pass
         process = self._info(record)
         stdout, stderr = await asyncio.gather(
-            self._read_stream(process.output.stdout, stdout_cursor, policy),
-            self._read_stream(process.output.stderr, stderr_cursor, policy),
+            self._read_stream(
+                process.output.stdout,
+                cursor=stdout_cursor,
+                start_offset=stdout_start_offset,
+                policy=policy,
+            ),
+            self._read_stream(
+                process.output.stderr,
+                cursor=stderr_cursor,
+                start_offset=stderr_start_offset,
+                policy=policy,
+            ),
         )
         return ProcessReadOutputResult(process=process, stdout=stdout, stderr=stderr)
 
     async def _read_stream(
         self,
         capture: EnvironmentOutputCapture,
+        *,
         cursor: BoundOutputCursor | None,
+        start_offset: int | None,
         policy: EnvironmentOutputPolicy,
     ) -> ProcessStreamRead:
+        if cursor is not None and start_offset is not None:
+            raise EnvironmentError(
+                "Output cursor and offset cannot both be selected.",
+                code="environment_request_invalid",
+            )
         if capture.reference is not None:
-            result = await self._retention.read(capture.reference, cursor=cursor, policy=policy)
+            result = await self._retention.read(
+                capture.reference,
+                cursor=cursor,
+                start_offset=start_offset,
+                policy=policy,
+            )
             return ProcessStreamRead(
                 chunks=result.chunks,
                 next_cursor=result.next_cursor,
@@ -530,7 +554,7 @@ class LocalProcessManager:
             )
         if cursor is not None:
             raise EnvironmentError("Output cursor is unavailable for this stream.", code="environment_cursor_invalid")
-        return _stream_read(capture, policy)
+        return _stream_read(capture, policy, start_offset=start_offset or 0)
 
     async def write_stdin(
         self,
@@ -799,10 +823,18 @@ def _signal_name(return_code: int | None) -> Literal["interrupt", "terminate", "
     return None
 
 
-def _stream_read(capture: EnvironmentOutputCapture, policy: EnvironmentOutputPolicy) -> ProcessStreamRead:
+def _stream_read(
+    capture: EnvironmentOutputCapture,
+    policy: EnvironmentOutputPolicy,
+    *,
+    start_offset: int = 0,
+) -> ProcessStreamRead:
     data = capture.inline
     if data is None and capture.preview:
         data = b"".join(segment.data for segment in capture.preview)
-    data = (data or b"")[: policy.max_inline_bytes]
-    chunks = (EnvironmentOutputSegment(start_offset=0, data=data),) if data else ()
+    available = data or b""
+    if start_offset < 0 or start_offset > len(available):
+        raise EnvironmentError("Output offset is unavailable for this stream.", code="environment_cursor_invalid")
+    selected = available[start_offset : start_offset + policy.max_inline_bytes]
+    chunks = (EnvironmentOutputSegment(start_offset=start_offset, data=selected),) if selected else ()
     return ProcessStreamRead(chunks=chunks, next_cursor=None, capture=capture)

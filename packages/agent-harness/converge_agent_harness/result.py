@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any, Literal, cast
 
@@ -12,6 +13,7 @@ from pydantic_ai.usage import RunUsage
 
 from converge_agent_harness.errors import RetryHint, RunError
 from converge_agent_harness.state import HarnessState, decode_messages, encode_messages
+from converge_agent_harness.usage import ModelUsageRecord, ProviderUsageRecord, UsageRecord
 
 RunStatus = Literal["completed", "suspended", "failed", "cancelled"]
 SuspendReason = Literal["deferred"]
@@ -62,6 +64,7 @@ class HarnessRunResult[OutputT]:
         "_status",
         "_suspend_reason",
         "_usage",
+        "_usage_records",
     )
 
     def __init__(
@@ -72,6 +75,7 @@ class HarnessRunResult[OutputT]:
         output: OutputT | None,
         state: HarnessState | None,
         usage: RunUsage,
+        usage_records: Sequence[UsageRecord] = (),
         failure: SafeFailure | None = None,
         suspend_reason: SuspendReason | None = None,
         deferred: DeferredToolRequests | None = None,
@@ -86,6 +90,8 @@ class HarnessRunResult[OutputT]:
             raise TypeError("state must be HarnessState or None")
         if not isinstance(usage, RunUsage):
             raise TypeError("usage must be RunUsage")
+        if not all(isinstance(record, ModelUsageRecord | ProviderUsageRecord) for record in usage_records):
+            raise TypeError("usage_records must contain only UsageRecord values")
         if failure is not None and not isinstance(failure, SafeFailure):
             raise TypeError("failure must be SafeFailure or None")
         if suspend_reason is not None and suspend_reason != "deferred":
@@ -119,6 +125,7 @@ class HarnessRunResult[OutputT]:
         self._output = deepcopy(output)
         self._state = state.model_copy(deep=True) if state is not None else None
         self._usage = _copy_usage(usage)
+        self._usage_records = tuple(record.model_copy(deep=True) for record in usage_records)
         self._failure = failure.model_copy(deep=True) if failure is not None else None
         self._suspend_reason = suspend_reason
         self._deferred = deepcopy(deferred)
@@ -146,6 +153,11 @@ class HarnessRunResult[OutputT]:
         return _copy_usage(self._usage)
 
     @property
+    def usage_records(self) -> tuple[UsageRecord, ...]:
+        """Return detached mixed-source attribution records captured at the terminal boundary."""
+        return tuple(record.model_copy(deep=True) for record in self._usage_records)
+
+    @property
     def failure(self) -> SafeFailure | None:
         return self._failure.model_copy(deep=True) if self._failure is not None else None
 
@@ -171,6 +183,7 @@ class HarnessRunResult[OutputT]:
         output: Any = _UNSET,
         state: Any = _UNSET,
         usage: Any = _UNSET,
+        usage_records: Any = _UNSET,
         failure: Any = _UNSET,
         suspend_reason: Any = _UNSET,
         deferred: Any = _UNSET,
@@ -183,6 +196,7 @@ class HarnessRunResult[OutputT]:
             output=self.output if output is _UNSET else output,
             state=self.state if state is _UNSET else state,
             usage=self.usage if usage is _UNSET else usage,
+            usage_records=self.usage_records if usage_records is _UNSET else usage_records,
             failure=self.failure if failure is _UNSET else failure,
             suspend_reason=self.suspend_reason if suspend_reason is _UNSET else suspend_reason,
             deferred=self.deferred if deferred is _UNSET else deferred,

@@ -17,7 +17,20 @@ from pydantic import BaseModel
 from converge_agent_harness._json import dump_json_bytes
 from converge_agent_harness.identity import AgentInstanceContext
 
-from .commands import BoundProcessHandle, CommandRequest, PortTarget, ProcessStartResult
+from .commands import (
+    BoundProcessHandle,
+    CommandRequest,
+    PortObservation,
+    PortTarget,
+    ProcessControlResult,
+    ProcessInfo,
+    ProcessReadOutputResult,
+    ProcessSignalResult,
+    ProcessStartResult,
+    ProcessWriteStdinResult,
+    ShellExecResult,
+)
+from .files import FileOperator
 from .models import (
     DEFAULT_ENVIRONMENT_CLEANUP_TIMEOUT_SECONDS,
     DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS,
@@ -46,13 +59,18 @@ from .models import (
 from .providers import (
     BoundEnvironment,
     BoundEnvironmentProvider,
+    BoundOutputOperations,
+    BoundPortOperations,
+    BoundProcessOperations,
+    BoundShellOperations,
     EnvironmentProviderBinding,
     EnvironmentProviderOperations,
     EnvironmentRunBinding,
     EnvironmentTopologyController,
     EnvironmentTopologyObserver,
+    FileScopeSelection,
 )
-from .retention import BoundOutputCursor, BoundOutputReference
+from .retention import BoundOutputCursor, BoundOutputReference, EnvironmentOutputReadResult
 from .topology import DynamicTopologyController, DynamicTopologyObserver
 from .virtual_files import VirtualFileOperator, _PreparedFile
 
@@ -149,7 +167,11 @@ class _OutputFacade:
     def __init__(self, environment: CompositeBoundEnvironment) -> None:
         self._environment = environment
 
-    async def read(self, reference: Any, **kwargs: Any) -> Any:
+    async def read(
+        self,
+        reference: BoundOutputReference,
+        **kwargs: Any,
+    ) -> EnvironmentOutputReadResult:
         async with self._prepare(reference, EnvironmentAction.OUTPUT_READ) as entered:
             outputs = entered.operations.outputs
             if outputs is None:
@@ -158,7 +180,12 @@ class _OutputFacade:
             _validate_provider_artifacts(entered, result)
             return result
 
-    async def release(self, *, reference: Any | None = None, cursor: Any | None = None) -> Any:
+    async def release(
+        self,
+        *,
+        reference: BoundOutputReference | None = None,
+        cursor: BoundOutputCursor | None = None,
+    ) -> EnvironmentOperationReceipt:
         selected = reference if reference is not None else cursor
         if selected is None:
             raise EnvironmentError("Output release requires a selector.", code="environment_request_invalid")
@@ -173,7 +200,7 @@ class _OutputFacade:
     @asynccontextmanager
     async def _prepare(
         self,
-        selected: Any,
+        selected: BoundOutputReference | BoundOutputCursor,
         action: EnvironmentAction,
     ) -> AsyncGenerator[_EnteredBinding]:
         binding_id = selected.binding_id
@@ -193,7 +220,7 @@ class _ShellFacade:
     def __init__(self, environment: CompositeBoundEnvironment) -> None:
         self._environment = environment
 
-    async def exec(self, request: CommandRequest, *, alias: str | None = None) -> Any:
+    async def exec(self, request: CommandRequest, *, alias: str | None = None) -> ShellExecResult:
         entered, provider_request = self._environment._prepare_command(request, alias=alias)
         async with self._environment._operation_lease(
             entered,
@@ -213,7 +240,7 @@ class _ProcessFacade:
     def __init__(self, environment: CompositeBoundEnvironment) -> None:
         self._environment = environment
 
-    async def start(self, request: CommandRequest, *, alias: str | None = None) -> Any:
+    async def start(self, request: CommandRequest, *, alias: str | None = None) -> ProcessStartResult:
         entered, provider_request = self._environment._prepare_command(request, alias=alias)
         async with self._environment._operation_lease(
             entered,
@@ -234,22 +261,22 @@ class _ProcessFacade:
             self._environment._track_process_handle(result.process.handle, added=True)
             return result
 
-    async def inspect(self, handle: BoundProcessHandle) -> Any:
+    async def inspect(self, handle: BoundProcessHandle) -> ProcessInfo:
         return await self._call(handle, EnvironmentAction.PROCESS_INSPECT, "inspect")
 
-    async def read_output(self, handle: BoundProcessHandle, **kwargs: Any) -> Any:
+    async def read_output(self, handle: BoundProcessHandle, **kwargs: Any) -> ProcessReadOutputResult:
         return await self._call(handle, EnvironmentAction.PROCESS_READ_OUTPUT, "read_output", **kwargs)
 
-    async def write_stdin(self, handle: BoundProcessHandle, data: bytes, **kwargs: Any) -> Any:
+    async def write_stdin(self, handle: BoundProcessHandle, data: bytes, **kwargs: Any) -> ProcessWriteStdinResult:
         return await self._call(handle, EnvironmentAction.PROCESS_WRITE_STDIN, "write_stdin", data, **kwargs)
 
-    async def close_stdin(self, handle: BoundProcessHandle) -> Any:
+    async def close_stdin(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt:
         return await self._call(handle, EnvironmentAction.PROCESS_CLOSE_STDIN, "close_stdin")
 
-    async def signal(self, handle: BoundProcessHandle, signal: str) -> Any:
+    async def signal(self, handle: BoundProcessHandle, signal: str) -> ProcessSignalResult:
         return await self._call(handle, EnvironmentAction.PROCESS_SIGNAL, "signal", signal)
 
-    async def wait(self, handle: BoundProcessHandle, **kwargs: Any) -> Any:
+    async def wait(self, handle: BoundProcessHandle, **kwargs: Any) -> ProcessInfo:
         timeout = kwargs.get("timeout_seconds")
         return await self._call(
             handle,
@@ -259,10 +286,10 @@ class _ProcessFacade:
             semantic_kwargs=kwargs,
         )
 
-    async def kill(self, handle: BoundProcessHandle) -> Any:
+    async def kill(self, handle: BoundProcessHandle) -> ProcessControlResult:
         return await self._call(handle, EnvironmentAction.PROCESS_KILL, "kill")
 
-    async def release(self, handle: BoundProcessHandle) -> Any:
+    async def release(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt:
         result = await self._call(handle, EnvironmentAction.PROCESS_RELEASE, "release")
         self._environment._track_process_handle(handle, added=False)
         return result
@@ -298,10 +325,10 @@ class _PortFacade:
     def __init__(self, environment: CompositeBoundEnvironment) -> None:
         self._environment = environment
 
-    async def inspect(self, target: PortTarget) -> Any:
+    async def inspect(self, target: PortTarget) -> PortObservation:
         return await self._call(target, EnvironmentAction.PORT_INSPECT, "inspect")
 
-    async def wait(self, target: PortTarget, **kwargs: Any) -> Any:
+    async def wait(self, target: PortTarget, **kwargs: Any) -> PortObservation:
         timeout = kwargs.get("timeout_seconds")
         return await self._call(
             target,
@@ -376,6 +403,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
         self._process_start_leases: dict[_RevisionKey, int] = {}
         self._active_process_handles: dict[_RevisionKey, set[BoundProcessHandle]] = {}
         self._readiness_tasks: dict[tuple[str, int, str, str], asyncio.Task[None]] = {}
+        self._readiness_waiters: dict[asyncio.Task[None], int] = {}
         self._retirement_tasks: set[asyncio.Task[None]] = set()
         self._retirement_failures: list[BaseException] = []
         self._alias_owners = {item.alias: item.binding_id for item in topology.bindings}
@@ -419,23 +447,66 @@ class CompositeBoundEnvironment(BoundEnvironment):
         return self._observer
 
     @property
-    def files(self) -> Any:
+    def files(self) -> FileOperator:
         return self._files
 
+    def select_files(self, path: str) -> FileScopeSelection:
+        selected = self.resolve_path(path)
+        entered = self._entered_by_revision.get((selected.binding_id, selected.binding_revision))
+        if entered is None:
+            raise EnvironmentError(
+                "Environment binding revision is unavailable.",
+                code="environment_stale_binding",
+            )
+        return FileScopeSelection(
+            logical_path=path,
+            resolved_path=selected,
+            observed_generation=entered.public.descriptor.generation,
+        )
+
+    @asynccontextmanager
+    async def open_files(self, selection: FileScopeSelection) -> AsyncGenerator[FileOperator]:
+        if not isinstance(selection, FileScopeSelection):
+            raise EnvironmentError("File scope selection is invalid.", code="environment_request_invalid")
+        selected = selection.resolved_path
+        entered = self._entered_by_revision.get((selected.binding_id, selected.binding_revision))
+        if entered is None or entered.public.descriptor.generation != selection.observed_generation:
+            raise EnvironmentError("File scope selection is stale.", code="environment_stale_binding")
+        async with self._revision_slot(entered):
+            await self._ensure_provider_family(entered, "files")
+            self._validate_live_observation(
+                entered,
+                entered.provider.availability,
+                frozenset({"files"}),
+            )
+            if entered.operations.files is None:
+                raise EnvironmentError("File operation facet is unavailable.", code="environment_unsupported")
+            scoped = VirtualFileOperator(
+                lambda path: self._resolve_scoped_file_path(path, entered, selection),
+                lambda path, action: self._prepare_scoped_file(entered, path, action),
+                lambda path, provider_path: self._virtualize_scoped_file_path(
+                    entered,
+                    selection,
+                    path,
+                    provider_path,
+                ),
+            )
+            yield scoped
+
     @property
-    def shell(self) -> Any:
+    def shell(self) -> BoundShellOperations:
         return self._shell
 
     @property
-    def processes(self) -> Any:
+    def processes(self) -> BoundProcessOperations:
         return self._processes
 
     @property
-    def ports(self) -> Any:
+    def ports(self) -> BoundPortOperations:
         return self._ports
 
     @property
-    def outputs(self) -> Any:
+    def outputs(self) -> BoundOutputOperations:
         return self._outputs
 
     async def activate(self) -> None:
@@ -736,7 +807,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
         if not path or "\x00" in path:
             raise EnvironmentError("Environment path is invalid.", code="environment_request_invalid")
         segments = path.split("/")
-        if any(segment in {".", ".."} for segment in segments):
+        if any(segment == ".." or (segment == "." and path != ".") for segment in segments):
             raise EnvironmentError("Environment path traversal is invalid.", code="environment_request_invalid")
 
         by_alias = {entered.public.alias: entered for entered in self._entered.values()}
@@ -783,7 +854,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
                     "The binding default working directory is invalid.",
                     code="environment_provider_failure",
                 )
-            provider_path = f"{base.rstrip('/')}/{path}"
+            provider_path = base if path == "." else f"{base.rstrip('/')}/{path}"
 
         if selected is None:
             raise EnvironmentError(
@@ -874,6 +945,120 @@ class CompositeBoundEnvironment(BoundEnvironment):
                 details={"action": action.value, "binding_id": binding_id},
             )
         return entered
+
+    def _resolve_scoped_file_path(
+        self,
+        path: str,
+        entered: _EnteredBinding,
+        selection: FileScopeSelection,
+    ) -> EnvironmentPath:
+        if not isinstance(path, str) or not path or "\x00" in path:
+            raise EnvironmentError("Environment path is invalid.", code="environment_request_invalid")
+        segments = path.split("/")
+        if any(segment == ".." or (segment == "." and path != ".") for segment in segments):
+            raise EnvironmentError("Environment path traversal is invalid.", code="environment_request_invalid")
+        selected_as_default = not selection.logical_path.startswith("/environment/")
+        if path.startswith("/workspace") and (path == "/workspace" or path.startswith("/workspace/")):
+            if not selected_as_default:
+                raise EnvironmentError(
+                    "The scoped file path selects another binding.",
+                    code="environment_selection_invalid",
+                )
+            provider_path = path.removeprefix("/workspace") or "/"
+        elif path.startswith("/environment/"):
+            remainder = path.removeprefix("/environment/")
+            alias, separator, tail = remainder.partition("/")
+            if alias != entered.public.alias:
+                raise EnvironmentError(
+                    "The scoped file path selects another binding.",
+                    code="environment_selection_invalid",
+                )
+            provider_path = f"/{tail}" if separator else "/"
+        elif path.startswith("/"):
+            raise EnvironmentError(
+                "Absolute paths must use /workspace or /environment/{alias}.",
+                code="environment_selection_invalid",
+            )
+        else:
+            base = entered.public.default_working_directory or "/"
+            if not base.startswith("/") or any(segment in {".", ".."} for segment in base.split("/")):
+                raise EnvironmentError(
+                    "The binding default working directory is invalid.",
+                    code="environment_provider_failure",
+                )
+            provider_path = base if path == "." else f"{base.rstrip('/')}/{path}"
+        return EnvironmentPath(
+            binding_id=entered.public.binding_id,
+            binding_revision=entered.public.binding_revision,
+            path=provider_path,
+        )
+
+    @asynccontextmanager
+    async def _prepare_scoped_file(
+        self,
+        entered: _EnteredBinding,
+        selected: EnvironmentPath,
+        action: EnvironmentAction,
+    ) -> AsyncGenerator[_PreparedFile]:
+        if (
+            selected.binding_id != entered.public.binding_id
+            or selected.binding_revision != entered.public.binding_revision
+        ):
+            raise EnvironmentError(
+                "The scoped file path selects another binding revision.",
+                code="environment_selection_invalid",
+            )
+        if action not in entered.public.permission_ceiling.operations:
+            raise EnvironmentError(
+                "Environment operation is denied by the binding permission ceiling.",
+                code="environment_denied",
+                details={"action": action.value, "binding_id": entered.public.binding_id},
+            )
+        try:
+            async with asyncio.timeout(DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS):
+                self._validate_live_observation(
+                    entered,
+                    entered.provider.availability,
+                    frozenset({"files"}),
+                )
+                if entered.operations.files is None:
+                    raise EnvironmentError("File operation facet is unavailable.", code="environment_unsupported")
+                yield _PreparedFile(
+                    selected=selected,
+                    observed_generation=entered.public.descriptor.generation,
+                    backend=entered.operations.files,
+                    validate_result=lambda value: _validate_provider_artifacts(entered, value),
+                )
+        except TimeoutError as exc:
+            raise EnvironmentError(
+                "Environment operation timed out.",
+                code="environment_timeout",
+                details={"timeout_seconds": DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS},
+                retry_hint="dependency_change",
+            ) from exc
+
+    @staticmethod
+    def _virtualize_scoped_file_path(
+        entered: _EnteredBinding,
+        selection: FileScopeSelection,
+        selected: EnvironmentPath,
+        provider_path: str,
+    ) -> str:
+        if (
+            selected.binding_id != entered.public.binding_id
+            or selected.binding_revision != entered.public.binding_revision
+        ):
+            raise EnvironmentError(
+                "Provider returned a path for another scoped binding revision.",
+                code="environment_provider_failure",
+            )
+        suffix = provider_path if provider_path.startswith("/") else f"/{provider_path}"
+        root = (
+            "/workspace"
+            if not selection.logical_path.startswith("/environment/")
+            else f"/environment/{entered.public.alias}"
+        )
+        return f"{root}{suffix}" if suffix != "/" else root
 
     @asynccontextmanager
     async def _prepare_file(
@@ -1183,15 +1368,25 @@ class CompositeBoundEnvironment(BoundEnvironment):
                         lambda completed, captured=revision_key: self._readiness_worker_finished(captured, completed)
                     )
                 self._readiness_tasks[key] = task
+            self._readiness_waiters[task] = self._readiness_waiters.get(task, 0) + 1
         try:
             await asyncio.shield(task)
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
+        finally:
             async with self._readiness_lock:
+                remaining = self._readiness_waiters.get(task, 0) - 1
+                if remaining > 0:
+                    self._readiness_waiters[task] = remaining
+                else:
+                    self._readiness_waiters.pop(task, None)
+
                 if self._readiness_tasks.get(key) is task:
-                    self._readiness_tasks.pop(key, None)
-            raise
+                    if task.done():
+                        self._readiness_tasks.pop(key, None)
+                        if not task.cancelled():
+                            task.exception()
+                    elif remaining <= 0:
+                        self._readiness_tasks.pop(key, None)
+                        task.cancel()
 
     def _readiness_worker_finished(self, key: _RevisionKey, task: asyncio.Task[Any]) -> None:
         release = asyncio.create_task(self._release_readiness_revision(key, task))
@@ -1211,6 +1406,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
         async with self._readiness_lock:
             readiness_tasks = tuple(self._readiness_tasks.values())
             self._readiness_tasks.clear()
+            self._readiness_waiters.clear()
         tasks = tuple(dict.fromkeys((*operation_tasks, *readiness_tasks)))
         for task in tasks:
             if not task.done():

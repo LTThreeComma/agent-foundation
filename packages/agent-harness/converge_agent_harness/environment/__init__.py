@@ -98,6 +98,8 @@ from .providers import (
     EnvironmentRunBinding,
     EnvironmentTopologyController,
     EnvironmentTopologyObserver,
+    FileScopeProvider,
+    FileScopeSelection,
 )
 from .retention import (
     BoundOutputCursor,
@@ -113,16 +115,18 @@ from .retention import (
 from .virtual_files import VirtualFileOperator
 
 if TYPE_CHECKING:
-    from .tools import EnvironmentToolsCapability, EnvironmentToolsConfiguration
+    from .configuration import DynamicEnvironmentConfiguration
+    from .dynamic import DynamicEnvironmentCapability
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"EnvironmentToolsCapability", "EnvironmentToolsConfiguration"}:
-        from .tools import EnvironmentToolsCapability, EnvironmentToolsConfiguration
+    if name in {"DynamicEnvironmentCapability", "DynamicEnvironmentConfiguration"}:
+        from .configuration import DynamicEnvironmentConfiguration
+        from .dynamic import DynamicEnvironmentCapability
 
         return {
-            "EnvironmentToolsCapability": EnvironmentToolsCapability,
-            "EnvironmentToolsConfiguration": EnvironmentToolsConfiguration,
+            "DynamicEnvironmentCapability": DynamicEnvironmentCapability,
+            "DynamicEnvironmentConfiguration": DynamicEnvironmentConfiguration,
         }[name]
     raise AttributeError(name)
 
@@ -151,6 +155,8 @@ __all__ = [
     "DirectLocalProcessPolicy",
     "DirectLocalRootConfiguration",
     "DirectLocalShellProfile",
+    "DynamicEnvironmentCapability",
+    "DynamicEnvironmentConfiguration",
     "EnvironmentAction",
     "EnvironmentActionDispatch",
     "EnvironmentAvailability",
@@ -178,8 +184,6 @@ __all__ = [
     "EnvironmentRunBinding",
     "EnvironmentState",
     "EnvironmentStateLimits",
-    "EnvironmentToolsCapability",
-    "EnvironmentToolsConfiguration",
     "EnvironmentTopology",
     "EnvironmentTopologyBindingChange",
     "EnvironmentTopologyChange",
@@ -194,6 +198,8 @@ __all__ = [
     "FileOperator",
     "FilePatchResult",
     "FileQueryRequest",
+    "FileScopeProvider",
+    "FileScopeSelection",
     "FileTextMatch",
     "FileTextResult",
     "FileTextSearchRequest",

@@ -29,6 +29,51 @@ from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import is_typeddict
 
+from converge_agent_harness.capabilities.context import (
+    COMPACTION_CAPABILITY_ID,
+    FILE_CONTEXT_CAPABILITY_ID,
+    HANDOFF_CAPABILITY_ID,
+    RUNTIME_CONTEXT_CAPABILITY_ID,
+    CompactionCapability,
+    FileContextCapability,
+    HandoffCapability,
+    RuntimeContextCapability,
+)
+from converge_agent_harness.capabilities.documents import (
+    DOCUMENTS_CAPABILITY_ID,
+    DOCUMENTS_RUN_CAPABILITY_ID,
+    DocumentsCapability,
+    DocumentsRunCapability,
+)
+from converge_agent_harness.capabilities.interaction import (
+    USER_INTERACTION_CAPABILITY_ID,
+    UserInteractionCapability,
+)
+from converge_agent_harness.capabilities.media import (
+    MEDIA_CAPABILITY_ID,
+    MEDIA_RUN_CAPABILITY_ID,
+    MediaCapability,
+    MediaRunCapability,
+)
+from converge_agent_harness.capabilities.process_monitor import (
+    MONITORED_PROCESS_CAPABILITY_ID,
+    MONITORED_PROCESS_RUN_CAPABILITY_ID,
+    MonitoredProcessCapability,
+    MonitoredProcessRunCapability,
+)
+from converge_agent_harness.capabilities.skills import SKILLS_CAPABILITY_ID, SkillsCapability
+from converge_agent_harness.capabilities.web import (
+    WEB_CAPABILITY_ID,
+    WEB_RUN_CAPABILITY_ID,
+    WebCapability,
+    WebRunCapability,
+)
+from converge_agent_harness.capabilities.working_state import (
+    TASK_STATE_RUN_CAPABILITY_ID,
+    WORKING_STATE_CAPABILITY_ID,
+    TaskStateRunCapability,
+    WorkingStateCapability,
+)
 from converge_agent_harness.capability_types import CapabilityTypeCatalog
 from converge_agent_harness.context import (
     AgentContext,
@@ -37,12 +82,12 @@ from converge_agent_harness.context import (
     SubagentCollection,
     _CapabilityProvenance,
 )
+from converge_agent_harness.environment.dynamic import (
+    DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
+    DynamicEnvironmentCapability,
+)
 from converge_agent_harness.environment.models import EnvironmentError, EnvironmentTopologyChange
 from converge_agent_harness.environment.providers import BoundEnvironment
-from converge_agent_harness.environment.tools import (
-    ENVIRONMENT_TOOLS_CAPABILITY_ID,
-    EnvironmentToolsCapability,
-)
 from converge_agent_harness.errors import (
     DefinitionError,
     HarnessError,
@@ -57,6 +102,10 @@ from converge_agent_harness.events import (
     HarnessRunResultEvent,
     HarnessStreamItem,
     _RunEventEmitter,
+)
+from converge_agent_harness.filters.integrity import (
+    MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
+    MessageIntegrityFilterCapability,
 )
 from converge_agent_harness.input import (
     RunInputFactory,
@@ -101,10 +150,17 @@ from converge_agent_harness.tools.deferred import (
     preflight_deferred_resume,
 )
 from converge_agent_harness.tools.invocation import (
-    INVOCATION_AUTHORIZATION_CAPABILITY_ID,
-    InvocationAuthorizationCapability,
+    TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+    ToolExecutionBoundaryCapability,
 )
 from converge_agent_harness.tools.policy import INVOCATION_POLICY_CAPABILITY_ID, InvocationPolicyCapability
+from converge_agent_harness.usage import (
+    MODEL_COST_RUN_CAPABILITY_ID,
+    USAGE_CAPABILITY_ID,
+    ModelCostRunCapability,
+    UsageCapability,
+    _RunUsageLedger,
+)
 
 _AGENT_EVENT_ADAPTER = TypeAdapter(AgentStreamEvent)
 _EXTENSION_EVENT_ADAPTER = TypeAdapter(HarnessExtensionEvent)
@@ -423,10 +479,12 @@ class HarnessBuilder:
             )
 
         capabilities = (
-            InvocationAuthorizationCapability(),
+            ToolExecutionBoundaryCapability(),
+            MessageIntegrityFilterCapability(),
             ResolveModelId(resolve_model),
             *definition.capabilities,
             *plugin_capabilities,
+            UsageCapability(),
         )
         model = definition.model
         if isinstance(model, Model):
@@ -691,6 +749,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self._terminal_close_task: asyncio.Task[None] | None = None
         self._pending_terminal_result: HarnessRunResult[OutputT] | None = None
         self._source_cleanup_failures: list[BaseException] = []
+        self._run_attachments_closed = False
         self._logical_events_started = False
         self._latest_messages: tuple[ModelMessage, ...] = self._previous_state.message_history
         self._new_message_index = len(self._latest_messages)
@@ -746,6 +805,11 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                     raise RunError("Run input factory failed.", code="input_factory_failed") from exc
             semantic_input = normalize_input(input_value)
             plugin_context = BoundPluginContext()
+            usage_attribution = _RunUsageLedger(
+                run_id=self.run_id,
+                instance=self._bindings.instance,
+                events=self._emitter,
+            )
             context = AgentContext(
                 run_id=self.run_id,
                 instance=self._bindings.instance,
@@ -755,6 +819,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 plugins=plugin_context,
                 subagents=self._executable.subagents,
                 events=self._emitter,
+                _usage_attribution=usage_attribution,
                 deferred_resume=self._deferred_resume,
                 metadata=self._bindings.metadata,
                 _capability_provenance=_CapabilityProvenance(
@@ -1241,6 +1306,8 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 continue
             if terminal:
                 self._install_terminal_fence()
+                await self.context._usage_attribution._flush(reason="terminal")
+                item = self._validate_result_candidate(item.replace(usage_records=self.context.usage_records))
             target_version = self.context.environment.topology.topology_version
             async for event in self._drain_emitter_through(target_version, terminal=terminal):
                 yield event
@@ -1646,7 +1713,8 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         self,
         candidate: HarnessRunResult[OutputT],
     ) -> HarnessRunResult[OutputT]:
-        validated = self._validate_result_candidate(candidate)
+        attributed = candidate.replace(usage_records=self.context.usage_records)
+        validated = self._validate_result_candidate(attributed)
         self._last_valid_outcome = validated
         return validated
 
@@ -1671,6 +1739,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 output=candidate.output,
                 state=candidate.state,
                 usage=candidate.usage,
+                usage_records=candidate.usage_records,
                 failure=candidate.failure,
                 suspend_reason=candidate.suspend_reason,
                 deferred=candidate.deferred,
@@ -1787,6 +1856,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
 
         await finish_cleanup(self._cancel_logical_source_tasks())
         await finish_cleanup(self._close_registered_responses())
+        await finish_cleanup(self._close_run_attachments())
         causes.extend(self._source_cleanup_failures)
         self._source_cleanup_failures.clear()
 
@@ -1808,6 +1878,14 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 outcome=outcome,
                 causes=tuple(causes),
             )
+
+    async def _close_run_attachments(self) -> None:
+        """Close collaborators claimed by finalized definition owners before Environment teardown."""
+        if self._run_attachments_closed:
+            return
+        self._run_attachments_closed = True
+        if self._context is not None:
+            await self._context._close_run_cleanups()
 
 
 def _resolve_business_output[OutputT](
@@ -1843,13 +1921,34 @@ def _validate_built_capability_tree(
     leaves: list[AbstractCapability[AgentContext]] = []
     root.apply(leaves.append)
     seen_ids: dict[str, str] = {}
-    authorization_count = 0
+    execution_boundary_count = 0
+    message_integrity_count = 0
+    usage_count = 0
     reserved_ids = {
-        INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+        TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+        MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
         INVOCATION_POLICY_CAPABILITY_ID,
+        USAGE_CAPABILITY_ID,
+        MODEL_COST_RUN_CAPABILITY_ID,
         CLIENT_TOOLS_CAPABILITY_ID,
         CLIENT_TOOLS_RUN_CAPABILITY_ID,
-        ENVIRONMENT_TOOLS_CAPABILITY_ID,
+        DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
+        RUNTIME_CONTEXT_CAPABILITY_ID,
+        FILE_CONTEXT_CAPABILITY_ID,
+        HANDOFF_CAPABILITY_ID,
+        COMPACTION_CAPABILITY_ID,
+        MONITORED_PROCESS_CAPABILITY_ID,
+        MONITORED_PROCESS_RUN_CAPABILITY_ID,
+        USER_INTERACTION_CAPABILITY_ID,
+        SKILLS_CAPABILITY_ID,
+        MEDIA_CAPABILITY_ID,
+        MEDIA_RUN_CAPABILITY_ID,
+        DOCUMENTS_CAPABILITY_ID,
+        DOCUMENTS_RUN_CAPABILITY_ID,
+        WEB_CAPABILITY_ID,
+        WEB_RUN_CAPABILITY_ID,
+        WORKING_STATE_CAPABILITY_ID,
+        TASK_STATE_RUN_CAPABILITY_ID,
     }
     for capability in leaves:
         if not isinstance(capability, AbstractCapability):
@@ -1879,17 +1978,48 @@ def _validate_built_capability_tree(
                 )
             seen_ids[capability_id] = type(capability).__name__
 
-        if isinstance(capability, InvocationAuthorizationCapability):
-            authorization_count += 1
-            if capability_id != INVOCATION_AUTHORIZATION_CAPABILITY_ID:
+        if isinstance(capability, ToolExecutionBoundaryCapability):
+            execution_boundary_count += 1
+            if capability_id != TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID:
                 raise DefinitionError(
-                    "The mandatory invocation Capability has an invalid ID.",
+                    "The mandatory tool execution boundary Capability has an invalid ID.",
+                    code="capability_scope_invalid",
+                )
+            continue
+        if type(capability) is MessageIntegrityFilterCapability:
+            message_integrity_count += 1
+            if capability_id != MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID:
+                raise DefinitionError(
+                    "The mandatory message-integrity Filter Capability has an invalid ID.",
+                    code="capability_scope_invalid",
+                )
+            continue
+        if type(capability) is UsageCapability:
+            usage_count += 1
+            if capability_id != USAGE_CAPABILITY_ID:
+                raise DefinitionError(
+                    "The mandatory Usage Capability has an invalid ID.",
                     code="capability_scope_invalid",
                 )
             continue
 
         allowed_definition_reserved = (
-            type(capability) in (ClientToolsCapability, EnvironmentToolsCapability)
+            type(capability)
+            in (
+                ClientToolsCapability,
+                DynamicEnvironmentCapability,
+                RuntimeContextCapability,
+                FileContextCapability,
+                HandoffCapability,
+                CompactionCapability,
+                MonitoredProcessCapability,
+                UserInteractionCapability,
+                SkillsCapability,
+                MediaCapability,
+                DocumentsCapability,
+                WebCapability,
+                WorkingStateCapability,
+            )
             and capability_id in definition_reserved_ids
         )
         if (
@@ -1906,9 +2036,19 @@ def _validate_built_capability_tree(
                 },
             )
 
-    if authorization_count != 1:
+    if execution_boundary_count != 1:
         raise DefinitionError(
-            "The built Agent must contain exactly one mandatory invocation Capability.",
+            "The built Agent must contain exactly one mandatory tool execution boundary Capability.",
+            code="capability_scope_invalid",
+        )
+    if message_integrity_count != 1:
+        raise DefinitionError(
+            "The built Agent must contain exactly one mandatory message-integrity Filter Capability.",
+            code="capability_scope_invalid",
+        )
+    if usage_count != 1:
+        raise DefinitionError(
+            "The built Agent must contain exactly one mandatory Usage Capability.",
             code="capability_scope_invalid",
         )
 
@@ -1919,7 +2059,16 @@ def _validate_capability_source(
     source: Literal["definition", "run"],
 ) -> frozenset[str]:
     """Flatten Capability trees and preserve ownership of reserved Harness IDs."""
-    run_types = (InvocationPolicyCapability, ClientToolsRunCapability)
+    run_types = (
+        InvocationPolicyCapability,
+        ClientToolsRunCapability,
+        MonitoredProcessRunCapability,
+        MediaRunCapability,
+        DocumentsRunCapability,
+        WebRunCapability,
+        TaskStateRunCapability,
+        ModelCostRunCapability,
+    )
     leaves: list[AbstractCapability[AgentContext]] = []
     for capability in capabilities:
         if not isinstance(capability, AbstractCapability):
@@ -1941,11 +2090,30 @@ def _validate_capability_source(
         capability.apply(leaves.append)
 
     reserved_ids = {
-        INVOCATION_AUTHORIZATION_CAPABILITY_ID,
+        TOOL_EXECUTION_BOUNDARY_CAPABILITY_ID,
+        MESSAGE_INTEGRITY_FILTER_CAPABILITY_ID,
         INVOCATION_POLICY_CAPABILITY_ID,
+        USAGE_CAPABILITY_ID,
+        MODEL_COST_RUN_CAPABILITY_ID,
         CLIENT_TOOLS_CAPABILITY_ID,
         CLIENT_TOOLS_RUN_CAPABILITY_ID,
-        ENVIRONMENT_TOOLS_CAPABILITY_ID,
+        DYNAMIC_ENVIRONMENT_CAPABILITY_ID,
+        RUNTIME_CONTEXT_CAPABILITY_ID,
+        FILE_CONTEXT_CAPABILITY_ID,
+        HANDOFF_CAPABILITY_ID,
+        COMPACTION_CAPABILITY_ID,
+        MONITORED_PROCESS_CAPABILITY_ID,
+        MONITORED_PROCESS_RUN_CAPABILITY_ID,
+        USER_INTERACTION_CAPABILITY_ID,
+        SKILLS_CAPABILITY_ID,
+        MEDIA_CAPABILITY_ID,
+        MEDIA_RUN_CAPABILITY_ID,
+        DOCUMENTS_CAPABILITY_ID,
+        DOCUMENTS_RUN_CAPABILITY_ID,
+        WEB_CAPABILITY_ID,
+        WEB_RUN_CAPABILITY_ID,
+        WORKING_STATE_CAPABILITY_ID,
+        TASK_STATE_RUN_CAPABILITY_ID,
     }
     accepted: set[str] = set()
     for capability in leaves:
@@ -1956,15 +2124,50 @@ def _validate_capability_source(
                 details={"source": source},
             )
         allowed = (
-            source == "definition" and type(capability) in (ClientToolsCapability, EnvironmentToolsCapability)
+            source == "definition"
+            and type(capability)
+            in (
+                ClientToolsCapability,
+                DynamicEnvironmentCapability,
+                RuntimeContextCapability,
+                FileContextCapability,
+                HandoffCapability,
+                CompactionCapability,
+                MonitoredProcessCapability,
+                UserInteractionCapability,
+                SkillsCapability,
+                MediaCapability,
+                DocumentsCapability,
+                WebCapability,
+                WorkingStateCapability,
+            )
         ) or (source == "run" and type(capability) in run_types)
         reserved_type = isinstance(
             capability,
-            InvocationAuthorizationCapability
+            ToolExecutionBoundaryCapability
+            | MessageIntegrityFilterCapability
             | InvocationPolicyCapability
+            | UsageCapability
+            | ModelCostRunCapability
             | ClientToolsCapability
             | ClientToolsRunCapability
-            | EnvironmentToolsCapability,
+            | DynamicEnvironmentCapability
+            | RuntimeContextCapability
+            | FileContextCapability
+            | HandoffCapability
+            | CompactionCapability
+            | MonitoredProcessCapability
+            | MonitoredProcessRunCapability
+            | UserInteractionCapability
+            | SkillsCapability
+            | MediaCapability
+            | MediaRunCapability
+            | DocumentsCapability
+            | DocumentsRunCapability
+            | WebCapability
+            | WebRunCapability
+            | WorkingStateCapability
+            | TaskStateRunCapability,
         )
         if reserved_type or capability.id in reserved_ids:
             if not allowed:

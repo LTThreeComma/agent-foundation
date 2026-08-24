@@ -72,7 +72,14 @@ def preflight_deferred_resume(
                 code="deferred_approval_invalid",
             )
     try:
-        for call_result in detached.results.calls.values():
+        pending_calls = {request.tool_call_id: request for request in detached.requests.calls}
+        for call_id, call_result in tuple(detached.results.calls.items()):
+            request = pending_calls[call_id]
+            if request.tool_name == "ask_user_question":
+                from converge_agent_harness.toolsets.interaction import validate_user_question_result
+
+                call_result = validate_user_question_result(request.args_as_dict(), call_result)
+                detached.results.calls[call_id] = call_result
             if isinstance(call_result, ToolReturn):
                 require_finite_json(call_result.return_value)
                 require_finite_json(call_result.metadata)

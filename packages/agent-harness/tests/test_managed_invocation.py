@@ -16,7 +16,19 @@ from converge_agent_harness.tools import (
     InvocationPolicyDecision,
     ToolOutputPolicy,
 )
-from pydantic_ai import RunContext
+from converge_agent_harness.tools.invocation import _apply_result_policy
+from pydantic_ai import (
+    AudioUrl,
+    BinaryContent,
+    CachePoint,
+    DocumentUrl,
+    ImageUrl,
+    RunContext,
+    TextContent,
+    ToolReturn,
+    UploadedFile,
+    VideoUrl,
+)
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability, Capability, CapabilityOrdering, CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart, ToolReturnPart
@@ -377,6 +389,120 @@ async def test_for_run_replacements_cannot_change_reserved_capability_provenance
     assert owner_error.value.code == "capability_scope_invalid"
 
 
+async def test_native_tool_return_policy_bounds_text_and_preserves_multimodal_values() -> None:
+    metadata = HarnessToolMetadata(
+        tool_id="native.read",
+        effects=frozenset({"read"}),
+        credential_audiences=(),
+        idempotency="read_only",
+        output_policy=ToolOutputPolicy(max_inline_bytes=2048, max_output_bytes=4096),
+    )
+    binary = BinaryContent(
+        b"x" * 2048,
+        media_type="image/png",
+        identifier="Bearer binary-secret",
+        vendor_metadata={"access_token": "binary-secret"},
+    )
+    image = ImageUrl(
+        "https://example.com/image.png?api_key=unchanged",
+        vendor_metadata={"api_key": "image-secret"},
+    )
+    uploaded = UploadedFile(
+        "file-1",
+        "openai",
+        media_type="image/png",
+        vendor_metadata={"authorization": "Bearer uploaded-secret"},
+    )
+    native_items = [
+        binary,
+        image,
+        AudioUrl("https://example.com/audio.mp3"),
+        DocumentUrl("https://example.com/document.pdf"),
+        VideoUrl("https://example.com/video.mp4?variant=large"),
+        uploaded,
+        CachePoint(ttl="1h"),
+    ]
+    projected = await _apply_result_policy(
+        ToolReturn(
+            return_value={"authorization": "Bearer return-secret"},
+            content=[
+                "Bearer raw-secret",
+                TextContent("Bearer text-secret", metadata={"api_key": "text-secret"}),
+                *native_items,
+            ],
+            metadata={"secret": "application-secret"},
+            tools=["Bearer tool-secret"],
+        ),
+        metadata,
+    )
+
+    assert isinstance(projected, ToolReturn)
+    assert projected.return_value == {"authorization": "[REDACTED]"}
+    assert isinstance(projected.content, list)
+    assert projected.content[0] == "Bearer [REDACTED]"
+    text = projected.content[1]
+    assert isinstance(text, TextContent)
+    assert text.content == "Bearer [REDACTED]"
+    assert text.metadata == {"api_key": "[REDACTED]"}
+    assert projected.content[2:] == native_items
+    assert all(projected.content[index + 2] is item for index, item in enumerate(native_items))
+    assert binary._identifier == "Bearer binary-secret"
+    assert image.url.endswith("api_key=unchanged")
+    assert uploaded.vendor_metadata == {"authorization": "Bearer uploaded-secret"}
+    assert projected.metadata == {"secret": "[REDACTED]"}
+    assert projected.tools == ["Bearer [REDACTED]"]
+
+
+async def test_native_tool_return_text_overflow_is_explicit_without_filtering_media() -> None:
+    metadata = HarnessToolMetadata(
+        tool_id="native.read",
+        effects=frozenset({"read"}),
+        credential_audiences=(),
+        idempotency="read_only",
+        output_policy=ToolOutputPolicy(max_inline_bytes=512, max_output_bytes=2048),
+    )
+    image = ImageUrl("https://example.com/image.png?api_key=preserved")
+
+    projected = await _apply_result_policy(
+        ToolReturn("ok", content=[image], tools=["x" * 1024]),
+        metadata,
+    )
+
+    assert isinstance(projected, ToolReturn)
+    assert isinstance(projected.content, list)
+    assert projected.content[0] is image
+    assert projected.tools is not None
+    assert len(projected.tools[0].encode("utf-8")) <= 512
+    assert "tool result truncated" in projected.tools[0]
+
+
+async def test_large_json_spill_without_sink_returns_bounded_structured_preview() -> None:
+    metadata = HarnessToolMetadata(
+        tool_id="result.preview",
+        effects=frozenset({"read"}),
+        credential_audiences=(),
+        idempotency="read_only",
+        output_policy=ToolOutputPolicy(
+            max_inline_bytes=512,
+            max_output_bytes=2048,
+            overflow="spill",
+        ),
+    )
+
+    projected = await _apply_result_policy(
+        {"content": "x" * 1_000, "hint": "continue"},
+        metadata,
+    )
+
+    assert isinstance(projected, dict)
+    assert projected["truncated"] is True
+    assert projected["output_file_path"] is None
+    assert projected["output_bytes"] > 1_000
+    assert isinstance(projected["result"], dict)
+    assert projected["result"]["hint"] == "continue"
+    assert len(json.dumps(projected).encode("utf-8")) <= 512
+
+
 async def test_duplicate_managed_identity_fails_before_model_request() -> None:
     model_called = False
 
@@ -415,9 +541,9 @@ async def test_duplicate_managed_identity_fails_before_model_request() -> None:
 @dataclass
 class _CompetingBoundary(AbstractCapability[Any]):
     def get_ordering(self) -> CapabilityOrdering:
-        from converge_agent_harness.tools.invocation import InvocationAuthorizationCapability
+        from converge_agent_harness.tools.invocation import ToolExecutionBoundaryCapability
 
-        return CapabilityOrdering(position="outermost", wraps=(InvocationAuthorizationCapability,))
+        return CapabilityOrdering(position="outermost", wraps=(ToolExecutionBoundaryCapability,))
 
 
 async def test_competing_outer_boundary_creates_a_fail_closed_ordering_cycle() -> None:

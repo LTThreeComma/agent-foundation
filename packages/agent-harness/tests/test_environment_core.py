@@ -224,6 +224,22 @@ async def test_static_aggregate_intersects_permissions_and_scopes_readiness() ->
     assert first.discarded == second.discarded == 0
 
 
+async def test_readiness_is_reacquired_after_live_availability_regresses() -> None:
+    provider = _Binding("readiness-regression")
+    binding = create_environment_run_binding(
+        initial_topology=_request(provider),
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+    )
+    requirement = EnvironmentReadinessRequirement(operations=frozenset({"files"}))
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        await environment.ensure_ready(requirement)
+        provider.bound.availability = EnvironmentAvailability(status="preparing")
+        await environment.ensure_ready(requirement)
+
+    assert provider.bound.ready_calls == [frozenset({"files"}), frozenset({"files"})]
+
+
 async def test_descriptor_values_are_recursively_detached_and_immutable() -> None:
     source = {"nested": {"items": [1, 2]}}
     descriptor = EnvironmentDescriptor(
@@ -864,16 +880,20 @@ async def test_cleanup_timeout_supervises_provider_exit_after_operation_drains(
     assert provider.exited == 1
 
 
-async def test_readiness_worker_holds_revision_until_it_finishes() -> None:
+async def test_readiness_timeout_cancels_an_unowned_worker_and_releases_its_revision() -> None:
     readiness_started = asyncio.Event()
-    release_readiness = asyncio.Event()
+    readiness_cancelled = asyncio.Event()
 
     async def ensure_ready(operations: frozenset[str]) -> None:
         del operations
         readiness_started.set()
-        await release_readiness.wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            readiness_cancelled.set()
+            raise
 
-    provider = _Binding("readiness")
+    provider = _Binding("readiness-timeout")
     provider.bound.ensure_ready = ensure_ready  # type: ignore[method-assign]
     aggregate = create_environment_run_binding(
         initial_topology=_request(provider),
@@ -882,19 +902,84 @@ async def test_readiness_worker_holds_revision_until_it_finishes() -> None:
     )
     async with aggregate.bind(run_id="run-1", instance=_instance()) as environment:
         await environment.activate()
-        operation = asyncio.create_task(environment.files.stat("/workspace/value"))
+        operation = asyncio.create_task(
+            environment.ensure_ready(
+                EnvironmentReadinessRequirement(
+                    operations=frozenset({"files"}),
+                    timeout_seconds=0.05,
+                )
+            )
+        )
         await readiness_started.wait()
         await aggregate.controller.apply(
             EnvironmentTopologyRequest(topology_version=2, bindings=(), default_binding_id=None)
         )
-        operation.cancel()
-        with pytest.raises(asyncio.CancelledError):
+
+        with pytest.raises(EnvironmentError) as timed_out:
             await operation
-        await asyncio.sleep(0)
+        assert timed_out.value.code == "environment_timeout"
+        await asyncio.wait_for(readiness_cancelled.wait(), timeout=0.5)
+        await asyncio.wait_for(provider.exit_event.wait(), timeout=0.5)
+        assert provider.exited == 1
+
+
+async def test_readiness_timeout_preserves_a_worker_owned_by_another_waiter() -> None:
+    readiness_started = asyncio.Event()
+    release_readiness = asyncio.Event()
+
+    provider = _Binding("shared-readiness")
+
+    async def ensure_ready(operations: frozenset[str]) -> None:
+        readiness_started.set()
+        await release_readiness.wait()
+        provider.bound.availability = EnvironmentAvailability(
+            status="available",
+            ready_families=operations,
+        )
+
+    provider.bound.ensure_ready = ensure_ready  # type: ignore[method-assign]
+    aggregate = create_environment_run_binding(
+        initial_topology=_request(provider),
+        topology_limits=EnvironmentTopologyLimits(max_committed_changes=2),
+        state_limits=EnvironmentStateLimits(),
+    )
+    async with aggregate.bind(run_id="run-1", instance=_instance()) as environment:
+        await environment.activate()
+        short_waiter = asyncio.create_task(
+            environment.ensure_ready(
+                EnvironmentReadinessRequirement(
+                    operations=frozenset({"files"}),
+                    timeout_seconds=0.1,
+                )
+            )
+        )
+        await readiness_started.wait()
+        long_waiter = asyncio.create_task(
+            environment.ensure_ready(
+                EnvironmentReadinessRequirement(
+                    operations=frozenset({"files"}),
+                    timeout_seconds=1,
+                )
+            )
+        )
+        for _ in range(20):
+            if sum(environment._readiness_waiters.values()) == 2:
+                break
+            await asyncio.sleep(0)
+        assert sum(environment._readiness_waiters.values()) == 2
+
+        await aggregate.controller.apply(
+            EnvironmentTopologyRequest(topology_version=2, bindings=(), default_binding_id=None)
+        )
+        with pytest.raises(EnvironmentError) as timed_out:
+            await short_waiter
+        assert timed_out.value.code == "environment_timeout"
+        assert not long_waiter.done()
         assert provider.exited == 0
 
         release_readiness.set()
-        await asyncio.wait_for(provider.exit_event.wait(), timeout=0.2)
+        await long_waiter
+        await asyncio.wait_for(provider.exit_event.wait(), timeout=0.5)
         assert provider.exited == 1
 
 

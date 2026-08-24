@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from converge_agent_harness import DeferredToolResume, DefinitionError, HarnessBuilder, RunBindings, RunError
+from converge_agent_harness import (
+    DeferredToolResume,
+    DefinitionError,
+    HarnessBuilder,
+    RunBindings,
+    RunError,
+    RuntimeContextCapability,
+)
 from converge_agent_harness.tools import (
     ClientToolDefinition,
     ClientToolsCapability,
@@ -217,6 +224,47 @@ async def test_external_suspend_detach_rebuild_and_resume() -> None:
 
     assert second.status == "completed"
     assert "ok" in second.output_or_raise()
+
+
+async def test_deferred_result_boundary_preserves_prior_wire_history_until_provider_advances() -> None:
+    spec = ClientToolsSpec(default_toolsets=(_toolset("client_action"),))
+    first = await _build(
+        spec,
+        tool_name="client_action",
+        extra_capabilities=(RuntimeContextCapability(),),
+    ).run("go", bindings=RunBindings.local())
+    assert first.state is not None and first.deferred is not None
+    original = list(first.state.message_history)
+    seen: list[list[ModelMessage]] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del info
+        seen.append(messages)
+        yield "done"
+
+    rebuilt = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            ClientToolsCapability(spec=spec),
+            RuntimeContextCapability(),
+        ),
+    )
+    requests = first.deferred
+    result = await rebuilt.run(
+        bindings=RunBindings.local(),
+        previous_state=first.state,
+        deferred_resume=DeferredToolResume(
+            requests,
+            requests.build_results(calls={requests.calls[0].tool_call_id: {"ok": True}}),
+        ),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert seen[0][: len(original)] == original
+    assert isinstance(seen[0][-1], ModelRequest)
+    assert any(isinstance(part, ToolReturnPart) for part in seen[0][-1].parts)
 
 
 async def test_deferred_external_results_reject_wrapped_non_finite_values_and_cycles() -> None:

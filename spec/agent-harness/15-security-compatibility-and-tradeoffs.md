@@ -108,7 +108,7 @@ The default shell path projects no credential. A provider that must inject one o
 
 ## Output Resource Safety
 
-Managed tools and first-party Environment operations enforce finite inline and per-capture output ceilings, explicit incompleteness, and provider-owned aggregate storage bounds. Direct Local bounds actual private-spool bytes; envd additionally bounds retained records and expiry. Effective limits may narrow but not exceed the applicable Harness or provider ceiling.
+Managed tools and first-party Environment operations enforce finite inline and per-capture output ceilings, explicit incompleteness, and provider-owned aggregate storage bounds. Direct Local bounds actual private-spool bytes. Envd reserves separate finite stdout/stderr allowances under a daemon-wide private disk-spool ceiling and retains valid references until explicit release or generation end. Harness model-facing limits can narrow what is read or projected but never widen provider capture ceilings.
 
 This does not prevent trusted Python from allocating an oversized object before the wrapper receives it. OS/container limits remain the final process-memory boundary.
 
