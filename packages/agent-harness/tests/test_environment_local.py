@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from pathlib import Path
 
@@ -40,6 +41,19 @@ from pydantic.errors import PydanticInvalidForJsonSchema
 from pydantic_core import PydanticSerializationError
 
 pytestmark = pytest.mark.anyio
+_PROCESS_EXECUTABLE = Path(sys.executable).resolve()
+
+
+def _write_utf8(path: Path, value: str) -> None:
+    path.write_bytes(value.encode("utf-8"))
+
+
+def _read_utf8(path: Path) -> str:
+    return path.read_bytes().decode("utf-8")
+
+
+def _process_policy() -> DirectLocalProcessPolicy:
+    return DirectLocalProcessPolicy(allowed_executables=frozenset({_PROCESS_EXECUTABLE}))
 
 
 def _instance() -> AgentInstanceContext:
@@ -81,7 +95,7 @@ def test_direct_local_policy_defaults_cover_only_materialized_values_and_live_re
     with pytest.raises(ValidationError):
         DirectLocalShellProfile(profile_id="relative", executable=Path("bin/sh"))
     with pytest.raises(ValidationError):
-        DirectLocalShellProfile(profile_id="", executable=Path("/bin/sh"))
+        DirectLocalShellProfile(profile_id="", executable=_PROCESS_EXECUTABLE)
 
 
 def _two_binding_aggregate(source: Path, destination: Path):
@@ -182,7 +196,7 @@ async def test_direct_local_text_patch_copy_and_routing(tmp_path: Path) -> None:
             "/workspace/copied.txt",
         )
         assert copied.bytes_copied == len(b"alpha\ngamma\n")
-        assert (tmp_path / "copied.txt").read_text() == "alpha\ngamma\n"
+        assert _read_utf8(tmp_path / "copied.txt") == "alpha\ngamma\n"
 
 
 @pytest.mark.parametrize(
@@ -203,19 +217,19 @@ async def test_direct_local_patch_uses_lf_only_lines_without_normalizing_content
     patch: str,
     expected: str,
 ) -> None:
-    (tmp_path / "value.txt").write_text(source)
+    _write_utf8(tmp_path / "value.txt", source)
     binding = _aggregate(tmp_path)
 
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         result = await environment.files.patch_text("/workspace/value.txt", patch)
 
     assert result.hunks_applied == 1
-    assert (tmp_path / "value.txt").read_text() == expected
+    assert _read_utf8(tmp_path / "value.txt") == expected
 
 
 async def test_direct_local_rejects_escape_symlink_and_read_only_mutation(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside-environment.txt"
-    outside.write_text("secret")
+    _write_utf8(outside, "secret")
     (tmp_path / "link").symlink_to(outside)
 
     binding = _aggregate(tmp_path)
@@ -273,7 +287,7 @@ async def test_binding_teardown_attempts_spool_and_owned_root_cleanup_after_proc
         DirectLocalEnvironmentConfiguration(
             environment_id="local-cleanup-failure",
             root=DirectLocalRootConfiguration(path=owned, ownership="binding_owned"),
-            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            processes=_process_policy(),
         )
     )
 
@@ -378,14 +392,14 @@ async def test_raw_reads_are_at_most_and_stream_writes_publish_only_on_success(t
         assert shrinking.read_bytes() == b"123"
 
         patch_target = tmp_path / "patch-target.txt"
-        patch_target.write_text("a\n")
+        _write_utf8(patch_target, "a\n")
         with pytest.raises(EnvironmentError) as patch_too_large:
             await environment.files.patch_text(
                 "/workspace/patch-target.txt",
                 "@@ -1 +1 @@\n-a\n+abcde\n",
             )
         assert patch_too_large.value.code == "environment_too_large"
-        assert patch_target.read_text() == "a\n"
+        assert _read_utf8(patch_target) == "a\n"
 
         with pytest.raises(EnvironmentError) as missing_append:
             await environment.files.write_text(
@@ -487,7 +501,7 @@ async def test_copy_accepts_source_eof_without_completion_evidence(
 
 async def test_text_read_uses_zero_based_line_offsets_without_splitting_utf8_lines(tmp_path: Path) -> None:
     content = "skip\naaaaaétail\nlast\n"
-    (tmp_path / "value.txt").write_text(content)
+    _write_utf8(tmp_path / "value.txt", content)
     binding = _aggregate(tmp_path)
 
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
@@ -554,7 +568,7 @@ async def test_text_read_uses_zero_based_line_offsets_without_splitting_utf8_lin
         assert invalid_patch.value.code == "environment_unsupported"
 
         boundaries = tmp_path / "boundaries.txt"
-        boundaries.write_text("a\rb\nc\u2028d\r\ne")
+        _write_utf8(boundaries, "a\rb\nc\u2028d\r\ne")
         selected = await environment.files.read_text(
             "/workspace/boundaries.txt",
             line_offset=1,
@@ -578,10 +592,10 @@ async def test_text_read_uses_zero_based_line_offsets_without_splitting_utf8_lin
 
 async def test_query_is_deterministic_bounded_and_offset_continues(tmp_path: Path) -> None:
     (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "1.txt").write_text("1")
-    (tmp_path / "a" / "2.txt").write_text("2")
-    (tmp_path / "b.txt").write_text("b")
-    (tmp_path / ".hidden.txt").write_text("hidden")
+    _write_utf8(tmp_path / "a" / "1.txt", "1")
+    _write_utf8(tmp_path / "a" / "2.txt", "2")
+    _write_utf8(tmp_path / "b.txt", "b")
+    _write_utf8(tmp_path / ".hidden.txt", "hidden")
     binding = _aggregate(tmp_path)
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         request = FileQueryRequest(
@@ -625,7 +639,7 @@ async def test_search_iterates_lines_without_materializing_a_second_line_collect
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "many-lines.txt").write_text("\n" * 10_000 + "needle\n")
+    _write_utf8(tmp_path / "many-lines.txt", "\n" * 10_000 + "needle\n")
     monkeypatch.setattr(
         local_files_module,
         "_split_lf_lines",
@@ -658,7 +672,7 @@ async def test_search_skips_nul_files_and_streams_files_larger_than_value_limit(
         assert result.has_more is False
 
     nul_file.unlink()
-    (tmp_path / "large.txt").write_text("haystack\n" * 10 + "needle\n")
+    _write_utf8(tmp_path / "large.txt", "haystack\n" * 10 + "needle\n")
     limited = _aggregate(tmp_path, file_policy=DirectLocalFilePolicy(max_value_bytes=16))
     async with limited.bind(run_id="run-large", instance=_instance()) as environment:
         result = await environment.files.search_text(
@@ -666,7 +680,7 @@ async def test_search_skips_nul_files_and_streams_files_larger_than_value_limit(
         )
         assert [match.path for match in result.matches] == ["/workspace/large.txt"]
 
-        (tmp_path / "long-line.txt").write_text("x" * 17 + " needle\n")
+        _write_utf8(tmp_path / "long-line.txt", "x" * 17 + " needle\n")
         with pytest.raises(EnvironmentError) as too_large:
             await environment.files.search_text(
                 FileTextSearchRequest(root="/workspace", pattern="needle", max_matches=10)
@@ -676,7 +690,7 @@ async def test_search_skips_nul_files_and_streams_files_larger_than_value_limit(
 
 async def test_search_result_page_does_not_limit_file_traversal(tmp_path: Path) -> None:
     for index in range(20):
-        (tmp_path / f"{index:02}.txt").write_text("needle\n")
+        _write_utf8(tmp_path / f"{index:02}.txt", "needle\n")
     binding = _aggregate(tmp_path)
 
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
@@ -695,7 +709,7 @@ async def test_local_retention_is_bounded_readable_and_released(tmp_path: Path) 
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
-            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            processes=_process_policy(),
         )
     )
     async with provider.bind(
@@ -723,7 +737,7 @@ async def test_retention_stops_capturing_after_the_first_quota_gap(tmp_path: Pat
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output-gap",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
-            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            processes=_process_policy(),
             outputs=DirectLocalOutputPolicy(max_buffer_bytes=4, max_spool_bytes=6),
         )
     )
@@ -755,7 +769,7 @@ async def test_retained_read_serializes_with_release(
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output-race",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
-            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            processes=_process_policy(),
         )
     )
     async with provider.bind(
@@ -796,7 +810,7 @@ async def test_retention_accounts_actual_bytes_and_refunds_release(tmp_path: Pat
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output-quota",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
-            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            processes=_process_policy(),
             outputs=DirectLocalOutputPolicy(max_buffer_bytes=4, max_spool_bytes=8),
         )
     )

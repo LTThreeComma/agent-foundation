@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,8 +14,8 @@ import pytest
 from converge_agent_harness import (
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
+    DirectLocalProcessPolicy,
     DirectLocalRootConfiguration,
-    DirectLocalShellProfile,
     EnvironmentAction,
     EnvironmentBindingRequest,
     EnvironmentError,
@@ -66,6 +67,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, RetryPromptPart, To
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 pytestmark = pytest.mark.anyio
+_PROCESS_EXECUTABLE = Path(sys.executable).resolve()
 
 
 def _configuration(**updates: Any) -> EnvironmentToolsConfiguration:
@@ -92,10 +94,10 @@ def _local_binding(root: Path, *, process_output: bool = False):
         DirectLocalEnvironmentConfiguration(
             environment_id="environment-tools-test",
             root=DirectLocalRootConfiguration(path=root, ownership="caller_owned"),
-            shell_profiles=(
-                (DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),)
+            processes=(
+                DirectLocalProcessPolicy(allowed_executables=frozenset({_PROCESS_EXECUTABLE}))
                 if process_output
-                else ()
+                else DirectLocalProcessPolicy()
             ),
         )
     )
