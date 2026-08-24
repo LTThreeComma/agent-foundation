@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import random
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from pydantic_ai.exceptions import (
     ModelAPIError,
@@ -15,10 +15,22 @@ from pydantic_ai.exceptions import (
     UsageLimitExceeded,
 )
 from pydantic_ai.messages import (
+    AgentStreamEvent,
+    BaseToolCallPart,
+    BaseToolReturnPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelResponsePart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
     RetryPromptPart,
+    TextPart,
+    TextPartDelta,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -84,14 +96,117 @@ class ModelRecoveryPolicy:
         return random.uniform(0, ceiling)
 
 
-def normalize_interrupted_history(messages: Sequence[ModelMessage]) -> tuple[tuple[ModelMessage, ...], int]:
-    """Close only tool calls at an explicitly interrupted terminal boundary."""
-    normalized = list(messages)
+@dataclass(slots=True)
+class InterruptedResponseTracker:
+    """Track response parts that are safe to retain after a stream interruption."""
+
+    _parts: dict[int, ModelResponsePart] = field(default_factory=dict)
+    _finalized_indices: set[int] = field(default_factory=set)
+    _response_history_count: int | None = None
+    _observed: bool = False
+
+    def observe(self, event: AgentStreamEvent, *, response_history_count: int) -> None:
+        """Observe a public response-part event at its model-response boundary."""
+        if not isinstance(event, PartStartEvent | PartDeltaEvent | PartEndEvent):
+            return
+        self._select_response(response_history_count)
+        self._observed = True
+        if isinstance(event, PartStartEvent):
+            self._observe_part(
+                event.index,
+                event.part,
+                finalized=isinstance(event.part, BaseToolReturnPart),
+            )
+        elif isinstance(event, PartDeltaEvent):
+            self._observe_delta(event.index, event)
+        else:
+            self._observe_part(event.index, event.part, finalized=True)
+
+    def sanitize(self, messages: Sequence[ModelMessage]) -> tuple[ModelMessage, ...]:
+        """Replace Pydantic's interrupted tail with only safely replayable parts."""
+        sanitized = list(messages)
+        if not sanitized:
+            return ()
+        tail = sanitized[-1]
+        if not isinstance(tail, ModelResponse) or tail.state != "interrupted":
+            return tuple(sanitized)
+        if not self._observed or self._response_history_count != len(sanitized) - 1 or not tail.parts:
+            sanitized.pop()
+            return tuple(sanitized)
+
+        parts = self._safe_parts()
+        if parts is None or not parts:
+            sanitized.pop()
+        else:
+            sanitized[-1] = replace(tail, parts=parts)
+        return tuple(sanitized)
+
+    def _select_response(self, response_history_count: int) -> None:
+        if response_history_count == self._response_history_count:
+            return
+        self._parts.clear()
+        self._finalized_indices.clear()
+        self._response_history_count = response_history_count
+        self._observed = False
+
+    def _observe_part(self, index: int, part: ModelResponsePart, *, finalized: bool) -> None:
+        if isinstance(part, TextPart):
+            self._parts[index] = replace(part)
+        elif isinstance(part, ThinkingPart | BaseToolCallPart | BaseToolReturnPart):
+            self._parts[index] = part
+        else:
+            return
+        if finalized:
+            self._finalized_indices.add(index)
+        else:
+            self._finalized_indices.discard(index)
+
+    def _observe_delta(self, index: int, event: PartDeltaEvent) -> None:
+        delta = event.delta
+        if not isinstance(delta, TextPartDelta):
+            return
+        existing = self._parts.get(index)
+        if isinstance(existing, TextPart):
+            self._parts[index] = delta.apply(existing)
+        elif existing is None:
+            self._parts[index] = TextPart(
+                content=delta.content_delta,
+                provider_name=delta.provider_name,
+                provider_details=delta.provider_details,
+            )
+
+    def _safe_parts(self) -> list[ModelResponsePart] | None:
+        safe: list[ModelResponsePart] = []
+        for index in sorted(self._parts):
+            part = self._parts[index]
+            if isinstance(part, TextPart):
+                if part.content:
+                    safe.append(part)
+            elif isinstance(part, ThinkingPart):
+                if index in self._finalized_indices and (part.content or part.signature):
+                    safe.append(part)
+            elif isinstance(part, BaseToolCallPart | BaseToolReturnPart):
+                if index not in self._finalized_indices:
+                    return None
+                safe.append(part)
+        return safe if _native_parts_are_balanced(safe) else None
+
+
+def normalize_interrupted_history(
+    messages: Sequence[ModelMessage],
+    *,
+    response_tracker: InterruptedResponseTracker | None = None,
+) -> tuple[tuple[ModelMessage, ...], int]:
+    """Retain safe streamed parts and close finalized tool calls at an interrupted boundary."""
+    normalized = list(response_tracker.sanitize(messages) if response_tracker is not None else messages)
     if not normalized:
         return (), 0
 
     tail = normalized[-1]
     if isinstance(tail, ModelResponse) and tail.state == "interrupted":
+        if not _native_parts_are_balanced(tail.parts):
+            normalized.pop()
+            return tuple(normalized), 0
         missing = _missing_tool_calls(tail, ())
         if missing:
             normalized.append(ModelRequest(parts=[_failed_tool_result(call) for call in missing]))
@@ -130,6 +245,22 @@ def is_recoverable_model_failure(error: BaseException, messages: Sequence[ModelM
     if isinstance(tail, ModelResponse):
         return tail.state == "interrupted"
     return isinstance(tail, ModelRequest) and tail.state != "interrupted"
+
+
+def _native_parts_are_balanced(parts: Sequence[object]) -> bool:
+    pending: dict[str, str] = {}
+    completed: set[str] = set()
+    for part in parts:
+        if isinstance(part, NativeToolCallPart):
+            if part.tool_call_id in pending or part.tool_call_id in completed:
+                return False
+            pending[part.tool_call_id] = part.tool_name
+        elif isinstance(part, NativeToolReturnPart):
+            if pending.get(part.tool_call_id) != part.tool_name:
+                return False
+            del pending[part.tool_call_id]
+            completed.add(part.tool_call_id)
+    return not pending
 
 
 def _missing_tool_calls(

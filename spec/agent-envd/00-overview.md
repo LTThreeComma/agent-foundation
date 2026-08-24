@@ -6,7 +6,7 @@
 
 The Harness is one EIP client, not the reason file and process capabilities exist. Foundation or product file gateways, CLIs and IDEs, provider controllers, and trusted background jobs can use the same low-level client and protocol. Envd does not know whether bytes will become model input, a browser preview, a user download, an upload, or another backend operation.
 
-The daemon is not mandatory for every Harness Environment. Direct `LocalFileOperator` and `LocalShell` implementations are first-class for an embedding process that intentionally grants local roots and commands. Docker, E2B, remote, and optional local-daemon providers use EIP when they need a daemon boundary. Both implementations satisfy the provider-neutral contracts owned by [Harness Environment Integration](../agent-harness/08-environment-integration.md); they are peers rather than fallback paths.
+The daemon is not mandatory for every Harness Environment. The first-party Direct Local provider is first-class for an embedding process that intentionally grants local roots and commands. Docker, E2B, remote, and optional local-daemon providers use EIP when they need a daemon boundary. Both approaches satisfy the provider-neutral contracts owned by [Harness Environment Integration](../agent-harness/08-environment-integration.md); they are peers rather than fallback paths.
 
 `agent-envd` is also not a container or VM manager. A provider adapter provisions, attaches, suspends, and destroys its native resource before it creates a fresh EIP-backed binding. The daemon governs operations inside the selected Environment. It can additionally contain each command tree with [OS-native execution isolation](07-execution-isolation.md), or explicitly leave containment to an outer sandbox while preserving all other daemon enforcement.
 
@@ -86,11 +86,11 @@ One canonical Protobuf descriptor generates Rust daemon models/dispatch and the 
 
 ### Session and protocol dispatcher
 
-The authenticated transport creates an uninitialized connection or HTTP logical session. The first EIP operation negotiates a protocol version, verifies the expected Environment identity, and publishes a descriptor with observed capabilities and hard limits. The dispatcher validates envelopes and operation context, checks session authority and generation, applies admission limits, and invokes one semantic resource operation.
+The authenticated transport creates an uninitialized connection or HTTP logical session. The first EIP operation negotiates a protocol version, verifies the expected Environment identity, selects `scoped` or an operator-permitted `server` resource authority for that session, and publishes a descriptor with its root mount, observed capabilities, and hard limits. The dispatcher validates envelopes and operation context, checks the fixed session authority and generation, applies admission limits, and invokes one semantic resource operation.
 
 ### Resource services
 
-Filesystem operations use logical mount-scoped paths, not host paths. Strict UTF-8 text conveniences remain bounded JSON operations, while exact raw content uses session-scoped readers and privately staged writers over the binary data plane. Only an integrity-checked writer commit changes a destination. Port operations observe or wait for local listeners but do not provision provider ingress. Native files remain ordinary Environment state across daemon restarts; EIP does not export or restore daemon runtime registries.
+Filesystem operations use logical mount-scoped paths, not host paths. Strict UTF-8 text conveniences remain bounded JSON operations, while exact raw content uses session-scoped readers and destination-local staged writers over the binary data plane. Only an integrity-checked writer commit publishes a complete candidate. This prevents envd partial-file exposure but does not claim exclusive control or compare-and-swap against commands and external writers. Port operations observe or wait for local listeners but do not provision provider ingress. Native files remain ordinary Environment state across daemon restarts; EIP does not export or restore daemon runtime registries.
 
 ### Command execution manager
 
@@ -153,7 +153,7 @@ sequenceDiagram
     Client-->>Consumer: consumer-neutral outcome
 ```
 
-Initialization returns observed capabilities, not authority. The client must already possess a trusted transport credential or parent-process channel, and each operation remains subject to daemon policy. Provider denial can only narrow a Harness allow decision.
+Initialization can select only the immutable resource-authority ceiling configured for the authenticated daemon user. It defaults to `scoped`; `server` is accepted only after explicit operator opt-in and then remains fixed for the session. This is not principal delegation: the client must already possess the trusted transport credential or parent-process channel, and each operation remains subject to daemon capabilities, limits, command isolation, and OS authority. Provider denial can only narrow a Harness allow decision.
 
 A descriptor refresh or reconnect can reveal a different generation or narrower capability set. The Host and Harness reconcile that observation before further use. Handles, operation records, receipts, cursors, and retained references never move between generations or provider resources.
 
@@ -165,7 +165,7 @@ Four lifetime classes remain separate:
 
 1. **Provider lifecycle state** belongs to the Host adapter and can identify a Docker container, E2B environment, local daemon instance, or remote resource. It is consumed before a fresh binding is constructed.
 2. **Native Environment state** consists primarily of files and other provider-owned resources. It can outlive envd without becoming an EIP state object.
-3. **Daemon-generation state** contains sessions, operation-owned receipt/idempotency evidence, process handles, output references, cursors, and private spool data. File readers and pre-handoff writers have a still narrower session sub-lifetime. Staged candidates live only beneath pinned, caller-inaccessible per-mount roots and remain conservatively owned until commit or confirmed deletion. All protocol state is volatile and is not restored after restart; recognizable stale staging artifacts are scavenged before staged-write readiness rather than becoming Environment files.
+3. **Daemon-generation state** contains sessions, operation-owned receipt/idempotency evidence, process handles, output references, cursors, and private spool data. File readers and pre-handoff writers have a still narrower session sub-lifetime. Live staged candidates remain conservatively owned until publication or confirmed deletion, but their destination-local names can be visible to actors that already control the directory. All protocol state is volatile and is not restored after restart; a crash-left candidate is ordinary native Environment state rather than a recoverable protocol object.
 4. **Host execution state** owns durable Agent attempts, checkpoints, outcomes, and delivery. It is never committed by envd.
 
 A native operation can have several independent facts: accepted by envd, dispatched to the OS, initial command exec confirmed, initial command exited, command tree cleaned, EIP result observed, Harness run completed, and Host execution committed. A generation-scoped receipt records only the envd facts it names.
@@ -177,7 +177,7 @@ Transport authentication, protocol authorization, resource policy, output bounds
 - HTTP and WebSocket require an envd-specific API key supplied to the daemon through its process environment and never through CLI arguments or EIP payloads.
 - A product gateway keeps that key and all EIP selectors server-side; browser identity, path policy, MIME handling, and user-facing delivery remain product responsibilities.
 - Stdio relies on the security of the parent-created pipes and daemon configuration; unrelated local principals must not be able to attach to them.
-- Native file and process checks remain active in every isolation mode.
+- Native file and process checks remain active in every isolation mode; `server` resource authority deliberately broadens EIP path selection but does not disable those checks.
 - `required` execution isolation adds a per-command OS sandbox.
 - `disabled` execution isolation delegates command containment to the outer host but does not disable any other control.
 
@@ -228,11 +228,11 @@ Fail-closed native isolation protects direct user-machine deployments. Explicitl
 04. Transport authentication and Host routing never replace daemon-side canonicalization, generation fencing, authorization, quotas, or resource enforcement.
 05. `shell.exec` and `process.start` cross one transactional execution manager, and one owner controls every native command tree through cleanup.
 06. `required` execution isolation fails closed; `disabled` is explicit and cannot result from probing, platform detection, test mode, or transport selection.
-07. Disabling inner isolation does not disable authentication, EIP file and cwd policy, environment filtering, process ownership, output bounds, quotas, or cleanup; the outer sandbox then owns the child's actual host-resource containment.
-08. Every producer is bounded while bytes are produced: retained output uses finite aggregate byte/object quotas, while file transfer uses finite frame, active-transfer, caller-inaccessible staging, file-size, idle, and duration limits; physical staging usage remains charged until commit or confirmed deletion.
+07. Disabling inner isolation does not disable authentication, session-selected EIP file and cwd authority, environment filtering, process ownership, output bounds, quotas, or cleanup; the outer sandbox then owns the child's actual host-resource containment.
+08. Every producer is bounded while bytes are produced: retained output uses finite aggregate byte/object quotas, while file transfer uses finite frame, active-transfer, staged-candidate, file-size, idle, and duration limits; physical staging usage remains charged until publication or confirmed deletion.
 09. Provider lifecycle credentials never enter envd; the envd transport key never enters commands, model data, EIP payloads, or logs.
 10. Handles, descriptors, cursors, references, and receipts are non-authoritative selectors scoped to Environment identity and one daemon generation; file transfer handles are additionally session-scoped, and none survives daemon restart.
-11. Reader or writer transport loss is never terminal consumer acceptance; before commit handoff it preserves the destination, while loss during or after handoff cannot resolve the mutation without operation-owned receipt or idempotency evidence.
+11. Reader or writer transport loss is never terminal consumer acceptance; before commit handoff it preserves the destination, while loss during or after handoff cannot resolve the mutation without operation-owned receipt, idempotency, or a fresh resource observation.
 12. One canonical IDL generates daemon and client wire surfaces; neither language maintains an editable parallel method catalog.
 13. The Foundation Service owns no Sandbox domain and never interprets provider-native Environment state.
 14. Envd is a client-neutral Environment host; it never receives product-user identity, browser credentials, model-media semantics, or arbitrary URL-fetch authority through the base EIP contract.

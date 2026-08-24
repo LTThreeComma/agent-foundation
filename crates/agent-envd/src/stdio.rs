@@ -200,9 +200,11 @@ where
                         }
                     }
                 };
+                let pending_operation = daemon.track_pending_payload(&payload);
                 let daemon = Arc::clone(&daemon);
                 let responses = control_tx.clone();
                 requests.spawn(async move {
+                    let _pending_operation = pending_operation;
                     let response = daemon.handle_payload(&payload).await;
                     let _ = responses.send(response).await;
                     drop(permit);

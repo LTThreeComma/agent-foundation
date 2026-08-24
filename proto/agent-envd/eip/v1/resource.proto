@@ -5,7 +5,6 @@ package converge.agent_envd.eip.v1;
 import "google/protobuf/timestamp.proto";
 import "agent-envd/eip/v1/common.proto";
 import "agent-envd/eip/v1/options.proto";
-import "agent-envd/eip/v1/output.proto";
 
 message EIPPath {
   string mount_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
@@ -13,12 +12,14 @@ message EIPPath {
 }
 
 message MountDescriptor {
+  reserved 6;
+  reserved "supports_file_revision";
+
   string mount_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   string logical_root = 2 [(eip_field).string_format = EIP_STRING_FORMAT_PATH];
   bool writable = 3;
   optional bool case_sensitive = 4;
   bool supports_atomic_replace = 5;
-  bool supports_file_revision = 6;
   uint64 max_file_bytes = 7;
 }
 
@@ -31,12 +32,14 @@ enum FileKind {
 }
 
 message FileInfo {
+  reserved 6;
+  reserved "revision";
+
   EIPPath path = 1;
   FileKind kind = 2;
   optional uint64 size_bytes = 3;
   optional google.protobuf.Timestamp modified_at = 4;
   optional bool executable = 5;
-  optional FileRevision revision = 6;
 }
 
 message FileStatParams {
@@ -49,29 +52,27 @@ message FileStatResult {
   FileInfo info = 1;
 }
 
-message TextPosition {
-  uint64 line = 1 [(eip_field).minimum = 1];
-  uint64 byte_column = 2;
-}
-
 message FileReadTextParams {
+  reserved 3, 4, 6, 7;
+  reserved "cursor", "start_line", "max_bytes", "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
-  optional FileTextCursor cursor = 3;
-  optional uint64 start_line = 4 [(eip_field).minimum = 1];
-  optional uint64 max_lines = 5 [(eip_field).minimum = 1];
-  optional uint64 max_bytes = 6 [(eip_field).minimum = 1];
-  optional FileRevision expected_revision = 7;
+  uint64 line_limit = 5 [(eip_field).minimum = 1];
+  optional uint64 line_offset = 8 [(eip_field).default_uint = 0];
+  uint64 max_line_length = 9 [(eip_field).minimum = 1];
 }
 
 message FileReadTextResult {
+  reserved 3, 4, 5, 6, 7;
+  reserved "start", "end", "next_cursor", "content_complete", "truncated";
+
   FileInfo info = 1;
   string text = 2;
-  TextPosition start = 3;
-  TextPosition end = 4;
-  optional FileTextCursor next_cursor = 5;
-  bool content_complete = 6;
-  bool truncated = 7;
+  uint64 line_offset = 8;
+  uint64 lines_read = 9;
+  bool has_more = 10;
+  repeated uint64 truncated_lines = 11;
 }
 
 message FileByteRange {
@@ -80,36 +81,30 @@ message FileByteRange {
 }
 
 message FileReaderOpenParams {
+  reserved 4;
+  reserved "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
   optional FileByteRange byte_range = 3;
-  optional FileRevision expected_revision = 4;
   optional google.protobuf.Timestamp transfer_deadline = 5;
 }
 
 message FileReaderOpenResult {
+  reserved 3, 4, 5;
+  reserved "range_start", "range_end", "source_eof_at_end";
+
   FileReaderHandle reader = 1;
   FileInfo info = 2;
-  uint64 range_start = 3;
-  uint64 range_end = 4;
-  bool source_eof_at_end = 5;
   google.protobuf.Timestamp expires_at = 6;
 }
 
-enum FileReadStability {
-  FILE_READ_STABILITY_UNSPECIFIED = 0;
-  FILE_READ_STABILITY_VERIFIED = 1 [(eip_enum_value).json_name = "verified"];
-  FILE_READ_STABILITY_CHANGED = 2 [(eip_enum_value).json_name = "changed"];
-  FILE_READ_STABILITY_UNVERIFIED = 3 [(eip_enum_value).json_name = "unverified"];
-}
-
 message FileReadCompletion {
-  uint64 range_start = 1;
-  uint64 range_end = 2;
+  reserved 1, 2, 5, 6;
+  reserved "range_start", "range_end", "source_eof_at_end", "stability";
+
   uint64 produced_bytes = 3;
   optional ContentDigest digest = 4;
-  bool source_eof_at_end = 5;
-  FileReadStability stability = 6;
   bool complete = 7;
 }
 
@@ -124,12 +119,14 @@ message FileReaderCloseResult {
 }
 
 message FileListParams {
+  reserved 3, 4, 5, 6;
+  reserved "recursive", "max_depth", "cursor", "output_policy";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
-  optional bool recursive = 3 [(eip_field).default_bool = false];
-  optional uint32 max_depth = 4 [(eip_field).default_uint = 1];
-  optional OutputCursor cursor = 5;
-  optional OutputPolicy output_policy = 6;
+  optional uint64 offset = 7 [(eip_field).default_uint = 0];
+  optional uint32 max_results = 8 [(eip_field).minimum = 1, (eip_field).default_uint = 100];
+  optional bool include_hidden = 9 [(eip_field).default_bool = false];
 }
 
 message FileListEntry {
@@ -138,30 +135,35 @@ message FileListEntry {
 }
 
 message FileListResult {
-  repeated FileListEntry entries = 1;
-  StructuredOutputDisposition output = 2;
-}
+  reserved 2;
+  reserved "output";
 
-enum FindMode {
-  FIND_MODE_UNSPECIFIED = 0;
-  FIND_MODE_GLOB = 1 [(eip_enum_value).json_name = "glob"];
-  FIND_MODE_REGEX = 2 [(eip_enum_value).json_name = "regex"];
+  repeated FileListEntry entries = 1;
+  uint64 offset = 3;
+  bool has_more = 4;
 }
 
 message FileFindParams {
+  reserved 4, 5, 6, 7, 8;
+  reserved "mode", "kind", "max_depth", "cursor", "output_policy";
+
   EIPCallContext context = 1;
   EIPPath root = 2;
   string pattern = 3;
-  FindMode mode = 4;
-  optional FileKind kind = 5;
-  uint32 max_depth = 6;
-  optional OutputCursor cursor = 7;
-  optional OutputPolicy output_policy = 8;
+  optional uint64 offset = 9 [(eip_field).default_uint = 0];
+  optional uint32 max_results = 10 [(eip_field).minimum = 1, (eip_field).default_uint = 100];
+  optional bool recursive = 11 [(eip_field).default_bool = true];
+  optional bool include_hidden = 12 [(eip_field).default_bool = false];
+  repeated FileKind kinds = 13;
 }
 
 message FileFindResult {
+  reserved 2;
+  reserved "output";
+
   repeated FileListEntry entries = 1;
-  StructuredOutputDisposition output = 2;
+  uint64 offset = 3;
+  bool has_more = 4;
 }
 
 enum SearchMode {
@@ -174,28 +176,37 @@ enum SearchMode {
 }
 
 message FileSearchParams {
+  reserved 5, 6, 7, 8, 9;
+  reserved "include", "exclude", "max_depth", "cursor", "output_policy";
+
   EIPCallContext context = 1;
   EIPPath root = 2;
   string query = 3;
   SearchMode mode = 4;
-  repeated string include = 5;
-  repeated string exclude = 6;
-  uint32 max_depth = 7;
-  optional OutputCursor cursor = 8;
-  optional OutputPolicy output_policy = 9;
   optional bool case_sensitive = 10 [(eip_field).default_bool = true];
+  optional uint64 offset = 11 [(eip_field).default_uint = 0];
+  optional uint32 max_results = 12 [(eip_field).minimum = 1, (eip_field).default_uint = 100];
+  optional bool include_hidden = 13 [(eip_field).default_bool = false];
+  uint64 max_line_length = 14 [(eip_field).minimum = 1];
 }
 
 message FileSearchMatch {
+  reserved 3;
+  reserved "byte_offset";
+
   EIPPath path = 1;
   uint64 line_number = 2 [(eip_field).minimum = 1];
-  uint64 byte_offset = 3;
   string preview = 4;
+  bool preview_truncated = 5;
 }
 
 message FileSearchResult {
+  reserved 2;
+  reserved "output";
+
   repeated FileSearchMatch matches = 1;
-  StructuredOutputDisposition output = 2;
+  uint64 offset = 3;
+  bool has_more = 4;
 }
 
 enum FileWriteMode {
@@ -210,11 +221,13 @@ enum FileWriteMode {
 }
 
 message FileWriteTextParams {
+  reserved 5;
+  reserved "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
   FileWriteMode mode = 3;
   string text = 4;
-  optional FileRevision expected_revision = 5;
   optional bool executable = 6;
 }
 
@@ -225,10 +238,12 @@ message FileWriteTextResult {
 }
 
 message FileWriterOpenParams {
+  reserved 4;
+  reserved "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
   FileWriteMode mode = 3;
-  optional FileRevision expected_revision = 4;
   optional bool executable = 5;
   optional google.protobuf.Timestamp transfer_deadline = 6;
 }
@@ -284,11 +299,13 @@ message FileMkdirResult {
 }
 
 message FilePatchTextParams {
+  reserved 5;
+  reserved "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
   string patch_format = 3 [(eip_field).const_string = "unified_diff"];
   string patch = 4;
-  FileRevision expected_revision = 5;
 }
 
 message FilePatchTextResult {
@@ -298,36 +315,31 @@ message FilePatchTextResult {
 }
 
 message FileCopyParams {
+  reserved 4, 5, 7, 8;
+  reserved "expected_source_revision", "expected_destination_revision", "require_atomic_destination", "require_stable_source";
+
   EIPCallContext context = 1;
   EIPPath source = 2;
   EIPPath destination = 3;
-  optional FileRevision expected_source_revision = 4;
-  optional FileRevision expected_destination_revision = 5;
   optional bool replace = 6 [(eip_field).default_bool = false];
-  optional bool require_atomic_destination = 7 [(eip_field).default_bool = false];
-  optional bool require_stable_source = 8 [(eip_field).default_bool = false];
-}
-
-enum FileCopySourceStability {
-  FILE_COPY_SOURCE_STABILITY_UNSPECIFIED = 0;
-  FILE_COPY_SOURCE_STABILITY_VERIFIED = 1 [(eip_enum_value).json_name = "verified"];
-  FILE_COPY_SOURCE_STABILITY_UNVERIFIED = 2 [(eip_enum_value).json_name = "unverified"];
 }
 
 message FileCopyResult {
+  reserved 3, 5;
+  reserved "atomic_destination", "source_stability";
+
   FileInfo destination = 1;
   uint64 bytes_copied = 2;
-  bool atomic_destination = 3;
   OperationReceipt receipt = 4;
-  FileCopySourceStability source_stability = 5;
 }
 
 message FileMoveParams {
+  reserved 4, 5;
+  reserved "expected_source_revision", "expected_destination_revision";
+
   EIPCallContext context = 1;
   EIPPath source = 2;
   EIPPath destination = 3;
-  optional FileRevision expected_source_revision = 4;
-  optional FileRevision expected_destination_revision = 5;
   optional bool replace = 6 [(eip_field).default_bool = false];
 }
 
@@ -337,10 +349,12 @@ message FileMoveResult {
 }
 
 message FileRemoveParams {
+  reserved 4;
+  reserved "expected_revision";
+
   EIPCallContext context = 1;
   EIPPath path = 2;
   FileKind expected_kind = 3;
-  optional FileRevision expected_revision = 4;
   optional bool recursive = 5 [(eip_field).default_bool = false];
   optional uint64 max_entries = 6 [(eip_field).default_uint = 1];
 }

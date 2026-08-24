@@ -25,7 +25,6 @@ from converge_agent_harness import (
     EnvironmentTopologyLimits,
     EnvironmentTopologyRequest,
     FileMetadata,
-    FileRevision,
     FileWriteResult,
     NoopBoundEnvironment,
     create_environment_run_binding,
@@ -721,7 +720,7 @@ async def test_removed_scope_retires_only_after_accepted_revision_operation_drai
         async def stat(self, path: str) -> FileMetadata:
             started.set()
             await release.wait()
-            return FileMetadata(path=path, kind="file", size=1, revision=None, writable=True)
+            return FileMetadata(path=path, kind="file", size=1, writable=True)
 
     provider = _Binding("retire", operations=EnvironmentProviderOperations(files=BlockingFiles()))
     aggregate = create_environment_run_binding(
@@ -841,7 +840,7 @@ async def test_cleanup_timeout_supervises_provider_exit_after_operation_drains(
                     await release.wait()
                 except asyncio.CancelledError:
                     continue
-            return FileMetadata(path=path, kind="file", size=1, revision=None, writable=True)
+            return FileMetadata(path=path, kind="file", size=1, writable=True)
 
     provider = _Binding("stubborn", operations=EnvironmentProviderOperations(files=StubbornFiles()))
     aggregate = create_environment_run_binding(
@@ -978,7 +977,6 @@ async def test_provider_bound_artifacts_must_match_selected_revision() -> None:
             del text, kwargs
             return FileWriteResult(
                 path=path,
-                revision=FileRevision("revision-1"),
                 bytes_written=1,
                 receipt=EnvironmentOperationReceipt(
                     binding_id="another-binding",

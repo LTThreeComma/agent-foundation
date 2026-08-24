@@ -270,10 +270,6 @@ impl OperationRegistry {
         }
     }
 
-    pub(crate) fn generation(&self) -> u64 {
-        self.inner.generation
-    }
-
     pub(crate) fn cancellation_requested(&self, operation_id: &str) -> bool {
         self.interruption(operation_id) == Some(OperationInterruption::Cancelled)
     }

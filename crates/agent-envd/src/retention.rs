@@ -236,68 +236,6 @@ impl RetentionStore {
         Ok(outputs)
     }
 
-    /// Applies producer-side output policy to an already bounded byte sequence.
-    /// Producers must call this incrementally or provide bytes bounded by max_output_bytes.
-    #[allow(dead_code)] // Also retained as the bounded producer API for future structured outputs.
-    pub(crate) fn retain_bytes(
-        &self,
-        bytes: Vec<u8>,
-        producer_complete: bool,
-        policy: Option<&OutputPolicy>,
-    ) -> Result<OutputCapture, RetentionError> {
-        let policy = self.effective_policy(policy)?;
-        let produced_bytes = bytes.len() as u64;
-        if produced_bytes <= policy.max_inline_bytes {
-            return Ok(OutputCapture {
-                kind: if bytes.is_empty() {
-                    OutputKind::Empty
-                } else {
-                    OutputKind::Inline
-                },
-                producer_complete,
-                content_complete: producer_complete,
-                produced_bytes,
-                captured_bytes: produced_bytes,
-                dropped_bytes: 0,
-                inline: (!bytes.is_empty()).then(|| encoded(&bytes)),
-                preview: None,
-                reference: None,
-                cursor: None,
-                available_start: 0,
-                available_end: produced_bytes,
-                expires_at: None,
-            });
-        }
-        match policy.overflow {
-            OutputOverflow::Fail => Err(RetentionError::OutputLimit),
-            OutputOverflow::Truncate => {
-                let captured = policy.max_inline_bytes.min(produced_bytes) as usize;
-                Ok(OutputCapture {
-                    kind: OutputKind::Truncated,
-                    producer_complete,
-                    content_complete: false,
-                    produced_bytes,
-                    captured_bytes: captured as u64,
-                    dropped_bytes: produced_bytes.saturating_sub(captured as u64),
-                    inline: None,
-                    preview: Some(crate::eip::OutputPreview {
-                        segments: vec![OutputSegment {
-                            start_offset: 0,
-                            data: encoded(&bytes[..captured]),
-                        }],
-                        represented_bytes: captured as u64,
-                    }),
-                    reference: None,
-                    cursor: None,
-                    available_start: 0,
-                    available_end: 0,
-                    expires_at: None,
-                })
-            }
-            OutputOverflow::Retain => self.create_object(bytes, producer_complete, &policy),
-        }
-    }
-
     pub(crate) fn read(
         &self,
         params: &OutputReadParams,
@@ -472,92 +410,6 @@ impl RetentionStore {
     #[cfg(test)]
     pub(crate) fn quota(&self) -> (u64, usize) {
         self.inner.quota.usage()
-    }
-
-    fn create_object(
-        &self,
-        mut bytes: Vec<u8>,
-        producer_complete: bool,
-        policy: &OutputPolicy,
-    ) -> Result<OutputCapture, RetentionError> {
-        let produced_bytes = bytes.len() as u64;
-        let capture_limit = policy.max_output_bytes.min(self.inner.max_output_bytes);
-        if bytes.len() as u64 > capture_limit {
-            bytes.truncate(capture_limit as usize);
-        }
-        let captured_bytes = bytes.len() as u64;
-        let dropped_bytes = produced_bytes.saturating_sub(captured_bytes);
-        let mut state = self.state();
-        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
-        if !self.inner.quota.reserve(captured_bytes, 1) {
-            drop(state);
-            let preview_bytes = policy.max_inline_bytes.min(bytes.len() as u64) as usize;
-            return Ok(OutputCapture {
-                kind: OutputKind::Truncated,
-                producer_complete,
-                content_complete: false,
-                produced_bytes,
-                captured_bytes: preview_bytes as u64,
-                dropped_bytes: produced_bytes.saturating_sub(preview_bytes as u64),
-                inline: None,
-                preview: Some(crate::eip::OutputPreview {
-                    segments: vec![OutputSegment {
-                        start_offset: 0,
-                        data: encoded(&bytes[..preview_bytes]),
-                    }],
-                    represented_bytes: preview_bytes as u64,
-                }),
-                reference: None,
-                cursor: None,
-                available_start: 0,
-                available_end: 0,
-                expires_at: None,
-            });
-        }
-        let selector = match self.inner.selector_ids.next("output") {
-            Ok(selector) => selector,
-            Err(_) => {
-                self.inner.quota.release(captured_bytes, 1);
-                return Err(RetentionError::Internal);
-            }
-        };
-        let expires_at = Instant::now() + self.inner.ttl;
-        let expires_at_utc = match chrono::Duration::from_std(self.inner.ttl) {
-            Ok(ttl) => chrono::Utc::now() + ttl,
-            Err(_) => {
-                self.inner.quota.release(captured_bytes, 1);
-                return Err(RetentionError::Internal);
-            }
-        };
-        state.objects.insert(
-            selector.clone(),
-            RetainedObject {
-                capture: Arc::new(Mutex::new(RetainedCapture {
-                    data: bytes,
-                    producer_complete,
-                    produced_bytes,
-                    dropped_bytes,
-                    readable: true,
-                })),
-                expires_at,
-                expires_at_utc,
-            },
-        );
-        Ok(OutputCapture {
-            kind: OutputKind::Retained,
-            producer_complete,
-            content_complete: producer_complete && dropped_bytes == 0,
-            produced_bytes,
-            captured_bytes,
-            dropped_bytes,
-            inline: None,
-            preview: None,
-            reference: Some(OutputReference(selector)),
-            cursor: None,
-            available_start: 0,
-            available_end: captured_bytes,
-            expires_at: Some(expires_at_utc),
-        })
     }
 
     fn effective_policy(
@@ -800,18 +652,16 @@ mod tests {
         let config = Config::for_test("env");
         let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
             .expect("store");
-        let capture = store
-            .retain_bytes(
-                b"abcdefgh".to_vec(),
-                true,
-                Some(&OutputPolicy {
-                    max_inline_bytes: 2,
-                    max_output_bytes: 8,
-                    overflow: OutputOverflow::Retain,
-                }),
-            )
-            .expect("retained");
-        let reference = capture.reference.expect("reference");
+        let live = store
+            .create_live(Some(&OutputPolicy {
+                max_inline_bytes: 2,
+                max_output_bytes: 8,
+                overflow: OutputOverflow::Retain,
+            }))
+            .expect("live output");
+        assert_eq!(live.append_limited(b"abcdefgh", 8).expect("append"), 8);
+        live.complete();
+        let reference = live.reference();
         let params = OutputReadParams {
             context: crate::eip::EIPCallContext {
                 operation_id: "read-one".to_owned(),
@@ -942,31 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn retention_quota_falls_back_to_explicit_truncation_without_losing_counts() {
-        let mut config = Config::for_test("env");
-        config.limits.max_retained_bytes = 1;
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let capture = store
-            .retain_bytes(
-                b"abcdefgh".to_vec(),
-                true,
-                Some(&OutputPolicy {
-                    max_inline_bytes: 2,
-                    max_output_bytes: 8,
-                    overflow: OutputOverflow::Retain,
-                }),
-            )
-            .expect("bounded fallback");
-        assert_eq!(capture.kind, crate::eip::OutputKind::Truncated);
-        assert_eq!(capture.produced_bytes, 8);
-        assert_eq!(capture.captured_bytes, 2);
-        assert_eq!(capture.dropped_bytes, 6);
-        assert!(capture.reference.is_none());
-        assert_eq!(store.quota(), (0, 0));
-    }
-
-    #[test]
     fn expiry_drops_live_capture_allocation_while_the_producer_handle_survives() {
         let mut config = Config::for_test("env");
         config.limits.max_retention_ttl_ms = 1;
@@ -998,18 +823,18 @@ mod tests {
         config.limits.max_retention_ttl_ms = 1;
         let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
             .expect("store");
-        let capture = store
-            .retain_bytes(
-                b"abc".to_vec(),
-                true,
-                Some(&OutputPolicy {
-                    max_inline_bytes: 1,
-                    max_output_bytes: 3,
-                    overflow: OutputOverflow::Retain,
-                }),
-            )
-            .expect("retained");
-        let reference = capture.reference.expect("reference");
+        let live = store
+            .create_live(Some(&OutputPolicy {
+                max_inline_bytes: 1,
+                max_output_bytes: 3,
+                overflow: OutputOverflow::Retain,
+            }))
+            .expect("live output");
+        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
+        live.complete();
+        let reference = live.reference();
+        live.detach();
+        drop(live);
         std::thread::sleep(std::time::Duration::from_millis(5));
         let result = store.read(&OutputReadParams {
             context: crate::eip::EIPCallContext {

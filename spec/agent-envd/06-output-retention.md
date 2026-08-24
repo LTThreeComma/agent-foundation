@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Every envd retained-output producer applies a finite effective EIP `OutputPolicy` while bytes or structured items are produced. A request can provide a narrower policy; when it omits one, envd uses the generous finite hard limits advertised in its descriptor with `overflow="truncate"`. The policy determines what can remain inline, whether overflow fails, truncates, or uses a daemon-owned retained reference, and the maximum bytes that can be captured for one operation. Daemon-global and per-object safety limits bound aggregate retained storage and object count.
+Every envd retained byte-output producer applies a finite effective EIP `OutputPolicy` while bytes are produced. A request can provide a narrower policy; when it omits one, envd uses the generous finite hard limits advertised in its descriptor with `overflow="truncate"`. The policy determines what can remain inline, whether overflow fails, truncates, or uses a daemon-owned retained reference, and the maximum bytes that can be captured for one operation. Daemon-global and per-object safety limits bound aggregate retained storage and object count.
 
 The Harness owns [`ToolOutputPolicy`](../agent-harness/07-tool-execution.md#tool-metadata) as a model-result policy. Envd does not deserialize Harness tool metadata, tool identity, or Pydantic objects. The EIP adapter maps an explicitly narrower Harness decision into the protocol-native `OutputPolicy`; otherwise it can omit the field and use the advertised envd default. Envd understands and enforces the effective provider contract at the producer.
 
@@ -13,7 +13,7 @@ The Harness owns [`ToolOutputPolicy`](../agent-harness/07-tool-execution.md#tool
 | Tool-level inline/total policy, overflow selection, and managed redaction   | Harness `ToolOutputPolicy` and result-safety path | Computes a model-result ceiling before provider dispatch       |
 | Protocol-native optional per-operation output policy and result disposition | This document                                     | Omitted for the advertised daemon default or sent to narrow it |
 | Daemon-global aggregate retained quotas                                     | `agent-envd`                                      | Non-disableable hard ceilings                                  |
-| Native retained-output production and stream identity                       | Command, process, list, or search owner           | Supplies bytes/items incrementally                             |
+| Native retained-output production and stream identity                       | Command, process, or output-read owner            | Supplies bytes incrementally                                   |
 | Native file readers and staged writers                                      | [Resource Operations](04-resource-operations.md)  | Use the raw transfer plane, not an `OutputReference`           |
 | Host artifact storage or durable checkpoint                                 | Host                                              | Not implied by an envd retained object                         |
 
@@ -105,26 +105,11 @@ class OutputCapture(BaseModel):
 
 Counts refer to raw producer bytes before base64 and JSON framing. `produced_bytes` is the number observed at the snapshot boundary; it can grow for a live process. `captured_bytes` is currently readable inline or through the reference. `dropped_bytes` counts known bytes that will never be readable through this object.
 
-`producer_complete` means the requested source range, traversal, or process stream has reached a terminal producer boundary. `content_complete` means every byte in that logical output through the producer boundary remains available. A live process normally has both fields false even when no byte has been dropped. A terminal operation with dropped bytes has `producer_complete=true` and `content_complete=false`.
+`producer_complete` means the requested byte source or process stream has reached a terminal producer boundary. `content_complete` means every byte in that logical output through the producer boundary remains available. A live process normally has both fields false even when no byte has been dropped. A terminal operation with dropped bytes has `producer_complete=true` and `content_complete=false`.
 
 `available_start` and `available_end` define the half-open logical offset interval currently addressable by the cursor and always satisfy `available_start <= available_end`. A retained ring or quota policy can advance the floor; any missing interval is explicit. A preview is a bounded set of offset-labelled head and/or tail segments and never pretends those segments are contiguous when a middle gap exists.
 
 The disposition fields have a small generated structural contract. `empty` has zero counts, a zero interval, and no inline, preview, reference, cursor, or expiry. `inline` has `inline` and none of preview, reference, cursor, or expiry. `retained` has a reference and expiry, has no inline value, and can include a preview and cursor; it can still have `content_complete=false` after a capture ceiling or retention-floor advance. `truncated` has no inline value, reference, cursor, or expiry and can include a bounded preview. Complete process and operation lifecycle coherence remains owned by the daemon domain state rather than duplicated in generated models.
-
-Structured methods such as list and search use the parallel shape:
-
-```python
-class StructuredOutputDisposition(BaseModel):
-    producer_complete: bool
-    content_complete: bool
-    emitted_items: int
-    dropped_items: int | None
-    encoded_bytes: int
-    cursor: OutputCursor | None
-    expires_at: datetime | None
-```
-
-Structured producers stop only at complete item boundaries, count canonical EIP JSON encoding toward byte ceilings, and never emit a partial item as valid data. When more items remain, `truncate` returns a bounded generation-scoped continuation cursor whenever the owning traversal can resume safely; `retain` can additionally reserve snapshot-backed continuation where the method advertises it; and `fail` returns `output_limit_exceeded`. If safe continuation is unavailable, the cursor is absent and incompleteness remains explicit. `dropped_items=None` means traversal stopped before the number of unvisited items could be known. A cursor does not by itself make an unstable traversal a snapshot; the owning method defines revision or invalidation semantics.
 
 ## Overflow Behavior
 
@@ -173,7 +158,7 @@ flowchart LR
     Drop --> Result
 ```
 
-Command stdout and stderr are drained concurrently. Text convenience reads enforce their own bounded page contract, while directory listings and search producers encode complete bounded items incrementally. Raw file readers and writers use the independently bounded binary transfer plane, and cross-mount copy streams from source to destination without routing full content through a JSON result or retained object. No default implementation can call an unbounded “read all” API and apply policy afterward.
+Command stdout and stderr are drained concurrently. File text, list, find, and search methods use their own fixed response ceilings and explicit line or item offsets; they are not retained output and do not accept `OutputPolicy`. Raw file readers and writers use the independently bounded binary transfer plane, and cross-mount copy streams from source to destination without routing full content through a JSON result or retained object. No default implementation can call an unbounded “read all” API and apply policy afterward.
 
 A producer can keep a bounded head/tail preview using fixed buffers. Retained storage records stream identity and logical offsets. For command output, stdout and stderr have independent offset domains and cursors while sharing the operation's total captured-byte and object quotas; interleaving timestamps are observations and not a deterministic total order unless a method explicitly provides a merged stream.
 
@@ -188,7 +173,7 @@ Per-operation limits do not prevent many small objects from exhausting a daemon.
 | Daemon global        | Bounds total disk/memory and object metadata across all sessions        |
 | Process or operation | Applies `max_output_bytes`, cursor count, and method-specific retention |
 
-Quota accounts cover retained command/output bytes, structured-result pages, cursors, previews stored outside the response, process output, and equivalent daemon-owned output objects. Private file-writer staging uses the separate aggregate transfer-staging quota; it cannot consume or hide inside retained-output capacity. Metadata overhead has its own bounded accounting and cannot be made unbounded with zero-byte objects.
+Quota accounts cover retained command/output bytes, output cursors, previews stored outside the response, process output, and equivalent daemon-owned output objects. Private file-writer staging uses the separate aggregate transfer-staging quota; it cannot consume or hide inside retained-output capacity. Metadata overhead has its own bounded accounting and cannot be made unbounded with zero-byte objects.
 
 Reservation is atomic and precedes object creation or growth. Streaming growth reserves in bounded increments before writing. Failure keeps the prior valid object unchanged and applies the selected overflow behavior. Envd never oversubscribes, evicts an independently retained object to satisfy another allocation, or counts sparse file logical size as free. Process-owned output follows the explicitly bounded process-record lifetime rather than becoming a second detached object lifecycle.
 
@@ -198,7 +183,7 @@ Release, expiry, failed creation rollback, terminal process-record release or ca
 
 An `OutputReference` is opaque and bound to Environment identity and generation, the daemon user, producer kind, original operation and request shape, retained object, and expiry. It is not a native path or bearer credential.
 
-An `OutputCursor` additionally binds a stream or structured traversal and a logical next offset. Cursors are non-draining: advancing one cursor does not consume bytes for another reader. Envd can limit cursor count and expire idle cursors independently from the underlying object.
+An `OutputCursor` additionally binds one retained byte stream and a logical next offset. Cursors are non-draining: advancing one cursor does not consume bytes for another reader. Envd can limit cursor count and expire idle cursors independently from the underlying object.
 
 `output.read` uses:
 
@@ -274,7 +259,7 @@ Harness translation is tested independently from EIP wire fixtures. Cross-transp
 
 ### Explicit references for produced output, raw streams for native files
 
-References and cursors add lifecycle and storage accounting for command output and resumable structured results. They keep result envelopes, Harness memory, and model values bounded. Native file download/upload instead uses a session-scoped raw reader or staged writer because treating a file as retained output would add redundant storage, base64, and cursor lifecycle.
+References and cursors add lifecycle and storage accounting for command and process output. They keep result envelopes, Harness memory, and model values bounded. Native file queries use explicit offsets, while native file download/upload uses a session-scoped raw reader or staged writer; treating either as retained output would add redundant storage and cursor lifecycle.
 
 ### Provider enforcement plus Harness redaction
 

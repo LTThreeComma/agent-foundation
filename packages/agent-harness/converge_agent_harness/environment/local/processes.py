@@ -45,7 +45,12 @@ from ..retention import (
 from .retention import LocalRetentionStore, LocalRetentionWriter
 
 if TYPE_CHECKING:
-    from .binding import DirectLocalPortPolicy, DirectLocalProcessPolicy, DirectLocalShellProfile
+    from .binding import (
+        DirectLocalOutputPolicy,
+        DirectLocalPortPolicy,
+        DirectLocalProcessPolicy,
+        DirectLocalShellProfile,
+    )
     from .files import LocalFileOperator
 
 
@@ -54,10 +59,12 @@ class _OutputCollector:
         self,
         *,
         policy: EnvironmentOutputPolicy,
+        buffer_limit: int,
         writer: LocalRetentionWriter | None,
         output_limit: asyncio.Event,
     ) -> None:
         self.policy = policy
+        self.buffer_limit = min(policy.max_inline_bytes, policy.max_output_bytes, buffer_limit)
         self.writer = writer
         self.output_limit = output_limit
         self.produced = 0
@@ -70,15 +77,13 @@ class _OutputCollector:
         try:
             while chunk := await stream.read(65_536):
                 self.produced += len(chunk)
-                preview_remaining = self.policy.max_inline_bytes - len(self.preview)
+                preview_remaining = self.buffer_limit - len(self.preview)
                 if preview_remaining > 0:
                     self.preview.extend(chunk[:preview_remaining])
                 if self.writer is not None:
                     storage_remaining = self.policy.max_output_bytes - self.stored
                     if storage_remaining > 0:
-                        stored_chunk = chunk[:storage_remaining]
-                        await self.writer.write(stored_chunk)
-                        self.stored += len(stored_chunk)
+                        self.stored += await self.writer.write(chunk[:storage_remaining])
                 if self.policy.overflow == "fail" and self.produced > self.policy.max_output_bytes:
                     self.output_limit.set()
         finally:
@@ -87,12 +92,17 @@ class _OutputCollector:
     async def finish(self) -> EnvironmentOutputCapture:
         preview = bytes(self.preview)
         if self.writer is not None:
-            if self.produced <= self.policy.max_inline_bytes:
-                await self.writer.abort()
+            if self.stored > len(preview):
+                self.reference = await self.writer.commit(
+                    producer_complete=self.complete,
+                    content_complete=self.produced == self.stored,
+                    produced_bytes=self.produced,
+                    dropped_bytes=max(self.produced - self.stored, 0),
+                )
             else:
-                self.reference = await self.writer.commit()
+                await self.writer.abort()
         if self.reference is not None:
-            return EnvironmentOutputCapture(
+            capture = EnvironmentOutputCapture(
                 kind="retained",
                 producer_complete=self.complete,
                 content_complete=self.produced == self.stored,
@@ -102,9 +112,10 @@ class _OutputCollector:
                 preview=(EnvironmentOutputSegment(start_offset=0, data=preview),) if preview else (),
                 reference=self.reference,
                 available_end=self.stored,
+                expires_at=None,
             )
-        if self.produced <= self.policy.max_inline_bytes:
-            return EnvironmentOutputCapture(
+        elif self.produced <= len(preview):
+            capture = EnvironmentOutputCapture(
                 kind="empty" if not preview else "inline",
                 producer_complete=self.complete,
                 content_complete=True,
@@ -114,16 +125,20 @@ class _OutputCollector:
                 inline=preview,
                 available_end=len(preview),
             )
-        return EnvironmentOutputCapture(
-            kind="truncated",
-            producer_complete=self.complete,
-            content_complete=False,
-            produced_bytes=self.produced,
-            captured_bytes=len(preview),
-            dropped_bytes=max(self.produced - len(preview), 0),
-            inline=preview,
-            available_end=len(preview),
-        )
+        else:
+            capture = EnvironmentOutputCapture(
+                kind="truncated",
+                producer_complete=self.complete,
+                content_complete=False,
+                produced_bytes=self.produced,
+                captured_bytes=len(preview),
+                dropped_bytes=max(self.produced - len(preview), 0),
+                inline=preview,
+                available_end=len(preview),
+            )
+        self.preview.clear()
+        self.writer = None
+        return capture
 
     def snapshot(self) -> EnvironmentOutputCapture:
         preview = bytes(self.preview)
@@ -150,6 +165,10 @@ class _ProcessRecord:
     stderr: _OutputCollector
     output_limit: asyncio.Event
     stdin_open: bool
+    stdin_bytes: int
+    stdin_limit: int | None
+    stdin_lock: asyncio.Lock
+    release_lock: asyncio.Lock
     status: ProcessStatus
     watcher: asyncio.Task[None] | None = None
     output: ProcessOutputSnapshot | None = None
@@ -164,23 +183,26 @@ class LocalProcessManager:
         files: LocalFileOperator,
         retention: LocalRetentionStore,
         policy: DirectLocalProcessPolicy,
+        output_policy: DirectLocalOutputPolicy,
         shell_profiles: tuple[DirectLocalShellProfile, ...],
         binding_id: str,
         binding_revision: int,
         generation: str,
-        max_stdin_bytes: int,
-        max_output_bytes: int,
     ) -> None:
         self._files = files
         self._retention = retention
         self._policy = policy
-        self._profiles = {profile.profile_id: profile for profile in shell_profiles}
-        self._allowed_executables = {path.expanduser().resolve(strict=True) for path in policy.allowed_executables}
+        self._output_policy = output_policy
+        self._profiles = {
+            profile.profile_id: profile.model_copy(
+                update={"executable": _resolve_configured_executable(profile.executable)}
+            )
+            for profile in shell_profiles
+        }
+        self._allowed_executables = {_resolve_configured_executable(path) for path in policy.allowed_executables}
         self._binding_id = binding_id
         self._binding_revision = binding_revision
         self._generation = generation
-        self._max_stdin_bytes = max_stdin_bytes
-        self._max_output_bytes = max_output_bytes
         self._records: dict[str, _ProcessRecord] = {}
         self._slots = asyncio.Semaphore(policy.max_concurrent_processes)
         self._operations = itertools.count(1)
@@ -197,23 +219,36 @@ class LocalProcessManager:
                 timeout_seconds=self._effective_wall_time(request) + self._policy.terminate_grace_seconds * 2 + 1,
             )
             assert process.output.stdout.producer_complete and process.output.stderr.producer_complete
-            return ShellExecResult(
+            result = ShellExecResult(
                 status=process.status,
                 output=process.output,
                 receipt=self._receipt(),
             )
         except asyncio.CancelledError:
-            await asyncio.shield(self.kill(handle))
+            try:
+                await asyncio.shield(self.kill(handle))
+            finally:
+                record = self._record(handle)
+                if record.process.returncode is not None:
+                    await asyncio.shield(self._release_record(handle, release_outputs=True))
             raise
-        finally:
+        except BaseException:
             record = self._record(handle)
-            if record.status.cleanup == "complete":
-                await self._release_record(handle, release_outputs=False)
+            if record.process.returncode is not None:
+                await self._release_record(handle, release_outputs=True)
+            raise
+        try:
+            await self._release_record(handle, release_outputs=False)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._release_record(handle, release_outputs=True))
+            raise
+        return result
 
     async def start(self, request: CommandRequest) -> ProcessStartResult:
         if os.name != "posix":
             raise EnvironmentError("Direct Local process groups require POSIX.", code="environment_unsupported")
         self._validate_request(request)
+        stdin_limit = self._effective_stdin_limit(request)
         await self._slots.acquire()
         process: asyncio.subprocess.Process | None = None
         record: _ProcessRecord | None = None
@@ -227,27 +262,18 @@ class LocalProcessManager:
             argv = self._argv(request)
             cwd = await self._files.resolve_native_directory(request.cwd or "/")
             environment = dict(request.environment.set)
-            output_policy = request.output_policy.model_copy(
-                update={
-                    "max_output_bytes": min(request.output_policy.max_output_bytes, self._max_output_bytes),
-                    "max_inline_bytes": min(
-                        request.output_policy.max_inline_bytes,
-                        request.output_policy.max_output_bytes,
-                        self._max_output_bytes,
-                    ),
-                }
-            )
+            output_policy = request.output_policy
             output_limit = asyncio.Event()
-            stdout_writer = await self._reserve_output(output_policy)
-            stderr_writer = await self._reserve_output(output_policy)
             stdout_collector = _OutputCollector(
                 policy=output_policy,
-                writer=stdout_writer,
+                buffer_limit=self._output_policy.max_buffer_bytes,
+                writer=await self._reserve_output(output_policy),
                 output_limit=output_limit,
             )
             stderr_collector = _OutputCollector(
                 policy=output_policy,
-                writer=stderr_writer,
+                buffer_limit=self._output_policy.max_buffer_bytes,
+                writer=await self._reserve_output(output_policy),
                 output_limit=output_limit,
             )
             process = await asyncio.create_subprocess_exec(
@@ -277,6 +303,10 @@ class LocalProcessManager:
                 stderr=stderr_collector,
                 output_limit=output_limit,
                 stdin_open=process.stdin is not None,
+                stdin_bytes=0,
+                stdin_limit=stdin_limit,
+                stdin_lock=asyncio.Lock(),
+                release_lock=asyncio.Lock(),
                 status=ProcessStatus(
                     phase="running",
                     started_at=started_at,
@@ -313,12 +343,7 @@ class LocalProcessManager:
     async def _reserve_output(self, policy: EnvironmentOutputPolicy) -> LocalRetentionWriter | None:
         if policy.overflow != "retain":
             return None
-        try:
-            return await self._retention.reserve(max_bytes=policy.max_output_bytes)
-        except EnvironmentError as exc:
-            if exc.code not in {"environment_quota_exceeded", "environment_request_invalid"}:
-                raise
-            return None
+        return await self._retention.reserve(max_bytes=policy.max_output_bytes)
 
     def _validate_request(self, request: CommandRequest) -> None:
         if request.network == "deny":
@@ -335,9 +360,13 @@ class LocalProcessManager:
             raise EnvironmentError("Command environment key is not allowed.", code="environment_denied")
         if not set(request.environment.unset) <= self._policy.allowed_environment_keys:
             raise EnvironmentError("Command environment key is not allowed.", code="environment_denied")
-        stdin_limit = min(request.limits.stdin_bytes or self._max_stdin_bytes, self._max_stdin_bytes)
-        if request.initial_stdin is not None and len(request.initial_stdin) > stdin_limit:
+        stdin_limit = self._effective_stdin_limit(request)
+        if request.initial_stdin is not None and stdin_limit is not None and len(request.initial_stdin) > stdin_limit:
             raise EnvironmentError("Initial stdin exceeds its finite limit.", code="environment_too_large")
+
+    @staticmethod
+    def _effective_stdin_limit(request: CommandRequest) -> int | None:
+        return request.limits.stdin_bytes
 
     def _argv(self, request: CommandRequest) -> tuple[str, ...]:
         command = request.command
@@ -351,7 +380,9 @@ class LocalProcessManager:
             raise EnvironmentError("Shell profile is not allowed.", code="environment_denied")
         if command.login and not profile.allow_login:
             raise EnvironmentError("Shell login mode is not allowed.", code="environment_denied")
-        executable = self._canonical_executable(str(profile.executable))
+        executable = profile.executable
+        if not executable.is_file():
+            raise EnvironmentError("Shell profile executable is unavailable.", code="environment_not_found")
         login = ("-l",) if command.login else ()
         return (str(executable), *profile.fixed_arguments, *login, "-c", command.script)
 
@@ -390,8 +421,13 @@ class LocalProcessManager:
                 timeout=record.wall_time_seconds,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if wait_task not in done:
-                reason = "output_limit" if limit_task in done and record.output_limit.is_set() else "timeout"
+            if limit_task in done and record.output_limit.is_set():
+                reason = "output_limit"
+                if wait_task not in done:
+                    await self._terminate_process(record.process)
+                    await wait_task
+            elif wait_task not in done:
+                reason = "timeout"
                 await self._terminate_process(record.process)
                 await wait_task
             return_code = record.process.returncode
@@ -399,6 +435,8 @@ class LocalProcessManager:
                 reason = "signal"
             await self._cleanup_group(record.process.pid)
             await asyncio.gather(stdout_task, stderr_task)
+            if reason == "exit" and record.output_limit.is_set():
+                reason = "output_limit"
             record.output = ProcessOutputSnapshot(
                 stdout=await record.stdout.finish(),
                 stderr=await record.stderr.finish(),
@@ -462,7 +500,6 @@ class LocalProcessManager:
         wait_seconds: float = 0,
         policy: EnvironmentOutputPolicy,
     ) -> ProcessReadOutputResult:
-        del stdout_cursor, stderr_cursor
         if not math.isfinite(wait_seconds) or wait_seconds < 0:
             raise EnvironmentError("Process output wait is invalid.", code="environment_request_invalid")
         record = self._record(handle)
@@ -472,11 +509,28 @@ class LocalProcessManager:
             except TimeoutError:
                 pass
         process = self._info(record)
-        return ProcessReadOutputResult(
-            process=process,
-            stdout=_stream_read(process.output.stdout, policy),
-            stderr=_stream_read(process.output.stderr, policy),
+        stdout, stderr = await asyncio.gather(
+            self._read_stream(process.output.stdout, stdout_cursor, policy),
+            self._read_stream(process.output.stderr, stderr_cursor, policy),
         )
+        return ProcessReadOutputResult(process=process, stdout=stdout, stderr=stderr)
+
+    async def _read_stream(
+        self,
+        capture: EnvironmentOutputCapture,
+        cursor: BoundOutputCursor | None,
+        policy: EnvironmentOutputPolicy,
+    ) -> ProcessStreamRead:
+        if capture.reference is not None:
+            result = await self._retention.read(capture.reference, cursor=cursor, policy=policy)
+            return ProcessStreamRead(
+                chunks=result.chunks,
+                next_cursor=result.next_cursor,
+                capture=capture,
+            )
+        if cursor is not None:
+            raise EnvironmentError("Output cursor is unavailable for this stream.", code="environment_cursor_invalid")
+        return _stream_read(capture, policy)
 
     async def write_stdin(
         self,
@@ -486,27 +540,35 @@ class LocalProcessManager:
         close_after_write: bool = False,
     ) -> ProcessWriteStdinResult:
         record = self._record(handle)
-        if not record.stdin_open or record.process.stdin is None:
-            raise EnvironmentError("Process stdin is closed.", code="environment_conflict")
-        if len(data) > self._max_stdin_bytes:
-            raise EnvironmentError("Stdin write exceeds its finite limit.", code="environment_too_large")
-        record.process.stdin.write(data)
-        await record.process.stdin.drain()
-        if close_after_write:
-            await self.close_stdin(handle)
+        async with record.stdin_lock:
+            if not record.stdin_open or record.process.stdin is None:
+                raise EnvironmentError("Process stdin is closed.", code="environment_conflict")
+            if record.stdin_limit is not None and record.stdin_bytes + len(data) > record.stdin_limit:
+                raise EnvironmentError("Stdin write exceeds its finite limit.", code="environment_too_large")
+            record.process.stdin.write(data)
+            record.stdin_bytes += len(data)
+            await record.process.stdin.drain()
+            if close_after_write:
+                await self._close_stdin(record)
+            stdin_open = record.stdin_open
         return ProcessWriteStdinResult(
             accepted_bytes=len(data),
-            stdin_open=record.stdin_open,
+            stdin_open=stdin_open,
             receipt=self._receipt(),
         )
 
     async def close_stdin(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt:
         record = self._record(handle)
+        async with record.stdin_lock:
+            await self._close_stdin(record)
+        return self._receipt()
+
+    @staticmethod
+    async def _close_stdin(record: _ProcessRecord) -> None:
         if record.stdin_open and record.process.stdin is not None:
             record.process.stdin.close()
             await record.process.stdin.wait_closed()
             record.stdin_open = False
-        return self._receipt()
 
     async def signal(
         self,
@@ -554,19 +616,23 @@ class LocalProcessManager:
         release_outputs: bool,
     ) -> EnvironmentOperationReceipt:
         record = self._record(handle)
-        if record.status.cleanup != "complete":
-            raise EnvironmentError("Active process cannot be released.", code="environment_conflict")
-        async with self._lock:
-            self._records.pop(record.token, None)
-        if release_outputs and record.output is not None:
-            for capture in (record.output.stdout, record.output.stderr):
-                if capture.reference is not None:
-                    try:
-                        await self._retention.release(reference=capture.reference)
-                    except EnvironmentError as exc:
-                        if exc.code != "environment_not_found":
-                            raise
-        return self._receipt()
+        async with record.release_lock:
+            if record.status.cleanup == "pending" or record.process.returncode is None:
+                raise EnvironmentError("Active process cannot be released.", code="environment_conflict")
+            if release_outputs and record.output is not None:
+                for capture in (record.output.stdout, record.output.stderr):
+                    if capture.reference is not None:
+                        try:
+                            await self._retention.release(reference=capture.reference)
+                        except EnvironmentError as exc:
+                            if exc.code != "environment_not_found":
+                                raise
+            async with self._lock:
+                current = self._records.get(record.token)
+                if current is not record:
+                    raise EnvironmentError("Process handle is unavailable.", code="environment_not_found")
+                self._records.pop(record.token)
+            return self._receipt()
 
     def _record(self, handle: BoundProcessHandle) -> _ProcessRecord:
         if (
@@ -630,14 +696,15 @@ class LocalProcessManager:
         async with self._lock:
             self._closed = True
             records = tuple(self._records.values())
-        for record in records:
-            if record.process.returncode is None:
-                await self._terminate_process(record.process)
+        await asyncio.gather(
+            *(self._terminate_process(record.process) for record in records if record.process.returncode is None),
+            return_exceptions=True,
+        )
         watchers = tuple(record.watcher for record in records if record.watcher is not None)
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
         for record in records:
-            if record.status.cleanup == "complete":
+            if record.process.returncode is not None:
                 try:
                     await self.release(record.handle)
                 except EnvironmentError:
@@ -645,7 +712,7 @@ class LocalProcessManager:
 
 
 class LocalShell:
-    """Public Direct Local foreground shell facade."""
+    """Internal Direct Local foreground shell facade."""
 
     def __init__(self, processes: LocalProcessManager) -> None:
         self._processes = processes
@@ -695,10 +762,21 @@ class LocalPortOperator:
                 await asyncio.sleep(0.05)
 
     def _validate(self, target: PortTarget) -> None:
-        if not self._policy.enabled:
-            raise EnvironmentError("Direct Local port observation is disabled.", code="environment_unsupported")
         if target.address != "loopback" or target.port not in self._policy.allowed_ports:
             raise EnvironmentError("Port target is not allowed.", code="environment_denied")
+
+
+def _resolve_configured_executable(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise EnvironmentError("Configured executable must be absolute.", code="environment_request_invalid")
+    try:
+        canonical = expanded.resolve(strict=True)
+    except OSError:
+        raise EnvironmentError("Configured executable is unavailable.", code="environment_not_found") from None
+    if not canonical.is_file():
+        raise EnvironmentError("Configured executable is not a file.", code="environment_request_invalid")
+    return canonical
 
 
 def _signal_group(process_group: int, signal: int) -> None:

@@ -36,6 +36,25 @@ This contract defines logical identities, states, fencing, and completion rules.
 | Child-result retention and parent routing         | Foundation subagent delivery ledger                              | Later Host input, never a deferred spawn result                                      |
 | Product delivery or webhook completion            | Connector or product                                             | Never commits Execution completion retroactively                                     |
 
+## Persistence Contract
+
+Foundation persists semantic authority, not a live runtime. The durable record set contains the accepted Execution and immutable definition target, current Attempt generation and fence-verification state, accepted inputs and command receipts, explicitly selected checkpoint, desired and observed-effective Environment topology, protected provider launch-state references, waiting dependencies, terminal outcome, and matching lifecycle events. Child Executions, task scopes, delivery ledgers, usage records, and external delivery state remain independently owned records linked by canonical identities rather than fields copied into `HarnessState`.
+
+`HarnessState` is a bounded, versioned continuation payload produced by the Harness. Foundation stores it opaquely except for envelope validation and the compatibility checks required by the selected definition and provider integrations. In particular, Foundation does not reinterpret Pydantic messages, rebuild authority from message metadata, or persist arbitrary live objects. Best-effort interrupted-output recovery is already reflected in the Harness-produced message history before a checkpoint candidate reaches this boundary.
+
+The following publication rules are invariant:
+
+1. acceptance commits before work becomes runnable;
+2. Attempt acquisition atomically selects its starting checkpoint, advances the generation, and installs the current fence-verification state;
+3. immutable checkpoint or launch-envelope payload bytes become durable before an authority record can select them;
+4. checkpoint selection, compatible effective-topology and launch-state references, the Execution version change, and the matching lifecycle event commit as one authority transition;
+5. waiting and terminal transitions commit their owning payload or dependency reference and lifecycle event with the same fence and compare-and-swap decision; and
+6. stale or mismatched Attempts cannot alter selection even when their payload writes completed earlier.
+
+The physical representation is replaceable. An implementation may use normalized relational records, document columns, immutable object storage, or a combination, provided that it preserves the same transactions, uniqueness constraints, fencing, codec versions, tenant isolation, encryption, retention, and size limits. No JSONB layout, table split, object-store vendor, or queue technology is part of this contract. A large immutable payload may live outside the authority store under a verified content reference; readers use only the explicitly selected reference, and unselected payloads remain non-authoritative garbage-collection candidates.
+
+Recovery reads authoritative records rather than inferring progress from a queue, event subscriber, worker heartbeat, directory listing, or newest blob. It invalidates stale ownership, selects the exact committed checkpoint and protected launch state, reconstructs fresh bindings and collaborators, and creates a new Attempt and Harness run. This is durable execution: process loss may discard uncommitted computation, but it cannot erase a committed transition, revive old authority, or silently convert an unknown external effect into success, failure, or safe replay.
+
 ## Core Model
 
 The following Python-like types are conceptual domain contracts, not a serialized API or persistence schema.

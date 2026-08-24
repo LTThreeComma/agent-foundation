@@ -122,7 +122,7 @@ The handwritten client runtime owns behavior that IDL cannot safely decide:
 - HTTP `Authorization`, `EIP-Session`, `EIP-Transfer`, and streaming GET/PUT body handling;
 - WebSocket upgrade configuration, required subprotocol, first-message initialization, text control, binary transfer frames, ping/pong, and close mapping;
 - transport and message size enforcement before generated payload decode;
-- initialization state, selected protocol minor, descriptor refresh, logical-session idle expiry, and prior-generation selector fencing;
+- initialization state, requested and effective resource authority, selected protocol minor, descriptor refresh, logical-session idle expiry, and prior-generation selector fencing;
 - deadline-to-transport timeout narrowing without treating a transport timeout as operation failure;
 - receipt/idempotency reconciliation surfaces without automatic ambiguous mutation retry;
 - secret redaction and lifecycle cleanup.
@@ -143,7 +143,7 @@ async with client.open_writer(path, mode="replace") as writer:
     result = await writer.commit()
 ```
 
-Normal reader iteration maintains a local count and SHA-256, withholds framed `END_ACK` until the public consumer drains all chunks, and ends only after clean carrier termination plus `file.close_reader(accept_complete=true)` count/digest/stability verification. Early framed context exit atomically retires the local channel before sending `RESET`, consumes envd's terminal `RESET` acknowledgement through a bounded tombstone, and calls `file.close_reader(accept_complete=false)`; an envd-initiated reset is already terminal and is not echoed. Once the coordinator accepts that peer reset into the bounded local channel, cleanup observes it as terminal even if the public iterator has not dequeued it. It never reports a prefetched stream as consumed. Writer `commit()` seals and receives terminal acknowledgement before `file.commit_writer`; context exit without successful commit uses the same bounded reset retirement and calls `file.abort_writer`. Helpers can also iterate text/list/search cursors, retained output, and explicit receipt reconciliation. They preserve every bound, expiry, revision, integrity, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unsupported capability, turn transport loss into EOF, or materialize an unbounded value.
+Normal reader iteration maintains a local count and SHA-256, withholds framed `END_ACK` until the public consumer drains all chunks, and ends only after clean carrier termination plus `file.close_reader(accept_complete=true)` delivered-byte count/digest verification. Early framed context exit atomically retires the local channel before sending `RESET`, consumes envd's terminal `RESET` acknowledgement through a bounded tombstone, and calls `file.close_reader(accept_complete=false)`; an envd-initiated reset is already terminal and is not echoed. Once the coordinator accepts that peer reset into the bounded local channel, cleanup observes it as terminal even if the public iterator has not dequeued it. It never reports a prefetched stream as consumed. Writer `commit()` seals and receives terminal acknowledgement before `file.commit_writer`; context exit without successful commit uses the same bounded reset retirement and calls `file.abort_writer`. Helpers can also iterate text/list/search cursors, retained output, and explicit receipt reconciliation. They preserve every bound, expiry, revision, integrity, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unsupported capability, turn transport loss into EOF, or materialize an unbounded value.
 
 ## Harness Integration
 
@@ -160,8 +160,9 @@ flowchart LR
 The adapter owns:
 
 - conversion from trusted Host endpoint/bootstrap configuration into a client session factory;
-- initialization during binding entry and mapping of the EIP descriptor into the provider-neutral Harness descriptor;
-- logical path, bounded text, async file reader/writer, command, process, port, receipt, selector, and error translation;
+- initialization during binding entry with an explicit `scoped` or operator-authorized `server` request and mapping of the effective EIP descriptor into the provider-neutral Harness descriptor;
+- conversion of Harness virtual paths into binding-local paths and then `EIPPath(root_mount_id, path)` at this low-level boundary; generated EIP path types never enter Harness core or model-facing tools;
+- bounded text, async file reader/writer, command, process, port, receipt, selector, and error translation;
 - omitting `OutputPolicy` for the advertised generous envd default or mapping an explicitly narrower Harness `ToolOutputPolicy` decision into EIP `OutputPolicy`;
 - wrapping only eligible retained/process selectors as binding- and generation-scoped logical references before model exposure; file-transfer handles remain entirely inside the client;
 - provider-neutral readiness, cancellation, generation-stale handling, and binding cleanup behavior;

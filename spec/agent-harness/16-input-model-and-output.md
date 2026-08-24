@@ -151,7 +151,7 @@ Pydantic `AgentStreamEvent` values are the source events. The Harness validates 
 
 Events from a recoverable failed attempt remain visible. A later attempt continues the logical run but cannot retract earlier observations. Consumers therefore use the terminal result to determine the logical outcome rather than treating any intermediate model event as completion.
 
-The Harness does not buffer for replay, fan out consumers, persist events, or reconstruct partial provider deltas into synthetic complete messages.
+The Harness does not buffer events for replay, fan out consumers, or persist the event stream. It does retain the public part-finalization observations required to sanitize Pydantic's interrupted response: append-only partial text may remain explicitly interrupted, finalized thinking may remain with its signature, and unfinished thinking is excluded. It never presents an unfinished part as complete. [Harness State and Resume](10-snapshot-and-resume.md#interrupted-history-normalization) owns the exact continuation rules.
 
 ## Output Boundary
 

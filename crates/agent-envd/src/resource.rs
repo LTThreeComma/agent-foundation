@@ -1,36 +1,31 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::BTreeSet,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
-    time::{Duration, Instant},
+    sync::Arc,
 };
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::GlobBuilder;
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
     eip::{
-        EIPPath, FileCopyParams, FileCopySourceStability, FileFindParams, FileFindResult, FileInfo,
-        FileKind, FileListEntry, FileListParams, FileListResult, FileMkdirParams, FileMoveParams,
-        FilePatchTextParams, FileReadTextParams, FileReadTextResult, FileRemoveParams,
-        FileRevision, FileSearchMatch, FileSearchParams, FileSearchResult, FileStatParams,
-        FileStatResult, FileTextCursor, FileWriteMode, FileWriteTextParams, FindMode, OutputCursor,
-        OutputOverflow, OutputPolicy, SearchMode, StructuredOutputDisposition, TextPosition,
+        EIPPath, FileCopyParams, FileFindParams, FileFindResult, FileInfo, FileKind, FileListEntry,
+        FileListParams, FileListResult, FileMkdirParams, FileMoveParams, FilePatchTextParams,
+        FileReadTextParams, FileReadTextResult, FileRemoveParams, FileSearchMatch,
+        FileSearchParams, FileSearchResult, FileStatParams, FileStatResult, FileWriteMode,
+        FileWriteTextParams, SearchMode,
     },
     mount::{Mount, MountPathError, MountRegistry, StagedCandidate},
-    operation::{OperationInterruption, OperationRegistry, ShortIdAllocator},
-    retention::RetentionQuota,
-    transfer::{file_info, file_revision},
+    operation::{OperationInterruption, OperationRegistry},
+    transfer::file_info,
 };
 
 const MAX_TRAVERSAL_ENTRIES: usize = 10_000;
 const MAX_TRAVERSAL_DEPTH: u32 = 128;
 const MAX_PATTERN_BYTES: usize = 16 * 1024;
-const MAX_GLOBS: usize = 128;
-const MAX_SEARCH_LINE_BYTES: usize = 64 * 1024;
 const MAX_PATCH_LINE_BYTES: usize = 64 * 1024;
 const MAX_PATCH_HUNKS: u64 = 10_000;
 const RESPONSE_RESERVE_BYTES: u64 = 4096;
@@ -41,61 +36,9 @@ pub(crate) struct ResourceRegistry {
 }
 
 struct ResourceInner {
-    state: Mutex<ResourceState>,
-    quota: RetentionQuota,
-    ttl: Duration,
     max_inline_bytes: u64,
-    max_output_bytes: u64,
     max_response_bytes: u64,
     operations: OperationRegistry,
-    selector_ids: ShortIdAllocator,
-}
-
-#[derive(Default)]
-struct ResourceState {
-    snapshots: BTreeMap<String, SnapshotRecord>,
-    cursors: BTreeMap<String, StructuredCursorRecord>,
-    text_cursors: BTreeMap<String, TextCursorRecord>,
-    released_cursors: BTreeSet<String>,
-    released_order: VecDeque<String>,
-}
-
-struct SnapshotRecord {
-    payload: SnapshotPayload,
-    charged_bytes: u64,
-    expires_at: Instant,
-    expires_at_utc: chrono::DateTime<chrono::Utc>,
-    cursors: usize,
-    dropped_items: u64,
-}
-
-#[derive(Clone)]
-enum SnapshotPayload {
-    Entries(Arc<Vec<FileListEntry>>),
-    Matches(Arc<Vec<FileSearchMatch>>),
-}
-
-struct StructuredCursorRecord {
-    snapshot_id: String,
-    shape: String,
-    offset: usize,
-    expires_at: Instant,
-}
-
-struct StructuredSnapshot<T> {
-    snapshot_id: String,
-    offset: usize,
-    items: Arc<Vec<T>>,
-    dropped_items: u64,
-}
-
-struct TextCursorRecord {
-    path: EIPPath,
-    revision: FileRevision,
-    offset: u64,
-    line: u64,
-    byte_column: u64,
-    expires_at: Instant,
 }
 
 #[derive(Clone)]
@@ -126,8 +69,6 @@ pub(crate) enum ResourceError {
     Unsupported,
     Limit,
     OutputLimit,
-    InvalidHandle,
-    Busy,
     Cancelled,
     Timeout,
     UnknownOutcome,
@@ -140,23 +81,14 @@ pub(crate) enum ResourceError {
 }
 
 impl ResourceRegistry {
-    pub(crate) fn new(
-        config: &crate::config::Config,
-        operations: OperationRegistry,
-        quota: RetentionQuota,
-    ) -> Result<Self, ResourceError> {
-        Ok(Self {
+    pub(crate) fn new(config: &crate::config::Config, operations: OperationRegistry) -> Self {
+        Self {
             inner: Arc::new(ResourceInner {
-                state: Mutex::new(ResourceState::default()),
-                quota,
-                ttl: Duration::from_millis(config.limits.max_retention_ttl_ms),
                 max_inline_bytes: config.limits.max_inline_output_bytes,
-                max_output_bytes: config.limits.max_output_bytes,
                 max_response_bytes: config.limits.max_response_bytes,
-                selector_ids: ShortIdAllocator::for_generation(operations.generation()),
                 operations,
             }),
-        })
+        }
     }
 
     pub(crate) fn stat(
@@ -179,80 +111,35 @@ impl ResourceRegistry {
         mounts: &MountRegistry,
         params: &FileReadTextParams,
     ) -> Result<FileReadTextResult, ResourceError> {
-        if params.cursor.is_some() && params.start_line.is_some() {
-            return Err(ResourceError::Invalid);
-        }
         self.check_cancelled(&params.context.operation_id)?;
         let mount = read_mount(mounts, &params.path, "read_text")?;
         let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
         let info = file_info(&params.path, &opened.metadata);
-        let revision = info.revision.clone();
-        if let Some(expected) = &params.expected_revision {
-            let current = revision.as_ref().ok_or(ResourceError::Unsupported)?;
-            if expected != current {
-                return Err(ResourceError::Conflict);
-            }
-        }
-
-        let (offset, start_line, start_column) = if let Some(cursor) = &params.cursor {
-            let current = revision.as_ref().ok_or(ResourceError::Unsupported)?;
-            self.consume_text_cursor(cursor, &params.path, current)?
-        } else {
-            let line = params.start_line.unwrap_or(1);
-            let offset = find_line_offset(
-                &opened.file,
-                line,
-                opened.metadata.len(),
-                &self.inner.operations,
-                &params.context.operation_id,
-            )?;
-            (offset, line, 0)
-        };
-        let max_bytes = params
-            .max_bytes
-            .unwrap_or(self.inner.max_inline_bytes)
-            .min(self.inner.max_inline_bytes)
+        let max_bytes = self
+            .inner
+            .max_inline_bytes
             .min(
                 self.inner
                     .max_response_bytes
                     .saturating_sub(RESPONSE_RESERVE_BYTES),
             )
             .max(1);
-        let max_lines = params.max_lines.unwrap_or(u64::MAX);
-        let page = read_text_page(
+        let selection = read_text_selection(
             opened.file,
-            offset,
-            start_line,
-            start_column,
+            params.line_offset,
+            params.line_limit,
+            params.max_line_length,
             max_bytes,
-            max_lines,
-            opened.metadata.len(),
+            &self.inner.operations,
+            &params.context.operation_id,
         )?;
-        let next_cursor = if page.complete {
-            None
-        } else if let Some(revision) = revision {
-            Some(self.insert_text_cursor(TextCursorRecord {
-                path: params.path.clone(),
-                revision,
-                offset: page.end_offset,
-                line: page.end.line,
-                byte_column: page.end.byte_column,
-                expires_at: Instant::now() + self.inner.ttl,
-            })?)
-        } else {
-            None
-        };
         Ok(FileReadTextResult {
             info,
-            text: page.text,
-            start: TextPosition {
-                line: start_line,
-                byte_column: start_column,
-            },
-            end: page.end,
-            next_cursor,
-            content_complete: page.complete,
-            truncated: !page.complete,
+            text: selection.text,
+            line_offset: params.line_offset,
+            lines_read: selection.lines_read,
+            has_more: selection.has_more,
+            truncated_lines: selection.truncated_lines,
         })
     }
 
@@ -261,37 +148,7 @@ impl ResourceRegistry {
         mounts: &MountRegistry,
         params: &FileListParams,
     ) -> Result<FileListResult, ResourceError> {
-        let shape = shape_key("file.list", params)?;
-        let page_limit = self.page_limit(params.output_policy.as_ref())?;
-        if let Some(cursor) = &params.cursor {
-            let snapshot = self.entries_cursor(cursor, &shape)?;
-            let (items, next, encoded) = page_slice(&snapshot.items, snapshot.offset, page_limit)?;
-            let snapshot_id = snapshot.snapshot_id;
-            let entries = snapshot.items;
-            let dropped_items = snapshot.dropped_items;
-            let next_cursor =
-                self.next_structured_cursor(&snapshot_id, &shape, next, entries.len())?;
-            let dropped_items = dropped_items
-                + if next < entries.len() && next_cursor.is_none() {
-                    (entries.len() - next) as u64
-                } else {
-                    0
-                };
-            let emitted = items.len() as u64;
-            let expires_at = self.cursor_expiry(next_cursor.as_ref());
-            return Ok(FileListResult {
-                entries: items,
-                output: disposition(
-                    emitted,
-                    encoded,
-                    next_cursor,
-                    expires_at,
-                    next == entries.len() && dropped_items == 0,
-                    dropped_items,
-                ),
-            });
-        }
-        if params.max_depth > MAX_TRAVERSAL_DEPTH {
+        if params.max_results == 0 {
             return Err(ResourceError::Limit);
         }
         let mount = read_mount(mounts, &params.path, "list")?;
@@ -301,20 +158,28 @@ impl ResourceRegistry {
         if !metadata.is_dir() {
             return Err(ResourceError::Denied);
         }
-        let depth = if params.recursive {
-            params.max_depth
-        } else {
-            1
-        };
         let entries = walk_entries(
             &mount,
             &params.path,
-            depth,
-            true,
+            1,
+            false,
             &self.inner.operations,
             &params.context.operation_id,
+        )?
+        .into_iter()
+        .filter(|entry| params.include_hidden || !is_hidden_path(&entry.relative_path))
+        .collect::<Vec<_>>();
+        let (entries, has_more) = bounded_slice(
+            &entries,
+            params.offset,
+            params.max_results,
+            self.response_item_limit(),
         )?;
-        self.finish_entries(shape, entries, page_limit, params.output_policy.as_ref())
+        Ok(FileListResult {
+            entries,
+            offset: params.offset,
+            has_more,
+        })
     }
 
     pub(crate) fn find(
@@ -322,58 +187,38 @@ impl ResourceRegistry {
         mounts: &MountRegistry,
         params: &FileFindParams,
     ) -> Result<FileFindResult, ResourceError> {
-        if params.pattern.len() > MAX_PATTERN_BYTES || params.max_depth > MAX_TRAVERSAL_DEPTH {
+        if params.pattern.len() > MAX_PATTERN_BYTES || params.max_results == 0 {
             return Err(ResourceError::Limit);
         }
-        let shape = shape_key("file.find", params)?;
-        let page_limit = self.page_limit(params.output_policy.as_ref())?;
-        if let Some(cursor) = &params.cursor {
-            let snapshot = self.entries_cursor(cursor, &shape)?;
-            let (items, next, encoded) = page_slice(&snapshot.items, snapshot.offset, page_limit)?;
-            let snapshot_id = snapshot.snapshot_id;
-            let entries = snapshot.items;
-            let dropped_items = snapshot.dropped_items;
-            let next_cursor =
-                self.next_structured_cursor(&snapshot_id, &shape, next, entries.len())?;
-            let dropped_items = dropped_items
-                + if next < entries.len() && next_cursor.is_none() {
-                    (entries.len() - next) as u64
-                } else {
-                    0
-                };
-            let emitted = items.len() as u64;
-            let expires_at = self.cursor_expiry(next_cursor.as_ref());
-            return Ok(FileFindResult {
-                entries: items,
-                output: disposition(
-                    emitted,
-                    encoded,
-                    next_cursor,
-                    expires_at,
-                    next == entries.len() && dropped_items == 0,
-                    dropped_items,
-                ),
-            });
-        }
-        let matcher = PathMatcher::new(params.mode, &params.pattern)?;
+        let matcher = PathMatcher::new(&params.pattern)?;
         let mount = read_mount(mounts, &params.root, "find")?;
         let entries = walk_entries(
             &mount,
             &params.root,
-            params.max_depth,
-            true,
+            if params.recursive {
+                MAX_TRAVERSAL_DEPTH
+            } else {
+                1
+            },
+            false,
             &self.inner.operations,
             &params.context.operation_id,
         )?
         .into_iter()
+        .filter(|entry| params.include_hidden || !is_hidden_path(&entry.relative_path))
         .filter(|entry| matcher.matches(&entry.relative_path))
-        .filter(|entry| params.kind.is_none_or(|kind| entry.info.kind == kind))
-        .collect();
-        let result =
-            self.finish_entries(shape, entries, page_limit, params.output_policy.as_ref())?;
+        .filter(|entry| params.kinds.is_empty() || params.kinds.contains(&entry.info.kind))
+        .collect::<Vec<_>>();
+        let (entries, has_more) = bounded_slice(
+            &entries,
+            params.offset,
+            params.max_results,
+            self.response_item_limit(),
+        )?;
         Ok(FileFindResult {
-            entries: result.entries,
-            output: result.output,
+            entries,
+            offset: params.offset,
+            has_more,
         })
     }
 
@@ -384,50 +229,18 @@ impl ResourceRegistry {
     ) -> Result<FileSearchResult, ResourceError> {
         if params.query.is_empty()
             || params.query.len() > MAX_PATTERN_BYTES
-            || params.include.len() + params.exclude.len() > MAX_GLOBS
-            || params.max_depth > MAX_TRAVERSAL_DEPTH
+            || params.max_results == 0
+            || params.max_line_length == 0
         {
             return Err(ResourceError::Invalid);
         }
-        let shape = shape_key("file.search", params)?;
-        let page_limit = self.page_limit(params.output_policy.as_ref())?;
-        if let Some(cursor) = &params.cursor {
-            let snapshot = self.matches_cursor(cursor, &shape)?;
-            let (items, next, encoded) = page_slice(&snapshot.items, snapshot.offset, page_limit)?;
-            let snapshot_id = snapshot.snapshot_id;
-            let matches = snapshot.items;
-            let dropped_items = snapshot.dropped_items;
-            let next_cursor =
-                self.next_structured_cursor(&snapshot_id, &shape, next, matches.len())?;
-            let dropped_items = dropped_items
-                + if next < matches.len() && next_cursor.is_none() {
-                    (matches.len() - next) as u64
-                } else {
-                    0
-                };
-            let emitted = items.len() as u64;
-            let expires_at = self.cursor_expiry(next_cursor.as_ref());
-            return Ok(FileSearchResult {
-                matches: items,
-                output: disposition(
-                    emitted,
-                    encoded,
-                    next_cursor,
-                    expires_at,
-                    next == matches.len() && dropped_items == 0,
-                    dropped_items,
-                ),
-            });
-        }
-        let includes = compile_globs(&params.include)?;
-        let excludes = compile_globs(&params.exclude)?;
         let content = ContentMatcher::new(params.mode, &params.query, params.case_sensitive)?;
         let mount = read_mount(mounts, &params.root, "search")?;
         let entries = walk_entries(
             &mount,
             &params.root,
-            params.max_depth,
-            true,
+            MAX_TRAVERSAL_DEPTH,
+            false,
             &self.inner.operations,
             &params.context.operation_id,
         )?;
@@ -436,29 +249,38 @@ impl ResourceRegistry {
             .into_iter()
             .filter(|entry| entry.info.kind == FileKind::File)
         {
-            if includes
-                .as_ref()
-                .is_some_and(|set| !set.is_match(&entry.relative_path))
-                || excludes
-                    .as_ref()
-                    .is_some_and(|set| set.is_match(&entry.relative_path))
-            {
+            if !params.include_hidden && is_hidden_path(&entry.relative_path) {
                 continue;
             }
             self.check_cancelled(&params.context.operation_id)?;
-            let file_matches = search_file(
+            let file_matches = match search_file(
                 &mount,
                 &entry.info.path,
                 &content,
+                params.max_line_length,
                 &self.inner.operations,
                 &params.context.operation_id,
-            )?;
+            ) {
+                Ok(matches) => matches,
+                Err(ResourceError::Unsupported) => continue,
+                Err(error) => return Err(error),
+            };
             if matches.len().saturating_add(file_matches.len()) > MAX_TRAVERSAL_ENTRIES {
                 return Err(ResourceError::Limit);
             }
             matches.extend(file_matches);
         }
-        self.finish_matches(shape, matches, page_limit, params.output_policy.as_ref())
+        let (matches, has_more) = bounded_slice(
+            &matches,
+            params.offset,
+            params.max_results,
+            self.response_item_limit(),
+        )?;
+        Ok(FileSearchResult {
+            matches,
+            offset: params.offset,
+            has_more,
+        })
     }
 
     pub(crate) fn write_text(
@@ -472,13 +294,9 @@ impl ResourceRegistry {
         let mount = write_mount(mounts, &params.path, "write_text")?;
         let input = params.text.as_bytes();
         let current = observe_regular(&mount, &params.path)?;
-        validate_write_mode(
-            params.mode,
-            current.as_ref(),
-            params.expected_revision.as_ref(),
-        )?;
+        validate_write_mode(params.mode, current.as_ref())?;
         let final_size = if params.mode == FileWriteMode::Append {
-            current.as_ref().map_or(0, |(_, metadata)| metadata.len())
+            current.as_ref().map_or(0, std::fs::Metadata::len)
         } else {
             0
         }
@@ -488,7 +306,9 @@ impl ResourceRegistry {
             return Err(ResourceError::Limit);
         }
         self.check_cancelled(&params.context.operation_id)?;
-        let mut candidate = mount.create_candidate().map_err(map_mount_error)?;
+        let mut candidate = mount
+            .create_candidate(&params.path)
+            .map_err(map_mount_error)?;
         candidate
             .reserve_bytes(final_size)
             .map_err(map_mount_error)?;
@@ -520,7 +340,7 @@ impl ResourceRegistry {
             .map_err(|_| ResourceError::Io)?;
         if let Some(executable) = params.executable {
             set_executable(&candidate.file, executable).map_err(|_| ResourceError::Unsupported)?;
-        } else if let Some((_, metadata)) = &current {
+        } else if let Some(metadata) = &current {
             set_permissions_from(&candidate.file, metadata).map_err(|_| ResourceError::Io)?;
         }
         self.check_cancelled(&params.context.operation_id)?;
@@ -528,7 +348,6 @@ impl ResourceRegistry {
             &mount,
             &params.path,
             params.mode,
-            current.as_ref().map(|(revision, _)| revision),
             &mut candidate,
             final_size,
             &format!("{:x}", intended.finalize()),
@@ -542,7 +361,6 @@ impl ResourceRegistry {
         params: &FileMkdirParams,
     ) -> Result<(FileInfo, u64), ResourceError> {
         let mount = write_mount(mounts, &params.path, "mkdir")?;
-        let _mutation = mount.mutation_guard();
         let relative = mount.relative_path(&params.path).map_err(map_mount_error)?;
         if relative == Path::new(".") {
             return if params.exist_ok {
@@ -596,15 +414,10 @@ impl ResourceRegistry {
         if params.patch.len() as u64 > mount.max_file_bytes {
             return Err(ResourceError::Limit);
         }
-        let _mutation = mount.mutation_guard();
         let target = mount
             .resolve_contained_target(&params.path)
             .map_err(map_mount_error)?;
         let opened = mount.open_regular(&target).map_err(map_mount_error)?;
-        let current = file_revision(&opened.metadata);
-        if current != params.expected_revision {
-            return Err(ResourceError::Conflict);
-        }
         let bytes = read_file_bounded(
             opened.file,
             mount.max_file_bytes,
@@ -620,7 +433,7 @@ impl ResourceRegistry {
             return Err(ResourceError::Limit);
         }
         self.check_cancelled(&params.context.operation_id)?;
-        let mut candidate = mount.create_candidate().map_err(map_mount_error)?;
+        let mut candidate = mount.create_candidate(&target).map_err(map_mount_error)?;
         candidate
             .reserve_bytes(result.len() as u64)
             .map_err(map_mount_error)?;
@@ -631,11 +444,10 @@ impl ResourceRegistry {
         set_permissions_from(&candidate.file, &opened.metadata).map_err(|_| ResourceError::Io)?;
         let expected_digest = format!("{:x}", Sha256::digest(result.as_bytes()));
         self.check_cancelled(&params.context.operation_id)?;
-        let mut info = commit_candidate_locked(
+        let mut info = commit_candidate(
             &mount,
             &target,
             FileWriteMode::Replace,
-            Some(&current),
             &mut candidate,
             result.len() as u64,
             &expected_digest,
@@ -648,7 +460,7 @@ impl ResourceRegistry {
         &self,
         mounts: &MountRegistry,
         params: &FileCopyParams,
-    ) -> Result<(FileInfo, u64, FileCopySourceStability), ResourceError> {
+    ) -> Result<(FileInfo, u64), ResourceError> {
         let source_mount = mounts
             .get(&params.source.mount_id)
             .ok_or(ResourceError::Denied)?;
@@ -659,24 +471,7 @@ impl ResourceRegistry {
         let mut source = source_mount
             .open_regular(&params.source)
             .map_err(map_mount_error)?;
-        let source_revision = file_revision(&source.metadata);
-        if params
-            .expected_source_revision
-            .as_ref()
-            .is_some_and(|expected| expected != &source_revision)
-        {
-            return Err(ResourceError::Conflict);
-        }
         let destination = observe_regular(&destination_mount, &params.destination)?;
-        if params
-            .expected_destination_revision
-            .as_ref()
-            .is_some_and(|expected| {
-                destination.as_ref().map(|(revision, _)| revision) != Some(expected)
-            })
-        {
-            return Err(ResourceError::Conflict);
-        }
         if destination.is_some() && !params.replace {
             return Err(ResourceError::Conflict);
         }
@@ -684,7 +479,7 @@ impl ResourceRegistry {
             return Err(ResourceError::Limit);
         }
         let mut candidate = destination_mount
-            .create_candidate()
+            .create_candidate(&params.destination)
             .map_err(map_mount_error)?;
         let (bytes, expected_digest) = copy_with_digest(
             &mut source.file,
@@ -694,10 +489,6 @@ impl ResourceRegistry {
             &params.context.operation_id,
         )?;
         set_permissions_from(&candidate.file, &source.metadata).map_err(|_| ResourceError::Io)?;
-        let final_source = source.file.metadata().map_err(|_| ResourceError::Io)?;
-        if file_revision(&final_source) != source_revision {
-            return Err(ResourceError::Conflict);
-        }
         self.check_cancelled(&params.context.operation_id)?;
         let info = commit_candidate(
             &destination_mount,
@@ -707,12 +498,11 @@ impl ResourceRegistry {
             } else {
                 FileWriteMode::Create
             },
-            destination.as_ref().map(|(revision, _)| revision),
             &mut candidate,
             bytes,
             &expected_digest,
         )?;
-        Ok((info, bytes, FileCopySourceStability::Verified))
+        Ok((info, bytes))
     }
 
     pub(crate) fn move_path(
@@ -724,33 +514,15 @@ impl ResourceRegistry {
             return Err(ResourceError::Unsupported);
         }
         let mount = write_mount(mounts, &params.source, "move")?;
-        let _mutation = mount.mutation_guard();
         let source = mount
             .metadata(&params.source, false)
             .map_err(map_mount_error)?;
-        let source_revision = cap_file_revision(&source);
         let source_identity = cap_entry_identity(&source)?;
-        if params
-            .expected_source_revision
-            .as_ref()
-            .is_some_and(|expected| expected != &source_revision)
-        {
-            return Err(ResourceError::Conflict);
-        }
         let destination = match mount.metadata(&params.destination, false) {
             Ok(metadata) => Some(metadata),
             Err(MountPathError::NotFound) => None,
             Err(error) => return Err(map_mount_error(error)),
         };
-        if params
-            .expected_destination_revision
-            .as_ref()
-            .is_some_and(|expected| {
-                destination.as_ref().map(cap_file_revision).as_ref() != Some(expected)
-            })
-        {
-            return Err(ResourceError::Conflict);
-        }
         if destination.is_some() && !params.replace {
             return Err(ResourceError::Conflict);
         }
@@ -775,7 +547,6 @@ impl ResourceRegistry {
         params: &FileRemoveParams,
     ) -> Result<u64, ResourceError> {
         let mount = write_mount(mounts, &params.path, "remove")?;
-        let _mutation = mount.mutation_guard();
         let relative = mount.relative_path(&params.path).map_err(map_mount_error)?;
         if relative == Path::new(".") || params.max_entries == 0 {
             return Err(ResourceError::Denied);
@@ -785,13 +556,6 @@ impl ResourceRegistry {
             .map_err(map_mount_error)?;
         let info = cap_file_info(&params.path, &metadata);
         if info.kind != params.expected_kind {
-            return Err(ResourceError::Conflict);
-        }
-        if params
-            .expected_revision
-            .as_ref()
-            .is_some_and(|expected| info.revision.as_ref() != Some(expected))
-        {
             return Err(ResourceError::Conflict);
         }
         if metadata.is_dir() {
@@ -848,458 +612,19 @@ impl ResourceRegistry {
         }
     }
 
-    pub(crate) fn expire(&self) {
-        self.state().prune(Instant::now(), &self.inner.quota);
-    }
-
-    pub(crate) fn release_cursor(&self, cursor: &OutputCursor) -> bool {
-        let mut state = self.state();
-        state.prune(Instant::now(), &self.inner.quota);
-        if let Some(record) = state.cursors.remove(&cursor.0) {
-            state.release_snapshot_cursor(&record.snapshot_id, &self.inner.quota);
-            state.remember_cursor_release(cursor.0.clone());
-            true
-        } else {
-            state.released_cursors.contains(&cursor.0)
-        }
-    }
-
-    fn finish_entries(
-        &self,
-        shape: String,
-        mut entries: Vec<FileListEntry>,
-        page_limit: u64,
-        policy: Option<&OutputPolicy>,
-    ) -> Result<FileListResult, ResourceError> {
-        let original_items = entries.len();
-        let retained_items = bounded_item_count(
-            &entries,
-            policy.map_or(self.inner.max_output_bytes, |policy| {
-                policy.max_output_bytes
-            }),
-        )?;
-        if retained_items < original_items
-            && policy.is_some_and(|policy| policy.overflow == OutputOverflow::Fail)
-        {
-            return Err(ResourceError::OutputLimit);
-        }
-        entries.truncate(retained_items);
-        let dropped_items = (original_items - retained_items) as u64;
-        let (items, next, encoded) = page_slice(&entries, 0, page_limit)?;
-        if next < entries.len()
-            && policy.is_some_and(|policy| policy.overflow == OutputOverflow::Fail)
-        {
-            return Err(ResourceError::OutputLimit);
-        }
-        let retained_items = entries.len();
-        let next_cursor = if next == retained_items {
-            None
-        } else {
-            self.insert_snapshot(
-                shape,
-                SnapshotPayload::Entries(Arc::new(entries)),
-                next,
-                dropped_items,
-            )?
-        };
-        let dropped_items = dropped_items
-            + if next < retained_items && next_cursor.is_none() {
-                (retained_items - next) as u64
-            } else {
-                0
-            };
-        let content_complete = next == retained_items && dropped_items == 0;
-        let emitted = items.len() as u64;
-        let expires_at = self.cursor_expiry(next_cursor.as_ref());
-        Ok(FileListResult {
-            entries: items,
-            output: disposition(
-                emitted,
-                encoded,
-                next_cursor,
-                expires_at,
-                content_complete,
-                dropped_items,
-            ),
-        })
-    }
-
-    fn finish_matches(
-        &self,
-        shape: String,
-        mut matches: Vec<FileSearchMatch>,
-        page_limit: u64,
-        policy: Option<&OutputPolicy>,
-    ) -> Result<FileSearchResult, ResourceError> {
-        let original_items = matches.len();
-        let retained_items = bounded_item_count(
-            &matches,
-            policy.map_or(self.inner.max_output_bytes, |policy| {
-                policy.max_output_bytes
-            }),
-        )?;
-        if retained_items < original_items
-            && policy.is_some_and(|policy| policy.overflow == OutputOverflow::Fail)
-        {
-            return Err(ResourceError::OutputLimit);
-        }
-        matches.truncate(retained_items);
-        let dropped_items = (original_items - retained_items) as u64;
-        let (items, next, encoded) = page_slice(&matches, 0, page_limit)?;
-        if next < matches.len()
-            && policy.is_some_and(|policy| policy.overflow == OutputOverflow::Fail)
-        {
-            return Err(ResourceError::OutputLimit);
-        }
-        let retained_items = matches.len();
-        let next_cursor = if next == retained_items {
-            None
-        } else {
-            self.insert_snapshot(
-                shape,
-                SnapshotPayload::Matches(Arc::new(matches)),
-                next,
-                dropped_items,
-            )?
-        };
-        let dropped_items = dropped_items
-            + if next < retained_items && next_cursor.is_none() {
-                (retained_items - next) as u64
-            } else {
-                0
-            };
-        let content_complete = next == retained_items && dropped_items == 0;
-        let emitted = items.len() as u64;
-        let expires_at = self.cursor_expiry(next_cursor.as_ref());
-        Ok(FileSearchResult {
-            matches: items,
-            output: disposition(
-                emitted,
-                encoded,
-                next_cursor,
-                expires_at,
-                content_complete,
-                dropped_items,
-            ),
-        })
-    }
-
-    fn page_limit(&self, policy: Option<&OutputPolicy>) -> Result<u64, ResourceError> {
-        if let Some(policy) = policy
-            && (policy.max_inline_bytes == 0
-                || policy.max_output_bytes == 0
-                || policy.max_inline_bytes > policy.max_output_bytes
-                || policy.max_inline_bytes > self.inner.max_inline_bytes
-                || policy.max_output_bytes > self.inner.max_output_bytes)
-        {
-            return Err(ResourceError::Invalid);
-        }
-        Ok(policy
-            .map_or(self.inner.max_inline_bytes, |policy| {
-                policy.max_inline_bytes
-            })
+    fn response_item_limit(&self) -> u64 {
+        self.inner
+            .max_inline_bytes
             .min(
                 self.inner
                     .max_response_bytes
                     .saturating_sub(RESPONSE_RESERVE_BYTES),
             )
-            .max(1))
-    }
-
-    fn insert_snapshot(
-        &self,
-        shape: String,
-        payload: SnapshotPayload,
-        offset: usize,
-        dropped_items: u64,
-    ) -> Result<Option<OutputCursor>, ResourceError> {
-        let charged_bytes = payload.encoded_bytes()?;
-        let mut state = self.state();
-        state.prune(Instant::now(), &self.inner.quota);
-        if !self.inner.quota.reserve(charged_bytes, 2) {
-            return Ok(None);
-        }
-        let snapshot_id = match self.inner.selector_ids.next("snapshot") {
-            Ok(selector) => selector,
-            Err(_) => {
-                self.inner.quota.release(charged_bytes, 2);
-                return Err(ResourceError::Internal);
-            }
-        };
-        let cursor = match self.inner.selector_ids.next("cursor") {
-            Ok(selector) => selector,
-            Err(_) => {
-                self.inner.quota.release(charged_bytes, 2);
-                return Err(ResourceError::Internal);
-            }
-        };
-        let expires_at = Instant::now() + self.inner.ttl;
-        let expires_at_utc = match chrono::Duration::from_std(self.inner.ttl) {
-            Ok(ttl) => chrono::Utc::now() + ttl,
-            Err(_) => {
-                self.inner.quota.release(charged_bytes, 2);
-                return Err(ResourceError::Internal);
-            }
-        };
-        state.snapshots.insert(
-            snapshot_id.clone(),
-            SnapshotRecord {
-                payload,
-                charged_bytes,
-                expires_at,
-                expires_at_utc,
-                cursors: 1,
-                dropped_items,
-            },
-        );
-        state.cursors.insert(
-            cursor.clone(),
-            StructuredCursorRecord {
-                snapshot_id,
-                shape,
-                offset,
-                expires_at,
-            },
-        );
-        Ok(Some(OutputCursor(cursor)))
-    }
-
-    fn entries_cursor(
-        &self,
-        cursor: &OutputCursor,
-        shape: &str,
-    ) -> Result<StructuredSnapshot<FileListEntry>, ResourceError> {
-        let state = self.state();
-        let record = state
-            .cursors
-            .get(&cursor.0)
-            .ok_or(ResourceError::InvalidHandle)?;
-        if record.expires_at <= Instant::now() || record.shape != shape {
-            return Err(ResourceError::Conflict);
-        }
-        let snapshot = state
-            .snapshots
-            .get(&record.snapshot_id)
-            .ok_or(ResourceError::InvalidHandle)?;
-        let SnapshotPayload::Entries(entries) = &snapshot.payload else {
-            return Err(ResourceError::Conflict);
-        };
-        Ok(StructuredSnapshot {
-            snapshot_id: record.snapshot_id.clone(),
-            offset: record.offset,
-            items: Arc::clone(entries),
-            dropped_items: snapshot.dropped_items,
-        })
-    }
-
-    fn matches_cursor(
-        &self,
-        cursor: &OutputCursor,
-        shape: &str,
-    ) -> Result<StructuredSnapshot<FileSearchMatch>, ResourceError> {
-        let state = self.state();
-        let record = state
-            .cursors
-            .get(&cursor.0)
-            .ok_or(ResourceError::InvalidHandle)?;
-        if record.expires_at <= Instant::now() || record.shape != shape {
-            return Err(ResourceError::Conflict);
-        }
-        let snapshot = state
-            .snapshots
-            .get(&record.snapshot_id)
-            .ok_or(ResourceError::InvalidHandle)?;
-        let SnapshotPayload::Matches(matches) = &snapshot.payload else {
-            return Err(ResourceError::Conflict);
-        };
-        Ok(StructuredSnapshot {
-            snapshot_id: record.snapshot_id.clone(),
-            offset: record.offset,
-            items: Arc::clone(matches),
-            dropped_items: snapshot.dropped_items,
-        })
-    }
-
-    fn next_structured_cursor(
-        &self,
-        snapshot_id: &str,
-        shape: &str,
-        offset: usize,
-        total: usize,
-    ) -> Result<Option<OutputCursor>, ResourceError> {
-        if offset >= total {
-            return Ok(None);
-        }
-        let mut state = self.state();
-        state.prune(Instant::now(), &self.inner.quota);
-        let expires_at = state
-            .snapshots
-            .get(snapshot_id)
-            .ok_or(ResourceError::InvalidHandle)?
-            .expires_at;
-        if !self.inner.quota.reserve(0, 1) {
-            return Ok(None);
-        }
-        let cursor = match self.inner.selector_ids.next("cursor") {
-            Ok(selector) => selector,
-            Err(_) => {
-                self.inner.quota.release(0, 1);
-                return Err(ResourceError::Internal);
-            }
-        };
-        state
-            .snapshots
-            .get_mut(snapshot_id)
-            .ok_or(ResourceError::InvalidHandle)?
-            .cursors += 1;
-        state.cursors.insert(
-            cursor.clone(),
-            StructuredCursorRecord {
-                snapshot_id: snapshot_id.to_owned(),
-                shape: shape.to_owned(),
-                offset,
-                expires_at,
-            },
-        );
-        Ok(Some(OutputCursor(cursor)))
-    }
-
-    fn insert_text_cursor(
-        &self,
-        record: TextCursorRecord,
-    ) -> Result<FileTextCursor, ResourceError> {
-        let mut state = self.state();
-        state.prune(Instant::now(), &self.inner.quota);
-        if !self.inner.quota.reserve(0, 1) {
-            return Err(ResourceError::Busy);
-        }
-        let cursor = match self.inner.selector_ids.next("text") {
-            Ok(selector) => selector,
-            Err(_) => {
-                self.inner.quota.release(0, 1);
-                return Err(ResourceError::Internal);
-            }
-        };
-        state.text_cursors.insert(cursor.clone(), record);
-        Ok(FileTextCursor(cursor))
-    }
-
-    fn consume_text_cursor(
-        &self,
-        cursor: &FileTextCursor,
-        path: &EIPPath,
-        revision: &FileRevision,
-    ) -> Result<(u64, u64, u64), ResourceError> {
-        let mut state = self.state();
-        state.prune(Instant::now(), &self.inner.quota);
-        let record = state
-            .text_cursors
-            .get(&cursor.0)
-            .ok_or(ResourceError::InvalidHandle)?;
-        if &record.path != path || &record.revision != revision {
-            return Err(ResourceError::Conflict);
-        }
-        Ok((record.offset, record.line, record.byte_column))
-    }
-
-    fn cursor_expiry(
-        &self,
-        cursor: Option<&OutputCursor>,
-    ) -> Option<chrono::DateTime<chrono::Utc>> {
-        let cursor = cursor?;
-        let state = self.state();
-        let record = state.cursors.get(&cursor.0)?;
-        state
-            .snapshots
-            .get(&record.snapshot_id)
-            .map(|snapshot| snapshot.expires_at_utc)
+            .max(1)
     }
 
     fn check_cancelled(&self, operation_id: &str) -> Result<(), ResourceError> {
         check_operation(&self.inner.operations, operation_id)
-    }
-
-    fn state(&self) -> std::sync::MutexGuard<'_, ResourceState> {
-        self.inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-impl ResourceState {
-    fn prune(&mut self, now: Instant, quota: &RetentionQuota) {
-        let expired = self
-            .cursors
-            .iter()
-            .filter(|(_, record)| record.expires_at <= now)
-            .map(|(cursor, record)| (cursor.clone(), record.snapshot_id.clone()))
-            .collect::<Vec<_>>();
-        for (cursor, snapshot_id) in expired {
-            if self.cursors.remove(&cursor).is_some() {
-                self.release_snapshot_cursor(&snapshot_id, quota);
-            }
-        }
-        let expired_text = self
-            .text_cursors
-            .iter()
-            .filter(|(_, record)| record.expires_at <= now)
-            .map(|(cursor, _)| cursor.clone())
-            .collect::<Vec<_>>();
-        for cursor in expired_text {
-            if self.text_cursors.remove(&cursor).is_some() {
-                quota.release(0, 1);
-            }
-        }
-        let orphaned = self
-            .snapshots
-            .iter()
-            .filter(|(_, snapshot)| snapshot.cursors == 0 || snapshot.expires_at <= now)
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in orphaned {
-            let dependent = self
-                .cursors
-                .values()
-                .filter(|cursor| cursor.snapshot_id == id)
-                .count();
-            self.cursors.retain(|_, cursor| cursor.snapshot_id != id);
-            if let Some(snapshot) = self.snapshots.remove(&id) {
-                quota.release(snapshot.charged_bytes, 1 + dependent);
-            }
-        }
-    }
-
-    fn release_snapshot_cursor(&mut self, snapshot_id: &str, quota: &RetentionQuota) {
-        quota.release(0, 1);
-        if let Some(snapshot) = self.snapshots.get_mut(snapshot_id) {
-            snapshot.cursors = snapshot.cursors.saturating_sub(1);
-            if snapshot.cursors == 0 {
-                let charged = snapshot.charged_bytes;
-                self.snapshots.remove(snapshot_id);
-                quota.release(charged, 1);
-            }
-        }
-    }
-
-    fn remember_cursor_release(&mut self, cursor: String) {
-        if self.released_cursors.insert(cursor.clone()) {
-            self.released_order.push_back(cursor);
-        }
-        while self.released_order.len() > MAX_TRAVERSAL_ENTRIES {
-            if let Some(expired) = self.released_order.pop_front() {
-                self.released_cursors.remove(&expired);
-            }
-        }
-    }
-}
-
-impl SnapshotPayload {
-    fn encoded_bytes(&self) -> Result<u64, ResourceError> {
-        match self {
-            Self::Entries(entries) => encoded_items(entries.as_slice()),
-            Self::Matches(matches) => encoded_items(matches.as_slice()),
-        }
     }
 }
 
@@ -1328,7 +653,7 @@ fn write_mount(
 fn observe_regular(
     mount: &Arc<Mount>,
     path: &EIPPath,
-) -> Result<Option<(FileRevision, std::fs::Metadata)>, ResourceError> {
+) -> Result<Option<std::fs::Metadata>, ResourceError> {
     match mount.metadata(path, false) {
         Ok(metadata) if metadata.is_symlink() => return Err(ResourceError::Denied),
         Ok(metadata) if !metadata.is_file() => return Err(ResourceError::Denied),
@@ -1337,23 +662,18 @@ fn observe_regular(
         Err(error) => return Err(map_mount_error(error)),
     }
     let opened = mount.open_regular(path).map_err(map_mount_error)?;
-    Ok(Some((file_revision(&opened.metadata), opened.metadata)))
+    Ok(Some(opened.metadata))
 }
 
 fn validate_write_mode(
     mode: FileWriteMode,
-    current: Option<&(FileRevision, std::fs::Metadata)>,
-    expected: Option<&FileRevision>,
+    current: Option<&std::fs::Metadata>,
 ) -> Result<(), ResourceError> {
-    if expected.is_some_and(|expected| current.map(|(revision, _)| revision) != Some(expected)) {
-        return Err(ResourceError::Conflict);
-    }
     match mode {
         FileWriteMode::Create if current.is_some() => Err(ResourceError::Conflict),
         FileWriteMode::Replace | FileWriteMode::Append if current.is_none() => {
             Err(ResourceError::NotFound)
         }
-        FileWriteMode::Append if expected.is_none() => Err(ResourceError::Conflict),
         _ => Ok(()),
     }
 }
@@ -1362,28 +682,6 @@ fn commit_candidate(
     mount: &Arc<Mount>,
     path: &EIPPath,
     mode: FileWriteMode,
-    open_revision: Option<&FileRevision>,
-    candidate: &mut StagedCandidate,
-    expected_size: u64,
-    expected_digest: &str,
-) -> Result<FileInfo, ResourceError> {
-    let _mutation = mount.mutation_guard();
-    commit_candidate_locked(
-        mount,
-        path,
-        mode,
-        open_revision,
-        candidate,
-        expected_size,
-        expected_digest,
-    )
-}
-
-fn commit_candidate_locked(
-    mount: &Arc<Mount>,
-    path: &EIPPath,
-    mode: FileWriteMode,
-    open_revision: Option<&FileRevision>,
     candidate: &mut StagedCandidate,
     expected_size: u64,
     expected_digest: &str,
@@ -1412,14 +710,10 @@ fn commit_candidate_locked(
     if format!("{:x}", hasher.finalize()) != expected_digest {
         return Err(ResourceError::Conflict);
     }
-    let current = observe_regular(mount, path)?;
-    if current.as_ref().map(|(revision, _)| revision) != open_revision {
-        return Err(ResourceError::Conflict);
-    }
     let replace = match mode {
         FileWriteMode::Create => false,
         FileWriteMode::Replace | FileWriteMode::Append => true,
-        FileWriteMode::Upsert => current.is_some(),
+        FileWriteMode::Upsert => observe_regular(mount, path)?.is_some(),
     };
     mount
         .publish_candidate(candidate, path, replace)
@@ -1431,7 +725,7 @@ fn commit_candidate_locked(
     let opened = mount
         .open_regular(path)
         .map_err(|_| ResourceError::UnknownOutcome)?;
-    if file_revision(&candidate_metadata) != file_revision(&opened.metadata) {
+    if !same_file_identity(&candidate_metadata, &opened.metadata) {
         return Err(ResourceError::UnknownOutcome);
     }
     Ok(file_info(path, &opened.metadata))
@@ -1468,6 +762,17 @@ fn copy_with_digest(
         total = next;
     }
     Ok((total, format!("{:x}", hasher.finalize())))
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 #[cfg(unix)]
@@ -1625,12 +930,7 @@ fn walk_entries(
             let info = cap_file_info(&path, &metadata);
             let child_relative = mount.relative_path(&path).map_err(map_mount_error)?;
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                let revision = info
-                    .revision
-                    .as_ref()
-                    .map(|revision| revision.0.clone())
-                    .unwrap_or_else(|| relative_path.clone());
-                if !visited.insert(revision) {
+                if !visited.insert(cap_entry_identity(&metadata)?) {
                     return Err(ResourceError::Conflict);
                 }
                 children.push((child_relative, relative_path.clone(), depth + 1));
@@ -1662,53 +962,17 @@ fn join_logical(root: &str, relative: &str) -> String {
     }
 }
 
-struct TextPage {
+struct TextSelection {
     text: String,
-    end: TextPosition,
-    end_offset: u64,
-    complete: bool,
+    lines_read: u64,
+    has_more: bool,
+    truncated_lines: Vec<u64>,
 }
 
-fn find_line_offset(
-    file: &std::fs::File,
-    line: u64,
-    file_size: u64,
-    operations: &OperationRegistry,
-    operation_id: &str,
-) -> Result<u64, ResourceError> {
-    if line == 1 {
-        return Ok(0);
-    }
-    let mut reader = BufReader::new(file.try_clone().map_err(|_| ResourceError::Io)?);
-    let mut current = 1_u64;
-    let mut offset = 0_u64;
-    while offset < file_size {
-        check_operation(operations, operation_id)?;
-        let available = reader.fill_buf().map_err(|_| ResourceError::Io)?;
-        if available.is_empty() {
-            break;
-        }
-        let consumed = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |position| position + 1);
-        let ended_line = available[consumed - 1] == b'\n';
-        reader.consume(consumed);
-        offset = offset
-            .checked_add(consumed as u64)
-            .ok_or(ResourceError::Limit)?;
-        if ended_line {
-            current += 1;
-            if current == line {
-                return Ok(offset);
-            }
-        }
-    }
-    if current == line && offset == file_size {
-        Ok(offset)
-    } else {
-        Err(ResourceError::Invalid)
-    }
+struct LinePreview {
+    text: String,
+    terminated: bool,
+    truncated: bool,
 }
 
 fn read_file_bounded(
@@ -1735,189 +999,203 @@ fn read_file_bounded(
     }
 }
 
-fn read_text_page(
-    mut file: std::fs::File,
-    offset: u64,
-    start_line: u64,
-    start_column: u64,
+fn read_text_selection(
+    file: std::fs::File,
+    line_offset: u64,
+    line_limit: u64,
+    max_line_length: u64,
     max_bytes: u64,
-    max_lines: u64,
-    file_size: u64,
-) -> Result<TextPage, ResourceError> {
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|_| ResourceError::Io)?;
-    let remaining = file_size.saturating_sub(offset);
-    let read_limit = remaining.min(max_bytes.saturating_add(4));
-    let mut bytes = Vec::with_capacity(read_limit as usize);
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ResourceError::Io)?;
-    let nominal = bytes.len().min(max_bytes as usize);
-    let mut end = nominal;
-    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
-        end -= 1;
-        if nominal - end > 3 {
-            return Err(ResourceError::Unsupported);
+    operations: &OperationRegistry,
+    operation_id: &str,
+) -> Result<TextSelection, ResourceError> {
+    let max_chars = usize::try_from(max_line_length).map_err(|_| ResourceError::Limit)?;
+    let mut reader = BufReader::new(file);
+    let mut text = String::new();
+    let mut line_index = 0_u64;
+    let mut lines_read = 0_u64;
+    let mut truncated_lines = Vec::new();
+    let mut has_more = false;
+    loop {
+        if line_index >= line_offset && lines_read == line_limit {
+            check_operation(operations, operation_id)?;
+            has_more = !reader.fill_buf().map_err(|_| ResourceError::Io)?.is_empty();
+            break;
         }
-    }
-    let valid = std::str::from_utf8(&bytes[..end]).map_err(|_| ResourceError::Unsupported)?;
-    if valid.contains('\0') {
-        return Err(ResourceError::Unsupported);
-    }
-    let mut selected_end = valid.len();
-    if max_lines != u64::MAX {
-        let mut lines = 0_u64;
-        for (index, byte) in valid.bytes().enumerate() {
-            if byte == b'\n' {
-                lines += 1;
-                if lines >= max_lines {
-                    selected_end = index + 1;
-                    break;
-                }
+        let Some(line) = read_line_preview(&mut reader, max_chars, operations, operation_id)?
+        else {
+            break;
+        };
+        if line_index < line_offset {
+            line_index += 1;
+            continue;
+        }
+        let required = line.text.len() as u64 + u64::from(line.terminated);
+        if (text.len() as u64).saturating_add(required) > max_bytes {
+            if lines_read == 0 {
+                return Err(ResourceError::OutputLimit);
             }
+            has_more = true;
+            break;
         }
-    }
-    let text = valid[..selected_end].to_owned();
-    let mut line = start_line;
-    let mut column = start_column;
-    for byte in text.bytes() {
-        if byte == b'\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
+        text.push_str(&line.text);
+        if line.terminated {
+            text.push('\n');
         }
+        if line.truncated {
+            truncated_lines.push(line_index + 1);
+        }
+        line_index += 1;
+        lines_read += 1;
     }
-    let end_offset = offset + selected_end as u64;
-    Ok(TextPage {
+    Ok(TextSelection {
         text,
-        end: TextPosition {
-            line,
-            byte_column: column,
-        },
-        end_offset,
-        complete: end_offset == file_size,
+        lines_read,
+        has_more,
+        truncated_lines,
     })
 }
 
-fn page_slice<T: Clone + Serialize>(
-    items: &[T],
-    offset: usize,
-    limit: u64,
-) -> Result<(Vec<T>, usize, u64), ResourceError> {
-    if offset > items.len() {
-        return Err(ResourceError::InvalidHandle);
+fn read_line_preview<R: BufRead>(
+    reader: &mut R,
+    max_chars: usize,
+    operations: &OperationRegistry,
+    operation_id: &str,
+) -> Result<Option<LinePreview>, ResourceError> {
+    let capture_limit = max_chars
+        .checked_mul(4)
+        .and_then(|value| value.checked_add(4))
+        .ok_or(ResourceError::Limit)?;
+    let mut captured = Vec::new();
+    let mut saw_line = false;
+    let mut terminated = false;
+    let mut overflow = false;
+    let mut utf8_tail = Vec::new();
+    loop {
+        check_operation(operations, operation_id)?;
+        let available = reader.fill_buf().map_err(|_| ResourceError::Io)?;
+        if available.is_empty() {
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        let content_end = newline.unwrap_or(consumed);
+        let content = &available[..content_end];
+        if content.contains(&0) {
+            return Err(ResourceError::Unsupported);
+        }
+        let mut validation = std::mem::take(&mut utf8_tail);
+        validation.extend_from_slice(content);
+        match std::str::from_utf8(&validation) {
+            Ok(_) => {}
+            Err(error) if error.error_len().is_none() => {
+                utf8_tail.extend_from_slice(&validation[error.valid_up_to()..]);
+            }
+            Err(_) => return Err(ResourceError::Unsupported),
+        }
+        if newline.is_some() && !utf8_tail.is_empty() {
+            return Err(ResourceError::Unsupported);
+        }
+        saw_line |= !content.is_empty() || newline.is_some();
+        let remaining = capture_limit.saturating_sub(captured.len());
+        let retained = remaining.min(content.len());
+        captured.extend_from_slice(&content[..retained]);
+        overflow |= retained < content.len();
+        reader.consume(consumed);
+        if newline.is_some() {
+            terminated = true;
+            break;
+        }
     }
-    let mut page = Vec::new();
+    if !utf8_tail.is_empty() {
+        return Err(ResourceError::Unsupported);
+    }
+    if !saw_line {
+        return Ok(None);
+    }
+    let valid_length = match std::str::from_utf8(&captured) {
+        Ok(_) => captured.len(),
+        Err(error) if overflow && error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => return Err(ResourceError::Unsupported),
+    };
+    let valid =
+        std::str::from_utf8(&captured[..valid_length]).map_err(|_| ResourceError::Unsupported)?;
+    let end = valid
+        .char_indices()
+        .nth(max_chars)
+        .map_or(valid.len(), |(index, _)| index);
+    Ok(Some(LinePreview {
+        text: valid[..end].to_owned(),
+        terminated,
+        truncated: overflow || end < valid.len(),
+    }))
+}
+
+fn bounded_slice<T: Clone + Serialize>(
+    items: &[T],
+    offset: u64,
+    max_results: u32,
+    max_bytes: u64,
+) -> Result<(Vec<T>, bool), ResourceError> {
+    if offset >= items.len() as u64 {
+        return Ok((Vec::new(), false));
+    }
+    let mut selected = Vec::new();
     let mut encoded = 0_u64;
-    let mut next = offset;
-    while next < items.len() {
+    let mut next = usize::try_from(offset).map_err(|_| ResourceError::Limit)?;
+    while next < items.len() && selected.len() < max_results as usize {
         let size = serde_json::to_vec(&items[next])
             .map_err(|_| ResourceError::Internal)?
             .len() as u64;
-        if encoded.saturating_add(size) > limit {
-            if page.is_empty() {
+        if encoded.saturating_add(size) > max_bytes {
+            if selected.is_empty() {
                 return Err(ResourceError::OutputLimit);
             }
             break;
         }
         encoded += size;
-        page.push(items[next].clone());
+        selected.push(items[next].clone());
         next += 1;
     }
-    Ok((page, next, encoded))
+    Ok((selected, next < items.len()))
 }
 
-fn disposition(
-    emitted_items: u64,
-    encoded_bytes: u64,
-    cursor: Option<OutputCursor>,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    content_complete: bool,
-    dropped_items: u64,
-) -> StructuredOutputDisposition {
-    StructuredOutputDisposition {
-        producer_complete: true,
-        content_complete,
-        emitted_items,
-        dropped_items: (dropped_items > 0).then_some(dropped_items),
-        encoded_bytes,
-        cursor,
-        expires_at,
-    }
-}
-
-fn bounded_item_count<T: Serialize>(items: &[T], limit: u64) -> Result<usize, ResourceError> {
-    let mut encoded = 0_u64;
-    for (index, item) in items.iter().enumerate() {
-        let size = serde_json::to_vec(item)
-            .map_err(|_| ResourceError::Internal)?
-            .len() as u64;
-        let next = encoded.checked_add(size).ok_or(ResourceError::Limit)?;
-        if next > limit {
-            return Ok(index);
-        }
-        encoded = next;
-    }
-    Ok(items.len())
-}
-
-fn encoded_items<T: Serialize>(items: &[T]) -> Result<u64, ResourceError> {
-    items.iter().try_fold(0_u64, |total, item| {
-        let size = serde_json::to_vec(item)
-            .map_err(|_| ResourceError::Internal)?
-            .len() as u64;
-        total.checked_add(size).ok_or(ResourceError::Limit)
-    })
-}
-
-fn shape_key<T: Serialize>(method: &str, params: &T) -> Result<String, ResourceError> {
-    let mut value = serde_json::to_value(params).map_err(|_| ResourceError::Internal)?;
-    let object = value.as_object_mut().ok_or(ResourceError::Internal)?;
-    object.remove("context");
-    object.remove("cursor");
-    object.remove("output_policy");
-    let mut hasher = Sha256::new();
-    hasher.update(method.as_bytes());
-    hasher.update([0]);
-    hasher.update(serde_json::to_vec(&value).map_err(|_| ResourceError::Internal)?);
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-enum PathMatcher {
-    Glob(globset::GlobMatcher),
-    Regex(Regex),
+struct PathMatcher {
+    matcher: globset::GlobMatcher,
+    basename: bool,
 }
 
 impl PathMatcher {
-    fn new(mode: FindMode, pattern: &str) -> Result<Self, ResourceError> {
-        match mode {
-            FindMode::Glob => {
-                validate_glob_pattern(pattern)?;
-                Ok(Self::Glob(
-                    GlobBuilder::new(pattern)
-                        .literal_separator(true)
-                        .build()
-                        .map_err(|_| ResourceError::Invalid)?
-                        .compile_matcher(),
-                ))
-            }
-            FindMode::Regex => Ok(Self::Regex(
-                Regex::new(&format!("^(?:{pattern})$")).map_err(|_| ResourceError::Invalid)?,
-            )),
-        }
+    fn new(pattern: &str) -> Result<Self, ResourceError> {
+        validate_glob_pattern(pattern)?;
+        let anchored = pattern.starts_with('/');
+        let normalized = pattern.strip_prefix('/').unwrap_or(pattern);
+        GlobBuilder::new(normalized)
+            .literal_separator(true)
+            .build()
+            .map_err(|_| ResourceError::Invalid)
+            .map(|glob| Self {
+                matcher: glob.compile_matcher(),
+                basename: !anchored && !normalized.contains('/'),
+            })
     }
 
     fn matches(&self, path: &str) -> bool {
-        match self {
-            Self::Glob(glob) => glob.is_match(path),
-            Self::Regex(regex) => regex.is_match(path),
-        }
+        let candidate = if self.basename {
+            path.rsplit('/').next().unwrap_or(path)
+        } else {
+            path
+        };
+        self.matcher.is_match(candidate)
     }
 }
 
+fn is_hidden_path(path: &str) -> bool {
+    path.split('/').any(|component| component.starts_with('.'))
+}
+
 fn validate_glob_pattern(pattern: &str) -> Result<(), ResourceError> {
-    if pattern.contains(['{', '}', '\\'])
+    if pattern.strip_prefix('/').unwrap_or(pattern).is_empty()
+        || pattern.contains(['{', '}', '\\'])
         || pattern
             .split('/')
             .any(|segment| segment.contains("**") && segment != "**")
@@ -1925,29 +1203,6 @@ fn validate_glob_pattern(pattern: &str) -> Result<(), ResourceError> {
         return Err(ResourceError::Invalid);
     }
     Ok(())
-}
-
-fn compile_globs(patterns: &[String]) -> Result<Option<GlobSet>, ResourceError> {
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        if pattern.len() > MAX_PATTERN_BYTES {
-            return Err(ResourceError::Limit);
-        }
-        validate_glob_pattern(pattern)?;
-        builder.add(
-            GlobBuilder::new(pattern)
-                .literal_separator(true)
-                .build()
-                .map_err(|_| ResourceError::Invalid)?,
-        );
-    }
-    builder
-        .build()
-        .map(Some)
-        .map_err(|_| ResourceError::Invalid)
 }
 
 enum ContentMatcher {
@@ -1975,109 +1230,53 @@ impl ContentMatcher {
         }
     }
 
-    fn ranges(&self, line: &str, max_matches: usize) -> Result<Vec<(usize, usize)>, ResourceError> {
-        let ranges = match self {
-            Self::Literal(query) => line
-                .match_indices(query)
-                .map(|(start, value)| (start, start + value.len()))
-                .take(max_matches.saturating_add(1))
-                .collect::<Vec<_>>(),
-            Self::Regex(regex) => regex
-                .find_iter(line)
-                .map(|matched| (matched.start(), matched.end()))
-                .take(max_matches.saturating_add(1))
-                .collect::<Vec<_>>(),
-        };
-        if ranges.len() > max_matches {
-            Err(ResourceError::Limit)
-        } else {
-            Ok(ranges)
+    fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::Literal(query) => line.contains(query),
+            Self::Regex(regex) => regex.is_match(line),
         }
     }
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
+fn truncate_chars(value: &str, max_chars: usize) -> (&str, bool) {
+    match value.char_indices().nth(max_chars) {
+        Some((end, _)) => (&value[..end], true),
+        None => (value, false),
     }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
 }
 
 fn search_file(
     mount: &Arc<Mount>,
     path: &EIPPath,
     matcher: &ContentMatcher,
+    max_line_length: u64,
     operations: &OperationRegistry,
     operation_id: &str,
 ) -> Result<Vec<FileSearchMatch>, ResourceError> {
     let opened = mount.open_regular(path).map_err(map_mount_error)?;
-    let mut reader = BufReader::new(opened.file);
-    let mut line = Vec::new();
-    let mut line_number = 1_u64;
-    let mut offset = 0_u64;
+    let bytes = read_file_bounded(opened.file, mount.max_file_bytes, operations, operation_id)?;
+    if bytes.contains(&0) {
+        return Err(ResourceError::Unsupported);
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| ResourceError::Unsupported)?;
+    let requested_chars = usize::try_from(max_line_length).map_err(|_| ResourceError::Limit)?;
     let mut matches = Vec::new();
-    loop {
-        check_operation(operations, operation_id)?;
-        line.clear();
-        let read = read_bounded_line(&mut reader, &mut line, MAX_SEARCH_LINE_BYTES)?;
-        if read == 0 {
-            break;
-        }
-        if line.contains(&0) {
-            return Ok(Vec::new());
-        }
-        let text = match std::str::from_utf8(&line) {
-            Ok(text) => text,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let preview = text.trim_end_matches(['\r', '\n']);
-        let remaining = MAX_TRAVERSAL_ENTRIES.saturating_sub(matches.len());
-        let ranges = matcher.ranges(preview, remaining)?;
-        for (start, _) in ranges {
+    for (index, raw_line) in text.split_inclusive('\n').enumerate() {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        if matcher.matches(line) {
+            let (preview, preview_truncated) = truncate_chars(line, requested_chars);
             matches.push(FileSearchMatch {
                 path: path.clone(),
-                line_number,
-                byte_offset: offset + start as u64,
-                preview: truncate_utf8(preview, 4096).to_owned(),
+                line_number: index as u64 + 1,
+                preview: preview.to_owned(),
+                preview_truncated,
             });
             if matches.len() > MAX_TRAVERSAL_ENTRIES {
                 return Err(ResourceError::Limit);
             }
         }
-        offset += read as u64;
-        line_number += 1;
     }
     Ok(matches)
-}
-
-fn read_bounded_line<R: BufRead>(
-    reader: &mut R,
-    output: &mut Vec<u8>,
-    max_bytes: usize,
-) -> Result<usize, ResourceError> {
-    loop {
-        let available = reader.fill_buf().map_err(|_| ResourceError::Io)?;
-        if available.is_empty() {
-            return Ok(output.len());
-        }
-        let consumed = available
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |position| position + 1);
-        if output.len().saturating_add(consumed) > max_bytes {
-            return Err(ResourceError::Limit);
-        }
-        let ended_line = available[consumed - 1] == b'\n';
-        output.extend_from_slice(&available[..consumed]);
-        reader.consume(consumed);
-        if ended_line {
-            return Ok(output.len());
-        }
-    }
 }
 
 fn apply_unified_diff(source: &str, patch: &str) -> Result<(String, u64), ResourceError> {
@@ -2272,33 +1471,7 @@ fn cap_file_info(path: &EIPPath, metadata: &cap_std::fs::Metadata) -> FileInfo {
             .map(cap_std::time::SystemTime::into_std)
             .map(chrono::DateTime::from),
         executable: cap_executable(metadata),
-        revision: cfg!(unix).then(|| cap_file_revision(metadata)),
     }
-}
-
-fn cap_file_revision(metadata: &cap_std::fs::Metadata) -> FileRevision {
-    let mut hasher = Sha256::new();
-    #[cfg(unix)]
-    {
-        use cap_std::fs::MetadataExt;
-        for value in [
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime() as u64,
-            metadata.mtime_nsec() as u64,
-            metadata.ctime() as u64,
-            metadata.ctime_nsec() as u64,
-            metadata.mode() as u64,
-        ] {
-            hasher.update(value.to_be_bytes());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        hasher.update(metadata.len().to_be_bytes());
-    }
-    FileRevision(format!("r1-{:x}", hasher.finalize()))
 }
 
 #[cfg(unix)]
@@ -2339,11 +1512,10 @@ mod tests {
         config::{Config, TrustedMountConfig},
         eip::{
             EIPCallContext, EIPPath, FileFindParams, FileKind, FileListParams, FileReadTextParams,
-            FileSearchParams, FileStatParams, FindMode, OutputOverflow, OutputPolicy, SearchMode,
+            FileSearchParams, FileStatParams, SearchMode,
         },
         mount::MountRegistry,
         operation::{OperationRegistry, random_selector},
-        retention::RetentionQuota,
     };
 
     use super::{ResourceError, ResourceRegistry, apply_unified_diff, join_logical};
@@ -2396,28 +1568,13 @@ mod tests {
             let tree = TempTree::new();
             let native = tree.child("native");
             fs::create_dir(&native).expect("native root");
-            let staging_root = if writable {
-                let staging = tree.child("staging");
-                fs::create_dir(&staging).expect("staging root");
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                        .expect("private staging permissions");
-                }
-                Some(staging)
-            } else {
-                None
-            };
             let mut config = Config::for_test("env-resource-test");
             config.limits.max_staged_file_bytes = max_bytes;
             config.limits.max_staged_file_objects = max_objects;
             config.mounts.push(TrustedMountConfig {
                 mount_id: "workspace".to_owned(),
                 native_root: native.clone(),
-                staging_root,
                 writable,
-                exclusive_mutation_control: writable,
                 allow_command_execution: false,
                 max_file_bytes: 1024 * 1024,
                 allowed_operations: Vec::new(),
@@ -2429,10 +1586,8 @@ mod tests {
                 Duration::from_secs(60),
                 Duration::from_secs(60),
             );
-            let mounts = MountRegistry::initialize(&config).expect("mounts initialize");
-            let quota = RetentionQuota::new(&config).expect("retention quota");
-            let resources =
-                ResourceRegistry::new(&config, operations, quota).expect("resources initialize");
+            let mounts = MountRegistry::initialize_scoped(&config).expect("mounts initialize");
+            let resources = ResourceRegistry::new(&config, operations);
             Self {
                 _tree: tree,
                 native,
@@ -2459,10 +1614,25 @@ mod tests {
 
     #[test]
     fn applies_strict_unified_diff() {
-        let patch = "--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n";
-        let (result, hunks) = apply_unified_diff("one\ntwo\n", patch).expect("patch applies");
-        assert_eq!(result, "one\nthree\n");
-        assert_eq!(hunks, 1);
+        let cases = [
+            (
+                "one\ntwo\n",
+                "--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n",
+                "one\nthree\n",
+            ),
+            ("a\rb\n", "@@ -1 +1 @@\n-a\rb\n+x\n", "x\n"),
+            ("a\u{2028}b\n", "@@ -1 +1 @@\n-a\u{2028}b\n+x\n", "x\n"),
+            (
+                "tail",
+                "@@ -1 +1 @@\n-tail\n\\ No newline at end of file\n+done\n\\ No newline at end of file",
+                "done",
+            ),
+        ];
+        for (source, patch, expected) in cases {
+            let (result, hunks) = apply_unified_diff(source, patch).expect("patch applies");
+            assert_eq!(result, expected);
+            assert_eq!(hunks, 1);
+        }
     }
 
     #[test]
@@ -2482,7 +1652,6 @@ mod tests {
                 path: path("/oversized.txt"),
                 mode: FileWriteMode::Create,
                 text: "123456789".to_owned(),
-                expected_revision: None,
                 executable: None,
             },
         );
@@ -2498,7 +1667,6 @@ mod tests {
                     path: path("/bounded.txt"),
                     mode: FileWriteMode::Create,
                     text: "12345678".to_owned(),
-                    expected_revision: None,
                     executable: None,
                 },
             )
@@ -2511,10 +1679,20 @@ mod tests {
     }
 
     #[test]
-    fn observes_text_and_structured_resources_with_stable_cursors() {
+    fn observes_text_and_structured_resources_with_explicit_offsets() {
         let fixture = Fixture::read_only();
         fs::create_dir(fixture.native.join("docs")).expect("docs directory");
         fs::write(fixture.native.join("docs/main.txt"), "alpha\nbeta\n").expect("text fixture");
+        fs::write(
+            fixture.native.join("docs/invalid-after-page.bin"),
+            b"valid\n\xff",
+        )
+        .expect("invalid trailing text fixture");
+        fs::write(
+            fixture.native.join("docs/boundaries.txt"),
+            "a\rb\nc\u{2028}d\r\ne",
+        )
+        .expect("line boundary fixture");
         for index in 0..8 {
             fs::write(
                 fixture.native.join(format!("docs/item-{index}.txt")),
@@ -2535,7 +1713,6 @@ mod tests {
             )
             .expect("stat succeeds");
         assert_eq!(stat.info.kind, FileKind::File);
-        assert_eq!(stat.info.revision.is_some(), cfg!(unix));
 
         let first = fixture
             .resources
@@ -2544,63 +1721,66 @@ mod tests {
                 &FileReadTextParams {
                     context: context("text-1"),
                     path: path("/docs/main.txt"),
-                    cursor: None,
-                    start_line: None,
-                    max_lines: None,
-                    max_bytes: Some(5),
-                    expected_revision: stat.info.revision.clone(),
+                    line_offset: 0,
+                    line_limit: 1,
+                    max_line_length: 2_000,
                 },
             )
-            .expect("first text page");
-        assert_eq!(first.text, "alpha");
-        assert!(!first.content_complete);
-        #[cfg(unix)]
-        {
-            let second = fixture
-                .resources
-                .read_text(
-                    &fixture.mounts,
-                    &FileReadTextParams {
-                        context: context("text-2"),
-                        path: path("/docs/main.txt"),
-                        cursor: first.next_cursor,
-                        start_line: None,
-                        max_lines: None,
-                        max_bytes: Some(64),
-                        expected_revision: None,
-                    },
-                )
-                .expect("second text page");
-            assert_eq!(second.text, "\nbeta\n");
-            assert!(second.content_complete);
-        }
-        #[cfg(not(unix))]
-        {
-            assert!(first.next_cursor.is_none());
-            let restarted = fixture
-                .resources
-                .read_text(
-                    &fixture.mounts,
-                    &FileReadTextParams {
-                        context: context("text-2"),
-                        path: path("/docs/main.txt"),
-                        cursor: None,
-                        start_line: None,
-                        max_lines: None,
-                        max_bytes: Some(64),
-                        expected_revision: None,
-                    },
-                )
-                .expect("separate text observation");
-            assert_eq!(restarted.text, "alpha\nbeta\n");
-            assert!(restarted.content_complete);
-        }
+            .expect("first text segment");
+        assert_eq!(first.text, "alpha\n");
+        assert_eq!(first.lines_read, 1);
+        assert!(first.has_more);
+        let second = fixture
+            .resources
+            .read_text(
+                &fixture.mounts,
+                &FileReadTextParams {
+                    context: context("text-2"),
+                    path: path("/docs/main.txt"),
+                    line_offset: first.line_offset + first.lines_read,
+                    line_limit: 1,
+                    max_line_length: 2_000,
+                },
+            )
+            .expect("second text segment");
+        assert_eq!(second.text, "beta\n");
+        assert_eq!(second.lines_read, 1);
+        assert!(!second.has_more);
 
-        let policy = OutputPolicy {
-            max_inline_bytes: 700,
-            max_output_bytes: 4096,
-            overflow: OutputOverflow::Truncate,
-        };
+        let valid_page = fixture
+            .resources
+            .read_text(
+                &fixture.mounts,
+                &FileReadTextParams {
+                    context: context("text-invalid-after-page"),
+                    path: path("/docs/invalid-after-page.bin"),
+                    line_offset: 0,
+                    line_limit: 1,
+                    max_line_length: 2_000,
+                },
+            )
+            .expect("invalid UTF-8 after the requested page is not scanned");
+        assert_eq!(valid_page.text, "valid\n");
+        assert_eq!(valid_page.lines_read, 1);
+        assert!(valid_page.has_more);
+
+        let boundaries = fixture
+            .resources
+            .read_text(
+                &fixture.mounts,
+                &FileReadTextParams {
+                    context: context("text-boundaries"),
+                    path: path("/docs/boundaries.txt"),
+                    line_offset: 1,
+                    line_limit: 1,
+                    max_line_length: 2_000,
+                },
+            )
+            .expect("LF-only line selection succeeds");
+        assert_eq!(boundaries.text, "c\u{2028}d\r\n");
+        assert_eq!(boundaries.lines_read, 1);
+        assert!(boundaries.has_more);
+
         let first_list = fixture
             .resources
             .list(
@@ -2608,41 +1788,30 @@ mod tests {
                 &FileListParams {
                     context: context("list-1"),
                     path: path("/docs"),
-                    recursive: false,
-                    max_depth: 1,
-                    cursor: None,
-                    output_policy: Some(policy.clone()),
+                    offset: 0,
+                    max_results: 3,
+                    include_hidden: false,
                 },
             )
-            .expect("first list page");
-        let cursor = first_list
-            .output
-            .cursor
-            .clone()
-            .expect("continuation cursor");
-        assert!(first_list.output.producer_complete);
-        assert!(!first_list.output.content_complete);
-        assert_eq!(first_list.output.dropped_items, None);
-        assert!(first_list.output.expires_at.is_some());
-        let continuation_params = FileListParams {
-            context: context("list-2"),
-            path: path("/docs"),
-            recursive: false,
-            max_depth: 1,
-            cursor: Some(cursor.clone()),
-            output_policy: Some(policy),
-        };
+            .expect("first list segment");
+        assert_eq!(first_list.entries.len(), 3);
+        assert!(first_list.has_more);
         let continued = fixture
             .resources
-            .list(&fixture.mounts, &continuation_params)
+            .list(
+                &fixture.mounts,
+                &FileListParams {
+                    context: context("list-2"),
+                    path: path("/docs"),
+                    offset: first_list.offset + first_list.entries.len() as u64,
+                    max_results: 3,
+                    include_hidden: false,
+                },
+            )
             .expect("list continuation");
-        let repeated = fixture
-            .resources
-            .list(&fixture.mounts, &continuation_params)
-            .expect("cursor is non-draining");
-        assert_eq!(continued.entries, repeated.entries);
-        assert!(fixture.resources.release_cursor(&cursor));
-        assert!(fixture.resources.release_cursor(&cursor));
+        assert_eq!(continued.entries.len(), 3);
+        assert!(continued.has_more);
+        assert_ne!(continued.entries, first_list.entries);
 
         let found = fixture
             .resources
@@ -2651,16 +1820,17 @@ mod tests {
                 &FileFindParams {
                     context: context("find"),
                     root: path("/"),
-                    pattern: "docs/*.txt".to_owned(),
-                    mode: FindMode::Glob,
-                    kind: Some(FileKind::File),
-                    max_depth: 2,
-                    cursor: None,
-                    output_policy: None,
+                    pattern: "*.txt".to_owned(),
+                    offset: 0,
+                    max_results: 100,
+                    recursive: true,
+                    include_hidden: false,
+                    kinds: vec![FileKind::File],
                 },
             )
             .expect("find succeeds");
-        assert_eq!(found.entries.len(), 9);
+        assert_eq!(found.entries.len(), 10);
+        assert!(!found.has_more);
 
         let searched = fixture
             .resources
@@ -2671,22 +1841,47 @@ mod tests {
                     root: path("/docs"),
                     query: "needle".to_owned(),
                     mode: SearchMode::Literal,
-                    include: vec!["*.txt".to_owned()],
-                    exclude: vec!["main.txt".to_owned()],
-                    max_depth: 1,
-                    cursor: None,
-                    output_policy: None,
                     case_sensitive: true,
+                    offset: 0,
+                    max_results: 100,
+                    include_hidden: false,
+                    max_line_length: 2_000,
                 },
             )
             .expect("search succeeds");
         assert_eq!(searched.matches.len(), 8);
+        assert!(!searched.has_more);
         assert!(
             searched
                 .matches
                 .windows(2)
                 .all(|pair| pair[0].path.path <= pair[1].path.path)
         );
+
+        let boundary_search = fixture
+            .resources
+            .search(
+                &fixture.mounts,
+                &FileSearchParams {
+                    context: context("search-boundaries"),
+                    root: path("/docs"),
+                    query: "d".to_owned(),
+                    mode: SearchMode::Literal,
+                    case_sensitive: true,
+                    offset: 0,
+                    max_results: 10,
+                    include_hidden: false,
+                    max_line_length: 2_000,
+                },
+            )
+            .expect("LF-only search succeeds");
+        let boundary_match = boundary_search
+            .matches
+            .iter()
+            .find(|matched| matched.path.path == "/docs/boundaries.txt")
+            .expect("boundary file match");
+        assert_eq!(boundary_match.line_number, 2);
+        assert_eq!(boundary_match.preview, "c\u{2028}d\r");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2705,7 +1900,7 @@ mod tests {
                 },
             )
             .expect("mkdir succeeds");
-        let (created, bytes) = fixture
+        let (_created, bytes) = fixture
             .resources
             .write_text(
                 &fixture.mounts,
@@ -2714,14 +1909,12 @@ mod tests {
                     path: path("/work/nested/source.txt"),
                     mode: FileWriteMode::Create,
                     text: "hello world\n".to_owned(),
-                    expected_revision: None,
                     executable: Some(false),
                 },
             )
             .expect("create succeeds");
         assert_eq!(bytes, 12);
-        let revision = created.revision.expect("revision");
-        let (appended, _) = fixture
+        let (_appended, _) = fixture
             .resources
             .write_text(
                 &fixture.mounts,
@@ -2733,12 +1926,10 @@ mod tests {
                     path: path("/work/nested/source.txt"),
                     mode: FileWriteMode::Append,
                     text: "tail\n".to_owned(),
-                    expected_revision: Some(revision),
                     executable: None,
                 },
             )
             .expect("append uses atomic replacement");
-        let patched_revision = appended.revision.expect("append revision");
         fixture
             .resources
             .patch_text(
@@ -2748,7 +1939,6 @@ mod tests {
                     path: path("/work/nested/source.txt"),
                     patch_format: "unified_diff".to_owned(),
                     patch: "@@ -1,2 +1,2 @@\n-hello world\n+hello block2\n tail\n".to_owned(),
-                    expected_revision: patched_revision,
                 },
             )
             .expect("patch succeeds");
@@ -2766,11 +1956,7 @@ mod tests {
                     context: context("copy"),
                     source: path("/work/nested/source.txt"),
                     destination: path("/work/nested/copy.txt"),
-                    expected_source_revision: None,
-                    expected_destination_revision: None,
                     replace: false,
-                    require_atomic_destination: true,
-                    require_stable_source: true,
                 },
             )
             .expect("atomic copy succeeds");
@@ -2782,8 +1968,6 @@ mod tests {
                     context: context("move"),
                     source: path("/work/nested/copy.txt"),
                     destination: path("/work/moved.txt"),
-                    expected_source_revision: None,
-                    expected_destination_revision: None,
                     replace: false,
                 },
             )
@@ -2796,24 +1980,20 @@ mod tests {
                     context: context("remove"),
                     path: moved.path,
                     expected_kind: FileKind::File,
-                    expected_revision: moved.revision,
                     recursive: false,
                     max_entries: 1,
                 },
             )
-            .expect("revision-checked removal succeeds");
+            .expect("removal succeeds");
         assert!(!fixture.native.join("work/moved.txt").exists());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn rejects_unbounded_search_lines_and_preflights_recursive_remove() {
+    fn truncates_long_search_previews_and_preflights_recursive_remove() {
         let fixture = Fixture::new();
-        fs::write(
-            fixture.native.join("long.txt"),
-            vec![b'a'; super::MAX_SEARCH_LINE_BYTES + 1],
-        )
-        .expect("long-line fixture");
+        fs::write(fixture.native.join("long.txt"), vec![b'a'; 64 * 1024 + 1])
+            .expect("long-line fixture");
         let searched = fixture.resources.search(
             &fixture.mounts,
             &FileSearchParams {
@@ -2821,15 +2001,17 @@ mod tests {
                 root: path("/"),
                 query: "a".to_owned(),
                 mode: SearchMode::Literal,
-                include: Vec::new(),
-                exclude: Vec::new(),
-                max_depth: 1,
-                cursor: None,
-                output_policy: None,
                 case_sensitive: true,
+                offset: 0,
+                max_results: 100,
+                include_hidden: false,
+                max_line_length: 2_000,
             },
         );
-        assert!(matches!(searched, Err(ResourceError::Limit)));
+        let searched = searched.expect("long search line is readable through a bounded preview");
+        assert_eq!(searched.matches.len(), 1);
+        assert_eq!(searched.matches[0].preview.len(), 2_000);
+        assert!(searched.matches[0].preview_truncated);
 
         fs::create_dir_all(fixture.native.join("tree/child")).expect("remove tree");
         fs::write(fixture.native.join("tree/child/file"), b"data").expect("remove file");
@@ -2839,7 +2021,6 @@ mod tests {
                 context: context("remove-bounded"),
                 path: path("/tree"),
                 expected_kind: FileKind::Directory,
-                expected_revision: None,
                 recursive: true,
                 max_entries: 2,
             },
@@ -2855,7 +2036,6 @@ mod tests {
                     context: context("remove-complete"),
                     path: path("/tree"),
                     expected_kind: FileKind::Directory,
-                    expected_revision: None,
                     recursive: true,
                     max_entries: 3,
                 },
@@ -2897,7 +2077,6 @@ mod tests {
                 path: path("/link.txt"),
                 mode: FileWriteMode::Replace,
                 text: "replacement".to_owned(),
-                expected_revision: None,
                 executable: None,
             },
         );
@@ -2907,20 +2086,6 @@ mod tests {
             "original"
         );
 
-        let revision = fixture
-            .resources
-            .stat(
-                &fixture.mounts,
-                &FileStatParams {
-                    context: context("symlink-stat"),
-                    path: path("/link.txt"),
-                    follow_symlinks: true,
-                },
-            )
-            .expect("stats contained symlink target")
-            .info
-            .revision
-            .expect("target revision");
         let patch = "@@ -1 +1 @@\n-original\n\\ No newline at end of file\n+patched\n\\ No newline at end of file\n";
         let (info, hunks) = fixture
             .resources
@@ -2931,7 +2096,6 @@ mod tests {
                     path: path("/link.txt"),
                     patch_format: "unified_diff".to_owned(),
                     patch: patch.to_owned(),
-                    expected_revision: revision,
                 },
             )
             .expect("patches contained symlink target");

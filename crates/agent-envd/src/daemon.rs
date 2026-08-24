@@ -18,8 +18,8 @@ use crate::{
         EnvironmentDescribeParams, EnvironmentDescribeResult, EnvironmentDescriptor, ErrorType,
         InitializeParams, InitializeResult, IsolationBackend, IsolationCleanupGuarantee,
         IsolationMode, IsolationNetworkPolicy, IsolationPosture, JsonRpcErrorResponse, JsonRpcId,
-        JsonRpcRequest, JsonRpcSuccessResponse, ReceiptOutcome, ReceiptStage, RetryHint,
-        SessionCloseParams, SessionCloseResult,
+        JsonRpcRequest, JsonRpcSuccessResponse, ReceiptOutcome, ReceiptStage, ResourceAuthority,
+        ResourceAuthorityDescriptor, RetryHint, SessionCloseParams, SessionCloseResult,
     },
     mount::MountRegistry,
     operation::{
@@ -48,11 +48,44 @@ struct SessionAdmission {
 
 struct SessionAdmissionState {
     lifecycle: SessionState,
+    resource_authority: Option<ResourceAuthority>,
     active_session_work: usize,
 }
 
 struct SessionWorkGuard<'a> {
     admission: &'a SessionAdmission,
+}
+
+#[derive(Clone, Default)]
+struct PendingOperations {
+    inner: Arc<PendingOperationsInner>,
+}
+
+#[derive(Default)]
+struct PendingOperationsInner {
+    state: Mutex<BTreeMap<String, PendingOperationState>>,
+    changed: Notify,
+    #[cfg(test)]
+    wait_entered: Notify,
+}
+
+#[derive(Clone, Copy)]
+struct PendingOperationState {
+    requests: usize,
+    admitted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAdmissionWait {
+    Admitted,
+    Removed,
+    TimedOut,
+    Closed,
+}
+
+pub(crate) struct PendingOperationGuard {
+    operations: PendingOperations,
+    operation_id: String,
 }
 
 #[derive(Clone, Default)]
@@ -79,13 +112,23 @@ struct OwnedOperationTaskGuard {
 
 type OwnedOperationResult<T> = oneshot::Receiver<Option<Result<T, EIPError>>>;
 
-pub(crate) struct Daemon {
+struct AuthoritySurface {
+    mounts: MountRegistry,
     descriptor: EnvironmentDescriptor,
+}
+
+struct AuthoritySurfaces {
+    scoped: AuthoritySurface,
+    server: Option<AuthoritySurface>,
+}
+
+pub(crate) struct Daemon {
+    surfaces: AuthoritySurfaces,
     session: SessionAdmission,
     max_operation_duration: Duration,
     operations: OperationRegistry,
+    pending_operations: PendingOperations,
     owned_operations: OwnedOperationTasks,
-    mounts: MountRegistry,
     resources: ResourceRegistry,
     retention: RetentionStore,
     execution: Option<ExecutionManager>,
@@ -138,6 +181,118 @@ impl Drop for SessionWorkGuard<'_> {
         if idle {
             self.admission.idle.notify_waiters();
         }
+    }
+}
+
+impl PendingOperations {
+    fn register(&self, operation_id: String) -> PendingOperationGuard {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let pending = state
+            .entry(operation_id.clone())
+            .or_insert(PendingOperationState {
+                requests: 0,
+                admitted: false,
+            });
+        pending.requests = pending
+            .requests
+            .checked_add(1)
+            .expect("pending request accounting overflow");
+        PendingOperationGuard {
+            operations: self.clone(),
+            operation_id,
+        }
+    }
+
+    fn mark_admitted(&self, operation_id: &str) {
+        let changed = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match state.get_mut(operation_id) {
+                Some(pending) if !pending.admitted => {
+                    pending.admitted = true;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.inner.changed.notify_waiters();
+        }
+    }
+
+    async fn wait_for_admission(
+        &self,
+        operation_id: &str,
+        deadline: Instant,
+        mut closed: watch::Receiver<bool>,
+    ) -> PendingAdmissionWait {
+        loop {
+            let changed = self.inner.changed.notified();
+            let status = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(operation_id)
+                .map(|pending| pending.admitted);
+            match status {
+                Some(true) => return PendingAdmissionWait::Admitted,
+                None => return PendingAdmissionWait::Removed,
+                Some(false) if *closed.borrow() => return PendingAdmissionWait::Closed,
+                Some(false) => {
+                    #[cfg(test)]
+                    self.inner.wait_entered.notify_one();
+                }
+            }
+            tokio::select! {
+                _ = changed => {}
+                changed = closed.changed() => {
+                    if changed.is_err() || *closed.borrow() {
+                        return PendingAdmissionWait::Closed;
+                    }
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    return PendingAdmissionWait::TimedOut;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_until_admission_wait(&self) {
+        self.inner.wait_entered.notified().await;
+    }
+
+    fn release(&self, operation_id: &str) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pending) = state.get_mut(operation_id) {
+            pending.requests = pending
+                .requests
+                .checked_sub(1)
+                .expect("pending request guard released exactly once");
+            if pending.requests == 0 {
+                state.remove(operation_id);
+            }
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+    }
+}
+
+impl Drop for PendingOperationGuard {
+    fn drop(&mut self) {
+        self.operations.release(&self.operation_id);
     }
 }
 
@@ -271,6 +426,67 @@ impl Drop for OwnedOperationTaskGuard {
     }
 }
 
+fn build_descriptor(
+    config: &Config,
+    generation: u64,
+    authority: ResourceAuthority,
+    mounts: &MountRegistry,
+    execution: Option<&ExecutionManager>,
+) -> EnvironmentDescriptor {
+    let mut capabilities = BASE_CAPABILITIES
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    capabilities.extend([
+        "operation.cancel".to_owned(),
+        "port.observe".to_owned(),
+        "receipt.read".to_owned(),
+    ]);
+    if mounts.has_complete_read_family() {
+        capabilities.push("file.read".to_owned());
+    }
+    if mounts.has_complete_write_family() {
+        capabilities.push("file.write".to_owned());
+    }
+    if mounts.supports_anywhere("find") {
+        capabilities.push("file.find".to_owned());
+    }
+    if mounts.supports_anywhere("search") {
+        capabilities.push("file.search".to_owned());
+    }
+    if execution.is_some() && mounts.supports_commands() {
+        capabilities.extend([
+            "output.read".to_owned(),
+            "process.manage".to_owned(),
+            "shell.exec".to_owned(),
+        ]);
+    }
+    capabilities.sort();
+    EnvironmentDescriptor {
+        environment_id: config.environment_id.clone(),
+        generation,
+        capabilities,
+        mounts: mounts.descriptors(),
+        shell_profiles: execution
+            .map(ExecutionManager::shell_profiles)
+            .unwrap_or_default(),
+        limits: config.limits.clone(),
+        isolation: IsolationPosture {
+            mode: IsolationMode::Disabled,
+            backend: IsolationBackend::OuterHost,
+            filesystem_containment: false,
+            process_containment: false,
+            network_containment: false,
+            network_policy: IsolationNetworkPolicy::Host,
+            cleanup_guarantee: IsolationCleanupGuarantee::OuterHost,
+        },
+        resource_authority: ResourceAuthorityDescriptor {
+            mode: authority,
+            root_mount_id: mounts.root_mount_id().map(str::to_owned),
+        },
+    }
+}
+
 impl Daemon {
     pub(crate) fn new(config: &Config) -> Result<Self, DaemonInitError> {
         Self::with_generation(config, fresh_generation()?)
@@ -287,8 +503,11 @@ impl Daemon {
                 DaemonInitError::new("max_operation_records does not fit this platform")
             })?;
         let operation_record_ttl = Duration::from_millis(config.limits.operation_record_ttl_ms);
-        let mounts = MountRegistry::initialize(config).map_err(|error| {
-            DaemonInitError::new(format!("mount initialization failed: {error}"))
+        let scoped_mounts = MountRegistry::initialize_scoped(config).map_err(|error| {
+            DaemonInitError::new(format!("scoped mount initialization failed: {error}"))
+        })?;
+        let server_mounts = MountRegistry::initialize_server(config).map_err(|error| {
+            DaemonInitError::new(format!("server mount initialization failed: {error}"))
         })?;
         let transfers = TransferRegistry::new(config, generation)
             .map_err(|_| DaemonInitError::new("transfer registry initialization failed"))?;
@@ -301,76 +520,50 @@ impl Daemon {
         );
         let retention_quota = RetentionQuota::new(config)
             .map_err(|_| DaemonInitError::new("retention quota initialization failed"))?;
-        let resources = ResourceRegistry::new(config, operations.clone(), retention_quota.clone())
-            .map_err(|_| DaemonInitError::new("resource registry initialization failed"))?;
+        let resources = ResourceRegistry::new(config, operations.clone());
         let retention = RetentionStore::new(config, generation, retention_quota)
             .map_err(|_| DaemonInitError::new("retention store initialization failed"))?;
-        let execution =
-            ExecutionManager::new(config, generation, mounts.clone(), retention.clone())
-                .map_err(|_| DaemonInitError::new("execution manager initialization failed"))?;
-        let mut capabilities = BASE_CAPABILITIES
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        capabilities.extend([
-            "operation.cancel".to_owned(),
-            "port.observe".to_owned(),
-            "receipt.read".to_owned(),
-        ]);
-        if mounts.has_complete_read_family() {
-            capabilities.push("file.read".to_owned());
-        }
-        if mounts.has_complete_write_family() {
-            capabilities.push("file.write".to_owned());
-        }
-        if mounts.supports_anywhere("find") {
-            capabilities.push("file.find".to_owned());
-        }
-        if mounts.supports_anywhere("search") {
-            capabilities.push("file.search".to_owned());
-        }
-        if execution.is_some() {
-            capabilities.extend([
-                "output.read".to_owned(),
-                "process.manage".to_owned(),
-                "shell.exec".to_owned(),
-            ]);
-        }
-        capabilities.sort();
-        let descriptor = EnvironmentDescriptor {
-            environment_id: config.environment_id.clone(),
+        let execution = ExecutionManager::new(config, generation, retention.clone())
+            .map_err(|_| DaemonInitError::new("execution manager initialization failed"))?;
+        let scoped_descriptor = build_descriptor(
+            config,
             generation,
-            capabilities,
-            mounts: mounts.descriptors(),
-            shell_profiles: execution
-                .as_ref()
-                .map(ExecutionManager::shell_profiles)
-                .unwrap_or_default(),
-            limits: config.limits.clone(),
-            isolation: IsolationPosture {
-                mode: IsolationMode::Disabled,
-                backend: IsolationBackend::OuterHost,
-                filesystem_containment: false,
-                process_containment: false,
-                network_containment: false,
-                network_policy: IsolationNetworkPolicy::Host,
-                cleanup_guarantee: IsolationCleanupGuarantee::OuterHost,
+            ResourceAuthority::Scoped,
+            &scoped_mounts,
+            execution.as_ref(),
+        );
+        let server = server_mounts.map(|mounts| AuthoritySurface {
+            descriptor: build_descriptor(
+                config,
+                generation,
+                ResourceAuthority::Server,
+                &mounts,
+                execution.as_ref(),
+            ),
+            mounts,
+        });
+        let surfaces = AuthoritySurfaces {
+            scoped: AuthoritySurface {
+                mounts: scoped_mounts,
+                descriptor: scoped_descriptor,
             },
+            server,
         };
         let (closed, _) = watch::channel(false);
         Ok(Self {
-            descriptor,
+            surfaces,
             session: SessionAdmission {
                 state: Mutex::new(SessionAdmissionState {
                     lifecycle: SessionState::Uninitialized,
+                    resource_authority: None,
                     active_session_work: 0,
                 }),
                 idle: Notify::new(),
             },
             max_operation_duration: Duration::from_millis(config.limits.max_operation_duration_ms),
             operations,
+            pending_operations: PendingOperations::default(),
             owned_operations: OwnedOperationTasks::default(),
-            mounts,
             resources,
             retention,
             execution,
@@ -382,6 +575,16 @@ impl Daemon {
 
     pub(crate) fn subscribe_closed(&self) -> watch::Receiver<bool> {
         self.closed.subscribe()
+    }
+
+    pub(crate) fn track_pending_payload(&self, payload: &str) -> Option<PendingOperationGuard> {
+        let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+        let operation_id = value
+            .get("params")?
+            .get("context")?
+            .get("operation_id")?
+            .as_str()?;
+        Some(self.pending_operations.register(operation_id.to_owned()))
     }
 
     pub(crate) fn has_active_file_transfers(&self) -> bool {
@@ -477,7 +680,6 @@ impl Daemon {
 
     pub(crate) async fn maintenance(&self) {
         self.retention.expire();
-        self.resources.expire();
         if let Some(execution) = &self.execution {
             execution.maintenance();
         }
@@ -587,8 +789,17 @@ impl Daemon {
                 "session is already initialized",
             )),
             SessionState::Initialized => {
+                let surface = state
+                    .resource_authority
+                    .and_then(|authority| self.surface_for(authority))
+                    .ok_or_else(|| {
+                        protocol_error(
+                            ErrorType::InternalError,
+                            "initialized session has no resource authority",
+                        )
+                    })?;
                 if let Some(capability) = method_capability(method)
-                    && !self
+                    && !surface
                         .descriptor
                         .capabilities
                         .iter()
@@ -615,6 +826,29 @@ impl Daemon {
             state.lifecycle = SessionState::Closed;
             self.closed.send_replace(true);
         }
+    }
+
+    fn surface_for(&self, authority: ResourceAuthority) -> Option<&AuthoritySurface> {
+        match authority {
+            ResourceAuthority::Scoped => Some(&self.surfaces.scoped),
+            ResourceAuthority::Server => self.surfaces.server.as_ref(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn effective_surface(&self) -> Result<&AuthoritySurface, EIPError> {
+        let authority = self.session.state().resource_authority.ok_or_else(|| {
+            protocol_error(
+                ErrorType::NotInitialized,
+                "session resource authority is not initialized",
+            )
+        })?;
+        self.surface_for(authority).ok_or_else(|| {
+            protocol_error(
+                ErrorType::InternalError,
+                "session resource authority is unavailable",
+            )
+        })
     }
 
     #[allow(clippy::result_large_err)]
@@ -679,9 +913,12 @@ impl Daemon {
         params: &P,
         key_allowed: bool,
     ) -> Result<BeginOutcome, EIPError> {
-        self.operations
+        let outcome = self
+            .operations
             .begin(method, context, params, key_allowed)
-            .map_err(map_registry_error)
+            .map_err(map_registry_error)?;
+        self.pending_operations.mark_admitted(&context.operation_id);
+        Ok(outcome)
     }
 
     #[allow(clippy::result_large_err)]
@@ -724,7 +961,7 @@ impl EipHandler for Daemon {
                 BeginOutcome::New(operation) => operation,
             };
         let result = EnvironmentDescribeResult {
-            descriptor: self.descriptor.clone(),
+            descriptor: self.effective_surface()?.descriptor.clone(),
         };
         operation
             .finish(&result, None)
@@ -741,6 +978,7 @@ impl EipHandler for Daemon {
             ));
         }
 
+        let surface = self.surface_for(params.resource_authority);
         let failure = if !params
             .supported_protocol_versions
             .iter()
@@ -750,16 +988,24 @@ impl EipHandler for Daemon {
                 ErrorType::ProtocolIncompatible,
                 "no mutually supported EIP protocol version",
             ))
-        } else if params.expected_environment_id != self.descriptor.environment_id {
+        } else if surface.is_none() {
+            Some(protocol_error(
+                ErrorType::ProtocolIncompatible,
+                "requested resource authority exceeds the daemon ceiling",
+            ))
+        } else if params.expected_environment_id != self.surfaces.scoped.descriptor.environment_id {
             Some(protocol_error(
                 ErrorType::ProtocolIncompatible,
                 "expected Environment identity does not match",
             ))
         } else {
+            let descriptor = &surface
+                .expect("surface availability was checked")
+                .descriptor;
             params
                 .required_capabilities
                 .iter()
-                .find(|required| !self.descriptor.capabilities.contains(required))
+                .find(|required| !descriptor.capabilities.contains(required))
                 .map(|required| {
                     error_with_capability(
                         ErrorType::ProtocolIncompatible,
@@ -775,6 +1021,11 @@ impl EipHandler for Daemon {
             return Err(error);
         }
 
+        let descriptor = surface
+            .expect("successful authority negotiation has a surface")
+            .descriptor
+            .clone();
+        state.resource_authority = Some(params.resource_authority);
         state.lifecycle = SessionState::Initialized;
         Ok(InitializeResult {
             protocol_version: eip::EIP_PROTOCOL_VERSION.to_owned(),
@@ -782,7 +1033,7 @@ impl EipHandler for Daemon {
                 name: "agent-envd".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
-            descriptor: self.descriptor.clone(),
+            descriptor,
         })
     }
 
@@ -840,15 +1091,18 @@ impl EipHandler for Daemon {
                 },
             )
             .map_err(map_registry_error)?;
+        self.pending_operations
+            .mark_admitted(&params.context.operation_id);
         drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
+        let mounts = self.effective_surface()?.mounts.clone();
         let result = self
             .transfers
-            .open_reader(&self.mounts, &params)
+            .open_reader(&mounts, &params)
             .await
             .map_err(map_transfer_error)?;
         operation
@@ -900,15 +1154,18 @@ impl EipHandler for Daemon {
                 },
             )
             .map_err(map_registry_error)?;
+        self.pending_operations
+            .mark_admitted(&params.context.operation_id);
         drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
+        let mounts = self.effective_surface()?.mounts.clone();
         let result = self
             .transfers
-            .open_writer(&self.mounts, &params)
+            .open_writer(&mounts, &params)
             .await
             .map_err(map_transfer_error)?;
         operation
@@ -1008,7 +1265,7 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
         let result = tokio::task::spawn_blocking(move || resources.stat(&mounts, &call))
             .await
@@ -1033,7 +1290,7 @@ impl EipHandler for Daemon {
                 BeginOutcome::New(operation) => operation,
             };
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
         let result = tokio::task::spawn_blocking(move || resources.read_text(&mounts, &call))
             .await
@@ -1057,7 +1314,7 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
         let result = tokio::task::spawn_blocking(move || resources.list(&mounts, &call))
             .await
@@ -1081,7 +1338,7 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
         let result = tokio::task::spawn_blocking(move || resources.find(&mounts, &call))
             .await
@@ -1105,7 +1362,7 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
         let result = tokio::task::spawn_blocking(move || resources.search(&mounts, &call))
             .await
@@ -1139,7 +1396,7 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.write_text")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
@@ -1192,7 +1449,7 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.mkdir")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
@@ -1245,7 +1502,7 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.patch_text")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
@@ -1298,13 +1555,13 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.copy")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
                 let copy =
                     tokio::task::spawn_blocking(move || resources.copy(&mounts, &params)).await;
-                let (destination, bytes_copied, source_stability) = match copy {
+                let (destination, bytes_copied) = match copy {
                     Ok(Ok(result)) => result,
                     Ok(Err(error)) => {
                         return Err(mutation_failure(
@@ -1324,9 +1581,7 @@ impl EipHandler for Daemon {
                 let result = eip::FileCopyResult {
                     destination,
                     bytes_copied,
-                    atomic_destination: true,
                     receipt: receipt.clone(),
-                    source_stability,
                 };
                 operation
                     .finish(&result, Some(receipt))
@@ -1352,7 +1607,7 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.move")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
@@ -1404,7 +1659,7 @@ impl EipHandler for Daemon {
         let (operation, receipt) = mutation_receipt(operation, "file.remove")?;
         let operation_id = params.context.operation_id.clone();
         let resources = self.resources.clone();
-        let mounts = self.mounts.clone();
+        let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
             .owned_operations
             .spawn(operation_id.clone(), async move {
@@ -1446,15 +1701,43 @@ impl EipHandler for Daemon {
     ) -> Result<eip::OperationCancelResult, EIPError> {
         self.ensure_initialized()?;
         ensure_deadline(&params.context)?;
+        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
         let operation =
             match self.admit_record("operation.cancel", &params.context, &params, true)? {
                 BeginOutcome::Replay(value) => return self.decode_replay(value),
                 BeginOutcome::ReplayFailure(error) => return Err(*error),
                 BeginOutcome::New(operation) => operation,
             };
-        let result = eip::OperationCancelResult {
-            status: self.operations.cancel(&params.target_operation_id),
-        };
+        let mut status = self.operations.cancel(&params.target_operation_id);
+        if status == eip::OperationCancelStatus::NotFound {
+            match self
+                .pending_operations
+                .wait_for_admission(
+                    &params.target_operation_id,
+                    deadline,
+                    self.subscribe_closed(),
+                )
+                .await
+            {
+                PendingAdmissionWait::Admitted => {
+                    status = self.operations.cancel(&params.target_operation_id);
+                }
+                PendingAdmissionWait::Removed => {}
+                PendingAdmissionWait::TimedOut => {
+                    return Err(protocol_error(
+                        ErrorType::Timeout,
+                        "operation cancel deadline expired before target admission",
+                    ));
+                }
+                PendingAdmissionWait::Closed => {
+                    return Err(protocol_error(
+                        ErrorType::NotInitialized,
+                        "session closed before target operation admission",
+                    ));
+                }
+            }
+        }
+        let result = eip::OperationCancelResult { status };
         operation
             .finish(&result, None)
             .map_err(map_registry_error)?;
@@ -1521,7 +1804,6 @@ impl EipHandler for Daemon {
             self.retention.release_reference(reference)
         } else if let Some(cursor) = &params.cursor {
             self.retention.release_cursor(cursor)
-                || self.resources.release_cursor(cursor)
                 || self
                     .execution
                     .as_ref()
@@ -1617,17 +1899,15 @@ impl EipHandler for Daemon {
         self.ensure_initialized()?;
         ensure_deadline(&params.context)?;
         let execution = self.execution_manager()?;
-        let operation = self
-            .operations
-            .begin("process.start", &params.context, &params, true)
-            .map_err(map_registry_error)?;
+        let mounts = self.effective_surface()?.mounts.clone();
+        let operation = self.begin_record("process.start", &params.context, &params, true)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
         let started = match execution
-            .start(&params.request, true, || {
+            .start(&mounts, &params.request, true, || {
                 match self.operations.interruption(&params.context.operation_id) {
                     Some(OperationInterruption::Cancelled) => {
                         return Err(ProcessError::PreDispatchCancelled);
@@ -1992,10 +2272,11 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let execution = self.execution_manager()?;
+        let mounts = self.effective_surface()?.mounts.clone();
         let hard_deadline =
             effective_deadline(params.context.deadline, self.max_operation_duration)?;
         let started = match execution
-            .start(&params.request, false, || {
+            .start(&mounts, &params.request, false, || {
                 match self.operations.interruption(&params.context.operation_id) {
                     Some(OperationInterruption::Cancelled) => {
                         return Err(ProcessError::PreDispatchCancelled);
@@ -2348,7 +2629,7 @@ fn map_resource_error(error: ResourceError) -> EIPError {
         ),
         ResourceError::Conflict => (
             ErrorType::Conflict,
-            "resource identity or revision changed",
+            "resource state conflicts with the requested operation",
             RetryHint::ReconcileFirst,
         ),
         ResourceError::Unsupported => (
@@ -2363,18 +2644,8 @@ fn map_resource_error(error: ResourceError) -> EIPError {
         ),
         ResourceError::OutputLimit => (
             ErrorType::OutputLimitExceeded,
-            "resource output exceeded the selected policy",
+            "resource result exceeds the daemon response limit",
             RetryHint::Never,
-        ),
-        ResourceError::InvalidHandle => (
-            ErrorType::InvalidHandle,
-            "resource cursor is invalid or expired",
-            RetryHint::Never,
-        ),
-        ResourceError::Busy => (
-            ErrorType::Busy,
-            "resource cursor capacity is exhausted",
-            RetryHint::AfterCapacity,
         ),
         ResourceError::Cancelled => (
             ErrorType::Cancelled,
@@ -2843,7 +3114,10 @@ mod tests {
     use crate::eip::{EipHandler, FileWriterOpenParams};
     use crate::{
         config::{Config, TrustedMountConfig},
-        eip::{EIPCallContext, EIPPath, FileWriteMode, FileWriteTextParams},
+        eip::{
+            EIPCallContext, EIPPath, EnvironmentDescribeParams, FileWriteMode, FileWriteTextParams,
+            OperationCancelParams, OperationCancelStatus,
+        },
         operation::{BeginOutcome, random_selector},
     };
 
@@ -2954,22 +3228,12 @@ mod tests {
     async fn session_teardown_serializes_transfer_and_mutation_admission() {
         let tree = TempTree::new();
         let native = tree.child("native");
-        let staging = tree.child("staging");
         fs::create_dir(&native).expect("native root");
-        fs::create_dir(&staging).expect("staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                .expect("private staging root");
-        }
         let mut config = Config::for_test("env-test");
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root: native.clone(),
-            staging_root: Some(staging.clone()),
             writable: true,
-            exclusive_mutation_control: true,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
             allowed_operations: Vec::new(),
@@ -2989,7 +3253,6 @@ mod tests {
                     path: "/candidate.bin".to_owned(),
                 },
                 mode: FileWriteMode::Create,
-                expected_revision: None,
                 executable: None,
                 transfer_deadline: None,
             },
@@ -3012,7 +3275,14 @@ mod tests {
         assert!(closing.await.expect("close waits for admitted work"));
         assert!(!daemon.has_active_file_transfers());
         assert_eq!(
-            fs::read_dir(&staging).expect("staging directory").count(),
+            fs::read_dir(&native)
+                .expect("native directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".eip-stage-"))
+                .count(),
             0
         );
 
@@ -3033,7 +3303,6 @@ mod tests {
                 },
                 mode: FileWriteMode::Create,
                 text: "too late".to_owned(),
-                expected_revision: None,
                 executable: None,
             },
         )
@@ -3044,6 +3313,131 @@ mod tests {
             crate::eip::ErrorType::NotInitialized
         );
         assert!(!native.join("too-late.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn pending_operation_wait_observes_admission_deadline_and_close() {
+        let config = Config::for_test("env-test");
+        let daemon = Arc::new(Daemon::with_generation(&config, 74).expect("daemon builds"));
+        let _ = initialize(&daemon).await;
+
+        let admission_guard = daemon
+            .track_pending_payload(&request(
+                json!(70),
+                "environment.describe",
+                json!({"context": {"operation_id": "pending-target"}}),
+            ))
+            .expect("transport-read payload registers a pending target");
+        let cancelling = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .operation_cancel(OperationCancelParams {
+                        context: EIPCallContext {
+                            operation_id: "pending-cancel".to_owned(),
+                            deadline: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
+                            idempotency_key: None,
+                        },
+                        target_operation_id: "pending-target".to_owned(),
+                    })
+                    .await
+            })
+        };
+        daemon.pending_operations.wait_until_admission_wait().await;
+        let target_params = EnvironmentDescribeParams {
+            context: EIPCallContext {
+                operation_id: "pending-target".to_owned(),
+                deadline: None,
+                idempotency_key: None,
+            },
+        };
+        let target = daemon
+            .begin_record(
+                "environment.describe",
+                &target_params.context,
+                &target_params,
+                false,
+            )
+            .expect("target admission succeeds");
+        let BeginOutcome::New(target) = target else {
+            panic!("new target operation expected");
+        };
+        let cancelled = cancelling
+            .await
+            .expect("cancel task joins")
+            .expect("cancel succeeds after admission");
+        assert_eq!(
+            cancelled.status,
+            OperationCancelStatus::CancellationRequested
+        );
+        drop(target);
+        drop(admission_guard);
+
+        let timeout_guard = daemon
+            .track_pending_payload(&request(
+                json!(71),
+                "environment.describe",
+                json!({"context": {"operation_id": "timeout-target"}}),
+            ))
+            .expect("transport-read payload registers a timeout target");
+        let timing_out = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .operation_cancel(OperationCancelParams {
+                        context: EIPCallContext {
+                            operation_id: "timeout-cancel".to_owned(),
+                            deadline: Some(
+                                chrono::Utc::now() + chrono::Duration::milliseconds(100),
+                            ),
+                            idempotency_key: None,
+                        },
+                        target_operation_id: "timeout-target".to_owned(),
+                    })
+                    .await
+            })
+        };
+        daemon.pending_operations.wait_until_admission_wait().await;
+        let timeout = timing_out
+            .await
+            .expect("timeout wait joins")
+            .expect_err("pending admission wait respects the cancel deadline");
+        assert_eq!(timeout.data.error_type, crate::eip::ErrorType::Timeout);
+        drop(timeout_guard);
+
+        let close_guard = daemon
+            .track_pending_payload(&request(
+                json!(72),
+                "environment.describe",
+                json!({"context": {"operation_id": "close-target"}}),
+            ))
+            .expect("transport-read payload registers a close target");
+        let waiting = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .operation_cancel(OperationCancelParams {
+                        context: EIPCallContext {
+                            operation_id: "close-cancel".to_owned(),
+                            deadline: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
+                            idempotency_key: None,
+                        },
+                        target_operation_id: "close-target".to_owned(),
+                    })
+                    .await
+            })
+        };
+        daemon.pending_operations.wait_until_admission_wait().await;
+        daemon.closed.send_replace(true);
+        let closed = waiting
+            .await
+            .expect("close wait joins")
+            .expect_err("session close terminates pending admission wait");
+        assert_eq!(
+            closed.data.error_type,
+            crate::eip::ErrorType::NotInitialized
+        );
+        drop(close_guard);
     }
 
     #[tokio::test]
@@ -3213,9 +3607,7 @@ mod tests {
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root: native.clone(),
-            staging_root: None,
             writable: false,
-            exclusive_mutation_control: false,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
             allowed_operations: Vec::new(),
@@ -3308,27 +3700,17 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
-    async fn resource_and_transfer_candidates_share_one_staging_quota() {
+    async fn resource_and_transfer_candidates_share_one_candidate_quota() {
         let tree = TempTree::new();
         let native = tree.child("native");
-        let staging = tree.child("staging");
         fs::create_dir(&native).expect("native root");
-        fs::create_dir(&staging).expect("staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                .expect("private staging root");
-        }
         let mut config = Config::for_test("env-test");
         config.limits.max_staged_file_objects = 1;
         config.limits.max_staged_file_bytes = 1024;
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root: native.clone(),
-            staging_root: Some(staging),
             writable: true,
-            exclusive_mutation_control: true,
             allow_command_execution: false,
             max_file_bytes: 1024,
             allowed_operations: Vec::new(),
@@ -3413,22 +3795,12 @@ mod tests {
     async fn configured_resource_handlers_return_receipts_and_reconcile() {
         let tree = TempTree::new();
         let native = tree.child("native");
-        let staging = tree.child("staging");
         fs::create_dir(&native).expect("native root");
-        fs::create_dir(&staging).expect("staging root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-                .expect("private staging root");
-        }
         let mut config = Config::for_test("env-test");
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root: native.clone(),
-            staging_root: Some(staging),
             writable: true,
-            exclusive_mutation_control: true,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
             allowed_operations: Vec::new(),
@@ -3488,14 +3860,18 @@ mod tests {
                     json!({
                         "context": {"operation_id": "read-e2e"},
                         "path": {"mount_id": "workspace", "path": "/block2.txt"},
-                        "max_bytes": 64
+                        "line_offset": 0,
+                        "line_limit": 1,
+                        "max_line_length": 2000
                     }),
                 ))
                 .await,
         )
         .expect("read response");
         assert_eq!(read["result"]["text"], "block2\n");
-        assert_eq!(read["result"]["content_complete"], true);
+        assert_eq!(read["result"]["line_offset"], 0);
+        assert_eq!(read["result"]["lines_read"], 1);
+        assert_eq!(read["result"]["has_more"], false);
 
         let failed: Value = serde_json::from_slice(
             &daemon
@@ -3592,7 +3968,6 @@ mod tests {
             },
             mode: FileWriteMode::Create,
             text: "drain".to_owned(),
-            expected_revision: None,
             executable: None,
         };
         let operation = match daemon
@@ -3688,7 +4063,6 @@ mod tests {
             },
             mode: FileWriteMode::Create,
             text: "late".to_owned(),
-            expected_revision: None,
             executable: None,
         };
         let operation = match daemon

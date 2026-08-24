@@ -252,7 +252,7 @@ jobs:
         run: make typecheck test python-build
 
   examples:
-    name: Plugin examples
+    name: Examples
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.examples == 'true'
     runs-on: ubuntu-latest
@@ -271,9 +271,9 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: examples/plugins/uv.lock
+          cache-dependency-glob: examples/*/uv.lock
 
-      - name: Run complete plugin examples gate
+      - name: Run complete examples gate
         run: make examples-check-all
 
   foundation-web:

@@ -29,9 +29,12 @@ from .files import LocalFileOperator
 from .processes import LocalPortOperator, LocalProcessManager, LocalShell
 from .retention import LocalRetentionStore
 
+_MIB = 1024 * 1024
+_GIB = 1024 * _MIB
+
 
 class DirectLocalRootConfiguration(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     path: Path
     ownership: Literal["caller_owned", "binding_owned"]
@@ -39,32 +42,36 @@ class DirectLocalRootConfiguration(BaseModel):
 
 
 class DirectLocalFilePolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_text_bytes: Annotated[int, Field(gt=0)] = 1_048_576
-    max_transfer_bytes: Annotated[int, Field(gt=0)] = 64 * 1_048_576
-    max_query_results: Annotated[int, Field(gt=0)] = 1_000
-    max_query_bytes: Annotated[int, Field(gt=0)] = 4 * 1_048_576
+    max_value_bytes: Annotated[int, Field(gt=0)] = 16 * _MIB
 
 
 class DirectLocalShellProfile(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    profile_id: str
+    profile_id: Annotated[str, Field(min_length=1, max_length=128)]
     executable: Path
     fixed_arguments: tuple[str, ...] = ()
     allow_login: bool = False
 
+    @field_validator("executable")
+    @classmethod
+    def _absolute_executable(cls, value: Path) -> Path:
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError("shell profile executable must be an absolute path")
+        return expanded
+
 
 class DirectLocalProcessPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     allowed_executables: frozenset[Path] = frozenset()
     allowed_environment_keys: frozenset[str] = frozenset()
-    max_concurrent_processes: Annotated[int, Field(gt=0)] = 8
-    max_wall_time_seconds: float = 600.0
+    max_concurrent_processes: Annotated[int, Field(gt=0)] = 128
+    max_wall_time_seconds: float = 24 * 60 * 60
     terminate_grace_seconds: float = 5.0
-    network_mode: Literal["ambient"] = "ambient"
 
     @model_validator(mode="after")
     def _finite_times(self) -> DirectLocalProcessPolicy:
@@ -75,40 +82,28 @@ class DirectLocalProcessPolicy(BaseModel):
         return self
 
 
-class DirectLocalRetentionPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class DirectLocalOutputPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_object_bytes: Annotated[int, Field(gt=0)] = 8 * 1_048_576
-    max_total_bytes: Annotated[int, Field(gt=0)] = 64 * 1_048_576
-    max_objects: Annotated[int, Field(gt=0)] = 64
-    max_lifetime_seconds: float = 600.0
-
-    @model_validator(mode="after")
-    def _valid_policy(self) -> DirectLocalRetentionPolicy:
-        if self.max_object_bytes > self.max_total_bytes:
-            raise ValueError("max_object_bytes cannot exceed max_total_bytes")
-        if not math.isfinite(self.max_lifetime_seconds) or self.max_lifetime_seconds <= 0:
-            raise ValueError("max_lifetime_seconds must be positive and finite")
-        return self
+    max_buffer_bytes: Annotated[int, Field(gt=0)] = _MIB
+    max_spool_bytes: Annotated[int, Field(gt=0)] = 64 * _GIB
 
 
 class DirectLocalPortPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    enabled: bool = False
     allowed_ports: frozenset[Annotated[int, Field(ge=1, le=65535)]] = frozenset()
-    address: Literal["loopback"] = "loopback"
 
 
 class DirectLocalEnvironmentConfiguration(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     environment_id: str
     root: DirectLocalRootConfiguration
     files: DirectLocalFilePolicy = DirectLocalFilePolicy()
     shell_profiles: tuple[DirectLocalShellProfile, ...] = ()
     processes: DirectLocalProcessPolicy = DirectLocalProcessPolicy()
-    retention: DirectLocalRetentionPolicy = DirectLocalRetentionPolicy()
+    outputs: DirectLocalOutputPolicy = DirectLocalOutputPolicy()
     ports: DirectLocalPortPolicy = DirectLocalPortPolicy()
 
     @field_validator("environment_id")
@@ -125,10 +120,6 @@ class DirectLocalEnvironmentConfiguration(BaseModel):
         profile_ids = [profile.profile_id for profile in self.shell_profiles]
         if len(profile_ids) != len(set(profile_ids)):
             raise ValueError("shell profile IDs must be unique")
-        allowed = {path.expanduser().resolve() for path in self.processes.allowed_executables}
-        for profile in self.shell_profiles:
-            if profile.executable.expanduser().resolve() not in allowed:
-                raise ValueError("every shell profile executable must be allowed")
         return self
 
 
@@ -229,7 +220,6 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
                         "Direct Local caller root is not a directory.", code="environment_request_invalid"
                     )
             generation = f"generation-{uuid4().hex[:16]}"
-            retention_root = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="converge-output-"))
             files = LocalFileOperator(
                 root=root,
                 read_only=self.configuration.root.read_only,
@@ -238,38 +228,33 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
                 binding_revision=binding_revision,
                 generation=generation,
             )
-            retention = LocalRetentionStore(
-                root=retention_root,
-                binding_id=binding_id,
-                binding_revision=binding_revision,
-                generation=generation,
-                max_object_bytes=self.configuration.retention.max_object_bytes,
-                max_total_bytes=self.configuration.retention.max_total_bytes,
-                max_objects=self.configuration.retention.max_objects,
-                max_lifetime_seconds=self.configuration.retention.max_lifetime_seconds,
+            process_enabled = bool(
+                self.configuration.processes.allowed_executables or self.configuration.shell_profiles
             )
-            process_enabled = bool(self.configuration.processes.allowed_executables)
-            processes = (
-                LocalProcessManager(
+            if process_enabled:
+                retention_root = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="converge-output-"))
+                retention = LocalRetentionStore(
+                    root=retention_root,
+                    binding_id=binding_id,
+                    binding_revision=binding_revision,
+                    generation=generation,
+                    max_spool_bytes=self.configuration.outputs.max_spool_bytes,
+                )
+                processes = LocalProcessManager(
                     files=files,
                     retention=retention,
                     policy=self.configuration.processes,
+                    output_policy=self.configuration.outputs,
                     shell_profiles=self.configuration.shell_profiles,
                     binding_id=binding_id,
                     binding_revision=binding_revision,
                     generation=generation,
-                    max_stdin_bytes=self.configuration.files.max_transfer_bytes,
-                    max_output_bytes=self.configuration.retention.max_object_bytes,
                 )
-                if process_enabled
-                else None
-            )
             shell = LocalShell(processes) if processes is not None else None
-            ports = LocalPortOperator(self.configuration.ports) if self.configuration.ports.enabled else None
+            ports = LocalPortOperator(self.configuration.ports) if self.configuration.ports.allowed_ports else None
             file_actions = {action for action in EnvironmentAction if action.value.startswith("environment.file.")}
-            output_actions = {EnvironmentAction.OUTPUT_READ, EnvironmentAction.OUTPUT_RELEASE}
-            permissions = file_actions | output_actions
-            families: set[EnvironmentOperationFamily] = {"files", "outputs"}
+            permissions = set(file_actions)
+            families: set[EnvironmentOperationFamily] = {"files"}
             if shell is not None:
                 permissions.add(EnvironmentAction.SHELL_EXEC)
                 families.add("shell")
@@ -277,19 +262,27 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
                 permissions.update(
                     action for action in EnvironmentAction if action.value.startswith("environment.process.")
                 )
-                families.add("processes")
+                permissions.update({EnvironmentAction.OUTPUT_READ, EnvironmentAction.OUTPUT_RELEASE})
+                families.update({"processes", "outputs"})
             if ports is not None:
                 permissions.update({EnvironmentAction.PORT_INSPECT, EnvironmentAction.PORT_WAIT})
                 families.add("ports")
+            limits: dict[str, int | float] = {
+                "max_value_bytes": self.configuration.files.max_value_bytes,
+            }
+            if processes is not None:
+                limits.update(
+                    {
+                        "max_wall_time_seconds": self.configuration.processes.max_wall_time_seconds,
+                        "max_buffer_bytes": self.configuration.outputs.max_buffer_bytes,
+                        "max_spool_bytes": self.configuration.outputs.max_spool_bytes,
+                    }
+                )
             descriptor = EnvironmentDescriptor(
                 generation=generation,
                 operation_families=frozenset(families),
                 permissions=EnvironmentPermissionSet(operations=frozenset(permissions)),
-                limits={
-                    "max_text_bytes": self.configuration.files.max_text_bytes,
-                    "max_transfer_bytes": self.configuration.files.max_transfer_bytes,
-                    "max_output_bytes": self.configuration.retention.max_object_bytes,
-                },
+                limits=limits,
                 mounts=(
                     EnvironmentMountDescriptor(
                         name="root",
@@ -311,14 +304,18 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
                 ),
             )
         finally:
-            if processes is not None:
-                await processes.close()
-            if retention is not None:
-                await retention.close()
-            elif retention_root is not None:
-                await asyncio.to_thread(shutil.rmtree, retention_root, True)
-            if owned and root is not None:
-                await asyncio.to_thread(shutil.rmtree, root, True)
+            try:
+                if processes is not None:
+                    await processes.close()
+            finally:
+                try:
+                    if retention is not None:
+                        await retention.close()
+                    elif retention_root is not None:
+                        await asyncio.to_thread(shutil.rmtree, retention_root, True)
+                finally:
+                    if owned and root is not None:
+                        await asyncio.to_thread(shutil.rmtree, root, True)
 
     async def discard(self) -> None:
         self._discarded = True

@@ -16,7 +16,7 @@ from converge_agent_harness.errors import HarnessError
 
 type EnvironmentOperationFamily = Literal["files", "shell", "processes", "ports", "outputs", "state"]
 ENVIRONMENT_OPERATION_FAMILIES = frozenset({"files", "shell", "processes", "ports", "outputs", "state"})
-ENVIRONMENT_ACTION_CATALOG_VERSION = "environment-actions/1"
+ENVIRONMENT_ACTION_CATALOG_VERSION = "environment-actions/2"
 DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS = 600.0
 DEFAULT_ENVIRONMENT_CLEANUP_TIMEOUT_SECONDS = 600.0
 
@@ -33,7 +33,7 @@ class EnvironmentAction(StrEnum):
 
     FILE_STAT = "environment.file.stat"
     FILE_READ_TEXT = "environment.file.read_text"
-    FILE_OPEN_READER = "environment.file.open_reader"
+    FILE_READ_BYTES = "environment.file.read_bytes"
     FILE_WRITE_TEXT = "environment.file.write_text"
     FILE_PATCH_TEXT = "environment.file.patch_text"
     FILE_LIST = "environment.file.list"
@@ -42,7 +42,7 @@ class EnvironmentAction(StrEnum):
     FILE_MKDIR = "environment.file.mkdir"
     FILE_MOVE = "environment.file.move"
     FILE_REMOVE = "environment.file.remove"
-    FILE_OPEN_WRITER = "environment.file.open_writer"
+    FILE_WRITE_BYTES = "environment.file.write_bytes"
     FILE_COPY_SOURCE = "environment.file.copy_source"
     FILE_COPY_DESTINATION = "environment.file.copy_destination"
     SHELL_EXEC = "environment.shell.exec"
@@ -74,7 +74,7 @@ ENVIRONMENT_ACTION_DISPATCH: Mapping[EnvironmentAction, EnvironmentActionDispatc
     {
         EnvironmentAction.FILE_STAT: EnvironmentActionDispatch("files", "files", "stat"),
         EnvironmentAction.FILE_READ_TEXT: EnvironmentActionDispatch("files", "files", "read_text"),
-        EnvironmentAction.FILE_OPEN_READER: EnvironmentActionDispatch("files", "files", "open_reader"),
+        EnvironmentAction.FILE_READ_BYTES: EnvironmentActionDispatch("files", "files", "read_bytes"),
         EnvironmentAction.FILE_WRITE_TEXT: EnvironmentActionDispatch("files", "files", "write_text"),
         EnvironmentAction.FILE_PATCH_TEXT: EnvironmentActionDispatch("files", "files", "patch_text"),
         EnvironmentAction.FILE_LIST: EnvironmentActionDispatch("files", "files", "list"),
@@ -83,7 +83,7 @@ ENVIRONMENT_ACTION_DISPATCH: Mapping[EnvironmentAction, EnvironmentActionDispatc
         EnvironmentAction.FILE_MKDIR: EnvironmentActionDispatch("files", "files", "mkdir"),
         EnvironmentAction.FILE_MOVE: EnvironmentActionDispatch("files", "files", "move"),
         EnvironmentAction.FILE_REMOVE: EnvironmentActionDispatch("files", "files", "remove"),
-        EnvironmentAction.FILE_OPEN_WRITER: EnvironmentActionDispatch("files", "files", "open_writer"),
+        EnvironmentAction.FILE_WRITE_BYTES: EnvironmentActionDispatch("files", "files", "write_bytes_stream"),
         EnvironmentAction.FILE_COPY_SOURCE: EnvironmentActionDispatch("files", "files", "copy"),
         EnvironmentAction.FILE_COPY_DESTINATION: EnvironmentActionDispatch("files", "files", "copy"),
         EnvironmentAction.SHELL_EXEC: EnvironmentActionDispatch("shell", "shell", "exec"),

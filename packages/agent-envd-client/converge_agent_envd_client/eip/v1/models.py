@@ -165,22 +165,11 @@ class ErrorType(StrEnum):
     INTEGRITY_MISMATCH = "integrity_mismatch"
 
 
-class FileCopySourceStability(StrEnum):
-    VERIFIED = "verified"
-    UNVERIFIED = "unverified"
-
-
 class FileKind(StrEnum):
     FILE = "file"
     DIRECTORY = "directory"
     SYMLINK = "symlink"
     OTHER = "other"
-
-
-class FileReadStability(StrEnum):
-    VERIFIED = "verified"
-    CHANGED = "changed"
-    UNVERIFIED = "unverified"
 
 
 class FileWriteMode(StrEnum):
@@ -195,11 +184,6 @@ class FileWriterAbortStatus(StrEnum):
     ALREADY_ABORTED = "already_aborted"
     COMMIT_IN_PROGRESS = "commit_in_progress"
     ALREADY_COMMITTED = "already_committed"
-
-
-class FindMode(StrEnum):
-    GLOB = "glob"
-    REGEX = "regex"
 
 
 class IsolationBackend(StrEnum):
@@ -300,6 +284,11 @@ class ReceiptStage(StrEnum):
 class RequestedProcessSignal(StrEnum):
     INTERRUPT = "interrupt"
     TERMINATE = "terminate"
+
+
+class ResourceAuthority(StrEnum):
+    SCOPED = "scoped"
+    SERVER = "server"
 
 
 class RetryHint(StrEnum):
@@ -456,6 +445,51 @@ class FileByteRange(EIPModel):
     length: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
 
 
+class FileCopyParams(EIPModel):
+    context: EIPCallContext
+    source: EIPPath
+    destination: EIPPath
+    replace: StrictBool = False
+
+
+class FileFindParams(EIPModel):
+    context: EIPCallContext
+    root: EIPPath
+    pattern: StrictStr
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+    max_results: Annotated[StrictInt, Field(ge=1, le=4294967295)] = 100
+    recursive: StrictBool = True
+    include_hidden: StrictBool = False
+    kinds: tuple[FileKind, ...] = ()
+
+
+class FileInfo(EIPModel):
+    path: EIPPath
+    kind: FileKind
+    size_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    modified_at: EIPTimestamp | None = None
+    executable: StrictBool | None = None
+
+
+class FileListEntry(EIPModel):
+    relative_path: StrictStr
+    info: FileInfo
+
+
+class FileListParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+    max_results: Annotated[StrictInt, Field(ge=1, le=4294967295)] = 100
+    include_hidden: StrictBool = False
+
+
+class FileListResult(EIPModel):
+    entries: tuple[FileListEntry, ...] = ()
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    has_more: StrictBool
+
+
 class FileMkdirParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
@@ -463,26 +497,50 @@ class FileMkdirParams(EIPModel):
     exist_ok: StrictBool = False
 
 
+class FileMoveParams(EIPModel):
+    context: EIPCallContext
+    source: EIPPath
+    destination: EIPPath
+    replace: StrictBool = False
+
+
+class FilePatchTextParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    patch_format: Literal["unified_diff"]
+    patch: StrictStr
+
+
 class FileReadCompletion(EIPModel):
-    range_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    range_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
     produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
     digest: ContentDigest | None = None
-    source_eof_at_end: StrictBool
-    stability: FileReadStability
     complete: StrictBool
 
     @model_validator(mode="after")
     def _validate_completion(self) -> FileReadCompletion:
-        if self.range_start > self.range_end:
-            raise ValueError("range_start cannot exceed range_end")
-        expected = self.range_end - self.range_start
         if self.complete:
-            if self.digest is None or self.produced_bytes != expected:
-                raise ValueError("complete reads require exact bytes and digest")
+            if self.digest is None:
+                raise ValueError("complete reads require a digest")
         elif self.digest is not None:
             raise ValueError("incomplete reads cannot expose a digest")
         return self
+
+
+class FileReadTextParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    line_limit: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    line_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+    max_line_length: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+
+
+class FileReadTextResult(EIPModel):
+    info: FileInfo
+    text: StrictStr
+    line_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    lines_read: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    has_more: StrictBool
+    truncated_lines: tuple[Annotated[StrictInt, Field(ge=0, le=18446744073709551615)], ...] = ()
 
 
 class FileReaderCloseResult(EIPModel):
@@ -494,16 +552,50 @@ class FileReaderHandle(RootModel[Identifier]):
     root: Identifier
 
 
-class FileRevision(RootModel[Identifier]):
-    model_config = ConfigDict(frozen=True)
-    root: Identifier
+class FileReaderOpenParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    byte_range: FileByteRange | None = None
+    transfer_deadline: EIPTimestamp | None = None
+
+
+class FileReaderOpenResult(EIPModel):
+    reader: FileReaderHandle
+    info: FileInfo
+    expires_at: EIPTimestamp
+
+
+class FileRemoveParams(EIPModel):
+    context: EIPCallContext
+    path: EIPPath
+    expected_kind: FileKind
+    recursive: StrictBool = False
+    max_entries: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 1
 
 
 class FileSearchMatch(EIPModel):
     path: EIPPath
     line_number: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    byte_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
     preview: StrictStr
+    preview_truncated: StrictBool
+
+
+class FileSearchParams(EIPModel):
+    context: EIPCallContext
+    root: EIPPath
+    query: StrictStr
+    mode: SearchMode
+    case_sensitive: StrictBool = True
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+    max_results: Annotated[StrictInt, Field(ge=1, le=4294967295)] = 100
+    include_hidden: StrictBool = False
+    max_line_length: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+
+
+class FileSearchResult(EIPModel):
+    matches: tuple[FileSearchMatch, ...] = ()
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    has_more: StrictBool
 
 
 class FileStatParams(EIPModel):
@@ -512,9 +604,8 @@ class FileStatParams(EIPModel):
     follow_symlinks: StrictBool = True
 
 
-class FileTextCursor(RootModel[Identifier]):
-    model_config = ConfigDict(frozen=True)
-    root: Identifier
+class FileStatResult(EIPModel):
+    info: FileInfo
 
 
 class FileWriteTextParams(EIPModel):
@@ -522,7 +613,6 @@ class FileWriteTextParams(EIPModel):
     path: EIPPath
     mode: FileWriteMode
     text: StrictStr
-    expected_revision: FileRevision | None = None
     executable: StrictBool | None = None
 
 
@@ -539,7 +629,6 @@ class FileWriterOpenParams(EIPModel):
     context: EIPCallContext
     path: EIPPath
     mode: FileWriteMode
-    expected_revision: FileRevision | None = None
     executable: StrictBool | None = None
     transfer_deadline: EIPTimestamp | None = None
 
@@ -556,6 +645,7 @@ class InitializeParams(EIPModel):
     expected_environment_id: Identifier
     required_capabilities: tuple[StrictStr, ...] = ()
     optional_capabilities: tuple[StrictStr, ...] = ()
+    resource_authority: ResourceAuthority = ResourceAuthority("scoped")
 
 
 class IsolationPosture(EIPModel):
@@ -574,7 +664,6 @@ class MountDescriptor(EIPModel):
     writable: StrictBool
     case_sensitive: StrictBool | None = None
     supports_atomic_replace: StrictBool
-    supports_file_revision: StrictBool
     max_file_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
 
 
@@ -708,6 +797,11 @@ class ReceiptRef(RootModel[Identifier]):
     root: Identifier
 
 
+class ResourceAuthorityDescriptor(EIPModel):
+    mode: ResourceAuthority
+    root_mount_id: Identifier | None = None
+
+
 class SessionCloseParams(EIPModel):
     context: EIPCallContext
 
@@ -730,21 +824,6 @@ class ShellProfileDescriptor(EIPModel):
     max_script_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
 
 
-class StructuredOutputDisposition(EIPModel):
-    producer_complete: StrictBool
-    content_complete: StrictBool
-    emitted_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    dropped_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    encoded_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    cursor: OutputCursor | None = None
-    expires_at: EIPTimestamp | None = None
-
-
-class TextPosition(EIPModel):
-    line: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    byte_column: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-
-
 type CommandSpec = Annotated[
     ArgvCommand | ShellCommand,
     Field(discriminator="kind"),
@@ -759,153 +838,19 @@ class EnvironmentDescriptor(EIPModel):
     shell_profiles: tuple[ShellProfileDescriptor, ...] = ()
     limits: EIPLimits
     isolation: IsolationPosture
+    resource_authority: ResourceAuthorityDescriptor
 
 
-class FileCopyParams(EIPModel):
-    context: EIPCallContext
-    source: EIPPath
-    destination: EIPPath
-    expected_source_revision: FileRevision | None = None
-    expected_destination_revision: FileRevision | None = None
-    replace: StrictBool = False
-    require_atomic_destination: StrictBool = False
-    require_stable_source: StrictBool = False
-
-
-class FileFindParams(EIPModel):
-    context: EIPCallContext
-    root: EIPPath
-    pattern: StrictStr
-    mode: FindMode
-    kind: FileKind | None = None
-    max_depth: Annotated[StrictInt, Field(ge=0, le=4294967295)]
-    cursor: OutputCursor | None = None
-    output_policy: OutputPolicy | None = None
-
-
-class FileInfo(EIPModel):
-    path: EIPPath
-    kind: FileKind
-    size_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    modified_at: EIPTimestamp | None = None
-    executable: StrictBool | None = None
-    revision: FileRevision | None = None
-
-
-class FileListEntry(EIPModel):
-    relative_path: StrictStr
-    info: FileInfo
-
-
-class FileListParams(EIPModel):
-    context: EIPCallContext
-    path: EIPPath
-    recursive: StrictBool = False
-    max_depth: Annotated[StrictInt, Field(ge=0, le=4294967295)] = 1
-    cursor: OutputCursor | None = None
-    output_policy: OutputPolicy | None = None
-
-
-class FileListResult(EIPModel):
+class FileFindResult(EIPModel):
     entries: tuple[FileListEntry, ...] = ()
-    output: StructuredOutputDisposition
-
-
-class FileMoveParams(EIPModel):
-    context: EIPCallContext
-    source: EIPPath
-    destination: EIPPath
-    expected_source_revision: FileRevision | None = None
-    expected_destination_revision: FileRevision | None = None
-    replace: StrictBool = False
-
-
-class FilePatchTextParams(EIPModel):
-    context: EIPCallContext
-    path: EIPPath
-    patch_format: Literal["unified_diff"]
-    patch: StrictStr
-    expected_revision: FileRevision
-
-
-class FileReadTextParams(EIPModel):
-    context: EIPCallContext
-    path: EIPPath
-    cursor: FileTextCursor | None = None
-    start_line: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
-    max_lines: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
-    max_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
-    expected_revision: FileRevision | None = None
-
-    @model_validator(mode="after")
-    def _validate_position(self) -> FileReadTextParams:
-        if self.cursor is not None and self.start_line is not None:
-            raise ValueError("cursor and start_line are mutually exclusive")
-        return self
-
-
-class FileReadTextResult(EIPModel):
-    info: FileInfo
-    text: StrictStr
-    start: TextPosition
-    end: TextPosition
-    next_cursor: FileTextCursor | None = None
-    content_complete: StrictBool
-    truncated: StrictBool
+    offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    has_more: StrictBool
 
 
 class FileReaderCloseParams(EIPModel):
     context: EIPCallContext
     reader: FileReaderHandle
     accept_complete: StrictBool
-
-
-class FileReaderOpenParams(EIPModel):
-    context: EIPCallContext
-    path: EIPPath
-    byte_range: FileByteRange | None = None
-    expected_revision: FileRevision | None = None
-    transfer_deadline: EIPTimestamp | None = None
-
-
-class FileReaderOpenResult(EIPModel):
-    reader: FileReaderHandle
-    info: FileInfo
-    range_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    range_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    source_eof_at_end: StrictBool
-    expires_at: EIPTimestamp
-
-
-class FileRemoveParams(EIPModel):
-    context: EIPCallContext
-    path: EIPPath
-    expected_kind: FileKind
-    expected_revision: FileRevision | None = None
-    recursive: StrictBool = False
-    max_entries: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 1
-
-
-class FileSearchParams(EIPModel):
-    context: EIPCallContext
-    root: EIPPath
-    query: StrictStr
-    mode: SearchMode
-    include: tuple[StrictStr, ...] = ()
-    exclude: tuple[StrictStr, ...] = ()
-    max_depth: Annotated[StrictInt, Field(ge=0, le=4294967295)]
-    cursor: OutputCursor | None = None
-    output_policy: OutputPolicy | None = None
-    case_sensitive: StrictBool = True
-
-
-class FileSearchResult(EIPModel):
-    matches: tuple[FileSearchMatch, ...] = ()
-    output: StructuredOutputDisposition
-
-
-class FileStatResult(EIPModel):
-    info: FileInfo
 
 
 class FileWriterAbortParams(EIPModel):
@@ -1083,14 +1028,7 @@ class EnvironmentDescribeResult(EIPModel):
 class FileCopyResult(EIPModel):
     destination: FileInfo
     bytes_copied: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    atomic_destination: StrictBool
     receipt: OperationReceipt
-    source_stability: FileCopySourceStability
-
-
-class FileFindResult(EIPModel):
-    entries: tuple[FileListEntry, ...] = ()
-    output: StructuredOutputDisposition
 
 
 class FileMkdirResult(EIPModel):
@@ -1286,11 +1224,27 @@ EIPServerInfo.model_rebuild()
 EncodedBytes.model_rebuild()
 EnvironmentDescribeParams.model_rebuild()
 FileByteRange.model_rebuild()
+FileCopyParams.model_rebuild()
+FileFindParams.model_rebuild()
+FileInfo.model_rebuild()
+FileListEntry.model_rebuild()
+FileListParams.model_rebuild()
+FileListResult.model_rebuild()
 FileMkdirParams.model_rebuild()
+FileMoveParams.model_rebuild()
+FilePatchTextParams.model_rebuild()
 FileReadCompletion.model_rebuild()
+FileReadTextParams.model_rebuild()
+FileReadTextResult.model_rebuild()
 FileReaderCloseResult.model_rebuild()
+FileReaderOpenParams.model_rebuild()
+FileReaderOpenResult.model_rebuild()
+FileRemoveParams.model_rebuild()
 FileSearchMatch.model_rebuild()
+FileSearchParams.model_rebuild()
+FileSearchResult.model_rebuild()
 FileStatParams.model_rebuild()
+FileStatResult.model_rebuild()
 FileWriteTextParams.model_rebuild()
 FileWriterAbortResult.model_rebuild()
 FileWriterOpenParams.model_rebuild()
@@ -1313,30 +1267,14 @@ ProcessSignalParams.model_rebuild()
 ProcessStatus.model_rebuild()
 ProcessWaitParams.model_rebuild()
 ProcessWriteStdinParams.model_rebuild()
+ResourceAuthorityDescriptor.model_rebuild()
 SessionCloseParams.model_rebuild()
 SessionCloseResult.model_rebuild()
 ShellCommand.model_rebuild()
 ShellProfileDescriptor.model_rebuild()
-StructuredOutputDisposition.model_rebuild()
-TextPosition.model_rebuild()
 EnvironmentDescriptor.model_rebuild()
-FileCopyParams.model_rebuild()
-FileFindParams.model_rebuild()
-FileInfo.model_rebuild()
-FileListEntry.model_rebuild()
-FileListParams.model_rebuild()
-FileListResult.model_rebuild()
-FileMoveParams.model_rebuild()
-FilePatchTextParams.model_rebuild()
-FileReadTextParams.model_rebuild()
-FileReadTextResult.model_rebuild()
+FileFindResult.model_rebuild()
 FileReaderCloseParams.model_rebuild()
-FileReaderOpenParams.model_rebuild()
-FileReaderOpenResult.model_rebuild()
-FileRemoveParams.model_rebuild()
-FileSearchParams.model_rebuild()
-FileSearchResult.model_rebuild()
-FileStatResult.model_rebuild()
 FileWriterAbortParams.model_rebuild()
 FileWriterCommitParams.model_rebuild()
 InitializeResult.model_rebuild()
@@ -1357,7 +1295,6 @@ CommandRequest.model_rebuild()
 EIPErrorData.model_rebuild()
 EnvironmentDescribeResult.model_rebuild()
 FileCopyResult.model_rebuild()
-FileFindResult.model_rebuild()
 FileMkdirResult.model_rebuild()
 FileMoveResult.model_rebuild()
 FilePatchTextResult.model_rebuild()
@@ -1409,7 +1346,6 @@ __all__ = [
     "FileByteRange",
     "FileCopyParams",
     "FileCopyResult",
-    "FileCopySourceStability",
     "FileFindParams",
     "FileFindResult",
     "FileInfo",
@@ -1424,7 +1360,6 @@ __all__ = [
     "FilePatchTextParams",
     "FilePatchTextResult",
     "FileReadCompletion",
-    "FileReadStability",
     "FileReadTextParams",
     "FileReadTextResult",
     "FileReaderCloseParams",
@@ -1434,13 +1369,11 @@ __all__ = [
     "FileReaderOpenResult",
     "FileRemoveParams",
     "FileRemoveResult",
-    "FileRevision",
     "FileSearchMatch",
     "FileSearchParams",
     "FileSearchResult",
     "FileStatParams",
     "FileStatResult",
-    "FileTextCursor",
     "FileWriteMode",
     "FileWriteTextParams",
     "FileWriteTextResult",
@@ -1452,7 +1385,6 @@ __all__ = [
     "FileWriterHandle",
     "FileWriterOpenParams",
     "FileWriterOpenResult",
-    "FindMode",
     "InitializeParams",
     "InitializeResult",
     "IsolationBackend",
@@ -1519,6 +1451,8 @@ __all__ = [
     "ReceiptRef",
     "ReceiptStage",
     "RequestedProcessSignal",
+    "ResourceAuthority",
+    "ResourceAuthorityDescriptor",
     "RetryHint",
     "SearchMode",
     "SessionCloseParams",
@@ -1527,7 +1461,5 @@ __all__ = [
     "ShellExecParams",
     "ShellExecResult",
     "ShellProfileDescriptor",
-    "StructuredOutputDisposition",
     "TerminationReason",
-    "TextPosition",
 ]

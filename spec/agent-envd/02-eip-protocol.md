@@ -63,12 +63,16 @@ class EIPClientInfo(BaseModel):
     version: str
 
 
+type ResourceAuthority = Literal["scoped", "server"]
+
+
 class InitializeParams(BaseModel):
     supported_protocol_versions: tuple[str, ...]
     client: EIPClientInfo
     expected_environment_id: str
     required_capabilities: tuple[str, ...] = ()
     optional_capabilities: tuple[str, ...] = ()
+    resource_authority: ResourceAuthority = "scoped"
 
 
 class EIPServerInfo(BaseModel):
@@ -102,6 +106,11 @@ class EIPLimits(BaseModel):
     session_idle_ttl_ms: int
 
 
+class ResourceAuthorityDescriptor(BaseModel):
+    mode: ResourceAuthority
+    root_mount_id: str | None
+
+
 class EnvironmentDescriptor(BaseModel):
     environment_id: str
     generation: int
@@ -110,6 +119,7 @@ class EnvironmentDescriptor(BaseModel):
     shell_profiles: tuple[ShellProfileDescriptor, ...]
     limits: EIPLimits
     isolation: IsolationPosture
+    resource_authority: ResourceAuthorityDescriptor
 
 
 class InitializeResult(BaseModel):
@@ -122,7 +132,11 @@ Protocol versions use `<major>.<minor>`. The server selects the highest mutually
 
 A required capability absent from the effective descriptor fails initialization. Optional capabilities are negotiation hints; the result's descriptor is authoritative observed support. Neither list grants capability or widens daemon policy.
 
-The descriptor contains no API key, transport session value, native path, provider lifecycle credential, protected path, helper location, or model-visible authority. Mount and shell descriptors use logical IDs. Limits are hard observed ceilings that a request can only narrow.
+`resource_authority` is a deliberate session request, not a capability hint. `scoped` selects only operator-configured logical mounts and is the default when the field is omitted. `server` requests every native filesystem root that the envd process can represent and access, subject to the daemon's immutable `server` authority ceiling. A daemon configured with the default `scoped` ceiling rejects a `server` request during initialization. The selected mode and its effective mount set are immutable for the session; another choice requires a new session. Because one daemon and transport credential represent one trusted daemon user rather than mutually untrusted tenants, this negotiation narrows or selects that user's configured authority and never delegates authority to another principal.
+
+`resource_authority.root_mount_id` identifies the mount used for an Environment-relative root. It is present whenever the effective descriptor has a default file root and always references exactly one entry in `mounts`; clients never infer a root from mount ordering or a conventional ID. In `server` mode, `mounts` contains daemon-defined logical roots for the complete representable native filesystem namespace. On a single-root POSIX namespace this is one root mount. A platform with multiple independent native roots exposes one logical mount per root and chooses one as `root_mount_id`; if envd cannot enumerate and represent all roots honestly, it does not offer `server` authority on that platform.
+
+The descriptor contains no API key, transport session value, native path, provider lifecycle credential, helper location, or additional authority beyond the selected mode. Mount and shell descriptors use logical IDs, and `EIPPath.path` remains a portable `/`-separated mount-local path rather than a native host path. Limits are hard observed ceilings that a request can only narrow. `server` authority does not remove path-shape validation, protocol capability checks, operation and transfer bounds, output retention, process ownership, environment filtering, command isolation, receipts, or unknown-outcome handling.
 
 Initialization itself has no `EIPCallContext`, cannot cause a native resource mutation, and is never retried inside an existing connection or HTTP logical session. Reinitialization requires a new transport session.
 
@@ -149,7 +163,7 @@ The semantic digest is SHA-256 over the selected protocol version, exact JSON-RP
 
 | Class                    | Methods                                                                                                                                                                               | Contract                                                                                                                                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Read-only retry          | `environment.describe`, `file.stat`, `file.read_text`, file listing/search, `process.inspect`, `process.read_output`, `process.wait`, port observations, `output.read`, `receipt.get` | No native mutation or persistent resource allocation; retries still obey revision, cursor, generation, and deadline semantics                                                                                  |
+| Read-only retry          | `environment.describe`, `file.stat`, `file.read_text`, file listing/search, `process.inspect`, `process.read_output`, `process.wait`, port observations, `output.read`, `receipt.get` | No native mutation or persistent resource allocation; retries still obey generation, deadline, and any method-specific output-cursor semantics                                                                 |
 | Session-resource replay  | `file.open_reader`, `file.open_writer`                                                                                                                                                | Allocate no target mutation but accept an optional session-scoped idempotency key that replays the same live handle for the same request; session loss destroys the resource and a new session opens a new one |
 | Provider-key replay      | `file.write_text`, `file.commit_writer`, other file mutations, `shell.exec`, `process.start`, `process.write_stdin`, `process.signal`                                                 | Accept an optional idempotency key whose mapping, request/result, and receipt evidence are owned by one bounded generation-local operation record                                                              |
 | State-idempotent control | `file.close_reader`, `file.abort_writer`, `operation.cancel`, `process.close_stdin`, `process.kill`, `process.release`, `output.release`                                              | Repeating the same target action converges while the owning record or bounded tombstone remains; a conflicting reader-close acceptance choice is not the same action, and a key never widens lifetime          |
@@ -182,7 +196,7 @@ The method catalog contains no provider provisioning, container lifecycle, daemo
 
 ## Descriptor Refresh
 
-`environment.describe` returns the current `EnvironmentDescriptor`. It can report a narrower capability set or unavailable posture, but the generation remains immutable for the daemon process lifetime. Envd never rotates generation underneath an initialized session; a fault requiring a new generation drains or terminates the daemon and therefore destroys its sessions.
+`environment.describe` returns the current session's `EnvironmentDescriptor`. It can report a narrower capability set or unavailable posture, but it never changes the session's selected resource-authority mode or retargets `root_mount_id`. The generation remains immutable for the daemon process lifetime. Envd never rotates generation underneath an initialized session; a fault requiring a new generation drains or terminates the daemon and therefore destroys its sessions.
 
 After a daemon restart, a newly initialized session observes the new generation and the client treats every operation ID, receipt, resource handle, output reference, and cursor from the prior daemon incarnation as gone. When an old selector carries enough structure to identify its prior generation, envd returns `stale_generation`; otherwise it returns the selector family's non-disclosing invalid-handle or not-found error. EIP never restores, migrates, or rewrites prior-generation selectors.
 
@@ -219,7 +233,6 @@ The following wire values are bounded opaque strings:
 class ProcessHandle(RootModel[str]): ...
 class FileReaderHandle(RootModel[str]): ...
 class FileWriterHandle(RootModel[str]): ...
-class FileTextCursor(RootModel[str]): ...
 class OutputReference(RootModel[str]): ...
 class OutputCursor(RootModel[str]): ...
 class ReceiptRef(RootModel[str]): ...
@@ -243,12 +256,12 @@ Process handles, receipts, and retained-output selectors are generation-scoped u
 
 1. `file.open_reader` authorizes a path and optional byte range and returns one reader handle plus observed metadata before raw delivery.
 2. The transport binds one server-to-client data attachment. Exact offsets, bounded raw frames, terminal EOF, backpressure, and carrier failure are transport facts governed by the same transfer state.
-3. The first `file.close_reader` chooses complete acceptance or incomplete abandonment. Complete acceptance requires clean terminal consumer acknowledgement and returns count, SHA-256 digest, and revision-stability evidence; abandonment returns honest producer progress with no digest. A high-level iterator treats successful complete close validation as part of normal EOF.
-4. `file.open_writer` authorizes and reserves one private staged candidate without changing the target.
+3. The first `file.close_reader` chooses complete acceptance or incomplete abandonment. Complete acceptance requires clean terminal consumer acknowledgement and returns count and SHA-256 digest evidence for delivered bytes; abandonment returns honest producer progress with no digest. A high-level iterator treats successful complete close validation as part of normal EOF.
+4. `file.open_writer` authorizes and reserves one bounded staged candidate without changing the target.
 5. One client-to-server attachment sends exact contiguous raw bytes and a terminal marker. Envd counts and hashes while reserving storage incrementally.
 6. `file.commit_writer` compares the required count and transfer digest, revalidates destination preconditions, and performs the only target mutation. `file.abort_writer` or any pre-commit transfer teardown deletes the candidate.
 
-A data frame is not a JSON-RPC notification or an independently retryable operation. It is valid only for the already opened handle and direction and cannot be replayed after interruption. A reader resumes by opening another explicit range under an expected revision. A writer restarts with a new private candidate. Only a possibly dispatched writer commit has mutation ambiguity; its `operation_id`, idempotency key, and receipt follow the ordinary generation-scoped reconciliation rules.
+A data frame is not a JSON-RPC notification or an independently retryable operation. It is valid only for the already opened handle and direction and cannot be replayed after interruption. A reader can open another explicit range as a new observation, but EIP does not claim it resumes the same file version. A writer restarts with a new candidate. Only a possibly dispatched writer commit has mutation ambiguity; its `operation_id`, idempotency key, and receipt follow the ordinary generation-scoped reconciliation rules.
 
 ## Operation Acceptance, Cancellation, and Completion
 
@@ -280,6 +293,8 @@ One operation record owns its canonical request digest, optional provider-idempo
 - `already_terminal`: terminal provider evidence already exists;
 - `cancellation_requested`: the owning resource manager accepted the request;
 - `not_cancellable`: the method or current stage cannot be safely interrupted.
+
+A transport that has already accepted an earlier target control frame into its ordered request handoff must not let a later `operation.cancel` overtake that frame and report `not_found` merely because the target has not yet entered the operation registry. The cancel waits only for that earlier handoff to admit or reject the target; its own effective operation deadline and transport/session closure bound the wait. This ordering bridge owns no operation result and disappears when the target handoff admits or terminates.
 
 A successful cancellation request is not terminal proof. The original operation or later receipt reconciliation reports `cancelled`, `completed`, `timed_out`, or `unknown_outcome`. Closing a connection or logical session does not request cancellation and is never evidence of cancellation.
 
@@ -401,7 +416,7 @@ Stable error codes are:
 |      `-32051` | `execution_isolation_failed` | Required per-command containment or pre-exec identity policy could not be established          |
 |      `-32052` | `cleanup_failed`             | Native resource reached a terminal command state but required cleanup could not be established |
 |      `-32053` | `command_start_failed`       | The selected executable could not be executed after transactional preparation                  |
-|      `-32060` | `conflict`                   | Compare-and-swap, topology, revision, or resource-state precondition failed                    |
+|      `-32060` | `conflict`                   | Topology, publication intent, or resource-state precondition failed                            |
 |      `-32061` | `integrity_mismatch`         | A completed data attachment does not match its required byte count or SHA-256 digest           |
 
 Transport authentication failures occur before JSON-RPC dispatch and therefore use transport-native status or connection close rather than fabricating an EIP error. Once a valid request is parsed in an initialized session, a method failure uses JSON-RPC even on HTTP.
@@ -412,7 +427,7 @@ The optional byte/item counts and `process_status` carry only bounded producer a
 
 ## Retry and Unknown Outcomes
 
-Reads can be retried only when the method's snapshot and cursor semantics permit it. Mutations can be retried when one of these is true:
+Read-only methods can be retried, but a repeated current-state file observation need not equal the earlier result when native state changed. Retained-output reads additionally obey their output-cursor and retention-gap semantics. Mutations can be retried when one of these is true:
 
 - the error proves `dispatch_stage="pre_dispatch"`;
 - the same idempotency key and semantic request are supported and retained;
@@ -428,14 +443,14 @@ Binary file data is not state notification. It exists only while a correlated re
 
 ## Compatibility and Versioning
 
-EIP protocol version is independent of daemon package, provider profile, readiness schema, and Harness package version.
+EIP protocol version is independent of daemon package, provider profile, readiness schema, and Harness package version. Before the repository publishes its first externally supported EIP release, the checked `0.0.0` daemon, client, descriptor, and fixtures form one atomic pre-release schema snapshot and make no compatibility promise across repository commits; a schema reset still reserves every removed field number and name. After that first supported release, all changes obey the versioning rules below.
 
 Within one protocol major version:
 
 - adding an optional result field is compatible when old clients can ignore it safely;
 - adding a capability-gated method or enum value is compatible only when receivers do not treat unknown values as an existing behavior;
-- adding an optional request field is compatible only in a negotiated newer minor, with an explicit non-widening default; a client that negotiated an older minor omits the field rather than relying on that server to ignore it;
-- method names, existing field meaning, error meaning, default side-effect behavior, idempotency scope, cursor semantics, and generation fencing remain stable.
+- adding an optional request field is compatible only in a negotiated newer minor, with an explicit non-widening default; `resource_authority` therefore defaults to `scoped`, and a client that negotiated an older minor omits the field rather than relying on that server to ignore it;
+- method names, existing field meaning, error meaning, default side-effect behavior, idempotency scope, output-cursor semantics, and generation fencing remain stable.
 
 Removing a field, changing an existing default, widening authority, making an incomplete result appear complete, changing retry or cancellation meaning, changing a selector's scope, changing transfer offset/terminal/integrity semantics, or moving the writer mutation boundary away from commit requires a new major version. Clients fail explicitly when no compatible major exists or a required capability is absent.
 
@@ -444,8 +459,8 @@ Common conformance fixtures run the generated Python client against the Rust dae
 ## Invariants
 
 01. Every control message contains exactly one JSON-RPC envelope; EIP batch requests and JSON-RPC notifications are invalid, while raw file data uses only the correlated bounded data carrier.
-02. `initialize` is the first and only initialization request in a session and verifies expected Environment identity before method or data-plane admission.
-03. Transport identity and session state never come from EIP params.
+02. `initialize` is the first and only initialization request in a session, verifies expected Environment identity, and fixes effective resource authority before method or data-plane admission.
+03. Transport identity never comes from EIP params; the initialization authority request can only select a mode allowed by immutable daemon configuration.
 04. Every non-initialization method carries one bounded `EIPCallContext` with a daemon-generation-unique operation ID.
 05. A method executes only when present in the selected protocol and enabled by the observed capability and current policy.
 06. Opaque selectors grant no authority and are revalidated against the daemon user, Environment identity, current generation, kind, state, and expiry; none survives daemon restart.

@@ -59,7 +59,7 @@ class FoundationEnvironmentStatePolicy(BaseModel):
 
 class FoundationEnvironmentPolicy(BaseModel):
     allowed_provider_keys: frozenset[str]
-    action_catalog_version: Literal["environment-actions/1"]
+    action_catalog_version: Literal["environment-actions/2"]
     operation_ceiling: frozenset[str]
     max_bindings: int
     max_topology_changes_per_run: int
@@ -137,7 +137,7 @@ class EnvironmentProviderMaterializationRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     operation: EnvironmentProviderOperationIdentity
-    action_catalog_version: Literal["environment-actions/1"]
+    action_catalog_version: Literal["environment-actions/2"]
     binding_id: str
     binding_revision: int
     canonical_parameters: Mapping[str, JsonValue]
@@ -289,7 +289,7 @@ class ExecutionEnvironmentTopology(BaseModel):
     topology_ref: str
     execution_id: str
     revision: int
-    action_catalog_version: Literal["environment-actions/1"]
+    action_catalog_version: Literal["environment-actions/2"]
     bindings: tuple[ExecutionEnvironmentBinding, ...]
     default_binding_id: str | None
     definition_revision_ref: str

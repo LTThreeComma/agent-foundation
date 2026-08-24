@@ -94,7 +94,7 @@ State export does not require `HarnessState.message_history` to equal a result o
 
 ## Complete Message Boundaries
 
-The Harness stores only public Pydantic `ModelMessage` values. It never serializes partial stream deltas or private graph nodes.
+The Harness stores only public Pydantic `ModelMessage` values. It never serializes raw stream deltas or private graph nodes. When a streamed model response is interrupted, the Harness uses public part lifecycle events to derive one explicitly interrupted response containing only parts that are safe to replay; it never marks an unfinished part complete.
 
 | Time                               | Exported messages                                                              |
 | ---------------------------------- | ------------------------------------------------------------------------------ |
@@ -110,7 +110,22 @@ A new semantic continuation prompt is input to the next attempt, not retroactive
 
 Recovery normalizes only a terminal message explicitly marked `state="interrupted"`.
 
-If the tail is an interrupted `ModelResponse`, the Harness appends one `ModelRequest` containing failed `ToolReturnPart` values for tool calls that have no recorded result. If the tail is an interrupted `ModelRequest`, the Harness finds the preceding response and appends missing failed tool returns to that request. Existing `ToolReturnPart` and `RetryPromptPart` results remain authoritative and are not duplicated.
+Before tool-call closure, the Harness observes `PartStartEvent`, `PartDeltaEvent`, and `PartEndEvent` values for the current model response and applies these replay rules. Observations are scoped to the exact response boundary established by the preceding public message count; part indices are local to a response and never identify a boundary. If the raw interrupted tail has no lifecycle event observed for that exact response, the Harness discards the complete tail rather than trusting unobserved internal parts. A tool-return part that is atomic and has no delta form is complete at `PartStartEvent`; streamed tool-call parts still require `PartEndEvent`.
+
+| Interrupted response part                        | Replay rule                                                                             |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Non-empty `TextPart`                             | Retain all append-only text already emitted, whether or not the part ended              |
+| `ThinkingPart`                                   | Retain only after `PartEndEvent`; preserve the finalized content and provider signature |
+| Unfinished `ThinkingPart`                        | Exclude without discarding surrounding safe text or finalized parts                     |
+| Finalized ordinary tool-call or tool-return part | Retain with its complete identity and payload                                           |
+| Matched finalized native call/return pair        | Retain one call followed by one same-name return for one unique provider-native ID      |
+| Unmatched native call or return                  | Reject the complete partial response; no portable synthetic native result is invented   |
+| Unfinished tool-call or tool-return part         | Reject the complete partial response and fall back to the preceding canonical history   |
+| Other unfinished or unsupported response part    | Do not reconstruct it into continuation history                                         |
+
+The finalization observation is process-local and is applied before state export. It is not inferred later from text, provider metadata, or the presence of a signature. Consequently, a Host that selects a Harness-produced state can replay partial visible text and finalized reasoning while never replaying an unfinished thinking block. Raw live events remain non-authoritative observations and may already have been displayed; the Harness cannot retract them.
+
+After that filtering, if the tail is an interrupted `ModelResponse`, the Harness appends one `ModelRequest` containing failed `ToolReturnPart` values for finalized ordinary tool calls that have no recorded result. Provider-native calls and returns must already form strict one-to-one pairs inside the response: each unique `tool_call_id` identifies exactly one call followed later by exactly one return with the same `tool_name`. A duplicate ID, return before its call, name mismatch, or otherwise unmatched native part causes the interrupted response to be discarded because the Harness has no portable synthetic native-result representation. If the tail is an interrupted `ModelRequest`, the Harness finds the preceding response and appends missing failed tool returns to that request. Existing `ToolReturnPart` and `RetryPromptPart` results remain authoritative and are not duplicated.
 
 Each synthesized failed result says:
 

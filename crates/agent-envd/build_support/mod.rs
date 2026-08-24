@@ -956,16 +956,9 @@ fn render_validation_impl(
                 "        if {sum} != 1 {{ return Err(ValidationError(\"exactly one of {names} must be present\".to_owned())); }}\n"
             ));
         }
-        if descriptor.name() == "FileReadTextParams" {
-            output.push_str(
-                "        if self.cursor.is_some() && self.start_line.is_some() { return Err(ValidationError(\"cursor and start_line are mutually exclusive\".to_owned())); }\n",
-            );
-        }
         if descriptor.name() == "FileReadCompletion" {
             output.push_str(
-                "        if self.range_start > self.range_end { return Err(ValidationError(\"range_start cannot exceed range_end\".to_owned())); }\n\
-                 \x20       let expected = self.range_end - self.range_start;\n\
-                 \x20       if self.complete && (self.digest.is_none() || self.produced_bytes != expected) { return Err(ValidationError(\"complete reads require exact bytes and digest\".to_owned())); }\n\
+                "        if self.complete && self.digest.is_none() { return Err(ValidationError(\"complete reads require a digest\".to_owned())); }\n\
                  \x20       if !self.complete && self.digest.is_some() { return Err(ValidationError(\"incomplete reads cannot expose a digest\".to_owned())); }\n",
             );
         }

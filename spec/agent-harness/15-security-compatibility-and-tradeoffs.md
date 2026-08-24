@@ -92,7 +92,7 @@ Routing selects a binding; it does not grant access. The Host alone retains the 
 
 Client-side validation improves errors but never replaces provider enforcement. Environment authorization intersects exact values from the selected action catalog; an operation family, prefix, wildcard, managed tool ID, EIP capability, or unknown provider string never grants a core action. Operations and handles are revalidated against current binding revision, Identity, policy, and provider generation. Removal or refresh never retargets an old handle; in-flight leases drain against the captured provider and unsafe active handles fence publication.
 
-Direct Local is an explicit embedding trust choice, not native command isolation. Its file operator enforces the configured canonical root, but an allowed child executable runs with the embedding OS account and can have ambient filesystem or network reach beyond its working directory. Direct Local therefore rejects `network="deny"` and rejects read-only roots combined with any shell profile or allowed executable rather than claiming enforcement it does not provide. A Host that needs command confinement uses an Environment provider, such as `agent-envd`, whose resource boundary enforces it.
+Direct Local is an explicit embedding trust choice, not native command isolation or a race-hardened filesystem broker. Its file facet rejects observed traversal and symlink escape under a Host-controlled namespace, but a hostile same-account process can race native directory replacement, and an allowed child executable already has the embedding OS account's ambient filesystem or network reach beyond its working directory. Direct Local therefore rejects `network="deny"` and rejects read-only roots combined with any shell profile or allowed executable rather than claiming enforcement it does not provide. A Host that needs command confinement or adversarial concurrent filesystem isolation uses an Environment provider, such as `agent-envd`, whose resource boundary enforces it beside the governed resources.
 
 ## Credential Boundary
 
@@ -102,7 +102,7 @@ The default shell path projects no credential. A provider that must inject one o
 
 ## Output Resource Safety
 
-Managed tools and first-party Environment operations enforce finite inline and retained output ceilings, explicit truncation, and bounded object counts. Effective limits may narrow but not exceed Harness/provider hard ceilings.
+Managed tools and first-party Environment operations enforce finite inline and per-capture output ceilings, explicit incompleteness, and provider-owned aggregate storage bounds. Direct Local bounds actual private-spool bytes; envd additionally bounds retained records and expiry. Effective limits may narrow but not exceed the applicable Harness or provider ceiling.
 
 This does not prevent trusted Python from allocating an oversized object before the wrapper receives it. OS/container limits remain the final process-memory boundary.
 

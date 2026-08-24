@@ -4,10 +4,9 @@ use std::{
     fmt, fs,
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -19,7 +18,7 @@ use cap_std::{ambient_authority, fs::Dir};
 
 use crate::{
     config::{Config, TrustedMountConfig},
-    eip::{EIPPath, MountDescriptor},
+    eip::{EIPPath, MountDescriptor, ResourceAuthority},
 };
 
 const READ_OPERATIONS: &[&str] = &["stat", "read_text", "open_reader", "list"];
@@ -33,27 +32,23 @@ const WRITE_OPERATIONS: &[&str] = &[
     "remove",
 ];
 const OPTIONAL_OPERATIONS: &[&str] = &["find", "search", "command_cwd", "executable_source"];
-const CANDIDATE_PREFIX: &str = "eip-stage-";
+const CANDIDATE_PREFIX: &str = ".eip-stage-";
 const CANDIDATE_RANDOM_BYTES: usize = 16;
 
 #[derive(Clone)]
 pub(crate) struct MountRegistry {
     mounts: BTreeMap<String, Arc<Mount>>,
+    root_mount_id: Option<String>,
 }
 
 pub(crate) struct Mount {
     pub(crate) mount_id: String,
     pub(crate) native_root: PathBuf,
     pub(crate) root: Arc<Dir>,
-    #[allow(dead_code)] // Retained for diagnostics without exposing it through EIP.
-    pub(crate) staging_root: Option<PathBuf>,
-    pub(crate) staging: Option<Arc<Dir>>,
     pub(crate) writable: bool,
-    exclusive_mutation_control: bool,
     pub(crate) allow_command_execution: bool,
     pub(crate) max_file_bytes: u64,
     allowed_operations: BTreeSet<String>,
-    mutation_gate: Mutex<()>,
     cleanup_fault: AtomicBool,
     staging_quota: StagingQuota,
 }
@@ -74,6 +69,9 @@ pub(crate) struct StagedCandidate {
     pub(crate) name: String,
     pub(crate) file: fs::File,
     mount: Arc<Mount>,
+    destination: EIPPath,
+    destination_name: std::ffi::OsString,
+    parent: Dir,
     reservation: StagingReservation,
     removed: bool,
 }
@@ -109,54 +107,97 @@ enum ReservationState {
 }
 
 impl MountRegistry {
-    pub(crate) fn initialize(config: &Config) -> Result<Self, MountInitError> {
+    pub(crate) fn initialize_scoped(config: &Config) -> Result<Self, MountInitError> {
+        let prepared = config
+            .mounts
+            .iter()
+            .map(PreparedMount::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_topology(&prepared)?;
+        Self::from_prepared(config, prepared, config.root_mount_id.as_deref())
+    }
+
+    pub(crate) fn initialize_server(config: &Config) -> Result<Option<Self>, MountInitError> {
+        if config.resource_authority != ResourceAuthority::Server {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        {
+            let configured = TrustedMountConfig {
+                mount_id: "server-root".to_owned(),
+                native_root: PathBuf::from("/"),
+                writable: true,
+                allow_command_execution: true,
+                max_file_bytes: config.limits.max_staged_file_bytes,
+                allowed_operations: READ_OPERATIONS
+                    .iter()
+                    .chain(WRITE_OPERATIONS)
+                    .chain(OPTIONAL_OPERATIONS)
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            };
+            let prepared = vec![PreparedMount::new(&configured)?];
+            Self::from_prepared(config, prepared, Some("server-root")).map(Some)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(MountInitError::new(
+                "server resource authority is unsupported on this platform",
+            ))
+        }
+    }
+
+    fn from_prepared(
+        config: &Config,
+        prepared: Vec<PreparedMount>,
+        configured_root_mount_id: Option<&str>,
+    ) -> Result<Self, MountInitError> {
         let staging_quota = StagingQuota::new(
             config.limits.max_staged_file_bytes,
             config.limits.max_staged_file_objects,
         )?;
-        let mut prepared = Vec::with_capacity(config.mounts.len());
-        for configured in &config.mounts {
-            prepared.push(PreparedMount::new(configured)?);
-        }
-        validate_topology(&prepared)?;
-
         let mut mounts = BTreeMap::new();
         for prepared in prepared {
             if mounts.contains_key(&prepared.mount_id) {
                 return Err(MountInitError::new("mount_id values must be unique"));
             }
-            if let Some(staging_root) = &prepared.staging_root {
-                scavenge_staging_root(
-                    staging_root,
-                    config.limits.max_staged_file_objects,
-                    config.limits.max_staged_file_bytes,
-                    config.staging_scavenge_timeout,
-                )?;
-            }
             let root = open_pinned_directory(&prepared.native_root, "mount root")?;
-            let staging = prepared
-                .staging_root
-                .as_ref()
-                .map(|path| open_pinned_directory(path, "staging root").map(Arc::new))
-                .transpose()?;
             let mount = Arc::new(Mount {
                 mount_id: prepared.mount_id.clone(),
                 native_root: prepared.native_root,
                 root: Arc::new(root),
-                staging_root: prepared.staging_root,
-                staging,
                 writable: prepared.writable,
-                exclusive_mutation_control: prepared.exclusive_mutation_control,
                 allow_command_execution: prepared.allow_command_execution,
                 max_file_bytes: prepared.max_file_bytes,
                 allowed_operations: prepared.allowed_operations,
-                mutation_gate: Mutex::new(()),
                 cleanup_fault: AtomicBool::new(false),
                 staging_quota: staging_quota.clone(),
             });
             mounts.insert(prepared.mount_id, mount);
         }
-        Ok(Self { mounts })
+        let root_mount_id = match configured_root_mount_id {
+            Some(mount_id) if mounts.contains_key(mount_id) => Some(mount_id.to_owned()),
+            Some(_) => {
+                return Err(MountInitError::new(
+                    "root_mount_id must reference a configured mount",
+                ));
+            }
+            None if mounts.len() == 1 => mounts.keys().next().cloned(),
+            None if mounts.len() > 1 => {
+                return Err(MountInitError::new(
+                    "root_mount_id is required when multiple mounts are configured",
+                ));
+            }
+            None => None,
+        };
+        Ok(Self {
+            mounts,
+            root_mount_id,
+        })
+    }
+
+    pub(crate) fn root_mount_id(&self) -> Option<&str> {
+        self.root_mount_id.as_deref()
     }
 
     pub(crate) fn get(&self, mount_id: &str) -> Option<Arc<Mount>> {
@@ -179,10 +220,7 @@ impl MountRegistry {
     pub(crate) fn has_complete_write_family(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "macos"))
             && self.mounts.values().any(|mount| {
-                mount.writable
-                    && mount.exclusive_mutation_control
-                    && WRITE_OPERATIONS.iter().all(|name| mount.allows(name))
-                    && mount.staging.is_some()
+                mount.writable && WRITE_OPERATIONS.iter().all(|name| mount.allows(name))
             })
     }
 
@@ -380,12 +418,6 @@ impl Drop for StagingReservation {
 }
 
 impl Mount {
-    pub(crate) fn mutation_guard(&self) -> MutexGuard<'_, ()> {
-        self.mutation_gate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
     pub(crate) fn cleanup_faulted(&self) -> bool {
         self.cleanup_fault.load(Ordering::Acquire)
     }
@@ -398,13 +430,10 @@ impl Mount {
         MountDescriptor {
             mount_id: self.mount_id.clone(),
             logical_root: "/".to_owned(),
-            writable: self.writable && self.exclusive_mutation_control,
-            case_sensitive: Some(cfg!(not(target_os = "windows"))),
+            writable: self.writable,
+            case_sensitive: None,
             supports_atomic_replace: self.writable
-                && self.exclusive_mutation_control
-                && self.staging.is_some()
                 && cfg!(any(target_os = "linux", target_os = "macos")),
-            supports_file_revision: cfg!(unix),
             max_file_bytes: self.max_file_bytes,
         }
     }
@@ -556,23 +585,29 @@ impl Mount {
         Ok((directory, name))
     }
 
-    pub(crate) fn create_candidate(self: &Arc<Self>) -> Result<StagedCandidate, MountPathError> {
+    pub(crate) fn create_candidate(
+        self: &Arc<Self>,
+        destination: &EIPPath,
+    ) -> Result<StagedCandidate, MountPathError> {
         if self.cleanup_faulted() {
             return Err(MountPathError::Internal);
         }
-        let staging = self.staging.as_ref().ok_or(MountPathError::Unsupported)?;
+        let (parent, destination_name) = self.open_parent(destination)?;
         let reservation = self.staging_quota.reserve_object()?;
         for _ in 0..32 {
             let name = random_candidate_name().map_err(|_| MountPathError::Internal)?;
             let mut options = cap_std::fs::OpenOptions::new();
             options.write(true).read(true).create_new(true);
-            match staging.open_with(&name, &options) {
+            match parent.open_with(&name, &options) {
                 Ok(file) => {
                     let file = file.into_std();
                     let candidate = StagedCandidate {
                         name,
                         file,
                         mount: Arc::clone(self),
+                        destination: destination.clone(),
+                        destination_name,
+                        parent,
                         reservation,
                         removed: false,
                     };
@@ -587,50 +622,36 @@ impl Mount {
         Err(MountPathError::Internal)
     }
 
-    pub(crate) fn remove_candidate(&self, name: &str) -> Result<(), MountPathError> {
-        if !valid_candidate_name(name) {
-            return Err(MountPathError::Denied);
-        }
-        self.staging
-            .as_ref()
-            .ok_or(MountPathError::Unsupported)?
-            .remove_file(name)
-            .map_err(MountPathError::from_io)
-    }
-
-    pub(crate) fn staging_dir(&self) -> Result<&Dir, MountPathError> {
-        self.staging.as_deref().ok_or(MountPathError::Unsupported)
-    }
-
     pub(crate) fn publish_candidate(
         &self,
         candidate: &mut StagedCandidate,
         destination: &EIPPath,
         replace: bool,
     ) -> Result<(), MountPathError> {
-        if candidate.mount().mount_id != self.mount_id {
+        if candidate.mount().mount_id != self.mount_id || candidate.destination != *destination {
             return Err(MountPathError::Denied);
         }
-        let (parent, name) = self.open_parent(destination)?;
-        let staging = self.staging_dir()?;
         let source = Path::new(&candidate.name);
-        let target = Path::new(&name);
+        let target = Path::new(&candidate.destination_name);
         let opened = candidate.file.metadata().map_err(MountPathError::from_io)?;
-        let named = staging
+        let named = candidate
+            .parent
             .symlink_metadata(source)
             .map_err(MountPathError::from_io)?;
         if !named.is_file() || named.is_symlink() || !candidate_identity_matches(&opened, &named) {
             return Err(MountPathError::Denied);
         }
         if replace {
-            staging
-                .rename(source, &parent, target)
+            candidate
+                .parent
+                .rename(source, &candidate.parent, target)
                 .map_err(MountPathError::from_io)?;
         } else {
-            rename_no_replace(staging, source, &parent, target).map_err(MountPathError::from_io)?;
+            rename_no_replace(&candidate.parent, source, &candidate.parent, target)
+                .map_err(MountPathError::from_io)?;
         }
         candidate.mark_removed();
-        sync_directory(&parent).map_err(|_| MountPathError::UnknownOutcome)?;
+        sync_directory(&candidate.parent).map_err(|_| MountPathError::UnknownOutcome)?;
         Ok(())
     }
 }
@@ -650,7 +671,10 @@ impl StagedCandidate {
     }
 
     pub(crate) fn delete(mut self) -> Result<(), MountPathError> {
-        let result = self.mount.remove_candidate(&self.name);
+        let result = self
+            .parent
+            .remove_file(&self.name)
+            .map_err(MountPathError::from_io);
         self.removed = true;
         if result.is_ok() {
             self.reservation.release();
@@ -665,7 +689,7 @@ impl StagedCandidate {
 impl Drop for StagedCandidate {
     fn drop(&mut self) {
         if !self.removed {
-            if self.mount.remove_candidate(&self.name).is_ok() {
+            if self.parent.remove_file(&self.name).is_ok() {
                 self.reservation.release();
             } else {
                 self.reservation.retain();
@@ -678,9 +702,7 @@ impl Drop for StagedCandidate {
 struct PreparedMount {
     mount_id: String,
     native_root: PathBuf,
-    staging_root: Option<PathBuf>,
     writable: bool,
-    exclusive_mutation_control: bool,
     allow_command_execution: bool,
     max_file_bytes: u64,
     allowed_operations: BTreeSet<String>,
@@ -695,11 +717,6 @@ impl PreparedMount {
         }
         if config.max_file_bytes == 0 {
             return Err(MountInitError::new("mount max_file_bytes must be positive"));
-        }
-        if config.writable && !config.exclusive_mutation_control {
-            return Err(MountInitError::new(
-                "a writable mount requires exclusive_mutation_control",
-            ));
         }
         let native_root = canonical_directory(&config.native_root, "native_root")?;
         let mut allowed_operations = if config.allowed_operations.is_empty() {
@@ -734,33 +751,10 @@ impl PreparedMount {
                 allowed_operations.remove(*operation);
             }
         }
-        let needs_staging = WRITE_OPERATIONS
-            .iter()
-            .any(|operation| allowed_operations.contains(*operation));
-        let staging_root = config
-            .staging_root
-            .as_ref()
-            .map(|path| canonical_directory(path, "staging_root"))
-            .transpose()?;
-        if needs_staging && staging_root.is_none() {
-            return Err(MountInitError::new(
-                "a writable mount requires a private staging_root",
-            ));
-        }
-        if let Some(staging_root) = &staging_root {
-            validate_private_directory(staging_root)?;
-            if !same_filesystem(&native_root, staging_root)? {
-                return Err(MountInitError::new(
-                    "mount native_root and staging_root must be on the same filesystem",
-                ));
-            }
-        }
         Ok(Self {
             mount_id: config.mount_id.clone(),
             native_root,
-            staging_root,
             writable: config.writable,
-            exclusive_mutation_control: config.exclusive_mutation_control,
             allow_command_execution: config.allow_command_execution,
             max_file_bytes: config.max_file_bytes,
             allowed_operations,
@@ -775,25 +769,6 @@ fn validate_topology(mounts: &[PreparedMount]) -> Result<(), MountInitError> {
                 return Err(MountInitError::new(
                     "native mount roots must not overlap or alias",
                 ));
-            }
-        }
-    }
-    for mount in mounts {
-        if let Some(staging) = &mount.staging_root {
-            for visible in mounts {
-                if overlaps(staging, &visible.native_root) {
-                    return Err(MountInitError::new(
-                        "staging roots must be outside every logical mount",
-                    ));
-                }
-            }
-            for other in mounts {
-                if let Some(other_staging) = &other.staging_root
-                    && staging != other_staging
-                    && overlaps(staging, other_staging)
-                {
-                    return Err(MountInitError::new("staging roots must not overlap"));
-                }
             }
         }
     }
@@ -875,107 +850,6 @@ fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.is_dir() && right.is_dir()
 }
 
-fn validate_private_directory(path: &Path) -> Result<(), MountInitError> {
-    #[cfg(not(unix))]
-    let _ = path;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let metadata = fs::metadata(path)
-            .map_err(|error| MountInitError::io("inspect staging root", error))?;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(MountInitError::new(
-                "staging_root must not grant group or other permissions",
-            ));
-        }
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(MountInitError::new(
-                "staging_root must be owned by the daemon effective user",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn same_filesystem(left: &Path, right: &Path) -> Result<bool, MountInitError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let left = fs::metadata(left)
-            .map_err(|error| MountInitError::io("inspect native_root filesystem", error))?;
-        let right = fs::metadata(right)
-            .map_err(|error| MountInitError::io("inspect staging_root filesystem", error))?;
-        Ok(left.dev() == right.dev())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (left, right);
-        Ok(false)
-    }
-}
-
-fn scavenge_staging_root(
-    root: &Path,
-    max_objects: u64,
-    max_bytes: u64,
-    timeout: Duration,
-) -> Result<(), MountInitError> {
-    let started = Instant::now();
-    let mut objects = 0_u64;
-    let mut bytes = 0_u64;
-    let entries =
-        fs::read_dir(root).map_err(|error| MountInitError::io("read staging root", error))?;
-    for entry in entries {
-        if started.elapsed() >= timeout {
-            return Err(MountInitError::new(
-                "staging root scavenging exceeded its startup timeout",
-            ));
-        }
-        let entry = entry.map_err(|error| MountInitError::io("read staging entry", error))?;
-        let name = entry
-            .file_name()
-            .to_str()
-            .filter(|name| valid_candidate_name(name))
-            .map(str::to_owned)
-            .ok_or_else(|| MountInitError::new("staging root contains an unknown entry"))?;
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| MountInitError::io("inspect staging entry", error))?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || file_has_multiple_links(&metadata)
-        {
-            return Err(MountInitError::new(
-                "staging root entries must be single-link regular candidate files",
-            ));
-        }
-        objects = objects
-            .checked_add(1)
-            .ok_or_else(|| MountInitError::new("staging object accounting overflow"))?;
-        bytes = bytes
-            .checked_add(metadata.len())
-            .ok_or_else(|| MountInitError::new("staging byte accounting overflow"))?;
-        if objects > max_objects || bytes > max_bytes {
-            return Err(MountInitError::new(
-                "stale staging candidates exceed configured startup limits",
-            ));
-        }
-        fs::remove_file(root.join(name))
-            .map_err(|error| MountInitError::io("remove stale staging candidate", error))?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn file_has_multiple_links(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    metadata.nlink() != 1
-}
-
-#[cfg(not(unix))]
-fn file_has_multiple_links(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
 fn random_candidate_name() -> Result<String, getrandom::Error> {
     let mut bytes = [0_u8; CANDIDATE_RANDOM_BYTES];
     getrandom::fill(&mut bytes)?;
@@ -988,6 +862,7 @@ fn random_candidate_name() -> Result<String, getrandom::Error> {
     Ok(name)
 }
 
+#[cfg(test)]
 fn valid_candidate_name(name: &str) -> bool {
     name.len() == CANDIDATE_PREFIX.len() + CANDIDATE_RANDOM_BYTES * 2
         && name.starts_with(CANDIDATE_PREFIX)
@@ -1161,28 +1036,7 @@ impl Error for MountInitError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::config::TrustedMountConfig;
-
-    use super::{PreparedMount, logical_to_relative, valid_candidate_name, valid_mount_id};
-
-    #[test]
-    fn writable_mount_requires_exclusive_mutation_control() {
-        let config = TrustedMountConfig {
-            mount_id: "workspace".to_owned(),
-            native_root: std::path::PathBuf::from("/not-opened"),
-            staging_root: None,
-            writable: true,
-            exclusive_mutation_control: false,
-            allow_command_execution: false,
-            max_file_bytes: 1024,
-            allowed_operations: Vec::new(),
-        };
-        let error = match PreparedMount::new(&config) {
-            Err(error) => error,
-            Ok(_) => panic!("unsafe writable mount must be rejected"),
-        };
-        assert!(error.to_string().contains("exclusive_mutation_control"));
-    }
+    use super::{logical_to_relative, valid_candidate_name, valid_mount_id};
 
     #[test]
     fn validates_logical_paths_without_normalizing_authority() {
@@ -1212,8 +1066,8 @@ mod tests {
         assert!(!valid_mount_id(""));
         assert!(!valid_mount_id("bad/name"));
         assert!(valid_candidate_name(
-            "eip-stage-0123456789abcdef0123456789abcdef"
+            ".eip-stage-0123456789abcdef0123456789abcdef"
         ));
-        assert!(!valid_candidate_name("eip-stage-../escape"));
+        assert!(!valid_candidate_name(".eip-stage-../escape"));
     }
 }

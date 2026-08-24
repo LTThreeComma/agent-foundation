@@ -16,13 +16,16 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     RetryPromptPart,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
 )
 from pydantic_ai.models import ModelRequestParameters, StreamedResponse
-from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, DeltaToolCall, FunctionModel
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.output import ToolOutput
 from pydantic_ai.settings import ModelSettings
@@ -78,6 +81,452 @@ async def test_stream_failure_resumes_with_partial_history_and_shared_usage() ->
         if isinstance(message, ModelResponse) and message.run_id is not None
     }
     assert len(response_run_ids) == 2
+
+
+async def test_interrupted_partial_thinking_is_not_replayed() -> None:
+    calls: list[list[ModelMessage]] = []
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart] | str]:
+        del info
+        calls.append(deepcopy(messages))
+        if len(calls) == 1:
+            yield {0: DeltaThinkingPart(content="unfinished private reasoning")}
+            raise RuntimeError("stream disconnected")
+        yield "resumed answer"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        model_recovery=_recovery_policy(),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "resumed answer"
+    assert len(calls) == 2
+    assert not any(
+        isinstance(part, ThinkingPart)
+        for message in calls[1]
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+    assert not any(
+        isinstance(part, ThinkingPart)
+        for message in result.all_messages()
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_disabled_recovery_exports_no_unfinished_thinking() -> None:
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart]]:
+        del messages, info
+        yield {0: DeltaThinkingPart(content="unfinished private reasoning")}
+        raise RuntimeError("stream disconnected")
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.status == "failed"
+    assert result.state is not None
+    assert result.state.message_history == result.all_messages()
+    assert not any(
+        isinstance(part, ThinkingPart)
+        for message in result.all_messages()
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_finalized_thinking_and_partial_text_are_replayed_in_order() -> None:
+    calls: list[list[ModelMessage]] = []
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart] | str]:
+        del info
+        calls.append(deepcopy(messages))
+        if len(calls) == 1:
+            yield {0: DeltaThinkingPart(content="finished reasoning")}
+            yield {0: DeltaThinkingPart(signature="signature-1")}
+            yield "visible partial answer"
+            raise RuntimeError("stream disconnected")
+        yield "resumed answer"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        model_recovery=_recovery_policy(),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "resumed answer"
+    interrupted = next(
+        message for message in calls[1] if isinstance(message, ModelResponse) and message.state == "interrupted"
+    )
+    assert interrupted.parts == [
+        ThinkingPart(
+            content="finished reasoning",
+            signature="signature-1",
+            provider_name="function",
+        ),
+        TextPart(content="visible partial answer"),
+    ]
+
+
+async def test_response_tracker_does_not_mix_multiple_model_requests() -> None:
+    calls: list[list[ModelMessage]] = []
+
+    def lookup() -> str:
+        return "lookup complete"
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart | DeltaToolCall] | str]:
+        del info
+        calls.append(deepcopy(messages))
+        if len(calls) == 1:
+            yield {0: DeltaThinkingPart(content="first response reasoning")}
+            yield {0: DeltaThinkingPart(signature="signature-1")}
+            yield {
+                1: DeltaToolCall(
+                    name="lookup",
+                    json_args="{}",
+                    tool_call_id="tool-1",
+                )
+            }
+            return
+        if len(calls) == 2:
+            # This incomplete index 0 call emits no public part event. The
+            # first public event for this response is therefore text at index 1.
+            yield {0: DeltaToolCall(json_args='{"value":')}
+            yield "second response partial text"
+            raise RuntimeError("second response disconnected")
+        yield "recovered answer"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(Capability(tools=[lookup], id="test-tools"),),
+        model_recovery=_recovery_policy(max_attempts=2),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "recovered answer"
+    assert len(calls) == 3
+    recovery_history = calls[2]
+    thinking_parts = [
+        part
+        for message in recovery_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ThinkingPart)
+    ]
+    tool_calls = [
+        part
+        for message in recovery_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ToolCallPart) and part.tool_call_id == "tool-1"
+    ]
+    tool_returns = [
+        part
+        for message in recovery_history
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolReturnPart) and part.tool_call_id == "tool-1"
+    ]
+    interrupted = [
+        message for message in recovery_history if isinstance(message, ModelResponse) and message.state == "interrupted"
+    ]
+    assert len(thinking_parts) == 1
+    assert len(tool_calls) == 1
+    assert len(tool_returns) == 1
+    assert tool_returns[0].content == "lookup complete"
+    assert len(interrupted) == 1
+    assert interrupted[0].parts == [TextPart(content="second response partial text")]
+
+
+async def test_unobserved_usage_limited_thinking_is_not_exported() -> None:
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart]]:
+        del messages, info
+        yield {0: DeltaThinkingPart(content="unobserved unfinished reasoning")}
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run(
+        "start",
+        bindings=RunBindings.local(),
+        usage_limits=UsageLimits(output_tokens_limit=0),
+    )
+
+    assert result.status == "failed"
+    assert result.failure is not None
+    assert result.failure.code == "usage_limit_exceeded"
+    assert result.state is not None
+    assert not any(
+        isinstance(part, ThinkingPart)
+        for message in result.state.message_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_complete_native_tool_parts_survive_a_later_text_interruption() -> None:
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, NativeToolCallPart | NativeToolReturnPart] | str]:
+        del messages, info
+        yield {
+            0: NativeToolCallPart(
+                tool_name="web_search",
+                args={"query": "safe recovery"},
+                tool_call_id="native-1",
+            )
+        }
+        yield {
+            1: NativeToolReturnPart(
+                tool_name="web_search",
+                content="native result",
+                tool_call_id="native-1",
+            )
+        }
+        yield "partial answer"
+        raise RuntimeError("stream disconnected")
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.status == "failed"
+    interrupted = next(
+        message
+        for message in result.all_messages()
+        if isinstance(message, ModelResponse) and message.state == "interrupted"
+    )
+    assert [type(part) for part in interrupted.parts] == [
+        NativeToolCallPart,
+        NativeToolReturnPart,
+        TextPart,
+    ]
+    assert interrupted.parts[1].content == "native result"
+    assert interrupted.parts[2].content == "partial answer"
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        (
+            NativeToolCallPart(tool_name="web_search", args={}, tool_call_id="native-1"),
+            NativeToolCallPart(tool_name="web_search", args={}, tool_call_id="native-1"),
+            NativeToolReturnPart(
+                tool_name="web_search",
+                content="native result",
+                tool_call_id="native-1",
+            ),
+        ),
+        (
+            NativeToolCallPart(tool_name="web_search", args={}, tool_call_id="native-1"),
+            NativeToolReturnPart(
+                tool_name="code_execution",
+                content="native result",
+                tool_call_id="native-1",
+            ),
+        ),
+        (
+            NativeToolReturnPart(
+                tool_name="web_search",
+                content="native result",
+                tool_call_id="native-1",
+            ),
+            NativeToolCallPart(tool_name="web_search", args={}, tool_call_id="native-1"),
+        ),
+    ],
+    ids=("duplicate-id", "tool-name-mismatch", "return-before-call"),
+)
+async def test_malformed_native_tool_pairs_discard_the_interrupted_response(
+    parts: tuple[NativeToolCallPart | NativeToolReturnPart, ...],
+) -> None:
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, NativeToolCallPart | NativeToolReturnPart] | str]:
+        del messages, info
+        for index, part in enumerate(parts):
+            yield {index: part}
+        yield "partial answer"
+        raise RuntimeError("stream disconnected")
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.status == "failed"
+    assert not any(
+        isinstance(part, NativeToolCallPart | NativeToolReturnPart)
+        for message in result.all_messages()
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+    assert result.state is not None
+    assert not any(
+        isinstance(part, NativeToolCallPart | NativeToolReturnPart)
+        for message in result.state.message_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_unmatched_native_tool_call_discards_the_interrupted_response() -> None:
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, NativeToolCallPart] | str]:
+        del messages, info
+        yield {
+            0: NativeToolCallPart(
+                tool_name="web_search",
+                args={"query": "unsafe continuation"},
+                tool_call_id="native-unmatched",
+            )
+        }
+        yield "partial answer after native call"
+        raise RuntimeError("stream disconnected")
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.status == "failed"
+    assert not any(
+        isinstance(part, NativeToolCallPart)
+        for message in result.all_messages()
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+    assert result.state is not None
+    assert not any(
+        isinstance(part, NativeToolCallPart)
+        for message in result.state.message_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_recovery_does_not_replay_an_unmatched_native_tool_call() -> None:
+    calls: list[list[ModelMessage]] = []
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, NativeToolCallPart] | str]:
+        del info
+        calls.append(deepcopy(messages))
+        if len(calls) == 1:
+            yield {
+                0: NativeToolCallPart(
+                    tool_name="web_search",
+                    args={"query": "unsafe continuation"},
+                    tool_call_id="native-unmatched",
+                )
+            }
+            raise RuntimeError("stream disconnected")
+        yield "resumed answer"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        model_recovery=_recovery_policy(),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "resumed answer"
+    assert len(calls) == 2
+    assert not any(
+        isinstance(part, NativeToolCallPart)
+        for message in calls[1]
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+async def test_unfinalized_tool_call_invalidates_the_partial_response() -> None:
+    calls: list[list[ModelMessage]] = []
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaToolCall] | str]:
+        del info
+        calls.append(deepcopy(messages))
+        if len(calls) == 1:
+            yield {
+                0: DeltaToolCall(
+                    name="side_effect",
+                    json_args='{"value":"started"}',
+                    tool_call_id="tool-1",
+                )
+            }
+            raise RuntimeError("stream disconnected")
+        yield "resumed answer"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        model_recovery=_recovery_policy(),
+    )
+
+    result = await executable.run("start", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "resumed answer"
+    assert len(calls) == 2
+    assert not any(
+        isinstance(part, ToolCallPart) and part.tool_call_id == "tool-1"
+        for message in calls[1]
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
 
 
 async def test_disabled_recovery_exports_interrupted_model_history_as_a_failed_result() -> None:
@@ -282,6 +731,41 @@ async def test_cancel_interrupts_recovery_backoff_without_starting_another_attem
 
     assert terminal.result.status == "cancelled"
     assert calls == 1
+
+
+async def test_cancelled_stream_does_not_export_unfinished_thinking() -> None:
+    started = asyncio.Event()
+
+    async def stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart]]:
+        del messages, info
+        yield {0: DeltaThinkingPart(content="unfinished private reasoning")}
+        started.set()
+        await asyncio.Event().wait()
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+    )
+
+    async with executable.stream("start", bindings=RunBindings.local()) as run_stream:
+        await run_stream.__anext__()
+        pending = asyncio.create_task(run_stream.__anext__())
+        await started.wait()
+        run_stream.cancel()
+        terminal = await asyncio.wait_for(pending, timeout=2)
+
+    assert terminal.result.status == "cancelled"
+    assert terminal.result.state is not None
+    assert not any(
+        isinstance(part, ThinkingPart)
+        for message in terminal.result.all_messages()
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
 
 
 async def test_cancel_fence_wins_when_provider_translates_cancellation() -> None:

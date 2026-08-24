@@ -82,6 +82,7 @@ from converge_agent_harness.plugins import (
     bind_run_plugins,
 )
 from converge_agent_harness.recovery import (
+    InterruptedResponseTracker,
     ModelRecoveryPolicy,
     is_recoverable_model_failure,
     normalize_interrupted_history,
@@ -1449,6 +1450,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
         while True:
             retry_error: BaseException | None = None
             next_attempt_index = attempt_index + 1
+            response_tracker = InterruptedResponseTracker()
             manager = self._executable._agent.run_stream_events(
                 current_input.value,
                 message_history=current_history,
@@ -1467,7 +1469,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                     if self._cancel_requested:
                         events.cancel()
                     try:
-                        async for event in self._merge_agent_events(events):
+                        async for event in self._merge_agent_events(events, response_tracker):
                             self._refresh_live_messages()
                             if isinstance(event, HarnessEvent):
                                 yield event
@@ -1510,7 +1512,11 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                                 return
                             yield self._adapt_event(cast(AgentStreamEvent, event))
                     except RunCancelled as exc:
-                        messages, _ = normalize_interrupted_history(exc.all_messages())
+                        messages, _ = normalize_interrupted_history(
+                            exc.all_messages(),
+                            response_tracker=response_tracker,
+                        )
+                        self._pydantic_events = None
                         self._latest_messages = messages
                         state = await exchange.context.export_state(messages) if exc.run_id is not None else None
                         yield self._record_inner_candidate(
@@ -1526,14 +1532,26 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                         )
                         return
                     except UsageLimitExceeded:
+                        self._refresh_live_messages()
+                        messages, _ = normalize_interrupted_history(
+                            self._latest_messages,
+                            response_tracker=response_tracker,
+                        )
+                        self._pydantic_events = None
+                        self._latest_messages = messages
                         yield await self._failed_candidate(
                             code="usage_limit_exceeded",
                             message="Pydantic AI usage limit exceeded.",
+                            refresh_messages=False,
                         )
                         return
                     except Exception as error:
                         self._refresh_live_messages()
-                        messages, _ = normalize_interrupted_history(self._latest_messages)
+                        messages, _ = normalize_interrupted_history(
+                            self._latest_messages,
+                            response_tracker=response_tracker,
+                        )
+                        self._pydantic_events = None
                         self._latest_messages = messages
                         if self._cancel_requested:
                             state = await exchange.context.export_state(messages) if messages else None
@@ -1563,6 +1581,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                                     if exhausted
                                     else "Pydantic AI agent execution failed."
                                 ),
+                                refresh_messages=False,
                             )
                             return
                         else:
@@ -1596,8 +1615,15 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
             current_history = self._latest_messages
             attempt_index = next_attempt_index
 
-    async def _failed_candidate(self, *, code: str, message: str) -> HarnessRunResult[OutputT]:
-        self._refresh_live_messages()
+    async def _failed_candidate(
+        self,
+        *,
+        code: str,
+        message: str,
+        refresh_messages: bool = True,
+    ) -> HarnessRunResult[OutputT]:
+        if refresh_messages:
+            self._refresh_live_messages()
         state = await self.context.export_state(self._latest_messages)
         return self._record_inner_candidate(
             HarnessRunResult(
@@ -1681,8 +1707,13 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
     async def _merge_agent_events(
         self,
         events: AgentRunEvents[OutputT | DeferredToolRequests],
+        response_tracker: InterruptedResponseTracker,
     ) -> AsyncIterator[Any]:
         async for event in events:
+            response_tracker.observe(
+                cast(AgentStreamEvent, event),
+                response_history_count=len(events.all_messages()),
+            )
             yield event
 
     def _next_public_sequence(self) -> int:

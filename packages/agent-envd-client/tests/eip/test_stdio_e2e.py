@@ -36,7 +36,6 @@ from converge_agent_envd_client.eip.v1 import (
     FileStatParams,
     FileWriteMode,
     FileWriteTextParams,
-    FindMode,
     InitializeParams,
     MethodSpec,
     OperationCancelParams,
@@ -62,6 +61,7 @@ from converge_agent_envd_client.eip.v1 import (
     ProcessWriteStdinParams,
     ReceiptGetParams,
     RequestedProcessSignal,
+    ResourceAuthority,
     SearchMode,
     SessionCloseParams,
     ShellExecParams,
@@ -87,12 +87,14 @@ async def start_daemon(
     environment_id: str = "env-e2e",
     config_path: Path | None = None,
     runtime_dir: Path | None = None,
+    resource_authority: ResourceAuthority = ResourceAuthority.SCOPED,
 ) -> asyncio.subprocess.Process:
     arguments = [str(binary)]
     if config_path is not None:
         arguments.extend(("--config", str(config_path)))
     environment = {
         "AGENT_ENVD_ENVIRONMENT_ID": environment_id,
+        "AGENT_ENVD_RESOURCE_AUTHORITY": resource_authority.value,
         "AGENT_ENVD_EXECUTION_ISOLATION": "disabled",
         "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS": "[ ]",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
@@ -154,6 +156,8 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
         )
         descriptor = await session.describe()
         assert descriptor.environment_id == "env-e2e"
+        assert descriptor.resource_authority.mode is ResourceAuthority.SCOPED
+        assert descriptor.resource_authority.root_mount_id is None
         assert descriptor.capabilities == (
             "environment.describe",
             "operation.cancel",
@@ -224,6 +228,80 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="server authority currently requires a POSIX root namespace")
+def test_resource_authority_ceiling_and_server_file_command_surface(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    source = tmp_path / "server-source.txt"
+    source.write_text("server-visible\n")
+    python = Path(sys.executable).resolve()
+    config_path = tmp_path / "agent-envd.json"
+    config_path.write_text(json.dumps({"trusted_executable_roots": [str(python.parent)]}))
+
+    async def scenario() -> None:
+        scoped_daemon = await start_daemon(agent_envd_binary())
+        with pytest.raises(EIPMethodError) as rejected:
+            await EIPSession.initialize(
+                StdioTransport.from_process(scoped_daemon),
+                expected_environment_id="env-e2e",
+                resource_authority=ResourceAuthority.SERVER,
+            )
+        assert rejected.value.error.data.error_type.value == "protocol_incompatible"
+        assert_disabled_isolation_warning(await wait_for_exit(scoped_daemon))
+
+        server_daemon = await start_daemon(
+            agent_envd_binary(),
+            config_path=config_path,
+            runtime_dir=runtime,
+            resource_authority=ResourceAuthority.SERVER,
+        )
+        session = await EIPSession.initialize(
+            StdioTransport.from_process(server_daemon),
+            expected_environment_id="env-e2e",
+            resource_authority=ResourceAuthority.SERVER,
+            required_capabilities=("file.read", "process.manage", "shell.exec"),
+        )
+        descriptor = session.descriptor
+        assert descriptor.resource_authority.mode is ResourceAuthority.SERVER
+        assert descriptor.resource_authority.root_mount_id == "server-root"
+        assert tuple(mount.mount_id for mount in descriptor.mounts) == ("server-root",)
+
+        source_path = EIPPath(mount_id="server-root", path=str(source))
+        observed = await session.client.file_read_text(
+            FileReadTextParams(
+                context=EIPCallContext(operation_id="server-read-e2e"),
+                path=source_path,
+                line_offset=0,
+                line_limit=1,
+                max_line_length=2_000,
+            )
+        )
+        assert observed.text == "server-visible\n"
+        assert observed.lines_read == 1
+        assert observed.has_more is False
+
+        foreground = await session.client.shell_exec(
+            ShellExecParams(
+                context=EIPCallContext(operation_id="server-shell-e2e"),
+                request=CommandRequest(
+                    command=ArgvCommand(
+                        kind="argv",
+                        executable=python.name,
+                        arguments=("-c", "print('server-command')"),
+                    ),
+                    cwd=EIPPath(mount_id="server-root", path=str(tmp_path)),
+                ),
+            )
+        )
+        assert foreground.status.cleanup.value == "complete"
+        assert foreground.output.stdout.capture.inline is not None
+        assert base64.b64decode(foreground.output.stdout.capture.inline.data + "===") == b"server-command\n"
+        await session.close()
+        assert_disabled_isolation_warning(await wait_for_exit(server_daemon))
+
+    asyncio.run(scenario())
+
+
 def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) -> None:
     native = tmp_path / "native"
     runtime = tmp_path / "runtime"
@@ -239,7 +317,6 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
                         "mount_id": "workspace",
                         "native_root": str(native),
                         "writable": False,
-                        "exclusive_mutation_control": False,
                         "allow_command_execution": True,
                         "max_file_bytes": 1024 * 1024,
                         "allowed_operations": [
@@ -356,7 +433,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                         "mount_id": "workspace",
                         "native_root": str(native),
                         "writable": False,
-                        "exclusive_mutation_control": False,
                         "allow_command_execution": True,
                         "max_file_bytes": 1024 * 1024,
                         "allowed_operations": [
@@ -846,7 +922,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 )
             )
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         blocked_cancellation = await session.client.operation_cancel(
             OperationCancelParams(
                 context=EIPCallContext(operation_id="process-blocked-initial-cancel-e2e"),
@@ -913,9 +989,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
 
 def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
     native = tmp_path / "native"
-    staging = tmp_path / "staging"
     native.mkdir()
-    staging.mkdir(mode=0o700)
     config_path = tmp_path / "agent-envd.json"
     config_path.write_text(
         json.dumps(
@@ -924,9 +998,7 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
                     {
                         "mount_id": "workspace",
                         "native_root": str(native),
-                        "staging_root": str(staging),
                         "writable": True,
-                        "exclusive_mutation_control": True,
                         "allow_command_execution": False,
                         "max_file_bytes": 1024 * 1024,
                     }
@@ -960,10 +1032,7 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         assert (native / "binary.dat").read_bytes() == payload
 
         downloaded = bytearray()
-        async with session.open_reader(
-            file_path,
-            expected_revision=committed.info.revision,
-        ) as reader:
+        async with session.open_reader(file_path) as reader:
             async for chunk in reader:
                 downloaded.extend(chunk)
         assert bytes(downloaded) == payload
@@ -997,18 +1066,22 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
             FileReadTextParams(
                 context=EIPCallContext(operation_id="text-e2e"),
                 path=text_path,
-                max_bytes=64,
+                line_offset=0,
+                line_limit=2,
+                max_line_length=2_000,
             )
         )
         assert text.text == "alpha\nbeta\n"
-        assert text.content_complete is True
+        assert text.line_offset == 0
+        assert text.lines_read == 2
+        assert text.has_more is False
         stat = await session.client.file_stat(
             FileStatParams(
                 context=EIPCallContext(operation_id="stat-e2e"),
                 path=text_path,
             )
         )
-        assert stat.info.revision == text.info.revision
+        assert stat.info.path == text.info.path
         listed = await session.client.file_list(
             FileListParams(
                 context=EIPCallContext(operation_id="list-e2e"),
@@ -1016,27 +1089,31 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
             )
         )
         assert [entry.relative_path for entry in listed.entries] == ["binary.dat", "notes.txt"]
+        assert listed.offset == 0
+        assert listed.has_more is False
         found = await session.client.file_find(
             FileFindParams(
                 context=EIPCallContext(operation_id="find-e2e"),
                 root=EIPPath(mount_id="workspace", path="/"),
                 pattern="*.txt",
-                mode=FindMode.GLOB,
-                kind=FileKind.FILE,
-                max_depth=2,
+                kinds=(FileKind.FILE,),
             )
         )
         assert [entry.relative_path for entry in found.entries] == ["notes.txt"]
+        assert found.offset == 0
+        assert found.has_more is False
         searched = await session.client.file_search(
             FileSearchParams(
                 context=EIPCallContext(operation_id="search-e2e"),
                 root=EIPPath(mount_id="workspace", path="/"),
                 query="beta",
                 mode=SearchMode.LITERAL,
-                max_depth=2,
+                max_line_length=2_000,
             )
         )
         assert [(match.path, match.line_number) for match in searched.matches] == [(text_path, 2)]
+        assert searched.offset == 0
+        assert searched.has_more is False
         receipt = await session.client.receipt_get(
             ReceiptGetParams(
                 context=EIPCallContext(operation_id="receipt-e2e"),

@@ -40,6 +40,8 @@ from converge_agent_envd_client.eip.v1 import (
     JsonRpcErrorResponse,
     JsonRpcRequest,
     JsonRpcSuccessResponse,
+    ResourceAuthority,
+    ResourceAuthorityDescriptor,
     RetryHint,
     decode_model,
     encode_model,
@@ -122,6 +124,7 @@ def descriptor(generation: int) -> EnvironmentDescriptor:
             file_transfer_idle_ttl_ms=1,
             max_file_transfer_duration_ms=1,
         ),
+        resource_authority=ResourceAuthorityDescriptor(mode=ResourceAuthority.SCOPED),
         isolation=IsolationPosture(
             mode=IsolationMode.DISABLED,
             backend=IsolationBackend.OUTER_HOST,

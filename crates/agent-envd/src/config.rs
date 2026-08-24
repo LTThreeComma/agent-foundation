@@ -9,7 +9,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::eip::EIPLimits;
+use crate::eip::{EIPLimits, ResourceAuthority};
 
 const DEFAULT_MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -17,7 +17,6 @@ const DEFAULT_MAX_CONCURRENT_OPERATIONS: u64 = 128;
 const DEFAULT_MAX_TRANSFER_FRAME_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS: u64 = 64;
 const DEFAULT_SESSION_IDLE_TTL_MS: u64 = 30 * 60 * 1000;
-const DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS: u64 = 30_000;
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_COMMAND_ARGUMENTS: usize = 1024;
 const DEFAULT_MAX_COMMAND_ARGUMENT_BYTES: usize = 1024 * 1024;
@@ -32,6 +31,7 @@ const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
     "AGENT_ENVD_WEBSOCKET_ENABLED",
     "AGENT_ENVD_ENVIRONMENT_ID",
     "AGENT_ENVD_RUNTIME_DIR",
+    "AGENT_ENVD_RESOURCE_AUTHORITY",
     "AGENT_ENVD_EXECUTION_ISOLATION",
     "AGENT_ENVD_EXECUTION_NETWORK",
     "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS",
@@ -51,10 +51,7 @@ const NETWORK_ONLY_VARIABLES: &[&str] = &[
 pub(crate) struct TrustedMountConfig {
     pub(crate) mount_id: String,
     pub(crate) native_root: PathBuf,
-    #[serde(default)]
-    pub(crate) staging_root: Option<PathBuf>,
     pub(crate) writable: bool,
-    pub(crate) exclusive_mutation_control: bool,
     #[serde(default = "default_allow_command_execution")]
     pub(crate) allow_command_execution: bool,
     pub(crate) max_file_bytes: u64,
@@ -95,6 +92,8 @@ pub(crate) struct CommandConfig {
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
+    root_mount_id: Option<String>,
+    #[serde(default)]
     mounts: Vec<TrustedMountConfig>,
     #[serde(default)]
     trusted_executable_roots: Vec<PathBuf>,
@@ -108,7 +107,8 @@ pub(crate) struct Config {
     pub(crate) limits: EIPLimits,
     pub(crate) initialization_timeout: Duration,
     pub(crate) session_idle_timeout: Duration,
-    pub(crate) staging_scavenge_timeout: Duration,
+    pub(crate) resource_authority: ResourceAuthority,
+    pub(crate) root_mount_id: Option<String>,
     pub(crate) mounts: Vec<TrustedMountConfig>,
     pub(crate) command: Option<CommandConfig>,
 }
@@ -183,6 +183,19 @@ impl Config {
             ));
         }
 
+        let resource_authority = match optional_unicode("AGENT_ENVD_RESOURCE_AUTHORITY")?
+            .as_deref()
+            .unwrap_or("scoped")
+        {
+            "scoped" => ResourceAuthority::Scoped,
+            "server" => ResourceAuthority::Server,
+            _ => {
+                return Err(ConfigError::new(
+                    "AGENT_ENVD_RESOURCE_AUTHORITY must be scoped or server",
+                ));
+            }
+        };
+
         let environment_id = required_unicode("AGENT_ENVD_ENVIRONMENT_ID")?;
         if environment_id.trim() != environment_id
             || environment_id.is_empty()
@@ -204,7 +217,8 @@ impl Config {
             environment_id,
             initialization_timeout: INITIALIZATION_TIMEOUT,
             session_idle_timeout: Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS),
-            staging_scavenge_timeout: Duration::from_millis(DEFAULT_STAGING_SCAVENGE_TIMEOUT_MS),
+            resource_authority,
+            root_mount_id: file.root_mount_id,
             mounts: file.mounts,
             command,
             limits,
@@ -218,7 +232,8 @@ impl Config {
             limits: default_limits(),
             initialization_timeout: Duration::from_millis(20),
             session_idle_timeout: Duration::from_secs(1),
-            staging_scavenge_timeout: Duration::from_secs(1),
+            resource_authority: ResourceAuthority::Scoped,
+            root_mount_id: None,
             mounts: Vec::new(),
             command: None,
         }

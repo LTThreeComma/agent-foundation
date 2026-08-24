@@ -33,8 +33,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run format:check && npm run typecheck && npm test",
-    "check:all": "npm run check && npm run pack:check",
+    "check": "npm run format:check && npm run typecheck",
+    "check:all": "npm run check && npm test && npm run pack:check",
     "clean": "rm -rf dist *.tgz",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

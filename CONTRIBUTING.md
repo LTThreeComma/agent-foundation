@@ -66,18 +66,18 @@ Use the Makefile as the stable development interface:
 | `make docs-serve`           | Start the local MkDocs development server                         |
 | `make docs-build`           | Build the documentation site in strict mode                       |
 | `make test`                 | Run Python workspace tests                                        |
-| `make examples-check`       | Run the fast independent examples gate                            |
+| `make examples-check`       | Lint and type-check the independent examples                      |
 | `make examples-check-all`   | Build and run the complete independent examples gate              |
 | `make eip-check`            | Verify generated EIP artifacts and shared Python/Rust wire models |
-| `make rust-check`           | Run the fast root Rust workspace gate                             |
-| `make sdk-check`            | Run the fast Python, Go, Rust, and TypeScript SDK gates           |
-| `make foundation-web-check` | Run the fast private Foundation Web gate                          |
+| `make rust-check`           | Format-check and lint the root Rust workspace                     |
+| `make sdk-check`            | Lint and type-check the standalone SDKs                           |
+| `make foundation-web-check` | Format-check and type-check Foundation Web                        |
 | `make foundation-web-build` | Build Foundation Web production assets                            |
 | `make build`                | Build all workspace packages, applications, and standalone SDKs   |
 | `make images`               | Build the foundation-service and sandbox images                   |
 | `make image-check`          | Build and smoke-check both container images                       |
-| `make check`                | Run the fast repository and standalone SDK feedback gate          |
-| `make check-all`            | Run every build, package, documentation, and SDK release check    |
+| `make check`                | Format, lint, and type-check the repository without tests         |
+| `make check-all`            | Run the complete component gates, including tests and builds      |
 
 Use `make check` while iterating. Run the full local gate before opening or updating a broad pull request:
 

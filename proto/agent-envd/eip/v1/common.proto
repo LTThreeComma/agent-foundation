@@ -20,11 +20,6 @@ message FileWriterHandle {
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
 
-message FileTextCursor {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
 message OutputReference {
   option (eip_message).transparent = true;
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
@@ -36,11 +31,6 @@ message OutputCursor {
 }
 
 message ReceiptRef {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
-message FileRevision {
   option (eip_message).transparent = true;
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }

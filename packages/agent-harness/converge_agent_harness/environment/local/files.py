@@ -1,43 +1,32 @@
-"""Direct-local bounded filesystem implementation."""
+"""Direct Local root-confined filesystem implementation."""
 
 from __future__ import annotations
 
 import asyncio
+import codecs
 import fnmatch
-import hashlib
 import itertools
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ..files import (
-    AsyncFileReader,
-    AsyncFileWriter,
-    FileByteRange,
-    FileContentDigest,
     FileCopyResult,
+    FileEntriesResult,
     FileKind,
-    FileListEntry,
-    FileListPage,
     FileMetadata,
     FileMutationResult,
     FilePatchResult,
-    FileQueryCursor,
-    FileQueryPage,
     FileQueryRequest,
-    FileReadCompletion,
-    FileRevision,
-    FileTextCursor,
     FileTextMatch,
-    FileTextPage,
-    FileTextPosition,
-    FileTextSearchPage,
+    FileTextResult,
     FileTextSearchRequest,
+    FileTextSearchResult,
     FileWriteMode,
     FileWriteResult,
 )
@@ -47,89 +36,27 @@ if TYPE_CHECKING:
     from .binding import DirectLocalFilePolicy
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_MAX_QUERY_PATTERN_BYTES = 16 * 1024
 
 
-class _LocalReader(AsyncFileReader):
-    def __init__(
-        self,
-        operator: LocalFileOperator,
-        logical_path: str,
-        native_path: Path,
-        byte_range: FileByteRange,
-        revision: FileRevision,
-    ) -> None:
-        self._operator = operator
-        self._logical_path = logical_path
-        self._native_path = native_path
-        self._range = byte_range
-        self._initial_revision = revision
-        self._file: Any | None = None
-        self._read = 0
-        self._digest = hashlib.sha256()
-        self._completion: FileReadCompletion | None = None
-
-    @property
-    def completion(self) -> FileReadCompletion | None:
-        return self._completion
-
-    async def open(self) -> None:
-        self._file = await asyncio.to_thread(self._native_path.open, "rb")
-        await asyncio.to_thread(self._file.seek, self._range.offset)
-
-    def __aiter__(self) -> AsyncIterator[bytes]:
-        return self._iterate()
-
-    async def _iterate(self) -> AsyncIterator[bytes]:
-        if self._file is None:
-            raise RuntimeError("Reader is not entered")
-        remaining = self._range.length
-        while remaining is None or remaining > 0:
-            size = 65_536 if remaining is None else min(65_536, remaining)
-            chunk = await asyncio.to_thread(self._file.read, size)
-            if not chunk:
-                break
-            self._read += len(chunk)
-            self._digest.update(chunk)
-            if remaining is not None:
-                remaining -= len(chunk)
-            yield chunk
-        current = await asyncio.to_thread(self._operator._revision, self._native_path)
-        if current != self._initial_revision:
-            raise EnvironmentError("File changed during raw read.", code="environment_conflict")
-        position = self._range.offset + self._read
-        size = await asyncio.to_thread(lambda: self._native_path.stat().st_size)
-        self._completion = FileReadCompletion(
-            range_start=self._range.offset,
-            range_end=position,
-            bytes_read=self._read,
-            digest=FileContentDigest(value=self._digest.hexdigest()),
-            source_eof_at_end=position >= size,
-            stability="verified",
-        )
-
-    async def close(self) -> None:
-        if self._file is not None:
-            await asyncio.to_thread(self._file.close)
-            self._file = None
-
-
-class _LocalWriter(AsyncFileWriter):
+class _LocalWriter:
     def __init__(
         self,
         operator: LocalFileOperator,
         logical_path: str,
         native_path: Path,
         mode: FileWriteMode,
-        expected_revision: FileRevision | None,
+        *,
+        validate_text_append: bool,
     ) -> None:
         self._operator = operator
         self._logical_path = logical_path
         self._native_path = native_path
         self._mode: FileWriteMode = mode
-        self._expected_revision = expected_revision
+        self._validate_text_append = validate_text_append
         self._temp_path: Path | None = None
         self._file: Any | None = None
-        self._written = 0
+        self._payload_bytes = 0
         self._committed = False
 
     async def open(self) -> None:
@@ -141,21 +68,49 @@ class _LocalWriter(AsyncFileWriter):
         self._temp_path = Path(name)
         self._file = os.fdopen(fd, "wb")
         if self._mode == "append" and self._native_path.exists():
-            existing_size = await asyncio.to_thread(lambda: self._native_path.stat().st_size)
-            if existing_size > self._operator.max_transfer_bytes:
-                raise EnvironmentError("Append source exceeds transfer limit.", code="environment_too_large")
-            existing = await asyncio.to_thread(self._native_path.read_bytes)
-            await self.write(existing)
+            await self._copy_append_source()
+
+    async def _copy_append_source(self) -> None:
+        source = await asyncio.to_thread(self._native_path.open, "rb")
+        decoder = codecs.getincrementaldecoder("utf-8")("strict") if self._validate_text_append else None
+        try:
+            while chunk := await asyncio.to_thread(source.read, 65_536):
+                if decoder is not None:
+                    if b"\x00" in chunk:
+                        raise EnvironmentError(
+                            "Text append source contains NUL.",
+                            code="environment_unsupported",
+                        )
+                    try:
+                        decoder.decode(chunk, final=False)
+                    except UnicodeDecodeError as exc:
+                        raise EnvironmentError(
+                            "Text append source is not valid UTF-8.",
+                            code="environment_unsupported",
+                        ) from exc
+                await self._write(chunk, payload=False)
+            if decoder is not None:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError as exc:
+                    raise EnvironmentError(
+                        "Text append source is not valid UTF-8.",
+                        code="environment_unsupported",
+                    ) from exc
+        finally:
+            await asyncio.to_thread(source.close)
 
     async def write(self, chunk: bytes) -> None:
+        await self._write(chunk, payload=True)
+
+    async def _write(self, chunk: bytes, *, payload: bool) -> None:
         if self._file is None or self._committed:
             raise EnvironmentError("File writer is not writable.", code="environment_conflict")
         if not isinstance(chunk, bytes):
             raise TypeError("raw writer chunks must be bytes")
-        if self._written + len(chunk) > self._operator.max_transfer_bytes:
-            raise EnvironmentError("Raw write exceeds transfer limit.", code="environment_too_large")
         await asyncio.to_thread(self._file.write, chunk)
-        self._written += len(chunk)
+        if payload:
+            self._payload_bytes += len(chunk)
 
     async def commit(self) -> FileWriteResult:
         if self._file is None or self._temp_path is None or self._committed:
@@ -169,15 +124,12 @@ class _LocalWriter(AsyncFileWriter):
             self._temp_path,
             self._native_path,
             self._mode,
-            self._expected_revision,
         )
         self._temp_path = None
         self._committed = True
-        revision = await asyncio.to_thread(self._operator._revision, self._native_path)
         return FileWriteResult(
             path=self._logical_path,
-            revision=revision,
-            bytes_written=self._written,
+            bytes_written=self._payload_bytes,
             receipt=self._operator._receipt(),
         )
 
@@ -210,10 +162,6 @@ class LocalFileOperator:
         self._binding_revision = binding_revision
         self._generation = generation
         self._operations = itertools.count(1)
-
-    @property
-    def max_transfer_bytes(self) -> int:
-        return self._policy.max_transfer_bytes
 
     def _receipt(self) -> EnvironmentOperationReceipt:
         return EnvironmentOperationReceipt(
@@ -272,28 +220,11 @@ class LocalFileOperator:
         if path == self._root:
             raise EnvironmentError("The provider root cannot be mutated.", code="environment_denied")
 
-    def _revision(self, path: Path) -> FileRevision:
-        if path.is_symlink():
-            digest = hashlib.sha256(os.readlink(path).encode()).hexdigest()
-        elif path.is_file():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        else:
-            stat = path.stat(follow_symlinks=False)
-            digest = hashlib.sha256(f"{stat.st_mode}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
-        return FileRevision(digest)
-
-    def _check_revision(self, path: Path, expected: FileRevision | None) -> None:
-        if expected is None:
-            return
-        if not path.exists() or self._revision(path) != expected:
-            raise EnvironmentError("File revision does not match.", code="environment_conflict")
-
     def _publish_staged(
         self,
         staged: Path,
         destination: Path,
         mode: FileWriteMode,
-        expected: FileRevision | None,
     ) -> None:
         self._require_writable(destination)
         exists = destination.exists() or destination.is_symlink()
@@ -301,9 +232,8 @@ class LocalFileOperator:
             raise EnvironmentError("Writing through a symlink is denied.", code="environment_denied")
         if mode == "create" and exists:
             raise EnvironmentError("Destination already exists.", code="environment_conflict")
-        if mode == "replace" and not exists:
+        if mode in {"replace", "append"} and not exists:
             raise EnvironmentError("Destination does not exist.", code="environment_not_found")
-        self._check_revision(destination, expected)
         parent = destination.parent.resolve(strict=True)
         try:
             parent.relative_to(self._root)
@@ -317,64 +247,109 @@ class LocalFileOperator:
         self,
         path: str,
         *,
-        cursor: FileTextCursor | None = None,
-        start_line: int | None = None,
-        max_lines: int | None = None,
-        max_bytes: int | None = None,
-        expected_revision: FileRevision | None = None,
-    ) -> FileTextPage:
+        line_offset: int = 0,
+        line_limit: int = 200,
+        max_line_length: int = 2_000,
+    ) -> FileTextResult:
+        if line_offset < 0:
+            raise EnvironmentError("line_offset must not be negative.", code="environment_request_invalid")
+        if line_limit < 1:
+            raise EnvironmentError("line_limit must be positive.", code="environment_request_invalid")
+        if max_line_length < 1:
+            raise EnvironmentError("max_line_length must be positive.", code="environment_request_invalid")
+        if line_limit * max_line_length > self._policy.max_value_bytes:
+            raise EnvironmentError("Requested text page exceeds configured limit.", code="environment_too_large")
         native = await asyncio.to_thread(self._resolve, path)
         if not native.is_file():
             raise EnvironmentError("Path is not a regular file.", code="environment_request_invalid")
-        revision = await asyncio.to_thread(self._revision, native)
-        if expected_revision is not None and expected_revision != revision:
-            raise EnvironmentError("File revision does not match.", code="environment_conflict")
-        size = await asyncio.to_thread(lambda: native.stat().st_size)
-        if size > self._policy.max_text_bytes:
-            raise EnvironmentError("Text file exceeds configured limit.", code="environment_too_large")
-        data = await asyncio.to_thread(native.read_bytes)
-        if len(data) > self._policy.max_text_bytes:
-            raise EnvironmentError("Text file exceeds configured limit.", code="environment_too_large")
-        limit = min(max_bytes or self._policy.max_text_bytes, self._policy.max_text_bytes)
-        text = data.decode("utf-8", errors="strict")
-        lines = text.splitlines(keepends=True)
-        if cursor is not None:
-            try:
-                cursor_revision, raw_index = cursor.root.split(":", 1)
-                index = int(raw_index)
-            except (ValueError, AttributeError):
-                raise EnvironmentError("Text cursor is invalid.", code="environment_cursor_invalid") from None
-            if cursor_revision != revision.root:
-                raise EnvironmentError("Text cursor is stale.", code="environment_conflict")
-        else:
-            index = max((start_line or 1) - 1, 0)
-        selected: list[str] = []
-        used = 0
-        line_limit = max_lines or len(lines)
-        while index + len(selected) < len(lines) and len(selected) < line_limit:
-            line = lines[index + len(selected)]
-            encoded = line.encode()
-            if selected and used + len(encoded) > limit:
-                break
-            if not selected and len(encoded) > limit:
-                selected.append(encoded[:limit].decode("utf-8", errors="ignore"))
-                used = limit
-                break
-            selected.append(line)
-            used += len(encoded)
-        next_index = index + len(selected)
-        complete = next_index >= len(lines)
-        output = "".join(selected)
-        return FileTextPage(
+        try:
+            text, lines_read, has_more, truncated_lines = await asyncio.to_thread(
+                _read_text_page,
+                native,
+                line_offset,
+                line_limit,
+                max_line_length,
+            )
+        except UnicodeDecodeError as exc:
+            raise EnvironmentError(
+                "Text source is not valid UTF-8.",
+                code="environment_unsupported",
+            ) from exc
+        if len(text.encode("utf-8")) > self._policy.max_value_bytes:
+            raise EnvironmentError("Text page exceeds configured limit.", code="environment_too_large")
+        return FileTextResult(
             path=path,
-            revision=revision,
-            text=output,
-            start=FileTextPosition(line=index + 1, byte_column=0),
-            end=FileTextPosition(line=max(next_index, index + 1), byte_column=0),
-            next_cursor=None if complete else FileTextCursor(f"{revision.root}:{next_index}"),
-            content_complete=complete,
-            truncated=not complete,
+            text=text,
+            line_offset=line_offset,
+            lines_read=lines_read,
+            has_more=has_more,
+            truncated_lines=truncated_lines,
         )
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> bytes:
+        if offset < 0 or (length is not None and length < 0):
+            raise EnvironmentError("Invalid byte read range.", code="environment_request_invalid")
+        native = await asyncio.to_thread(self._resolve, path)
+        if not native.is_file():
+            raise EnvironmentError("Raw read source is not a file.", code="environment_request_invalid")
+        size = (await asyncio.to_thread(native.stat)).st_size
+        selected_bytes = max(size - offset, 0)
+        if length is not None:
+            selected_bytes = min(selected_bytes, length)
+        if selected_bytes > self._policy.max_value_bytes:
+            raise EnvironmentError("Raw read exceeds value limit.", code="environment_too_large")
+        read_length = None if length is None else min(length, self._policy.max_value_bytes + 1)
+        data = await asyncio.to_thread(
+            _read_bytes_at_most,
+            native,
+            offset,
+            read_length,
+            self._policy.max_value_bytes,
+        )
+        if len(data) > self._policy.max_value_bytes:
+            raise EnvironmentError("Raw read exceeds value limit.", code="environment_too_large")
+        return data
+
+    async def read_bytes_stream(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 65_536,
+    ) -> AsyncIterator[bytes]:
+        if chunk_size < 1:
+            raise EnvironmentError("chunk_size must be positive.", code="environment_request_invalid")
+        effective_chunk_size = min(chunk_size, self._policy.max_value_bytes)
+        native = await asyncio.to_thread(self._resolve, path)
+        if not native.is_file():
+            raise EnvironmentError("Raw read source is not a file.", code="environment_request_invalid")
+        file = await asyncio.to_thread(native.open, "rb")
+        try:
+            while chunk := await asyncio.to_thread(file.read, effective_chunk_size):
+                yield chunk
+        finally:
+            await asyncio.to_thread(file.close)
+
+    async def write_bytes_stream(
+        self,
+        path: str,
+        stream: AsyncIterable[bytes],
+        *,
+        mode: FileWriteMode,
+    ) -> FileWriteResult:
+        async with self._open_writer(
+            path,
+            mode=mode,
+            validate_text_append=False,
+        ) as writer:
+            async for chunk in stream:
+                await writer.write(chunk)
+            return await writer.commit()
 
     async def write_text(
         self,
@@ -382,12 +357,17 @@ class LocalFileOperator:
         text: str,
         *,
         mode: FileWriteMode,
-        expected_revision: FileRevision | None = None,
     ) -> FileWriteResult:
+        if "\x00" in text:
+            raise EnvironmentError("Text contains NUL.", code="environment_unsupported")
         data = text.encode("utf-8")
-        if len(data) > self._policy.max_text_bytes:
+        if len(data) > self._policy.max_value_bytes:
             raise EnvironmentError("Text write exceeds configured limit.", code="environment_too_large")
-        async with self.open_writer(path, mode=mode, expected_revision=expected_revision) as writer:
+        async with self._open_writer(
+            path,
+            mode=mode,
+            validate_text_append=True,
+        ) as writer:
             await writer.write(data)
             return await writer.commit()
 
@@ -395,17 +375,36 @@ class LocalFileOperator:
         self,
         path: str,
         patch: str,
-        *,
-        expected_revision: FileRevision,
     ) -> FilePatchResult:
-        page = await self.read_text(path, expected_revision=expected_revision)
-        if not page.content_complete:
-            raise EnvironmentError("Patch source was not read completely.", code="environment_too_large")
-        updated, count = _apply_unified_diff(page.text, patch)
-        result = await self.write_text(path, updated, mode="replace", expected_revision=expected_revision)
+        native = await asyncio.to_thread(self._resolve, path)
+        if not native.is_file():
+            raise EnvironmentError("Patch source is not a file.", code="environment_request_invalid")
+        data = await asyncio.to_thread(
+            _read_bytes_at_most,
+            native,
+            0,
+            self._policy.max_value_bytes + 1,
+            self._policy.max_value_bytes + 1,
+        )
+        if len(data) > self._policy.max_value_bytes:
+            raise EnvironmentError("Patch source exceeds configured limit.", code="environment_too_large")
+        if b"\x00" in data:
+            raise EnvironmentError("Patch source contains NUL.", code="environment_unsupported")
+        try:
+            source = data.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise EnvironmentError(
+                "Patch source is not valid UTF-8.",
+                code="environment_unsupported",
+            ) from exc
+        updated, count = _apply_unified_diff(
+            source,
+            patch,
+            max_result_bytes=self._policy.max_value_bytes,
+        )
+        result = await self.write_text(path, updated, mode="replace")
         return FilePatchResult(
             path=path,
-            revision=result.revision,
             hunks_applied=count,
             receipt=result.receipt,
         )
@@ -427,7 +426,6 @@ class LocalFileOperator:
             path=path,
             kind=kind,
             size=stat.st_size if kind == "file" else None,
-            revision=await asyncio.to_thread(self._revision, native),
             writable=not self._read_only and native != self._root,
         )
 
@@ -435,128 +433,109 @@ class LocalFileOperator:
         self,
         path: str,
         *,
-        cursor: FileQueryCursor | None = None,
+        offset: int = 0,
         max_results: int,
         include_hidden: bool = False,
-    ) -> FileListPage:
-        if max_results <= 0 or max_results > self._policy.max_query_results:
-            raise EnvironmentError("Invalid list result limit.", code="environment_request_invalid")
+    ) -> FileEntriesResult:
+        if offset < 0 or max_results <= 0:
+            raise EnvironmentError("Invalid list range.", code="environment_request_invalid")
         native = await asyncio.to_thread(self._resolve, path)
         if not native.is_dir():
             raise EnvironmentError("List path is not a directory.", code="environment_request_invalid")
         children = await asyncio.to_thread(lambda: sorted(native.iterdir(), key=lambda item: item.name))
         if not include_hidden:
             children = [item for item in children if not item.name.startswith(".")]
-        offset = _cursor_offset(cursor)
         selected = children[offset : offset + max_results]
-        entries_list: list[FileListEntry] = []
-        for item in selected:
-            entries_list.append(FileListEntry(metadata=await self.stat(self._logical(item))))
-        entries = tuple(entries_list)
-        next_offset = offset + len(selected)
-        complete = next_offset >= len(children)
-        return FileListPage(
-            path=path,
+        entries = tuple([await self.stat(self._logical(item)) for item in selected])
+        return FileEntriesResult(
             entries=entries,
-            next_cursor=None if complete else FileQueryCursor(str(next_offset)),
-            content_complete=complete,
+            offset=offset,
+            has_more=offset + len(selected) < len(children),
         )
 
-    async def query(self, request: FileQueryRequest) -> FileQueryPage:
+    async def query(self, request: FileQueryRequest) -> FileEntriesResult:
         root = await asyncio.to_thread(self._resolve, request.root)
         if not root.is_dir():
             raise EnvironmentError("Query root is not a directory.", code="environment_request_invalid")
-        offset = _cursor_offset(request.cursor)
-        limit = min(request.max_results, self._policy.max_query_results)
         selected, has_more = await asyncio.to_thread(
-            _collect_query_page,
+            _collect_query_slice,
             root,
             request.pattern,
             request.recursive,
             request.include_hidden,
             request.kinds,
-            offset,
-            limit,
+            request.offset,
+            request.max_results,
         )
-        entries_list: list[FileListEntry] = []
-        for item in selected:
-            entries_list.append(FileListEntry(metadata=await self.stat(self._logical(item))))
-        entries = tuple(entries_list)
-        next_offset = offset + len(selected)
-        return FileQueryPage(
-            entries=entries,
-            next_cursor=FileQueryCursor(str(next_offset)) if has_more else None,
-            content_complete=not has_more,
-        )
+        entries = tuple([await self.stat(self._logical(item)) for item in selected])
+        return FileEntriesResult(entries=entries, offset=request.offset, has_more=has_more)
 
-    async def search_text(self, request: FileTextSearchRequest) -> FileTextSearchPage:
-        query = FileQueryRequest(
-            root=request.root,
-            pattern="*",
-            recursive=True,
-            include_hidden=request.include_hidden,
-            kinds=frozenset({"file"}),
-            max_results=self._policy.max_query_results,
-        )
-        files = (await self.query(query)).entries
-        offset = _cursor_offset(request.cursor)
-        matches: list[FileTextMatch] = []
-        consumed = 0
+    async def search_text(self, request: FileTextSearchRequest) -> FileTextSearchResult:
+        root = await asyncio.to_thread(self._resolve, request.root)
+        if not root.is_dir():
+            raise EnvironmentError("Search root is not a directory.", code="environment_request_invalid")
+        if not request.pattern:
+            raise EnvironmentError("Search pattern must not be empty.", code="environment_request_invalid")
         needle = request.pattern if request.case_sensitive else request.pattern.casefold()
-        regex = re.compile(request.pattern, 0 if request.case_sensitive else re.IGNORECASE) if request.regex else None
-        for entry in files:
-            try:
-                native = await asyncio.to_thread(self._resolve, entry.metadata.path)
-                data = await asyncio.to_thread(native.read_bytes)
-                if len(data) > min(request.max_bytes, self._policy.max_query_bytes):
-                    continue
-                text = data.decode("utf-8", errors="strict")
-            except (UnicodeDecodeError, EnvironmentError):
+        try:
+            regex = (
+                re.compile(request.pattern, 0 if request.case_sensitive else re.IGNORECASE) if request.regex else None
+            )
+        except re.error as exc:
+            raise EnvironmentError("Search regular expression is invalid.", code="environment_request_invalid") from exc
+
+        matches: list[FileTextMatch] = []
+        seen = 0
+        paths = _iter_native_paths(root, recursive=True, include_hidden=request.include_hidden)
+        while (native := await asyncio.to_thread(next, paths, None)) is not None:
+            if native.is_symlink() or not native.is_file():
                 continue
-            revision = entry.metadata.revision
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                candidate = line if request.case_sensitive else line.casefold()
-                positions = (
-                    [match.start() for match in regex.finditer(line)]
-                    if regex is not None
-                    else _literal_positions(candidate, needle)
+            try:
+                scanned = await asyncio.to_thread(
+                    _search_text_file,
+                    native,
+                    needle,
+                    regex,
+                    request.case_sensitive,
+                    max(request.offset - seen, 0),
+                    request.max_matches - len(matches) + 1,
+                    request.max_line_length,
+                    self._policy.max_value_bytes,
                 )
-                for position in positions:
-                    if consumed < offset:
-                        consumed += 1
-                        continue
-                    matches.append(
-                        FileTextMatch(
-                            path=entry.metadata.path,
-                            revision=revision,
-                            line=line_number,
-                            byte_column=len(line[:position].encode()),
-                            text=line,
-                        )
-                    )
-                    consumed += 1
-                    if len(matches) >= request.max_matches:
-                        return FileTextSearchPage(
-                            matches=tuple(matches),
-                            next_cursor=FileQueryCursor(str(consumed)),
-                            content_complete=False,
-                        )
-        return FileTextSearchPage(matches=tuple(matches), next_cursor=None, content_complete=True)
+            except OSError:
+                continue
+            if scanned is None:
+                continue
+            file_matches, file_match_count = scanned
+            seen += file_match_count
+            matches.extend(
+                FileTextMatch(
+                    path=self._logical(native),
+                    line=line_number,
+                    text=text,
+                    text_truncated=truncated,
+                )
+                for line_number, text, truncated in file_matches
+            )
+            if len(matches) > request.max_matches:
+                return FileTextSearchResult(
+                    matches=tuple(matches[: request.max_matches]),
+                    offset=request.offset,
+                    has_more=True,
+                )
+        return FileTextSearchResult(matches=tuple(matches), offset=request.offset, has_more=False)
 
     async def mkdir(self, path: str, *, parents: bool = False, exist_ok: bool = False) -> FileMutationResult:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False, require_exists=False)
         self._require_writable(native)
         await asyncio.to_thread(native.mkdir, parents=parents, exist_ok=exist_ok)
-        return FileMutationResult(
-            path=path, revision=await asyncio.to_thread(self._revision, native), receipt=self._receipt()
-        )
+        return FileMutationResult(path=path, receipt=self._receipt())
 
     async def move(
         self,
         source: str,
         destination: str,
         *,
-        expected_source_revision: FileRevision | None = None,
         replace: bool = False,
     ) -> FileMutationResult:
         source_native = await asyncio.to_thread(self._resolve, source, follow_final=False)
@@ -568,28 +547,21 @@ class LocalFileOperator:
         )
         self._require_writable(source_native)
         self._require_writable(destination_native)
-        self._check_revision(source_native, expected_source_revision)
         if destination_native.exists() and not replace:
             raise EnvironmentError("Move destination exists.", code="environment_conflict")
         if destination_native.is_symlink():
             raise EnvironmentError("Move destination symlink is denied.", code="environment_denied")
         await asyncio.to_thread(os.replace if replace else os.rename, source_native, destination_native)
-        return FileMutationResult(
-            path=destination,
-            revision=await asyncio.to_thread(self._revision, destination_native),
-            receipt=self._receipt(),
-        )
+        return FileMutationResult(path=destination, receipt=self._receipt())
 
     async def remove(
         self,
         path: str,
         *,
         recursive: bool = False,
-        expected_revision: FileRevision | None = None,
     ) -> FileMutationResult:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False)
         self._require_writable(native)
-        self._check_revision(native, expected_revision)
         if native.is_symlink() or native.is_file():
             await asyncio.to_thread(native.unlink)
         elif native.is_dir():
@@ -599,46 +571,25 @@ class LocalFileOperator:
                 await asyncio.to_thread(native.rmdir)
         else:
             raise EnvironmentError("Unsupported file kind.", code="environment_unsupported")
-        return FileMutationResult(path=path, revision=None, receipt=self._receipt())
+        return FileMutationResult(path=path, receipt=self._receipt())
 
     @asynccontextmanager
-    async def open_reader(
-        self,
-        path: str,
-        *,
-        byte_range: FileByteRange | None = None,
-        expected_revision: FileRevision | None = None,
-    ) -> AsyncGenerator[AsyncFileReader]:
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_file():
-            raise EnvironmentError("Raw reader source is not a file.", code="environment_request_invalid")
-        revision = await asyncio.to_thread(self._revision, native)
-        if expected_revision is not None and revision != expected_revision:
-            raise EnvironmentError("File revision does not match.", code="environment_conflict")
-        selected_range = byte_range or FileByteRange()
-        size = await asyncio.to_thread(lambda: native.stat().st_size)
-        available = max(size - selected_range.offset, 0)
-        requested = available if selected_range.length is None else min(selected_range.length, available)
-        if requested > self._policy.max_transfer_bytes:
-            raise EnvironmentError("Raw read range exceeds transfer limit.", code="environment_too_large")
-        reader = _LocalReader(self, path, native, selected_range, revision)
-        try:
-            await reader.open()
-            yield reader
-        finally:
-            await reader.close()
-
-    @asynccontextmanager
-    async def open_writer(
+    async def _open_writer(
         self,
         path: str,
         *,
         mode: FileWriteMode,
-        expected_revision: FileRevision | None = None,
-    ) -> AsyncGenerator[AsyncFileWriter]:
+        validate_text_append: bool,
+    ) -> AsyncGenerator[_LocalWriter]:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False, require_exists=False)
         self._require_writable(native)
-        writer = _LocalWriter(self, path, native, mode, expected_revision)
+        writer = _LocalWriter(
+            self,
+            path,
+            native,
+            mode,
+            validate_text_append=validate_text_append,
+        )
         try:
             await writer.open()
             yield writer
@@ -651,56 +602,141 @@ class LocalFileOperator:
         source: str,
         destination: str,
         *,
-        expected_source_revision: FileRevision | None = None,
-        expected_destination_revision: FileRevision | None = None,
         replace: bool = False,
-        require_atomic_destination: bool = True,
-        require_stable_source: bool = False,
     ) -> FileCopyResult:
-        del require_atomic_destination
-        mode: FileWriteMode = "replace" if replace else "create"
-        copied = 0
-        async with self.open_reader(source, expected_revision=expected_source_revision) as reader:
-            async with self.open_writer(
-                destination,
-                mode=mode,
-                expected_revision=expected_destination_revision,
-            ) as writer:
-                async for chunk in reader:
-                    copied += len(chunk)
-                    if copied > self._policy.max_transfer_bytes:
-                        raise EnvironmentError("Copy exceeds transfer limit.", code="environment_too_large")
-                    await writer.write(chunk)
-                completion = reader.completion
-                if completion is None:
-                    raise EnvironmentError(
-                        "Raw source did not complete verification.", code="environment_provider_failure"
-                    )
-                if require_stable_source and completion.stability != "verified":
-                    raise EnvironmentError("Copy source stability is unverified.", code="environment_conflict")
-                result = await writer.commit()
+        result = await self.write_bytes_stream(
+            destination,
+            self.read_bytes_stream(source),
+            mode="replace" if replace else "create",
+        )
         return FileCopyResult(
             path=destination,
-            revision=result.revision,
-            bytes_copied=copied,
-            atomic_destination=True,
-            source_stability=completion.stability,
+            bytes_copied=result.bytes_written,
             receipt=result.receipt,
         )
 
 
-def _collect_query_page(
+def _read_bytes_at_most(
+    path: Path,
+    offset: int,
+    length: int | None,
+    max_bytes: int,
+) -> bytes:
+    with path.open("rb") as file:
+        file.seek(offset)
+        return file.read(max_bytes + 1 if length is None else length)
+
+
+def _read_text_page(
+    path: Path,
+    line_offset: int,
+    line_limit: int,
+    max_line_length: int,
+) -> tuple[str, int, bool, tuple[int, ...]]:
+    def read_line(file: Any) -> tuple[str, bool, bool] | None:
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        parts: list[str] = []
+        captured = 0
+        truncated = False
+        saw_bytes = False
+
+        def append_text(value: str) -> None:
+            nonlocal captured, truncated
+            if "\x00" in value:
+                raise EnvironmentError(
+                    "Text source contains NUL.",
+                    code="environment_unsupported",
+                )
+            remaining = max(max_line_length - captured, 0)
+            if remaining:
+                parts.append(value[:remaining])
+                captured += min(len(value), remaining)
+            if len(value) > remaining:
+                truncated = True
+
+        while True:
+            raw = file.readline(65_536)
+            if not raw:
+                if not saw_bytes:
+                    return None
+                append_text(decoder.decode(b"", final=True))
+                return "".join(parts), False, truncated
+            saw_bytes = True
+            terminated = raw.endswith(b"\n")
+            content = raw[:-1] if terminated else raw
+            append_text(decoder.decode(content, final=terminated))
+            if terminated:
+                return "".join(parts), True, truncated
+
+    selected: list[str] = []
+    truncated_lines: list[int] = []
+    line_index = 0
+    with path.open("rb") as file:
+        while line_index < line_offset:
+            if read_line(file) is None:
+                return "", 0, False, ()
+            line_index += 1
+
+        while len(selected) < line_limit:
+            line = read_line(file)
+            if line is None:
+                return "".join(selected), len(selected), False, tuple(truncated_lines)
+            preview, terminated, truncated = line
+            selected.append(preview + ("\n" if terminated else ""))
+            if truncated:
+                truncated_lines.append(line_index + 1)
+            line_index += 1
+
+        has_more = bool(file.read(1))
+    return "".join(selected), len(selected), has_more, tuple(truncated_lines)
+
+
+def _validate_query_pattern(pattern: str) -> None:
+    normalized = pattern.removeprefix("/")
+    if (
+        not normalized
+        or len(pattern.encode("utf-8")) > _MAX_QUERY_PATTERN_BYTES
+        or any(character in pattern for character in "{}\\")
+    ):
+        raise EnvironmentError("File query pattern is invalid.", code="environment_request_invalid")
+    if any("**" in segment and segment != "**" for segment in normalized.split("/")):
+        raise EnvironmentError("File query pattern is invalid.", code="environment_request_invalid")
+
+
+def _query_glob_matches(path: str, pattern: str) -> bool:
+    anchored = pattern.startswith("/")
+    normalized = pattern.removeprefix("/")
+    path_parts = path.split("/")
+    pattern_parts = normalized.split("/")
+    if len(pattern_parts) == 1 and not anchored:
+        return fnmatch.fnmatchcase(path_parts[-1], pattern_parts[0])
+
+    reachable = [False] * (len(path_parts) + 1)
+    reachable[0] = True
+    for part in pattern_parts:
+        next_reachable = [False] * (len(path_parts) + 1)
+        if part == "**":
+            matched_prefix = False
+            for index, matched in enumerate(reachable):
+                matched_prefix |= matched
+                next_reachable[index] = matched_prefix
+        else:
+            for index, matched in enumerate(reachable[:-1]):
+                if matched and fnmatch.fnmatchcase(path_parts[index], part):
+                    next_reachable[index + 1] = True
+        reachable = next_reachable
+    return reachable[-1]
+
+
+def _iter_native_paths(
     root: Path,
-    pattern: str,
+    *,
     recursive: bool,
     include_hidden: bool,
-    kinds: frozenset[FileKind] | None,
-    offset: int,
-    limit: int,
-) -> tuple[list[Path], bool]:
-    """Walk in deterministic path order while retaining at most one page plus lookahead."""
+) -> Iterator[Path]:
+    """Walk incrementally in deterministic path order."""
 
-    def iterate(directory: Path):
+    def iterate(directory: Path) -> Iterator[Path]:
         try:
             children = sorted(directory.iterdir(), key=lambda item: item.name)
         except OSError as exc:
@@ -715,11 +751,26 @@ def _collect_query_page(
             if recursive and child.is_dir() and not child.is_symlink():
                 yield from iterate(child)
 
+    return iterate(root)
+
+
+def _collect_query_slice(
+    root: Path,
+    pattern: str,
+    recursive: bool,
+    include_hidden: bool,
+    kinds: frozenset[FileKind] | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[Path], bool]:
+    """Walk in deterministic path order while retaining only the requested slice and lookahead."""
+
+    _validate_query_pattern(pattern)
     selected: list[Path] = []
     matched = 0
-    for item in iterate(root):
+    for item in _iter_native_paths(root, recursive=recursive, include_hidden=include_hidden):
         relative = item.relative_to(root).as_posix()
-        if not fnmatch.fnmatch(relative, pattern):
+        if not _query_glob_matches(relative, pattern):
             continue
         kind = _native_kind(item)
         if kinds is not None and kind not in kinds:
@@ -734,6 +785,49 @@ def _collect_query_page(
     return selected, False
 
 
+def _search_text_file(
+    path: Path,
+    needle: str,
+    regex: re.Pattern[str] | None,
+    case_sensitive: bool,
+    skip: int,
+    limit: int,
+    max_line_length: int,
+    max_line_bytes: int,
+) -> tuple[list[tuple[int, str, bool]], int] | None:
+    """Scan one UTF-8/LF file incrementally and retain only a bounded result slice."""
+    selected: list[tuple[int, str, bool]] = []
+    matched = 0
+    with path.open("rb") as file:
+        line_number = 0
+        while raw := file.readline(max_line_bytes + 2):
+            line_number += 1
+            terminated = raw.endswith(b"\n")
+            content = raw[:-1] if terminated else raw
+            if len(content) > max_line_bytes:
+                raise EnvironmentError("Text search line exceeds value limit.", code="environment_too_large")
+            if b"\x00" in content:
+                return None
+            try:
+                line = content.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                return None
+            candidate = line if case_sensitive else line.casefold()
+            is_match = regex.search(line) is not None if regex is not None else needle in candidate
+            if not is_match:
+                continue
+            if matched >= skip and len(selected) < limit:
+                selected.append(
+                    (
+                        line_number,
+                        line[:max_line_length],
+                        len(line) > max_line_length,
+                    )
+                )
+            matched += 1
+    return selected, matched
+
+
 def _native_kind(path: Path) -> str:
     if path.is_symlink():
         return "symlink"
@@ -744,32 +838,31 @@ def _native_kind(path: Path) -> str:
     return "other"
 
 
-def _cursor_offset(cursor: FileQueryCursor | None) -> int:
-    if cursor is None:
-        return 0
-    try:
-        value = int(cursor.root)
-    except ValueError:
-        raise EnvironmentError("Query cursor is invalid.", code="environment_cursor_invalid") from None
-    if value < 0:
-        raise EnvironmentError("Query cursor is invalid.", code="environment_cursor_invalid")
-    return value
-
-
-def _literal_positions(value: str, needle: str) -> list[int]:
-    if not needle:
-        raise EnvironmentError("Search pattern must not be empty.", code="environment_request_invalid")
-    positions = []
+def _iter_lf_lines(text: str) -> Iterator[str]:
+    """Iterate LF-only lines without constructing per-file line collections."""
     start = 0
-    while (position := value.find(needle, start)) >= 0:
-        positions.append(position)
-        start = position + max(len(needle), 1)
-    return positions
+    while start < len(text):
+        end = text.find("\n", start)
+        if end < 0:
+            yield text[start:]
+            return
+        yield text[start : end + 1]
+        start = end + 1
 
 
-def _apply_unified_diff(original: str, patch: str) -> tuple[str, int]:
-    source = original.splitlines(keepends=True)
-    patch_lines = patch.splitlines(keepends=True)
+def _split_lf_lines(text: str) -> list[str]:
+    """Materialize bounded patch lines while preserving LF terminators."""
+    return list(_iter_lf_lines(text))
+
+
+def _apply_unified_diff(
+    original: str,
+    patch: str,
+    *,
+    max_result_bytes: int,
+) -> tuple[str, int]:
+    source = _split_lf_lines(original)
+    patch_lines = _split_lf_lines(patch)
     output: list[str] = []
     source_index = 0
     index = 0
@@ -791,10 +884,17 @@ def _apply_unified_diff(original: str, patch: str) -> tuple[str, int]:
         hunks += 1
         while index < len(patch_lines) and not patch_lines[index].startswith("@@"):
             item = patch_lines[index]
-            if item.startswith("\\ No newline"):
-                index += 1
-                continue
             marker, content = item[:1], item[1:]
+            no_newline = index + 1 < len(patch_lines) and patch_lines[index + 1].rstrip("\r\n") == (
+                "\\ No newline at end of file"
+            )
+            if no_newline:
+                if content.endswith("\r\n"):
+                    content = content[:-2]
+                elif content.endswith("\n"):
+                    content = content[:-1]
+                else:
+                    raise EnvironmentError("Unified diff line is invalid.", code="environment_request_invalid")
             if marker == " ":
                 if source_index >= len(source) or source[source_index] != content:
                     raise EnvironmentError("Unified diff context does not match.", code="environment_conflict")
@@ -808,8 +908,10 @@ def _apply_unified_diff(original: str, patch: str) -> tuple[str, int]:
                 output.append(content)
             else:
                 raise EnvironmentError("Unified diff line is invalid.", code="environment_request_invalid")
-            index += 1
+            index += 2 if no_newline else 1
     if hunks == 0:
         raise EnvironmentError("Unified diff must contain at least one hunk.", code="environment_request_invalid")
     output.extend(source[source_index:])
+    if sum(len(item.encode("utf-8")) for item in output) > max_result_bytes:
+        raise EnvironmentError("Patch result exceeds configured limit.", code="environment_too_large")
     return "".join(output), hunks

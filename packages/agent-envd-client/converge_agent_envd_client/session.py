@@ -16,9 +16,9 @@ from converge_agent_envd_client.eip.v1 import (
     EnvironmentDescribeParams,
     EnvironmentDescriptor,
     FileByteRange,
-    FileRevision,
     FileWriteMode,
     InitializeParams,
+    ResourceAuthority,
     SessionCloseParams,
 )
 from converge_agent_envd_client.errors import EIPProtocolError, EIPSessionStateError
@@ -49,6 +49,7 @@ class EIPSession:
         expected_environment_id: str,
         required_capabilities: tuple[str, ...] = (),
         optional_capabilities: tuple[str, ...] = (),
+        resource_authority: ResourceAuthority | str = ResourceAuthority.SCOPED,
         client_name: str = "converge-agent-envd-client",
         client_version: str | None = None,
         initialization_timeout: float = 10.0,
@@ -59,6 +60,11 @@ class EIPSession:
             raise ValueError("initialization_timeout must be positive")
         if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight < 1:
             raise ValueError("max_in_flight must be a positive integer")
+        resolved_authority = (
+            resource_authority
+            if isinstance(resource_authority, ResourceAuthority)
+            else ResourceAuthority(resource_authority)
+        )
         requester = RequestCoordinator(
             transport,
             max_in_flight=1,
@@ -74,6 +80,7 @@ class EIPSession:
             expected_environment_id=expected_environment_id,
             required_capabilities=required_capabilities,
             optional_capabilities=optional_capabilities,
+            resource_authority=resolved_authority,
         )
         try:
             async with asyncio.timeout(initialization_timeout):
@@ -86,6 +93,11 @@ class EIPSession:
             missing = sorted(set(required_capabilities) - set(descriptor.capabilities))
             if missing:
                 raise EIPProtocolError(f"server omitted required capability: {missing[0]}")
+            if descriptor.resource_authority.mode is not resolved_authority:
+                raise EIPProtocolError("server selected a different resource authority")
+            root_mount_id = descriptor.resource_authority.root_mount_id
+            if root_mount_id is not None and root_mount_id not in {mount.mount_id for mount in descriptor.mounts}:
+                raise EIPProtocolError("server returned an unknown root mount")
             requester.configure_limits(
                 max_in_flight=min(max_in_flight, descriptor.limits.max_concurrent_operations),
                 max_request_bytes=descriptor.limits.max_request_bytes,
@@ -117,7 +129,6 @@ class EIPSession:
         path: EIPPath,
         *,
         byte_range: FileByteRange | None = None,
-        expected_revision: FileRevision | None = None,
         transfer_deadline: datetime | None = None,
     ) -> EIPFileReader:
         self._ensure_open()
@@ -127,7 +138,6 @@ class EIPSession:
             self._client,
             path,
             byte_range=byte_range,
-            expected_revision=expected_revision,
             transfer_deadline=transfer_deadline,
         )
 
@@ -136,7 +146,6 @@ class EIPSession:
         path: EIPPath,
         *,
         mode: FileWriteMode | str,
-        expected_revision: FileRevision | None = None,
         executable: bool | None = None,
         transfer_deadline: datetime | None = None,
     ) -> EIPFileWriter:
@@ -148,7 +157,6 @@ class EIPSession:
             self._client,
             path,
             resolved_mode,
-            expected_revision=expected_revision,
             executable=executable,
             transfer_deadline=transfer_deadline,
             max_transfer_frame_bytes=self._descriptor.limits.max_transfer_frame_bytes,
@@ -169,6 +177,10 @@ class EIPSession:
             if descriptor.generation != self._descriptor.generation:
                 await self._terminate_protocol_error(
                     EIPProtocolError("Environment generation changed within an EIP session")
+                )
+            if descriptor.resource_authority != self._descriptor.resource_authority:
+                await self._terminate_protocol_error(
+                    EIPProtocolError("resource authority changed within an EIP session")
                 )
             self._requester.narrow_limits(
                 max_in_flight=descriptor.limits.max_concurrent_operations,

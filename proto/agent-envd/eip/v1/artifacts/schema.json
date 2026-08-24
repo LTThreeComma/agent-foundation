@@ -866,6 +866,9 @@
           "title": "Mounts",
           "type": "array"
         },
+        "resource_authority": {
+          "$ref": "#/$defs/ResourceAuthorityDescriptor"
+        },
         "shell_profiles": {
           "default": [],
           "items": {
@@ -879,7 +882,8 @@
         "environment_id",
         "generation",
         "limits",
-        "isolation"
+        "isolation",
+        "resource_authority"
       ],
       "title": "EnvironmentDescriptor",
       "type": "object"
@@ -955,41 +959,9 @@
         "destination": {
           "$ref": "#/$defs/EIPPath"
         },
-        "expected_destination_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "expected_source_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "replace": {
           "default": false,
           "title": "Replace",
-          "type": "boolean"
-        },
-        "require_atomic_destination": {
-          "default": false,
-          "title": "Require Atomic Destination",
-          "type": "boolean"
-        },
-        "require_stable_source": {
-          "default": false,
-          "title": "Require Stable Source",
           "type": "boolean"
         },
         "source": {
@@ -1007,10 +979,6 @@
     "FileCopyResult": {
       "additionalProperties": false,
       "properties": {
-        "atomic_destination": {
-          "title": "Atomic Destination",
-          "type": "boolean"
-        },
         "bytes_copied": {
           "maximum": 18446744073709551615,
           "minimum": 0,
@@ -1022,28 +990,15 @@
         },
         "receipt": {
           "$ref": "#/$defs/OperationReceipt"
-        },
-        "source_stability": {
-          "$ref": "#/$defs/FileCopySourceStability"
         }
       },
       "required": [
         "destination",
         "bytes_copied",
-        "atomic_destination",
-        "receipt",
-        "source_stability"
+        "receipt"
       ],
       "title": "FileCopyResult",
       "type": "object"
-    },
-    "FileCopySourceStability": {
-      "enum": [
-        "verified",
-        "unverified"
-      ],
-      "title": "FileCopySourceStability",
-      "type": "string"
     },
     "FileFindParams": {
       "additionalProperties": false,
@@ -1051,51 +1006,41 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "include_hidden": {
+          "default": false,
+          "title": "Include Hidden",
+          "type": "boolean"
         },
-        "kind": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileKind"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "kinds": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FileKind"
+          },
+          "title": "Kinds",
+          "type": "array"
         },
-        "max_depth": {
+        "max_results": {
+          "default": 100,
           "maximum": 4294967295,
-          "minimum": 0,
-          "title": "Max Depth",
+          "minimum": 1,
+          "title": "Max Results",
           "type": "integer"
         },
-        "mode": {
-          "$ref": "#/$defs/FindMode"
-        },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "offset": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         },
         "pattern": {
           "title": "Pattern",
           "type": "string"
+        },
+        "recursive": {
+          "default": true,
+          "title": "Recursive",
+          "type": "boolean"
         },
         "root": {
           "$ref": "#/$defs/EIPPath"
@@ -1104,9 +1049,7 @@
       "required": [
         "context",
         "root",
-        "pattern",
-        "mode",
-        "max_depth"
+        "pattern"
       ],
       "title": "FileFindParams",
       "type": "object"
@@ -1122,12 +1065,20 @@
           "title": "Entries",
           "type": "array"
         },
-        "output": {
-          "$ref": "#/$defs/StructuredOutputDisposition"
+        "has_more": {
+          "title": "Has More",
+          "type": "boolean"
+        },
+        "offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "output"
+        "offset",
+        "has_more"
       ],
       "title": "FileFindResult",
       "type": "object"
@@ -1165,17 +1116,6 @@
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
-        },
-        "revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "size_bytes": {
           "anyOf": [
@@ -1233,42 +1173,27 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "include_hidden": {
+          "default": false,
+          "title": "Include Hidden",
+          "type": "boolean"
         },
-        "max_depth": {
-          "default": 1,
+        "max_results": {
+          "default": 100,
           "maximum": 4294967295,
-          "minimum": 0,
-          "title": "Max Depth",
+          "minimum": 1,
+          "title": "Max Results",
           "type": "integer"
         },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "offset": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
-        },
-        "recursive": {
-          "default": false,
-          "title": "Recursive",
-          "type": "boolean"
         }
       },
       "required": [
@@ -1289,12 +1214,20 @@
           "title": "Entries",
           "type": "array"
         },
-        "output": {
-          "$ref": "#/$defs/StructuredOutputDisposition"
+        "has_more": {
+          "title": "Has More",
+          "type": "boolean"
+        },
+        "offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "output"
+        "offset",
+        "has_more"
       ],
       "title": "FileListResult",
       "type": "object"
@@ -1359,28 +1292,6 @@
         "destination": {
           "$ref": "#/$defs/EIPPath"
         },
-        "expected_destination_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "expected_source_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "replace": {
           "default": false,
           "title": "Replace",
@@ -1421,9 +1332,6 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "expected_revision": {
-          "$ref": "#/$defs/FileRevision"
-        },
         "patch": {
           "title": "Patch",
           "type": "string"
@@ -1441,8 +1349,7 @@
         "context",
         "path",
         "patch_format",
-        "patch",
-        "expected_revision"
+        "patch"
       ],
       "title": "FilePatchTextParams",
       "type": "object"
@@ -1494,46 +1401,14 @@
           "minimum": 0,
           "title": "Produced Bytes",
           "type": "integer"
-        },
-        "range_end": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Range End",
-          "type": "integer"
-        },
-        "range_start": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Range Start",
-          "type": "integer"
-        },
-        "source_eof_at_end": {
-          "title": "Source Eof At End",
-          "type": "boolean"
-        },
-        "stability": {
-          "$ref": "#/$defs/FileReadStability"
         }
       },
       "required": [
-        "range_start",
-        "range_end",
         "produced_bytes",
-        "source_eof_at_end",
-        "stability",
         "complete"
       ],
       "title": "FileReadCompletion",
       "type": "object"
-    },
-    "FileReadStability": {
-      "enum": [
-        "verified",
-        "changed",
-        "unverified"
-      ],
-      "title": "FileReadStability",
-      "type": "string"
     },
     "FileReadTextParams": {
       "additionalProperties": false,
@@ -1541,77 +1416,34 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileTextCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "line_limit": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Line Limit",
+          "type": "integer"
         },
-        "expected_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "line_offset": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Line Offset",
+          "type": "integer"
         },
-        "max_bytes": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Bytes"
-        },
-        "max_lines": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Lines"
+        "max_line_length": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Line Length",
+          "type": "integer"
         },
         "path": {
           "$ref": "#/$defs/EIPPath"
-        },
-        "start_line": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Start Line"
         }
       },
       "required": [
         "context",
-        "path"
+        "path",
+        "line_limit",
+        "max_line_length"
       ],
       "title": "FileReadTextParams",
       "type": "object"
@@ -1619,46 +1451,46 @@
     "FileReadTextResult": {
       "additionalProperties": false,
       "properties": {
-        "content_complete": {
-          "title": "Content Complete",
+        "has_more": {
+          "title": "Has More",
           "type": "boolean"
-        },
-        "end": {
-          "$ref": "#/$defs/TextPosition"
         },
         "info": {
           "$ref": "#/$defs/FileInfo"
         },
-        "next_cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileTextCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "line_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Line Offset",
+          "type": "integer"
         },
-        "start": {
-          "$ref": "#/$defs/TextPosition"
+        "lines_read": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Lines Read",
+          "type": "integer"
         },
         "text": {
           "title": "Text",
           "type": "string"
         },
-        "truncated": {
-          "title": "Truncated",
-          "type": "boolean"
+        "truncated_lines": {
+          "default": [],
+          "items": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Truncated Lines",
+          "type": "array"
         }
       },
       "required": [
         "info",
         "text",
-        "start",
-        "end",
-        "content_complete",
-        "truncated"
+        "line_offset",
+        "lines_read",
+        "has_more"
       ],
       "title": "FileReadTextResult",
       "type": "object"
@@ -1720,17 +1552,6 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "expected_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "path": {
           "$ref": "#/$defs/EIPPath"
         },
@@ -1766,32 +1587,13 @@
         "info": {
           "$ref": "#/$defs/FileInfo"
         },
-        "range_end": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Range End",
-          "type": "integer"
-        },
-        "range_start": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Range Start",
-          "type": "integer"
-        },
         "reader": {
           "$ref": "#/$defs/FileReaderHandle"
-        },
-        "source_eof_at_end": {
-          "title": "Source Eof At End",
-          "type": "boolean"
         }
       },
       "required": [
         "reader",
         "info",
-        "range_start",
-        "range_end",
-        "source_eof_at_end",
         "expires_at"
       ],
       "title": "FileReaderOpenResult",
@@ -1805,17 +1607,6 @@
         },
         "expected_kind": {
           "$ref": "#/$defs/FileKind"
-        },
-        "expected_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "max_entries": {
           "default": 1,
@@ -1861,20 +1652,9 @@
       "title": "FileRemoveResult",
       "type": "object"
     },
-    "FileRevision": {
-      "minLength": 1,
-      "title": "FileRevision",
-      "type": "string"
-    },
     "FileSearchMatch": {
       "additionalProperties": false,
       "properties": {
-        "byte_offset": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Byte Offset",
-          "type": "integer"
-        },
         "line_number": {
           "maximum": 18446744073709551615,
           "minimum": 1,
@@ -1887,13 +1667,17 @@
         "preview": {
           "title": "Preview",
           "type": "string"
+        },
+        "preview_truncated": {
+          "title": "Preview Truncated",
+          "type": "boolean"
         }
       },
       "required": [
         "path",
         "line_number",
-        "byte_offset",
-        "preview"
+        "preview",
+        "preview_truncated"
       ],
       "title": "FileSearchMatch",
       "type": "object"
@@ -1909,52 +1693,33 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "include_hidden": {
+          "default": false,
+          "title": "Include Hidden",
+          "type": "boolean"
         },
-        "exclude": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Exclude",
-          "type": "array"
+        "max_line_length": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Line Length",
+          "type": "integer"
         },
-        "include": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Include",
-          "type": "array"
-        },
-        "max_depth": {
+        "max_results": {
+          "default": 100,
           "maximum": 4294967295,
-          "minimum": 0,
-          "title": "Max Depth",
+          "minimum": 1,
+          "title": "Max Results",
           "type": "integer"
         },
         "mode": {
           "$ref": "#/$defs/SearchMode"
         },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "offset": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         },
         "query": {
           "title": "Query",
@@ -1969,7 +1734,7 @@
         "root",
         "query",
         "mode",
-        "max_depth"
+        "max_line_length"
       ],
       "title": "FileSearchParams",
       "type": "object"
@@ -1977,6 +1742,10 @@
     "FileSearchResult": {
       "additionalProperties": false,
       "properties": {
+        "has_more": {
+          "title": "Has More",
+          "type": "boolean"
+        },
         "matches": {
           "default": [],
           "items": {
@@ -1985,12 +1754,16 @@
           "title": "Matches",
           "type": "array"
         },
-        "output": {
-          "$ref": "#/$defs/StructuredOutputDisposition"
+        "offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "output"
+        "offset",
+        "has_more"
       ],
       "title": "FileSearchResult",
       "type": "object"
@@ -2030,11 +1803,6 @@
       "title": "FileStatResult",
       "type": "object"
     },
-    "FileTextCursor": {
-      "minLength": 1,
-      "title": "FileTextCursor",
-      "type": "string"
-    },
     "FileWriteMode": {
       "enum": [
         "create",
@@ -2062,17 +1830,6 @@
           ],
           "default": null,
           "title": "Executable"
-        },
-        "expected_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "mode": {
           "$ref": "#/$defs/FileWriteMode"
@@ -2237,17 +1994,6 @@
           "default": null,
           "title": "Executable"
         },
-        "expected_revision": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FileRevision"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "mode": {
           "$ref": "#/$defs/FileWriteMode"
         },
@@ -2302,14 +2048,6 @@
       "title": "FileWriterOpenResult",
       "type": "object"
     },
-    "FindMode": {
-      "enum": [
-        "glob",
-        "regex"
-      ],
-      "title": "FindMode",
-      "type": "string"
-    },
     "InitializeParams": {
       "additionalProperties": false,
       "properties": {
@@ -2336,6 +2074,10 @@
           },
           "title": "Required Capabilities",
           "type": "array"
+        },
+        "resource_authority": {
+          "$ref": "#/$defs/ResourceAuthority",
+          "default": "scoped"
         },
         "supported_protocol_versions": {
           "items": {
@@ -2486,10 +2228,6 @@
           "title": "Supports Atomic Replace",
           "type": "boolean"
         },
-        "supports_file_revision": {
-          "title": "Supports File Revision",
-          "type": "boolean"
-        },
         "writable": {
           "title": "Writable",
           "type": "boolean"
@@ -2500,7 +2238,6 @@
         "logical_root",
         "writable",
         "supports_atomic_replace",
-        "supports_file_revision",
         "max_file_bytes"
       ],
       "title": "MountDescriptor",
@@ -3886,6 +3623,40 @@
       "title": "RequestedProcessSignal",
       "type": "string"
     },
+    "ResourceAuthority": {
+      "enum": [
+        "scoped",
+        "server"
+      ],
+      "title": "ResourceAuthority",
+      "type": "string"
+    },
+    "ResourceAuthorityDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ResourceAuthority"
+        },
+        "root_mount_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Mount Id"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "ResourceAuthorityDescriptor",
+      "type": "object"
+    },
     "RetryHint": {
       "enum": [
         "never",
@@ -4035,77 +3806,6 @@
       "title": "ShellProfileDescriptor",
       "type": "object"
     },
-    "StructuredOutputDisposition": {
-      "additionalProperties": false,
-      "properties": {
-        "content_complete": {
-          "title": "Content Complete",
-          "type": "boolean"
-        },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "dropped_items": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Dropped Items"
-        },
-        "emitted_items": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Emitted Items",
-          "type": "integer"
-        },
-        "encoded_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Encoded Bytes",
-          "type": "integer"
-        },
-        "expires_at": {
-          "anyOf": [
-            {
-              "format": "date-time",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Expires At"
-        },
-        "producer_complete": {
-          "title": "Producer Complete",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "producer_complete",
-        "content_complete",
-        "emitted_items",
-        "encoded_bytes"
-      ],
-      "title": "StructuredOutputDisposition",
-      "type": "object"
-    },
     "TerminationReason": {
       "enum": [
         "exit",
@@ -4117,29 +3817,6 @@
       ],
       "title": "TerminationReason",
       "type": "string"
-    },
-    "TextPosition": {
-      "additionalProperties": false,
-      "properties": {
-        "byte_column": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Byte Column",
-          "type": "integer"
-        },
-        "line": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Line",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "line",
-        "byte_column"
-      ],
-      "title": "TextPosition",
-      "type": "object"
     }
   },
   "$id": "https://github.com/converge-ai-labs/agent-foundation/eip/v1/schema.json",

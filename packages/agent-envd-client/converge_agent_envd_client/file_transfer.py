@@ -22,8 +22,6 @@ from converge_agent_envd_client.eip.v1 import (
     FileReaderCloseParams,
     FileReaderOpenParams,
     FileReaderOpenResult,
-    FileReadStability,
-    FileRevision,
     FileWriteMode,
     FileWriterAbortParams,
     FileWriterAbortResult,
@@ -43,7 +41,7 @@ from converge_agent_envd_client.requester import RequestCoordinator, TransferCha
 
 
 class EIPFileReader:
-    """High-level exact reader that owns attachment, integrity, and typed close."""
+    """High-level bounded reader that owns attachment, integrity, and typed close."""
 
     def __init__(
         self,
@@ -52,7 +50,6 @@ class EIPFileReader:
         path: EIPPath,
         *,
         byte_range: FileByteRange | None,
-        expected_revision: FileRevision | None,
         transfer_deadline: datetime | None,
     ) -> None:
         self._requester = requester
@@ -61,13 +58,13 @@ class EIPFileReader:
             context=_new_context(with_idempotency=True),
             path=path,
             byte_range=byte_range,
-            expected_revision=expected_revision,
             transfer_deadline=cast(str | None, transfer_deadline),
         )
         self._opened: FileReaderOpenResult | None = None
         self._channel: TransferChannel | None = None
         self._hasher = hashlib.sha256()
         self._received_bytes = 0
+        self._max_bytes: int | None = None
         self._completion: FileReadCompletion | None = None
         self._entered = False
         self._finalized = False
@@ -94,6 +91,15 @@ class EIPFileReader:
         self._entered = True
         try:
             self._opened = await self._client.file_open_reader(self._params)
+            byte_range = self._params.byte_range
+            if byte_range is not None and byte_range.length is not None:
+                self._max_bytes = byte_range.length
+            else:
+                size = self._opened.info.size_bytes
+                if size is None:
+                    raise EIPProtocolError("reader open result omitted the regular-file size")
+                offset = 0 if byte_range is None else byte_range.offset
+                self._max_bytes = max(size - offset, 0)
             handle = self._opened.reader.root
             self._channel = self._requester.register_transfer(handle, inbound_frames=8)
             await self._requester.send_data_frame(
@@ -123,8 +129,12 @@ class EIPFileReader:
             if frame.offset != self._received_bytes:
                 await self._reset_for_protocol(frame.offset)
                 raise EIPProtocolError("reader data frame offset is not contiguous")
+            received = self._received_bytes + len(frame.payload)
+            if self._max_bytes is not None and received > self._max_bytes:
+                await self._reset_for_protocol(frame.offset)
+                raise EIPProtocolError("reader produced more bytes than the requested maximum")
             self._hasher.update(frame.payload)
-            self._received_bytes += len(frame.payload)
+            self._received_bytes = received
             return frame.payload
         if frame.kind is DataFrameKind.END:
             if frame.offset != self._received_bytes:
@@ -227,18 +237,15 @@ class EIPFileReader:
             pass
 
     def _verify_completion(self, completion: FileReadCompletion) -> None:
-        opened = self.opened
         if not completion.complete:
             raise EIPProtocolError("reader accepted a complete stream but envd reported it incomplete")
-        if completion.range_start != opened.range_start or completion.range_end != opened.range_end:
-            raise EIPProtocolError("reader completion range differs from its open result")
         if completion.produced_bytes != self._received_bytes:
             raise EIPProtocolError("reader byte count differs from envd completion evidence")
+        if self._max_bytes is None or completion.produced_bytes > self._max_bytes:
+            raise EIPProtocolError("reader completion exceeds the negotiated maximum")
         digest = completion.digest
         if digest is None or digest.algorithm != "sha256" or digest.value != self._hasher.hexdigest():
             raise EIPProtocolError("reader digest differs from envd completion evidence")
-        if completion.stability is FileReadStability.CHANGED:
-            raise EIPTransferError("reader source revision changed during transfer")
 
     def _require_channel(self) -> TransferChannel:
         if self._channel is None:
@@ -266,7 +273,6 @@ class EIPFileWriter:
         path: EIPPath,
         mode: FileWriteMode,
         *,
-        expected_revision: FileRevision | None,
         executable: bool | None,
         transfer_deadline: datetime | None,
         max_transfer_frame_bytes: int,
@@ -277,7 +283,6 @@ class EIPFileWriter:
             context=_new_context(with_idempotency=True),
             path=path,
             mode=mode,
-            expected_revision=expected_revision,
             executable=executable,
             transfer_deadline=cast(str | None, transfer_deadline),
         )

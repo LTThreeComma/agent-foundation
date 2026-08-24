@@ -87,10 +87,10 @@ The root `Makefile` is the stable local entry point. `pre-commit` provides fast 
 - `make lint` runs non-mutating file, Markdown, Ruff, and configuration checks;
 - `make typecheck` runs Pyright over Python package sources;
 - `make test` runs the Python workspace test suite;
-- `make examples-check` validates independent example locks, style, types, tests, and offline smoke paths;
-- `make build` builds every Python workspace package;
-- `make check` runs the fast repository merge gate, including the independent examples.
-
-Rust validation remains separate until Rust CI is accepted.
+- `make examples-check` validates independent example locks, style, and types;
+- `make examples-check-all` additionally runs example tests, offline smoke paths, and builds;
+- `make build` builds every workspace package, browser application, and standalone SDK;
+- `make check` formats repository sources, then runs repository-wide lint, static-analysis, and type checks without tests;
+- `make check-all` runs the complete EIP, example, browser application, Python, Rust, and standalone SDK gates, including tests and builds.
 
 As implementation packages are added, their focused lint, type-check, test, and build commands must be added behind these stable Make targets rather than requiring contributors to discover unrelated tool-specific commands.

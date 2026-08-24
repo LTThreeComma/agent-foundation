@@ -31,11 +31,9 @@ NO_REBUILD_MODELS = {
     "ProcessHandle",
     "FileReaderHandle",
     "FileWriterHandle",
-    "FileTextCursor",
     "OutputReference",
     "OutputCursor",
     "ReceiptRef",
-    "FileRevision",
 }
 
 
@@ -419,29 +417,15 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "        return self",
                 ]
             )
-        if message.name == "FileReadTextParams":
-            lines.extend(
-                [
-                    "",
-                    "    @model_validator(mode='after')",
-                    "    def _validate_position(self) -> FileReadTextParams:",
-                    "        if self.cursor is not None and self.start_line is not None:",
-                    "            raise ValueError('cursor and start_line are mutually exclusive')",
-                    "        return self",
-                ]
-            )
         if message.name == "FileReadCompletion":
             lines.extend(
                 [
                     "",
                     "    @model_validator(mode='after')",
                     "    def _validate_completion(self) -> FileReadCompletion:",
-                    "        if self.range_start > self.range_end:",
-                    "            raise ValueError('range_start cannot exceed range_end')",
-                    "        expected = self.range_end - self.range_start",
                     "        if self.complete:",
-                    "            if self.digest is None or self.produced_bytes != expected:",
-                    "                raise ValueError('complete reads require exact bytes and digest')",
+                    "            if self.digest is None:",
+                    "                raise ValueError('complete reads require a digest')",
                     "        elif self.digest is not None:",
                     "            raise ValueError('incomplete reads cannot expose a digest')",
                     "        return self",

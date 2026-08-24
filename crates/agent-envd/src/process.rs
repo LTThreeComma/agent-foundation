@@ -66,7 +66,6 @@ pub(crate) struct ExecutionManager {
 
 struct ExecutionInner {
     state: Mutex<ManagerState>,
-    mounts: MountRegistry,
     retention: RetentionStore,
     command: CommandConfig,
     environment_id: String,
@@ -183,15 +182,11 @@ impl ExecutionManager {
     pub(crate) fn new(
         config: &Config,
         generation: u64,
-        mounts: MountRegistry,
         retention: RetentionStore,
     ) -> Result<Option<Self>, ProcessError> {
         let Some(command) = config.command.clone() else {
             return Ok(None);
         };
-        if !mounts.supports_commands() {
-            return Ok(None);
-        }
         let max_active =
             usize::try_from(config.limits.max_processes).map_err(|_| ProcessError::Internal)?;
         let max_records = usize::try_from(config.limits.max_process_records)
@@ -211,7 +206,6 @@ impl ExecutionManager {
                     starts_in_progress: 0,
                     draining: false,
                 }),
-                mounts,
                 retention,
                 command,
                 environment_id: config.environment_id.clone(),
@@ -246,6 +240,7 @@ impl ExecutionManager {
 
     pub(crate) async fn start<F>(
         &self,
+        mounts: &MountRegistry,
         request: &CommandRequest,
         exposed: bool,
         dispatch_guard: F,
@@ -253,7 +248,7 @@ impl ExecutionManager {
     where
         F: Fn() -> Result<(), ProcessError>,
     {
-        let prepared = self.prepare_request(request)?;
+        let prepared = self.prepare_request(mounts, request)?;
         let mut reservation = self.reserve_start()?;
         self.start_reserved(prepared, exposed, &mut reservation, dispatch_guard)
             .await
@@ -454,7 +449,11 @@ impl ExecutionManager {
         }
     }
 
-    fn prepare_request(&self, request: &CommandRequest) -> Result<PreparedCommand, ProcessError> {
+    fn prepare_request(
+        &self,
+        mounts: &MountRegistry,
+        request: &CommandRequest,
+    ) -> Result<PreparedCommand, ProcessError> {
         if request.network == CommandNetwork::Deny
             || request.limits.memory_bytes.is_some()
             || request.limits.cpu_time_ms.is_some()
@@ -462,9 +461,7 @@ impl ExecutionManager {
         {
             return Err(ProcessError::Unsupported);
         }
-        let cwd = self
-            .inner
-            .mounts
+        let cwd = mounts
             .resolve_command_cwd(&request.cwd)
             .map_err(map_mount_error)?;
         let ResolvedCommand {

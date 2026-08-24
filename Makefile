@@ -2,7 +2,7 @@
 
 FOUNDATION_SERVICE_IMAGE ?= agent-foundation-service:local
 SANDBOX_IMAGE ?= agent-foundation-sandbox:local
-PLUGIN_EXAMPLES_DIR := examples/plugins
+EXAMPLE_DIRS := examples/plugins examples/hosting
 
 .PHONY: install
 install: ## Install locked dependencies and Git hooks
@@ -26,42 +26,43 @@ sync: ## Synchronize the locked Python workspace
 	@uv sync --locked --all-packages
 
 .PHONY: examples-sync
-examples-sync: ## Synchronize the independent plugin examples project
-	@uv sync --project "$(PLUGIN_EXAMPLES_DIR)" --locked
+examples-sync: ## Synchronize every independent example project
+	@for directory in $(EXAMPLE_DIRS); do uv sync --project "$$directory" --locked || exit $$?; done
 
 .PHONY: examples-lock-check
-examples-lock-check: ## Verify the plugin examples lock file
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv lock --check)
+examples-lock-check: ## Verify every independent example lock file
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && uv lock --check) || exit $$?; done
 
 .PHONY: examples-format-check
-examples-format-check: examples-sync ## Check plugin example lint and formatting
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked ruff check --no-fix .)
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked ruff format --check .)
+examples-format-check: examples-sync ## Check example lint and formatting
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && uv run --locked ruff check --no-fix .) || exit $$?; done
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && uv run --locked ruff format --check .) || exit $$?; done
 
 .PHONY: examples-typecheck
-examples-typecheck: examples-sync ## Type-check plugin example sources and tests
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked pyright)
+examples-typecheck: examples-sync ## Type-check example sources and tests
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && uv run --locked pyright) || exit $$?; done
 
 .PHONY: examples-test
-examples-test: examples-sync ## Run focused plugin example tests
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked pytest)
+examples-test: examples-sync ## Run focused example tests
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && uv run --locked pytest) || exit $$?; done
 
 .PHONY: examples-smoke
-examples-smoke: examples-sync ## Run all four offline plugin composition paths
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-environment-entrypoint)
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-environment-code)
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-harness-entrypoint)
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && uv run --locked plugin-example-harness-code)
+examples-smoke: examples-sync ## Run every offline example path
+	@(cd examples/plugins && uv run --locked plugin-example-environment-entrypoint)
+	@(cd examples/plugins && uv run --locked plugin-example-environment-code)
+	@(cd examples/plugins && uv run --locked plugin-example-harness-entrypoint)
+	@(cd examples/plugins && uv run --locked plugin-example-harness-code)
+	@(cd examples/hosting && uv run --locked host-persistence-example)
 
 .PHONY: examples-build
-examples-build: examples-sync ## Build the plugin examples distribution
-	@(cd "$(PLUGIN_EXAMPLES_DIR)" && rm -rf dist && uv build)
+examples-build: examples-sync ## Build every example distribution
+	@for directory in $(EXAMPLE_DIRS); do (cd "$$directory" && rm -rf dist && uv build) || exit $$?; done
 
 .PHONY: examples-check
-examples-check: examples-lock-check examples-format-check examples-typecheck examples-test examples-smoke ## Run the fast plugin examples gate
+examples-check: examples-lock-check examples-format-check examples-typecheck ## Run example lint and type checks
 
 .PHONY: examples-check-all
-examples-check-all: examples-check examples-build ## Run the complete plugin examples gate
+examples-check-all: examples-check examples-test examples-smoke examples-build ## Run the complete examples gate
 
 .PHONY: setup
 setup: sync ## Start local PostgreSQL and Redis
@@ -78,8 +79,14 @@ dev-down: ## Stop local infrastructure and remove its data volumes
 
 .PHONY: format
 format: sync foundation-web-sync sdk-python-sync sdk-typescript-sync ## Format repository and standalone SDK sources
-	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files || true
-	@git ls-files --cached --others --exclude-standard -z | xargs -0 uv run --locked pre-commit run --files
+	@for hook in end-of-file-fixer trailing-whitespace mdformat ruff-format; do \
+		git ls-files --cached --others --exclude-standard -z | \
+			xargs -0 uv run --locked pre-commit run "$$hook" --files || true; \
+	done
+	@for hook in end-of-file-fixer trailing-whitespace mdformat ruff-format; do \
+		git ls-files --cached --others --exclude-standard -z | \
+			xargs -0 uv run --locked pre-commit run "$$hook" --files || exit $$?; \
+	done
 	@files="$$(find sdk/go -type f -name '*.go')"; gofmt -w $$files
 	@cargo fmt --all
 	@(cd sdk/rust && cargo fmt)
@@ -181,10 +188,10 @@ rust-package: ## Verify the agent-envd crates.io package
 	@cargo package --locked --allow-dirty --package converge-agent-envd
 
 .PHONY: rust-check
-rust-check: rust-format-check rust-lint rust-test ## Run the fast Rust workspace gate
+rust-check: rust-format-check rust-lint ## Run Rust workspace formatting and lint checks
 
 .PHONY: rust-check-all
-rust-check-all: rust-check rust-build rust-package ## Run the complete Rust workspace gate
+rust-check-all: rust-check rust-test rust-build rust-package ## Run the complete Rust workspace gate
 
 .PHONY: sdk-python-isolation-check
 sdk-python-isolation-check: ## Verify the Python SDK is excluded from the root workspace
@@ -212,10 +219,10 @@ sdk-python-build: sdk-python-sync ## Build the Python SDK distributions
 	@(cd sdk/python && rm -rf dist && uv build --no-build-isolation)
 
 .PHONY: sdk-python-check
-sdk-python-check: sdk-python-isolation-check sdk-python-format-check sdk-python-typecheck sdk-python-test ## Run the fast Python SDK gate
+sdk-python-check: sdk-python-isolation-check sdk-python-format-check sdk-python-typecheck ## Run Python SDK lint and type checks
 
 .PHONY: sdk-python-check-all
-sdk-python-check-all: sdk-python-check sdk-python-build ## Run the complete Python SDK gate
+sdk-python-check-all: sdk-python-check sdk-python-test sdk-python-build ## Run the complete Python SDK gate
 
 .PHONY: sdk-go-format-check
 sdk-go-format-check: ## Check Go SDK formatting
@@ -236,10 +243,10 @@ sdk-go-build: ## Build the Go SDK
 	@(cd sdk/go && go build ./...)
 
 .PHONY: sdk-go-check
-sdk-go-check: sdk-go-format-check sdk-go-vet sdk-go-test ## Run the fast Go SDK gate
+sdk-go-check: sdk-go-format-check sdk-go-vet ## Run Go SDK formatting and static analysis
 
 .PHONY: sdk-go-check-all
-sdk-go-check-all: sdk-go-check sdk-go-build ## Run the complete Go SDK gate
+sdk-go-check-all: sdk-go-check sdk-go-test sdk-go-build ## Run the complete Go SDK gate
 
 .PHONY: sdk-rust-isolation-check
 sdk-rust-isolation-check: ## Verify the Rust SDK is excluded from the root workspace
@@ -266,10 +273,10 @@ sdk-rust-package: ## Verify the Rust SDK crates.io package
 	@(cd sdk/rust && cargo package --locked --allow-dirty)
 
 .PHONY: sdk-rust-check
-sdk-rust-check: sdk-rust-isolation-check sdk-rust-format-check sdk-rust-lint sdk-rust-test ## Run the fast Rust SDK gate
+sdk-rust-check: sdk-rust-isolation-check sdk-rust-format-check sdk-rust-lint ## Run Rust SDK formatting and lint checks
 
 .PHONY: sdk-rust-check-all
-sdk-rust-check-all: sdk-rust-check sdk-rust-build sdk-rust-package ## Run the complete Rust SDK gate
+sdk-rust-check-all: sdk-rust-check sdk-rust-test sdk-rust-build sdk-rust-package ## Run the complete Rust SDK gate
 
 .PHONY: foundation-web-sync
 foundation-web-sync: ## Install locked Foundation Web dependencies
@@ -284,7 +291,7 @@ foundation-web-build: foundation-web-sync ## Build Foundation Web production ass
 	@npm --prefix apps/foundation-web run build
 
 .PHONY: foundation-web-check
-foundation-web-check: foundation-web-sync ## Run the fast Foundation Web gate
+foundation-web-check: foundation-web-sync ## Run Foundation Web formatting and type checks
 	@npm --prefix apps/foundation-web run check
 
 .PHONY: foundation-web-check-all
@@ -300,7 +307,7 @@ sdk-typescript-build: sdk-typescript-sync ## Build the TypeScript SDK
 	@npm --prefix sdk/typescript run build
 
 .PHONY: sdk-typescript-check
-sdk-typescript-check: sdk-typescript-sync ## Run the fast TypeScript SDK gate
+sdk-typescript-check: sdk-typescript-sync ## Run TypeScript SDK formatting and type checks
 	@npm --prefix sdk/typescript run check
 
 .PHONY: sdk-typescript-check-all
@@ -311,7 +318,7 @@ sdk-typescript-check-all: sdk-typescript-sync ## Run the complete TypeScript SDK
 sdk-build: sdk-python-build sdk-go-build sdk-rust-build sdk-typescript-build ## Build all standalone SDKs
 
 .PHONY: sdk-check
-sdk-check: sdk-python-check sdk-go-check sdk-rust-check sdk-typescript-check ## Run all fast standalone SDK gates
+sdk-check: sdk-python-check sdk-go-check sdk-rust-check sdk-typescript-check ## Run all standalone SDK lint and type checks
 
 .PHONY: sdk-check-all
 sdk-check-all: sdk-python-check-all sdk-go-check-all sdk-rust-check-all sdk-typescript-check-all ## Run all complete standalone SDK gates
@@ -372,13 +379,34 @@ image-check: images ## Build and smoke-check all container images
 		--entrypoint agent-envd "$(SANDBOX_IMAGE)"
 
 .PHONY: python-check
-python-check: lint typecheck test ## Run the fast Python workspace gate
+python-check: lint typecheck ## Run Python workspace lint and type checks
 
 .PHONY: python-check-all
-python-check-all: python-check python-build docs-build ## Run the complete Python and documentation gate
+python-check-all: python-check test python-build docs-build ## Run the complete Python and documentation gate
 
 .PHONY: check
-check: eip-check examples-check foundation-web-check python-check rust-check sdk-check ## Run the fast repository gate
+check: ## Format, lint, and type-check the repository
+	@printf '\n==> [1/10] Format repository\n'
+	@$(MAKE) --no-print-directory format
+	@printf '\n==> [2/10] Lint repository and Python workspace\n'
+	@$(MAKE) --no-print-directory lint
+	@printf '\n==> [3/10] Type-check Python workspace with Pyright\n'
+	@$(MAKE) --no-print-directory typecheck
+	@printf '\n==> [4/10] Check examples with Ruff and Pyright\n'
+	@$(MAKE) --no-print-directory examples-check
+	@printf '\n==> [5/10] Check Foundation Web with Prettier and TypeScript\n'
+	@$(MAKE) --no-print-directory foundation-web-check
+	@printf '\n==> [6/10] Check Rust workspace with rustfmt and Clippy\n'
+	@$(MAKE) --no-print-directory rust-check
+	@printf '\n==> [7/10] Check Python SDK with Ruff and Pyright\n'
+	@$(MAKE) --no-print-directory sdk-python-check
+	@printf '\n==> [8/10] Check Go SDK with gofmt and vet\n'
+	@$(MAKE) --no-print-directory sdk-go-check
+	@printf '\n==> [9/10] Check Rust SDK with rustfmt and Clippy\n'
+	@$(MAKE) --no-print-directory sdk-rust-check
+	@printf '\n==> [10/10] Check TypeScript SDK with Prettier and TypeScript\n'
+	@$(MAKE) --no-print-directory sdk-typescript-check
+	@printf '\n==> Check completed\n'
 
 .PHONY: check-all
 check-all: eip-check examples-check-all foundation-web-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate

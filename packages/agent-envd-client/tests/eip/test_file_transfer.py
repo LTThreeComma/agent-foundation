@@ -5,6 +5,7 @@ import hashlib
 import json
 from typing import Any
 
+import pytest
 from converge_agent_envd_client import ControlFrame, EIPSession, EIPTransportFrame, RequestCoordinator
 from converge_agent_envd_client.eip.v1 import (
     ContentDigest,
@@ -14,6 +15,7 @@ from converge_agent_envd_client.eip.v1 import (
     EIPLimits,
     EIPPath,
     EnvironmentDescriptor,
+    FileByteRange,
     FileInfo,
     FileKind,
     FileReadCompletion,
@@ -21,7 +23,6 @@ from converge_agent_envd_client.eip.v1 import (
     FileReaderCloseResult,
     FileReaderHandle,
     FileReaderOpenResult,
-    FileReadStability,
     FileWriteMode,
     FileWriterAbortParams,
     FileWriterAbortResult,
@@ -41,9 +42,12 @@ from converge_agent_envd_client.eip.v1 import (
     ReceiptOutcome,
     ReceiptRef,
     ReceiptStage,
+    ResourceAuthority,
+    ResourceAuthorityDescriptor,
     decode_model,
     encode_model,
 )
+from converge_agent_envd_client.errors import EIPProtocolError
 from pydantic import BaseModel
 
 
@@ -132,6 +136,7 @@ def descriptor() -> EnvironmentDescriptor:
             file_transfer_idle_ttl_ms=1000,
             max_file_transfer_duration_ms=1000,
         ),
+        resource_authority=ResourceAuthorityDescriptor(mode=ResourceAuthority.SCOPED),
         isolation=IsolationPosture(
             mode=IsolationMode.DISABLED,
             backend=IsolationBackend.OUTER_HOST,
@@ -190,9 +195,6 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
                 FileReaderOpenResult(
                     reader=FileReaderHandle("reader-one"),
                     info=info(path, len(content)),
-                    range_start=0,
-                    range_end=len(content),
-                    source_eof_at_end=True,
                     expires_at="2026-08-21T01:00:00Z",
                 ),
             )
@@ -215,15 +217,11 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
                 closed,
                 FileReaderCloseResult(
                     completion=FileReadCompletion(
-                        range_start=0,
-                        range_end=len(content),
                         produced_bytes=len(content),
                         digest=ContentDigest(
                             algorithm="sha256",
                             value=hashlib.sha256(content).hexdigest(),
                         ),
-                        source_eof_at_end=True,
-                        stability=FileReadStability.VERIFIED,
                         complete=True,
                     )
                 ),
@@ -234,6 +232,81 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
             chunks = [chunk async for chunk in reader]
             assert b"".join(chunks) == content
             assert reader.completion.complete
+        await peer_task
+        await session.abort()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("byte_range", "reported_size", "payload"),
+    [
+        (FileByteRange(offset=0, length=0), 1, b"x"),
+        (FileByteRange(offset=0, length=3), 4, b"four"),
+        (None, 0, b"x"),
+    ],
+)
+def test_high_level_reader_rejects_bytes_beyond_requested_maximum(
+    byte_range: FileByteRange | None,
+    reported_size: int,
+    payload: bytes,
+) -> None:
+    async def scenario() -> None:
+        transport = FakeTypedTransport()
+        requester = RequestCoordinator(transport, request_timeout=1)
+        requester.configure_limits(
+            max_in_flight=4,
+            max_request_bytes=1024 * 1024,
+            max_response_bytes=1024 * 1024,
+            max_transfer_frame_bytes=128,
+            max_concurrent_file_transfers=2,
+        )
+        session = EIPSession(requester, descriptor())
+        path = EIPPath(mount_id="workspace", path="/source.bin")
+
+        async def peer() -> None:
+            opened = await next_control(transport, "file.open_reader")
+            await respond(
+                transport,
+                opened,
+                FileReaderOpenResult(
+                    reader=FileReaderHandle("reader-excess"),
+                    info=info(path, reported_size),
+                    expires_at="2026-08-21T01:00:00Z",
+                ),
+            )
+            attach = await transport.outbound.get()
+            assert isinstance(attach, DataFrame) and attach.kind is DataFrameKind.ATTACH
+            await transport.inbound.put(DataFrame(kind=DataFrameKind.ATTACHED, handle="reader-excess"))
+            await transport.inbound.put(DataFrame(kind=DataFrameKind.CHUNK, handle="reader-excess", payload=payload))
+
+            protocol_reset = await transport.outbound.get()
+            assert isinstance(protocol_reset, DataFrame)
+            assert protocol_reset.kind is DataFrameKind.RESET
+            assert protocol_reset.reset_status is DataResetStatus.PROTOCOL
+            cancellation_reset = await transport.outbound.get()
+            assert isinstance(cancellation_reset, DataFrame)
+            assert cancellation_reset.kind is DataFrameKind.RESET
+            closed = await next_control(transport, "file.close_reader")
+            close_params = decode_params(closed, FileReaderCloseParams)
+            assert isinstance(close_params, FileReaderCloseParams)
+            assert not close_params.accept_complete
+            await respond(
+                transport,
+                closed,
+                FileReaderCloseResult(
+                    completion=FileReadCompletion(
+                        produced_bytes=0,
+                        digest=None,
+                        complete=False,
+                    )
+                ),
+            )
+
+        peer_task = asyncio.create_task(peer())
+        with pytest.raises(EIPProtocolError, match="requested maximum"):
+            async with session.open_reader(path, byte_range=byte_range) as reader:
+                await anext(reader)
         await peer_task
         await session.abort()
 
@@ -325,9 +398,6 @@ def test_queued_peer_reader_reset_does_not_consume_retired_capacity() -> None:
                     FileReaderOpenResult(
                         reader=FileReaderHandle(handle),
                         info=info(path, 0),
-                        range_start=0,
-                        range_end=0,
-                        source_eof_at_end=True,
                         expires_at="2026-08-21T01:00:00Z",
                     ),
                 )
@@ -354,12 +424,8 @@ def test_queued_peer_reader_reset_does_not_consume_retired_capacity() -> None:
                     closed,
                     FileReaderCloseResult(
                         completion=FileReadCompletion(
-                            range_start=0,
-                            range_end=0,
                             produced_bytes=0,
                             digest=None,
-                            source_eof_at_end=True,
-                            stability=FileReadStability.UNVERIFIED,
                             complete=False,
                         )
                     ),

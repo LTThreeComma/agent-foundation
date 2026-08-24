@@ -192,38 +192,10 @@
           }
         },
         {
-          "name": "expected_source_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileCopyParams/properties/expected_source_revision"
-          }
-        },
-        {
-          "name": "expected_destination_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileCopyParams/properties/expected_destination_revision"
-          }
-        },
-        {
           "name": "replace",
           "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/FileCopyParams/properties/replace"
-          }
-        },
-        {
-          "name": "require_atomic_destination",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileCopyParams/properties/require_atomic_destination"
-          }
-        },
-        {
-          "name": "require_stable_source",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileCopyParams/properties/require_stable_source"
           }
         }
       ],
@@ -271,38 +243,38 @@
           }
         },
         {
-          "name": "mode",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileFindParams/properties/mode"
-          }
-        },
-        {
-          "name": "kind",
+          "name": "offset",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileFindParams/properties/kind"
+            "$ref": "schema.json#/$defs/FileFindParams/properties/offset"
           }
         },
         {
-          "name": "max_depth",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileFindParams/properties/max_depth"
-          }
-        },
-        {
-          "name": "cursor",
+          "name": "max_results",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileFindParams/properties/cursor"
+            "$ref": "schema.json#/$defs/FileFindParams/properties/max_results"
           }
         },
         {
-          "name": "output_policy",
+          "name": "recursive",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileFindParams/properties/output_policy"
+            "$ref": "schema.json#/$defs/FileFindParams/properties/recursive"
+          }
+        },
+        {
+          "name": "include_hidden",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/include_hidden"
+          }
+        },
+        {
+          "name": "kinds",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileFindParams/properties/kinds"
           }
         }
       ],
@@ -343,31 +315,24 @@
           }
         },
         {
-          "name": "recursive",
+          "name": "offset",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileListParams/properties/recursive"
+            "$ref": "schema.json#/$defs/FileListParams/properties/offset"
           }
         },
         {
-          "name": "max_depth",
+          "name": "max_results",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileListParams/properties/max_depth"
+            "$ref": "schema.json#/$defs/FileListParams/properties/max_results"
           }
         },
         {
-          "name": "cursor",
+          "name": "include_hidden",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileListParams/properties/cursor"
-          }
-        },
-        {
-          "name": "output_policy",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileListParams/properties/output_policy"
+            "$ref": "schema.json#/$defs/FileListParams/properties/include_hidden"
           }
         }
       ],
@@ -466,20 +431,6 @@
           }
         },
         {
-          "name": "expected_source_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileMoveParams/properties/expected_source_revision"
-          }
-        },
-        {
-          "name": "expected_destination_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileMoveParams/properties/expected_destination_revision"
-          }
-        },
-        {
           "name": "replace",
           "required": false,
           "schema": {
@@ -531,13 +482,6 @@
           }
         },
         {
-          "name": "expected_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/expected_revision"
-          }
-        },
-        {
           "name": "transfer_deadline",
           "required": false,
           "schema": {
@@ -586,13 +530,6 @@
           "required": true,
           "schema": {
             "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/mode"
-          }
-        },
-        {
-          "name": "expected_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/expected_revision"
           }
         },
         {
@@ -659,13 +596,6 @@
           "schema": {
             "$ref": "schema.json#/$defs/FilePatchTextParams/properties/patch"
           }
-        },
-        {
-          "name": "expected_revision",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FilePatchTextParams/properties/expected_revision"
-          }
         }
       ],
       "result": {
@@ -705,38 +635,24 @@
           }
         },
         {
-          "name": "cursor",
-          "required": false,
+          "name": "line_limit",
+          "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadTextParams/properties/cursor"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/line_limit"
           }
         },
         {
-          "name": "start_line",
+          "name": "line_offset",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadTextParams/properties/start_line"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/line_offset"
           }
         },
         {
-          "name": "max_lines",
-          "required": false,
+          "name": "max_line_length",
+          "required": true,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReadTextParams/properties/max_lines"
-          }
-        },
-        {
-          "name": "max_bytes",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileReadTextParams/properties/max_bytes"
-          }
-        },
-        {
-          "name": "expected_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileReadTextParams/properties/expected_revision"
+            "$ref": "schema.json#/$defs/FileReadTextParams/properties/max_line_length"
           }
         }
       ],
@@ -781,13 +697,6 @@
           "required": true,
           "schema": {
             "$ref": "schema.json#/$defs/FileRemoveParams/properties/expected_kind"
-          }
-        },
-        {
-          "name": "expected_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileRemoveParams/properties/expected_revision"
           }
         },
         {
@@ -856,45 +765,38 @@
           }
         },
         {
-          "name": "include",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileSearchParams/properties/include"
-          }
-        },
-        {
-          "name": "exclude",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileSearchParams/properties/exclude"
-          }
-        },
-        {
-          "name": "max_depth",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileSearchParams/properties/max_depth"
-          }
-        },
-        {
-          "name": "cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileSearchParams/properties/cursor"
-          }
-        },
-        {
-          "name": "output_policy",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileSearchParams/properties/output_policy"
-          }
-        },
-        {
           "name": "case_sensitive",
           "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/FileSearchParams/properties/case_sensitive"
+          }
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileSearchParams/properties/offset"
+          }
+        },
+        {
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileSearchParams/properties/max_results"
+          }
+        },
+        {
+          "name": "include_hidden",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileSearchParams/properties/include_hidden"
+          }
+        },
+        {
+          "name": "max_line_length",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/FileSearchParams/properties/max_line_length"
           }
         }
       ],
@@ -993,13 +895,6 @@
           }
         },
         {
-          "name": "expected_revision",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileWriteTextParams/properties/expected_revision"
-          }
-        },
-        {
           "name": "executable",
           "required": false,
           "schema": {
@@ -1062,6 +957,13 @@
           "required": false,
           "schema": {
             "$ref": "schema.json#/$defs/InitializeParams/properties/optional_capabilities"
+          }
+        },
+        {
+          "name": "resource_authority",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/$defs/InitializeParams/properties/resource_authority"
           }
         }
       ],

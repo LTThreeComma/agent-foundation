@@ -14,10 +14,9 @@ use tokio::{
 use crate::{
     eip::{
         ContentDigest, DataFrame, DataFrameKind, DataResetStatus, EIPPath, FileInfo, FileKind,
-        FileReadCompletion, FileReadStability, FileReaderCloseResult, FileReaderHandle,
-        FileReaderOpenParams, FileReaderOpenResult, FileRevision, FileWriteMode,
-        FileWriterAbortStatus, FileWriterCommitParams, FileWriterHandle, FileWriterOpenParams,
-        FileWriterOpenResult,
+        FileReadCompletion, FileReaderCloseResult, FileReaderHandle, FileReaderOpenParams,
+        FileReaderOpenResult, FileWriteMode, FileWriterAbortStatus, FileWriterCommitParams,
+        FileWriterHandle, FileWriterOpenParams, FileWriterOpenResult,
     },
     mount::{Mount, MountPathError, MountRegistry, StagedCandidate},
     operation::{OperationInterruption, OperationRegistry, RegistryError, ShortIdAllocator},
@@ -57,11 +56,8 @@ enum TransferRecord {
 struct ReaderRecord {
     handle: String,
     file: Option<std::fs::File>,
-    range_start: u64,
-    range_end: u64,
-    source_eof_at_end: bool,
-    open_revision: Option<FileRevision>,
-    final_revision: Option<FileRevision>,
+    start_offset: u64,
+    max_bytes: u64,
     phase: ReaderPhase,
     produced: u64,
     digest: Option<ContentDigest>,
@@ -85,7 +81,6 @@ struct WriterRecord {
     handle: String,
     path: EIPPath,
     mode: FileWriteMode,
-    open_revision: Option<FileRevision>,
     executable: Option<bool>,
     candidate: Option<StagedCandidate>,
     file: Option<tokio::fs::File>,
@@ -117,7 +112,6 @@ pub(crate) struct WriterCommit {
     handle: String,
     path: EIPPath,
     mode: FileWriteMode,
-    open_revision: Option<FileRevision>,
     executable: Option<bool>,
     candidate: StagedCandidate,
     transferred: u64,
@@ -220,24 +214,16 @@ impl TransferRegistry {
         }
         let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
         let info = file_info(&params.path, &opened.metadata);
-        if let Some(expected) = &params.expected_revision
-            && info.revision.as_ref() != Some(expected)
+        let start_offset = params.byte_range.as_ref().map_or(0, |range| range.offset);
+        let available = opened.metadata.len().saturating_sub(start_offset);
+        let max_bytes = params
+            .byte_range
+            .as_ref()
+            .and_then(|range| range.length)
+            .unwrap_or(available);
+        if max_bytes > mount.max_file_bytes
+            || (params.byte_range.is_none() && available > mount.max_file_bytes)
         {
-            return Err(TransferError::Conflict);
-        }
-        let size = opened.metadata.len();
-        let range_start = params.byte_range.as_ref().map_or(0, |range| range.offset);
-        if range_start > size {
-            return Err(TransferError::Protocol);
-        }
-        let range_end = match params.byte_range.as_ref().and_then(|range| range.length) {
-            Some(length) => range_start
-                .checked_add(length)
-                .ok_or(TransferError::Limit)?
-                .min(size),
-            None => size,
-        };
-        if range_end - range_start > mount.max_file_bytes {
             return Err(TransferError::Limit);
         }
         let expires_at = self.transfer_expiry(params.transfer_deadline)?;
@@ -250,11 +236,8 @@ impl TransferRegistry {
         let record = Arc::new(Mutex::new(ReaderRecord {
             handle: handle.clone(),
             file: Some(opened.file),
-            range_start,
-            range_end,
-            source_eof_at_end: range_end == size,
-            open_revision: info.revision.clone(),
-            final_revision: None,
+            start_offset,
+            max_bytes,
             phase: ReaderPhase::Open,
             produced: 0,
             digest: None,
@@ -267,9 +250,6 @@ impl TransferRegistry {
         Ok(FileReaderOpenResult {
             reader: FileReaderHandle(handle),
             info,
-            range_start,
-            range_end,
-            source_eof_at_end: range_end == size,
             expires_at,
         })
     }
@@ -296,12 +276,8 @@ impl TransferRegistry {
             reader.phase = ReaderPhase::Reset;
             let result = FileReaderCloseResult {
                 completion: FileReadCompletion {
-                    range_start: reader.range_start,
-                    range_end: reader.range_end,
                     produced_bytes: reader.produced,
                     digest: None,
-                    source_eof_at_end: reader.source_eof_at_end,
-                    stability: FileReadStability::Unverified,
                     complete: false,
                 },
             };
@@ -315,29 +291,16 @@ impl TransferRegistry {
                 Ok(result)
             };
         }
-        let complete = accept_complete
-            && reader.phase == ReaderPhase::Acknowledged
-            && reader.produced == reader.range_end - reader.range_start;
+        let complete = accept_complete && reader.phase == ReaderPhase::Acknowledged;
         if accept_complete && !complete {
             return Err(TransferError::WrongState);
         }
         if !accept_complete {
             reader.cancellation.send_replace(true);
         }
-        let stability = match (&reader.open_revision, &reader.final_revision) {
-            (Some(open), Some(final_revision)) if open == final_revision => {
-                FileReadStability::Verified
-            }
-            (Some(_), Some(_)) => FileReadStability::Changed,
-            _ => FileReadStability::Unverified,
-        };
         let completion = FileReadCompletion {
-            range_start: reader.range_start,
-            range_end: reader.range_end,
             produced_bytes: reader.produced,
             digest: complete.then(|| reader.digest.clone()).flatten(),
-            source_eof_at_end: reader.source_eof_at_end,
-            stability,
             complete,
         };
         let result = FileReaderCloseResult { completion };
@@ -360,15 +323,12 @@ impl TransferRegistry {
             _ => return Err(TransferError::Denied),
         };
         let destination = observe_destination(&mount, &params.path)?;
-        let open_revision = destination.as_ref().map(|(_, revision)| revision.clone());
-        validate_open_mode(
-            params.mode,
-            open_revision.as_ref(),
-            params.expected_revision.as_ref(),
-        )?;
-        let mut candidate = mount.create_candidate().map_err(map_mount_error)?;
+        validate_open_mode(params.mode, destination.as_ref())?;
+        let mut candidate = mount
+            .create_candidate(&params.path)
+            .map_err(map_mount_error)?;
         if params.executable.is_none()
-            && let Some((metadata, _)) = &destination
+            && let Some(metadata) = &destination
         {
             set_permissions_from(&candidate.file, metadata).map_err(|_| TransferError::Source)?;
         }
@@ -376,9 +336,6 @@ impl TransferRegistry {
         let mut prefix_digest = None;
         if params.mode == FileWriteMode::Append {
             let opened = mount.open_regular(&params.path).map_err(map_mount_error)?;
-            if Some(file_revision(&opened.metadata)) != open_revision {
-                return Err(TransferError::Conflict);
-            }
             prefix_bytes = opened.metadata.len();
             candidate
                 .reserve_bytes(prefix_bytes)
@@ -448,7 +405,6 @@ impl TransferRegistry {
             handle: handle.clone(),
             path: params.path.clone(),
             mode: params.mode,
-            open_revision,
             executable: params.executable,
             candidate: Some(candidate),
             file: Some(writer_file),
@@ -540,7 +496,6 @@ impl TransferRegistry {
             handle: writer.handle.clone(),
             path: writer.path.clone(),
             mode: writer.mode,
-            open_revision: writer.open_revision.clone(),
             executable: writer.executable,
             candidate,
             transferred: writer.transferred,
@@ -717,12 +672,12 @@ impl TransferRegistry {
         handle: String,
         cancellation: &mut watch::Receiver<bool>,
     ) {
-        let (range_start, range_end) = {
+        let (start_offset, max_bytes) = {
             let reader = record.lock().await;
-            (reader.range_start, reader.range_end)
+            (reader.start_offset, reader.max_bytes)
         };
         let mut file = tokio::fs::File::from_std(file);
-        if file.seek(SeekFrom::Start(range_start)).await.is_err() {
+        if file.seek(SeekFrom::Start(start_offset)).await.is_err() {
             self.reset_reader(&record, &handle, DataResetStatus::Source)
                 .await;
             return;
@@ -735,12 +690,12 @@ impl TransferRegistry {
         let mut buffer = vec![0_u8; payload_limit.min(64 * 1024)];
         let mut offset = 0_u64;
         let mut hasher = Sha256::new();
-        while offset < range_end - range_start {
-            let remaining =
-                usize::try_from((range_end - range_start - offset).min(buffer.len() as u64))
-                    .unwrap_or(buffer.len());
+        while offset < max_bytes {
+            let remaining = usize::try_from((max_bytes - offset).min(buffer.len() as u64))
+                .unwrap_or(buffer.len());
             let read = match file.read(&mut buffer[..remaining]).await {
-                Ok(0) | Err(_) => {
+                Ok(0) => break,
+                Err(_) => {
                     self.reset_reader(&record, &handle, DataResetStatus::Source)
                         .await;
                     return;
@@ -774,18 +729,12 @@ impl TransferRegistry {
             reader.produced = offset;
             reader.last_progress = Instant::now();
         }
-        let final_revision = file
-            .metadata()
-            .await
-            .ok()
-            .map(|metadata| file_revision(&metadata));
         {
             let mut reader = record.lock().await;
             reader.digest = Some(ContentDigest {
                 algorithm: "sha256".to_owned(),
                 value: format!("{:x}", hasher.finalize()),
             });
-            reader.final_revision = final_revision;
             reader.phase = ReaderPhase::AwaitingAck;
             reader.last_progress = Instant::now();
         }
@@ -1280,17 +1229,17 @@ impl WriterCommit {
         }
         check_operation(operations, operation_id)?;
         let mount = Arc::clone(self.candidate.mount());
-        let _mutation = mount.mutation_guard();
-        let current = observe_destination(&mount, &self.path)?.map(|(_, revision)| revision);
-        if current != self.open_revision {
-            return Err(TransferError::Conflict);
-        }
+        let current = observe_destination(&mount, &self.path)?;
         validate_commit_mode(self.mode, current.as_ref())?;
         check_operation(operations, operation_id)?;
         if let Some(executable) = self.executable {
             set_executable(&self.candidate.file, executable).map_err(|_| TransferError::Denied)?;
         }
-        let replace = self.mode != FileWriteMode::Create;
+        let replace = match self.mode {
+            FileWriteMode::Create => false,
+            FileWriteMode::Replace | FileWriteMode::Append => true,
+            FileWriteMode::Upsert => current.is_some(),
+        };
         mount
             .publish_candidate(&mut self.candidate, &self.path, replace)
             .map_err(map_mount_error)?;
@@ -1302,7 +1251,7 @@ impl WriterCommit {
         let opened = mount
             .open_regular(&self.path)
             .map_err(|_| TransferError::UnknownOutcome)?;
-        if file_revision(&candidate_metadata) != file_revision(&opened.metadata) {
+        if !same_file_identity(&candidate_metadata, &opened.metadata) {
             return Err(TransferError::UnknownOutcome);
         }
         Ok(WriterCommitOutput {
@@ -1372,27 +1321,20 @@ fn check_operation(
 
 fn validate_open_mode(
     mode: FileWriteMode,
-    current: Option<&FileRevision>,
-    expected: Option<&FileRevision>,
+    current: Option<&std::fs::Metadata>,
 ) -> Result<(), TransferError> {
-    if let Some(expected) = expected
-        && current != Some(expected)
-    {
-        return Err(TransferError::Conflict);
-    }
     match mode {
         FileWriteMode::Create if current.is_some() => Err(TransferError::Conflict),
         FileWriteMode::Replace | FileWriteMode::Append if current.is_none() => {
             Err(TransferError::NotFound)
         }
-        FileWriteMode::Append if expected.is_none() => Err(TransferError::Conflict),
         _ => Ok(()),
     }
 }
 
 fn validate_commit_mode(
     mode: FileWriteMode,
-    current: Option<&FileRevision>,
+    current: Option<&std::fs::Metadata>,
 ) -> Result<(), TransferError> {
     match mode {
         FileWriteMode::Create if current.is_some() => Err(TransferError::Conflict),
@@ -1406,7 +1348,7 @@ fn validate_commit_mode(
 fn observe_destination(
     mount: &Arc<Mount>,
     path: &EIPPath,
-) -> Result<Option<(std::fs::Metadata, FileRevision)>, TransferError> {
+) -> Result<Option<std::fs::Metadata>, TransferError> {
     match mount.metadata(path, false) {
         Ok(metadata) if metadata.is_symlink() => return Err(TransferError::Denied),
         Ok(metadata) if !metadata.is_file() => return Err(TransferError::Denied),
@@ -1415,8 +1357,7 @@ fn observe_destination(
         Err(error) => return Err(map_mount_error(error)),
     }
     let opened = mount.open_regular(path).map_err(map_mount_error)?;
-    let revision = file_revision(&opened.metadata);
-    Ok(Some((opened.metadata, revision)))
+    Ok(Some(opened.metadata))
 }
 
 pub(crate) fn file_info(path: &EIPPath, metadata: &std::fs::Metadata) -> FileInfo {
@@ -1435,38 +1376,18 @@ pub(crate) fn file_info(path: &EIPPath, metadata: &std::fs::Metadata) -> FileInf
         size_bytes: metadata.is_file().then_some(metadata.len()),
         modified_at: metadata.modified().ok().map(chrono::DateTime::from),
         executable: executable(metadata),
-        revision: cfg!(unix).then(|| file_revision(metadata)),
     }
 }
 
-pub(crate) fn file_revision(metadata: &std::fs::Metadata) -> FileRevision {
-    let mut hasher = Sha256::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        for value in [
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime() as u64,
-            metadata.mtime_nsec() as u64,
-            metadata.ctime() as u64,
-            metadata.ctime_nsec() as u64,
-            metadata.mode() as u64,
-        ] {
-            hasher.update(value.to_be_bytes());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        hasher.update(metadata.len().to_be_bytes());
-        if let Ok(modified) = metadata.modified()
-            && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
-        {
-            hasher.update(duration.as_nanos().to_be_bytes());
-        }
-    }
-    FileRevision(format!("r1-{:x}", hasher.finalize()))
+#[cfg(unix)]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 #[cfg(unix)]
@@ -1574,7 +1495,9 @@ mod tests {
 
     use crate::{
         config::{Config, TrustedMountConfig},
-        eip::{DataFrame, DataFrameKind, EIPCallContext, EIPPath, FileReaderOpenParams},
+        eip::{
+            DataFrame, DataFrameKind, EIPCallContext, EIPPath, FileByteRange, FileReaderOpenParams,
+        },
         mount::MountRegistry,
         operation::random_selector,
     };
@@ -1585,7 +1508,7 @@ mod tests {
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use super::{ContentDigest, FileWriterAbortStatus, TransferRecord, WriterPhase, file_revision};
+    use super::{ContentDigest, FileWriterAbortStatus, TransferRecord, WriterPhase};
     use super::{TransferError, TransferRegistry};
 
     struct TempTree(PathBuf);
@@ -1625,6 +1548,19 @@ mod tests {
         }
     }
 
+    fn candidate_count(tree: &TempTree) -> usize {
+        fs::read_dir(tree.child("native"))
+            .expect("lists native root")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".eip-stage-")
+            })
+            .count()
+    }
+
     fn setup(
         writable: bool,
         idle_ttl_ms: u64,
@@ -1638,29 +1574,13 @@ mod tests {
         let tree = TempTree::new();
         let native_root = tree.child("native");
         fs::create_dir(&native_root).expect("creates native root");
-        let staging_root = if writable {
-            let staging_root = tree.child("staging");
-            fs::create_dir(&staging_root).expect("creates staging root");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&staging_root, fs::Permissions::from_mode(0o700))
-                    .expect("makes staging private");
-            }
-            Some(staging_root)
-        } else {
-            None
-        };
-
         let mut config = Config::for_test("env-transfer-test");
         config.limits.max_staged_file_objects = 1;
         config.limits.file_transfer_idle_ttl_ms = idle_ttl_ms;
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
             native_root,
-            staging_root,
             writable,
-            exclusive_mutation_control: writable,
             allow_command_execution: false,
             max_file_bytes: 1024 * 1024,
             allowed_operations: if writable {
@@ -1669,7 +1589,7 @@ mod tests {
                 vec!["open_reader".to_owned()]
             },
         });
-        let mounts = MountRegistry::initialize(&config).expect("initializes mount registry");
+        let mounts = MountRegistry::initialize_scoped(&config).expect("initializes mount registry");
         let transfers = TransferRegistry::new(&config, 1).expect("initializes transfer registry");
         let (sender, receiver) = mpsc::channel(16);
         transfers
@@ -1690,7 +1610,6 @@ mod tests {
                     context: context("open-reader"),
                     path: path("/source.bin"),
                     byte_range: None,
-                    expected_revision: None,
                     transfer_deadline: None,
                 },
             )
@@ -1754,6 +1673,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reader_treats_eof_before_requested_length_as_success() {
+        let (tree, _config, mounts, transfers, mut outbound) = setup(false, 60_000);
+        let source = tree.child("native/source.bin");
+        fs::write(&source, b"abcdefgh").expect("writes source");
+        let opened = transfers
+            .open_reader(
+                &mounts,
+                &FileReaderOpenParams {
+                    context: context("open-short-reader"),
+                    path: path("/source.bin"),
+                    byte_range: Some(FileByteRange {
+                        offset: 0,
+                        length: Some(8),
+                    }),
+                    transfer_deadline: None,
+                },
+            )
+            .await
+            .expect("opens bounded reader");
+        fs::write(&source, b"abc").expect("shortens source after open");
+
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::Attach,
+                handle: opened.reader.0.clone(),
+                offset: 0,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("attaches reader");
+        assert_eq!(
+            outbound.recv().await.expect("attached frame").kind,
+            DataFrameKind::Attached
+        );
+        let mut received = Vec::new();
+        loop {
+            let frame = outbound.recv().await.expect("reader frame");
+            match frame.kind {
+                DataFrameKind::Chunk => received.extend(frame.payload),
+                DataFrameKind::End => break,
+                other => panic!("unexpected reader frame: {other:?}"),
+            }
+        }
+        assert_eq!(received, b"abc");
+        transfers
+            .handle_frame(DataFrame {
+                kind: DataFrameKind::EndAck,
+                handle: opened.reader.0.clone(),
+                offset: received.len() as u64,
+                payload: Vec::new(),
+                reset_status: None,
+            })
+            .await
+            .expect("acknowledges short read");
+        let completion = transfers
+            .close_reader(&opened.reader, true)
+            .await
+            .expect("short read closes successfully")
+            .completion;
+        assert!(completion.complete);
+        assert_eq!(completion.produced_bytes, 3);
+        assert_eq!(
+            completion.digest.expect("short read digest").value,
+            format!("{:x}", Sha256::digest(b"abc"))
+        );
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn writer_commit_is_atomic_and_reset_releases_staging_quota() {
@@ -1768,7 +1756,6 @@ mod tests {
                         path: "/denied.bin".to_owned(),
                     },
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -1783,7 +1770,6 @@ mod tests {
                     context: context("open-writer"),
                     path: path("/target.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -1873,11 +1859,7 @@ mod tests {
                 .expect("lists native root")
                 .map(|entry| entry.expect("native entry").file_name())
                 .collect::<Vec<_>>();
-            let staging = fs::read_dir(tree.child("staging"))
-                .expect("lists staging root")
-                .map(|entry| entry.expect("staging entry").file_name())
-                .collect::<Vec<_>>();
-            panic!("commits writer: {error:?}; native={native:?}; staging={staging:?}")
+            panic!("commits writer: {error:?}; native={native:?}")
         });
         assert_eq!(commit.transfer_digest, digest);
         assert_eq!(
@@ -1892,7 +1874,6 @@ mod tests {
                     context: context("reset-writer"),
                     path: path("/reset.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -1923,7 +1904,6 @@ mod tests {
                     context: context("after-reset"),
                     path: path("/after-reset.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -1963,7 +1943,6 @@ mod tests {
                     context: context("close-during-commit-open"),
                     path: path("/close-during-commit.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -2031,7 +2010,6 @@ mod tests {
                         context: context("late-open"),
                         path: path("/late-open.bin"),
                         mode: FileWriteMode::Create,
-                        expected_revision: None,
                         executable: None,
                         transfer_deadline: None,
                     },
@@ -2047,13 +2025,6 @@ mod tests {
         let (tree, _config, mounts, transfers, mut outbound) = setup(true, 60_000);
         let target = tree.child("native/append.bin");
         fs::write(&target, b"prefix").expect("writes append target");
-        let mount = mounts.get("workspace").expect("workspace mount");
-        let revision = file_revision(
-            &mount
-                .open_regular(&path("/append.bin"))
-                .expect("opens append target")
-                .metadata,
-        );
         let opened = transfers
             .open_writer(
                 &mounts,
@@ -2061,7 +2032,6 @@ mod tests {
                     context: context("append-open"),
                     path: path("/append.bin"),
                     mode: FileWriteMode::Append,
-                    expected_revision: Some(revision),
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -2168,7 +2138,6 @@ mod tests {
                     context: context("expiring-reader"),
                     path: path("/expired.bin"),
                     byte_range: None,
-                    expected_revision: None,
                     transfer_deadline: None,
                 },
             )
@@ -2189,7 +2158,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
-    async fn expired_writer_cleanup_returns_staging_capacity() {
+    async fn expired_writer_cleanup_returns_candidate_capacity() {
         let (tree, _config, mounts, transfers, _outbound) = setup(true, 1);
         let first = transfers
             .open_writer(
@@ -2198,7 +2167,6 @@ mod tests {
                     context: context("expiring-writer"),
                     path: path("/first.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
@@ -2213,19 +2181,13 @@ mod tests {
                     context: context("replacement-writer"),
                     path: path("/second.bin"),
                     mode: FileWriteMode::Create,
-                    expected_revision: None,
                     executable: None,
                     transfer_deadline: None,
                 },
             )
             .await
-            .expect("expired writer released the single staging slot");
-        assert_eq!(
-            fs::read_dir(tree.child("staging"))
-                .expect("lists staging")
-                .count(),
-            1
-        );
+            .expect("expired writer released the single candidate slot");
+        assert_eq!(candidate_count(&tree), 1);
         assert_eq!(
             transfers
                 .abort_writer(&first.writer)
@@ -2240,11 +2202,6 @@ mod tests {
                 .expect("second writer aborts"),
             FileWriterAbortStatus::Aborted
         );
-        assert_eq!(
-            fs::read_dir(tree.child("staging"))
-                .expect("lists staging")
-                .count(),
-            0
-        );
+        assert_eq!(candidate_count(&tree), 0);
     }
 }

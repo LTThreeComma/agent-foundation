@@ -10,7 +10,7 @@ A Host retains the paired `EnvironmentTopologyController` for the complete enter
 
 `EnvironmentToolsCapability` is the optional first-party model projection. It contributes stable filesystem, shell, process, and optional port Toolsets, stable usage instructions, bounded current-topology context, and native enqueue notices. It does not own provider bindings, readiness tasks, routing snapshots, the controller, Environment state, authority, or cleanup. Callers that need only static tools can compose Toolsets directly; a Capability is justified when Agent-loop behavior, dynamic context, or notices are required.
 
-Environment operations are provider-neutral. `LocalFileOperator` and `LocalShell` are direct implementations for an embedding process that intentionally grants local roots and commands. The Harness also owns the EIP adapter over generated `converge-agent-envd-client` APIs for daemon-governed resources. Local execution is never forced through a daemon, and a direct local binding makes no sandbox claim.
+Environment operations are provider-neutral. The Direct Local binding is the public first-party implementation for an embedding process that intentionally grants local roots and commands; its file and shell facets remain package internals. The Harness also owns the EIP adapter over generated `converge-agent-envd-client` APIs for daemon-governed resources. Local execution is never forced through a daemon, and a Direct Local binding makes no sandbox claim.
 
 ## Boundary
 
@@ -21,7 +21,7 @@ Environment operations are provider-neutral. `LocalFileOperator` and `LocalShell
 | Run-scoped aggregate binding, immutable topology, virtual routing, readiness coordination, operation leases, retirement, and portable Environment-state aggregation | Harness Environment core                                                                                                              |
 | Model-visible tools, stable guidance, bounded topology context, and topology-change notices                                                                         | Optional `EnvironmentToolsCapability`                                                                                                 |
 | Provider resource entry, background preparation and maintenance, generation observation, operation execution, and provider-local cleanup                            | Entered provider binding                                                                                                              |
-| Direct local path and process enforcement                                                                                                                           | `LocalFileOperator`, `LocalShell`, and embedding OS                                                                                   |
+| Direct local path and process enforcement                                                                                                                           | Direct Local provider binding and embedding OS                                                                                        |
 | EIP canonical resources, handles, cursors, generations, retained output, and side-effect evidence                                                                   | `agent-envd` and its [resource](../agent-envd/04-resource-operations.md) and [output](../agent-envd/06-output-retention.md) contracts |
 | Generated EIP models, codecs, typed stubs, and transport/session runtime                                                                                            | [`converge-agent-envd-client`](../agent-envd/08-protocol-source-client-and-generation.md)                                             |
 | Vendor provision, attach, suspend, recreate, and destroy policy                                                                                                     | Host provider integration                                                                                                             |
@@ -55,13 +55,13 @@ type EnvironmentOperationFamily = Literal[
 ]
 
 
-ENVIRONMENT_ACTION_CATALOG_VERSION = "environment-actions/1"
+ENVIRONMENT_ACTION_CATALOG_VERSION = "environment-actions/2"
 
 
 class EnvironmentAction(StrEnum):
     FILE_STAT = "environment.file.stat"
     FILE_READ_TEXT = "environment.file.read_text"
-    FILE_OPEN_READER = "environment.file.open_reader"
+    FILE_READ_BYTES = "environment.file.read_bytes"
     FILE_WRITE_TEXT = "environment.file.write_text"
     FILE_PATCH_TEXT = "environment.file.patch_text"
     FILE_LIST = "environment.file.list"
@@ -70,7 +70,7 @@ class EnvironmentAction(StrEnum):
     FILE_MKDIR = "environment.file.mkdir"
     FILE_MOVE = "environment.file.move"
     FILE_REMOVE = "environment.file.remove"
-    FILE_OPEN_WRITER = "environment.file.open_writer"
+    FILE_WRITE_BYTES = "environment.file.write_bytes"
     FILE_COPY_SOURCE = "environment.file.copy_source"
     FILE_COPY_DESTINATION = "environment.file.copy_destination"
     SHELL_EXEC = "environment.shell.exec"
@@ -184,42 +184,42 @@ class EnvironmentTopology(BaseModel):
     default_binding_id: str | None
 ```
 
-`environment-actions/1` is the stable first-party authorization compatibility domain. Each action has one exact family and provider-neutral dispatch mapping:
+`environment-actions/2` is the stable first-party authorization compatibility domain. Each action has one exact family and provider-neutral dispatch mapping:
 
-| Action                              | Family      | Facet and semantic method                                           |
-| ----------------------------------- | ----------- | ------------------------------------------------------------------- |
-| `environment.file.stat`             | `files`     | `FileOperator.stat`                                                 |
-| `environment.file.read_text`        | `files`     | `FileOperator.read_text`                                            |
-| `environment.file.open_reader`      | `files`     | `FileOperator.open_reader` and its captured reader lease            |
-| `environment.file.write_text`       | `files`     | `FileOperator.write_text`                                           |
-| `environment.file.patch_text`       | `files`     | `FileOperator.patch_text`                                           |
-| `environment.file.list`             | `files`     | `FileOperator.list`                                                 |
-| `environment.file.query`            | `files`     | `FileOperator.query`                                                |
-| `environment.file.search_text`      | `files`     | `FileOperator.search_text`                                          |
-| `environment.file.mkdir`            | `files`     | `FileOperator.mkdir`                                                |
-| `environment.file.move`             | `files`     | `FileOperator.move`                                                 |
-| `environment.file.remove`           | `files`     | `FileOperator.remove`                                               |
-| `environment.file.open_writer`      | `files`     | `FileOperator.open_writer` and its staged writer commit/abort lease |
-| `environment.file.copy_source`      | `files`     | `FileOperator.copy` source authorization                            |
-| `environment.file.copy_destination` | `files`     | `FileOperator.copy` destination authorization                       |
-| `environment.shell.exec`            | `shell`     | `ProviderShellOperations.exec`                                      |
-| `environment.process.start`         | `processes` | `ProviderProcessOperations.start`                                   |
-| `environment.process.inspect`       | `processes` | `ProviderProcessOperations.inspect`                                 |
-| `environment.process.read_output`   | `processes` | `ProviderProcessOperations.read_output`                             |
-| `environment.process.write_stdin`   | `processes` | `ProviderProcessOperations.write_stdin`                             |
-| `environment.process.close_stdin`   | `processes` | `ProviderProcessOperations.close_stdin`                             |
-| `environment.process.signal`        | `processes` | `ProviderProcessOperations.signal`                                  |
-| `environment.process.wait`          | `processes` | `ProviderProcessOperations.wait`                                    |
-| `environment.process.kill`          | `processes` | `ProviderProcessOperations.kill`                                    |
-| `environment.process.release`       | `processes` | `ProviderProcessOperations.release`                                 |
-| `environment.output.read`           | `outputs`   | `ProviderOutputOperations.read`                                     |
-| `environment.output.release`        | `outputs`   | `ProviderOutputOperations.release`                                  |
-| `environment.port.inspect`          | `ports`     | `ProviderPortOperations.inspect`                                    |
-| `environment.port.wait`             | `ports`     | `ProviderPortOperations.wait`                                       |
-| `environment.state.export`          | `state`     | `BoundEnvironmentProvider.export_state`                             |
-| `environment.state.restore`         | `state`     | `BoundEnvironmentProvider.restore_state`                            |
+| Action                              | Family      | Facet and semantic method                         |
+| ----------------------------------- | ----------- | ------------------------------------------------- |
+| `environment.file.stat`             | `files`     | `FileOperator.stat`                               |
+| `environment.file.read_text`        | `files`     | `FileOperator.read_text`                          |
+| `environment.file.read_bytes`       | `files`     | `FileOperator.read_bytes` and `read_bytes_stream` |
+| `environment.file.write_text`       | `files`     | `FileOperator.write_text`                         |
+| `environment.file.patch_text`       | `files`     | `FileOperator.patch_text`                         |
+| `environment.file.list`             | `files`     | `FileOperator.list`                               |
+| `environment.file.query`            | `files`     | `FileOperator.query`                              |
+| `environment.file.search_text`      | `files`     | `FileOperator.search_text`                        |
+| `environment.file.mkdir`            | `files`     | `FileOperator.mkdir`                              |
+| `environment.file.move`             | `files`     | `FileOperator.move`                               |
+| `environment.file.remove`           | `files`     | `FileOperator.remove`                             |
+| `environment.file.write_bytes`      | `files`     | `FileOperator.write_bytes_stream`                 |
+| `environment.file.copy_source`      | `files`     | `FileOperator.copy` source authorization          |
+| `environment.file.copy_destination` | `files`     | `FileOperator.copy` destination authorization     |
+| `environment.shell.exec`            | `shell`     | `ProviderShellOperations.exec`                    |
+| `environment.process.start`         | `processes` | `ProviderProcessOperations.start`                 |
+| `environment.process.inspect`       | `processes` | `ProviderProcessOperations.inspect`               |
+| `environment.process.read_output`   | `processes` | `ProviderProcessOperations.read_output`           |
+| `environment.process.write_stdin`   | `processes` | `ProviderProcessOperations.write_stdin`           |
+| `environment.process.close_stdin`   | `processes` | `ProviderProcessOperations.close_stdin`           |
+| `environment.process.signal`        | `processes` | `ProviderProcessOperations.signal`                |
+| `environment.process.wait`          | `processes` | `ProviderProcessOperations.wait`                  |
+| `environment.process.kill`          | `processes` | `ProviderProcessOperations.kill`                  |
+| `environment.process.release`       | `processes` | `ProviderProcessOperations.release`               |
+| `environment.output.read`           | `outputs`   | `ProviderOutputOperations.read`                   |
+| `environment.output.release`        | `outputs`   | `ProviderOutputOperations.release`                |
+| `environment.port.inspect`          | `ports`     | `ProviderPortOperations.inspect`                  |
+| `environment.port.wait`             | `ports`     | `ProviderPortOperations.wait`                     |
+| `environment.state.export`          | `state`     | `BoundEnvironmentProvider.export_state`           |
+| `environment.state.restore`         | `state`     | `BoundEnvironmentProvider.restore_state`          |
 
-Every facade dispatch requires its exact action in the effective intersection of Host policy, requested permission ceiling, observed provider descriptor, and current provider policy. File copy requires both source and destination actions, independently authorized against their selected bindings and canonical resources, even when one backend performs a native same-binding copy. Opening a reader or writer authorizes the complete scoped lease; chunk iteration and staged commit cannot switch target, action, binding revision, or generation.
+Every facade dispatch requires its exact action in the effective intersection of Host policy, requested permission ceiling, observed provider descriptor, and current provider policy. File copy requires both source and destination actions, independently authorized against their selected bindings and canonical resources, even when one backend performs a native same-binding copy. A byte stream remains inside the captured operation scope; iteration cannot switch target, action, binding revision, or generation.
 
 The core compares complete action values only. An operation family, prefix, wildcard, model tool name, `HarnessToolMetadata.tool_id`, EIP capability, or provider method name never implies another action. First-party Environment Toolsets attach stable managed metadata for the outer invocation decision, then their semantic adapters call the exact actions above; the later `BoundEnvironment` decision always narrows the earlier allow. Trusted direct Python callers enter the same exact-action boundary without manufacturing managed-tool metadata.
 
@@ -428,7 +428,7 @@ def create_noop_environment_run_binding(
 
 A provider can prepare family-specific resources after entry. All preparation, TTL refresh, session keepalive, liveness observation, bounded reconnect, and cleanup tasks are children of the entered provider scope and the aggregate's supervised async lifetime. They cannot escape binding close or mutate a published descriptor in place. Direct local can have no maintenance task. The Harness defines no universal `ping()` because provider liveness and session semantics differ. A maintenance failure updates typed availability and readiness; it never grants fallback authority.
 
-Environment operations and provider callbacks are always finite. A request- or operation-specific semantic deadline takes precedence. When no narrower owner supplies one, first-party Environment adapters use a generous 600-second fallback so a defective provider cannot hold a run forever. This fallback is not installed as a Harness-wide Pydantic `Agent.tool_timeout`, does not shorten an explicit shell/process/port/state deadline, and does not override a provider's stricter declared limit. Teardown uses its separately bounded cleanup policy and continues attempting every owned resource.
+Environment operations and provider callbacks are always finite. A request- or operation-specific semantic deadline remains the provider-owned behavior deadline. When no narrower owner supplies one, first-party Environment adapters use a generous 600-second fallback; when a semantic deadline exists, the aggregate watchdog permits at most one additional fallback interval for the provider to return its terminal result and bounded cleanup. A defective provider therefore cannot hold a run forever, while the aggregate does not cancel a valid provider exactly at its process deadline. This watchdog is not installed as a Harness-wide Pydantic `Agent.tool_timeout`, does not widen the provider's effective process/port/state limit, and does not override a provider's stricter declared limit. Teardown uses its separately bounded cleanup policy and continues attempting every owned resource.
 
 Pydantic AI remains the sole owner of model tool argument and output retry accounting through `AgentSpec.retries`, per-Toolset limits, and native `ModelRetry` handling. Environment Toolsets do not wrap those calls in another generic retry loop. Provider transport retry remains below the semantic operation and mutations repeat only with affirmative idempotency or reconciliation evidence. Exhausting tool or output retries is terminal for that inner Agent attempt and does not activate Harness model-interruption recovery.
 
@@ -526,7 +526,7 @@ Direct Local is a first-party public provider binding for deliberate in-process 
 
 ```python
 class DirectLocalRootConfiguration(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     path: Path
     ownership: Literal["caller_owned", "binding_owned"]
@@ -534,16 +534,13 @@ class DirectLocalRootConfiguration(BaseModel):
 
 
 class DirectLocalFilePolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_text_bytes: int
-    max_transfer_bytes: int
-    max_query_results: int
-    max_query_bytes: int
+    max_value_bytes: int = 16 * 1024 * 1024
 
 
 class DirectLocalShellProfile(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     profile_id: str
     executable: Path
@@ -552,43 +549,38 @@ class DirectLocalShellProfile(BaseModel):
 
 
 class DirectLocalProcessPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    allowed_executables: frozenset[Path]
+    allowed_executables: frozenset[Path] = frozenset()
     allowed_environment_keys: frozenset[str] = frozenset()
-    max_concurrent_processes: int
-    max_wall_time_seconds: float
-    terminate_grace_seconds: float
-    network_mode: Literal["ambient"] = "ambient"
+    max_concurrent_processes: int = 128
+    max_wall_time_seconds: float = 24 * 60 * 60
+    terminate_grace_seconds: float = 5.0
 
 
-class DirectLocalRetentionPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class DirectLocalOutputPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_object_bytes: int
-    max_total_bytes: int
-    max_objects: int
-    max_lifetime_seconds: float
+    max_buffer_bytes: int = 1024 * 1024
+    max_spool_bytes: int = 64 * 1024 * 1024 * 1024
 
 
 class DirectLocalPortPolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    enabled: bool = False
     allowed_ports: frozenset[int] = frozenset()
-    address: Literal["loopback"] = "loopback"
 
 
 class DirectLocalEnvironmentConfiguration(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     environment_id: str
     root: DirectLocalRootConfiguration
-    files: DirectLocalFilePolicy
+    files: DirectLocalFilePolicy = DirectLocalFilePolicy()
     shell_profiles: tuple[DirectLocalShellProfile, ...] = ()
-    processes: DirectLocalProcessPolicy
-    retention: DirectLocalRetentionPolicy
-    ports: DirectLocalPortPolicy
+    processes: DirectLocalProcessPolicy = DirectLocalProcessPolicy()
+    outputs: DirectLocalOutputPolicy = DirectLocalOutputPolicy()
+    ports: DirectLocalPortPolicy = DirectLocalPortPolicy()
 
 
 class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
@@ -598,9 +590,19 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
     ) -> None: ...
 ```
 
-All paths are explicit trusted Host values and are canonicalized at binding entry. A `caller_owned` root must already exist and is never removed by binding close. A `binding_owned` path must not exist; entry creates it exclusively, and bounded teardown removes only that exact created root. Existing-path adoption under `binding_owned` is rejected, preventing cleanup policy from claiming arbitrary caller data. `read_only` narrows every file mutation regardless of tool metadata. Because Direct Local does not sandbox arbitrary child filesystem effects, a read-only configuration must have no allowed executables or shell profiles; otherwise binding entry rejects it instead of claiming the root is protected. Positive process and retention ceilings are mandatory and non-disableable. Executables and shell profiles use canonical configured paths, and every profile executable must also satisfy the executable allow policy; request input cannot select another shell binary, wrapper, search path, environment key, or login mode. The Direct Local backend does not claim network isolation: `network="deny"` is unsupported under `network_mode="ambient"` rather than silently accepted. Port observation is absent unless explicitly enabled and is restricted to configured loopback ports. Caller workspace content survives close according to root ownership, while binding-owned staging, retained output, and every owned process are cleaned.
+All paths are explicit trusted Host values and are canonicalized at binding entry. A `caller_owned` root must already exist and is never removed by binding close. A `binding_owned` path must not exist; entry creates it exclusively, and bounded teardown removes only that exact created root. Existing-path adoption under `binding_owned` is rejected, preventing cleanup policy from claiming arbitrary caller data. `read_only` narrows every file mutation regardless of tool metadata. Because Direct Local does not sandbox arbitrary child filesystem effects, a read-only configuration must have no allowed executables or shell profiles; otherwise binding entry rejects it instead of claiming the root is protected.
 
-The configuration, binding, `LocalFileOperator`, and `LocalShell` are public Harness Environment types. OS process records, staging paths, retention implementation objects, and native port inspection details remain implementation-owned. Constructing a Direct Local binding grants only the configured root and operation ceiling; the aggregate still intersects its descriptor with the request ceiling and live invocation policy.
+Direct Local assumes that the embedding Host controls concurrent structural mutation of the configured filesystem namespace. It rejects observed traversal and symlink escape, but it is not a race-hardened filesystem broker against a hostile same-account process replacing ancestor directory entries between observation and use. This does not widen the stated Direct Local process boundary: any allowed child already runs with the embedding OS account and can have ambient filesystem reach. A Host that treats concurrently mutating code as hostile uses an EIP provider whose resource operations and command isolation are enforced beside the governed filesystem rather than presenting Direct Local as that security boundary.
+
+Direct Local separates limits by the resource they actually bound. `max_value_bytes` limits a text value, patch target and result, ordinary `read_bytes()` result, or one search line materialized in process memory. Raw file reads and writes, append staging, copy, and eligible search files are processed incrementally under backpressure and have no arbitrary provider-wide byte ceiling. Query and search traverse across directories incrementally in deterministic path order; one directory's entries can be materialized for deterministic sorting, but the complete tree is never precollected. A request still selects a finite list, query, or search result page, and a large append source does not have to fit the value ceiling.
+
+The process policy caps active owned process trees and supplies the finite fallback wall time and termination grace. A request can select a narrower wall time, cumulative stdin limit, and per-stream `EnvironmentOutputPolicy.max_output_bytes`; omitted `stdin_bytes` remains incrementally backpressured without a Direct Local cumulative provider cap. The descriptor publishes the effective wall-time ceiling so the aggregate installs it in a command that omitted a request deadline and carries the same value through the foreground operation lease.
+
+The output policy bounds the in-memory preview for each stdout or stderr stream and the aggregate actual bytes in the private binding-owned spool. Opening a retained-output writer reserves no worst-case bytes. Each write atomically claims only currently available aggregate capacity, failed or aborted writes return the bytes they actually claimed, and release returns the committed object's actual size. Once a capture cannot accept one complete producer chunk, it permanently stops spooling later bytes and only drains the producer, so every retained object remains one continuous prefix from offset zero. Exhaustion reports original produced, captured, and dropped counts plus explicit incompleteness on every paginated read; reaching the retained prefix's EOF never changes that producer provenance. The store never evicts another reference. Lightweight objects have no Direct Local count or TTL ceiling. A reference remains readable until explicit output release, owning process release, or binding close, and `expires_at` is absent. The spool is separate from caller workspace files and is always removed on binding close. A file-only binding creates and advertises no output facet or private spool.
+
+Executables and shell profiles use canonical configured absolute paths. `allowed_executables` authorizes only an `ArgvCommand`; each configured shell profile independently authorizes its own executable, fixed arguments, and optional login mode. Request input cannot select another shell binary, wrapper, search path, environment key, or login mode. Direct Local always has ambient process networking and therefore rejects `network="deny"` as unsupported instead of exposing a one-value network configuration field. Port observation is absent when `allowed_ports` is empty and otherwise remains restricted to those loopback ports, so separate enablement and fixed-address fields are unnecessary. Caller workspace content survives close according to root ownership, while binding-owned staging, retained output, and every owned process are cleaned. Unknown configuration fields fail validation rather than being silently ignored.
+
+The configuration models and provider binding are public Harness Environment types and remain the Host/Harness construction seam for changing these policies. Concrete local file, shell, process, staging, spool, and native port implementation objects remain package-owned. Constructing a Direct Local binding grants only the configured root and operation ceiling; the aggregate still intersects its descriptor with the request ceiling and live invocation policy.
 
 ## Scoped Readiness and Recovery
 
@@ -693,22 +695,20 @@ The Capability owns no continuation namespace. Topology version and portable bac
 
 ### Compact Operation References
 
-The provider-neutral Python facade returns `FileRevision`, file cursors, `BoundProcessHandle`, `BoundOutputReference`, and `BoundOutputCursor` so trusted code can preserve exact binding revision, provider generation, request shape, and opaque provider values. The model projection never serializes those values. On first exposure, `EnvironmentToolsCapability` assigns a reference from an independent monotonic positive sequence:
+The provider-neutral Python facade returns `BoundProcessHandle`, `BoundOutputReference`, and `BoundOutputCursor` so trusted code can preserve exact binding revision, provider generation, and opaque provider values. The model projection never serializes provider values. On first exposure, `EnvironmentToolsCapability` assigns a reference from an independent monotonic positive sequence:
 
-| Internal value                                    | Model reference | Example      |
-| ------------------------------------------------- | --------------- | ------------ |
-| File revision used for compare-and-swap           | `revision-{N}`  | `revision-1` |
-| File text, listing, query, or search continuation | `cursor-{N}`    | `cursor-1`   |
-| Background process handle                         | `process-{N}`   | `process-1`  |
-| Retained-output reference                         | `output-{N}`    | `output-1`   |
+| Internal value            | Model reference | Example     |
+| ------------------------- | --------------- | ----------- |
+| Background process handle | `process-{N}`   | `process-1` |
+| Retained-output reference | `output-{N}`    | `output-1`  |
 
-Repeated exposure of the same exact scoped value returns the same compact reference. File revision entries additionally bind the exact logical path, and cursor entries bind the operation and canonical request shape, so a reference cannot be replayed against another path or query. Output-provider cursors remain internal to a bounded output read; the model uses `output-{N}` plus bounded offsets or the tool's continuation semantics rather than receiving a provider cursor.
+Repeated exposure of the same exact scoped value returns the same compact reference. Output-provider cursors remain internal to a bounded output read; the model uses `output-{N}` plus bounded offsets or the tool's continuation semantics rather than receiving a provider cursor. File observations use explicit line or item offsets and allocate no compact reference.
 
 The Capability keeps one concurrency-safe bounded reference table for the logical Harness run. Its definition-selected `for_run()` replacement also implements one package-internal typed result-projector seam over that same table. The code-owned managed invocation wrapper resolves exactly zero or one compatible projector from Pydantic's finalized Capability mapping by the Environment tools Capability's stable ID and expected internal type; it accepts no independent Host attachment or callback. A missing Capability is the ordinary no-projection case, while a duplicate or incompatible value fails before managed tool exposure.
 
 Only this projector can register an exact `BoundOutputReference` and return its `output-N` projection; `InvocationAuthorizationCapability` stores no Environment reference map and cannot allocate an `output-N` itself. The seam is usable only when the result has one unambiguous selected binding and that binding reserved a compatible retained-output sink before overflow. Without it, `environment_reference` follows the explicit bounded truncation or failure fallback even if some provider retention facility exists for trusted programmatic callers.
 
-Model-facing file, process-control, and retained-output tools accept only the corresponding compact strings, resolve them through that one table, and then call the live `BoundEnvironment`, which revalidates path or request scope, binding revision, generation, Agent identity, ownership, permission ceiling, readiness, and provider policy. Direct programmatic callers continue to use the full provider-neutral values and bypass no Environment authorization by doing so.
+Model-facing process-control and retained-output tools accept only the corresponding compact strings, resolve them through that one table, and then call the live `BoundEnvironment`, which revalidates binding revision, generation, Agent identity, ownership, permission ceiling, readiness, and provider policy. Model-facing file tools send ordinary paths and explicit offsets on every independent call. Direct programmatic callers continue to use the full provider-neutral values and bypass no Environment authorization by doing so.
 
 `EnvironmentOperationReceipt`, binding identity, generation, operation ID, provider digest, native PID, and provider cursor are internal result, event, or reconciliation evidence. A model tool result projects only the compact follow-up references and bounded semantic fields such as path, counts, completion, status, safe preview, or unknown outcome. It never serializes the programmatic result model wholesale merely because that model is provider-neutral.
 
@@ -788,7 +788,7 @@ class EnvironmentPath(BaseModel):
 
 `path` is absolute within the selected provider root; it is never a host filesystem path. The harness validates selector shape, virtual-root membership, relative-path syntax, declared limits, and obvious traversal. It does not resolve provider-internal mounts, symlinks, provider aliases, case folding, or remote filesystem state.
 
-Cross-Environment copy opens an independently authorized source reader and destination writer, pumps bounded raw chunks under backpressure, and commits the destination only after terminal source count/digest verification and successful close. `stability="changed"` fails before destination commit. `stability="unverified"` is allowed by the general copy path but is preserved in the copy outcome rather than described as a source snapshot; `require_stable_source=true` rejects it before commit, and an expected revision additionally selects the exact source version when supported. Failure before destination commit aborts its private candidate and leaves the target unchanged. The two-Environment operation is not globally atomic, and an ambiguous destination commit is reconciled through that provider's receipt rather than replaying the source blindly.
+Cross-Environment copy captures one topology snapshot, resolves and independently authorizes both endpoints from it, and passes the source async byte iterator directly into the destination's staged stream write under backpressure. Normal source exhaustion permits destination publication; a source exception aborts the candidate and leaves the target unchanged. A provider adapter may use handles, frame acknowledgements, counts, or digests inside its own transport, but none becomes Harness completion evidence. The two-Environment operation is not globally atomic, and an ambiguous destination publication is reconciled through that provider's receipt rather than replaying the source blindly.
 
 ## Route, Authorize, Execute
 
@@ -810,12 +810,12 @@ sequenceDiagram
     else EIP control operation
         Backend->>Resource: JSON-RPC control with optional output policy and call context
     else EIP raw file transfer
-        Backend->>Resource: open reader or staged writer
+        Backend->>Resource: internally open reader or staged writer
         Backend->>Resource: bounded raw upload chunks under backpressure
         Resource-->>Backend: bounded raw download chunks under backpressure
         Backend->>Resource: verified close, commit, or abort
     end
-    Resource-->>Backend: bounded result, completion, receipt, reference, or typed error
+    Resource-->>Backend: bounded result, receipt, reference, or typed error
     Backend-->>Bound: provider-neutral outcome
 ```
 
@@ -826,70 +826,28 @@ The Harness performs lexical routing and policy checks over the selected binding
 The public semantic protocols retain the useful SDK split:
 
 - `FileOperator` is the provider-neutral async file contract;
-- `LocalFileOperator` maps configured logical roots directly to host files with canonical containment and symlink-escape checks;
+- the Direct Local binding maps configured logical roots directly to host files with canonical containment and symlink-escape checks;
 - the Harness-owned EIP file adapter maps the same contract through `converge-agent-envd-client` to an EIP-backed binding;
 - `VirtualFileOperator` is the stable mount-and-routing facade used by `BoundEnvironment.files`;
-- `Shell` is the provider-neutral command and process contract;
-- `LocalShell` and `EIPShell` are direct and daemon-backed first-class implementations.
+- the provider shell and process protocols are the provider-neutral command contracts;
+- Direct Local and EIP-backed bindings are first-class implementations whose concrete facets remain package-owned.
 
-The file contract separates caller intent instead of returning a text-or-bytes union from one dynamic method. The following values are Harness-owned immutable provider-neutral models, not aliases or imports from generated EIP wire types:
+The file contract separates Agent-oriented text operations from provider byte transport. The following values are Harness-owned immutable provider-neutral models, not aliases or imports from generated EIP wire types:
 
 ```python
 type FileWriteMode = Literal["create", "replace", "upsert", "append"]
-type FileReadStability = Literal["verified", "unverified"]
+type FileKind = Literal["file", "directory", "symlink", "other"]
 
 
-class FileRevision(RootModel[str]):
-    model_config = ConfigDict(frozen=True)
-
-
-class FileTextCursor(RootModel[str]):
-    model_config = ConfigDict(frozen=True)
-
-
-class FileByteRange(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    offset: int = 0
-    length: int | None = None
-
-
-class FileTextPosition(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    line: int
-    byte_column: int
-
-
-class FileTextPage(BaseModel):
+class FileTextResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     text: str
-    start: FileTextPosition
-    end: FileTextPosition
-    next_cursor: FileTextCursor | None
-    content_complete: bool
-    truncated: bool
-
-
-class FileContentDigest(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    algorithm: Literal["sha256"]
-    value: str
-
-
-class FileReadCompletion(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    range_start: int
-    range_end: int
-    bytes_read: int
-    digest: FileContentDigest
-    source_eof_at_end: bool
-    stability: FileReadStability
+    line_offset: int
+    lines_read: int
+    has_more: bool
+    truncated_lines: tuple[int, ...] = ()
 
 
 class EnvironmentOperationReceipt(BaseModel):
@@ -911,7 +869,6 @@ class FileWriteResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     bytes_written: int
     receipt: EnvironmentOperationReceipt
 
@@ -920,7 +877,6 @@ class FilePatchResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     hunks_applied: int
     receipt: EnvironmentOperationReceipt
 
@@ -929,18 +885,8 @@ class FileCopyResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     bytes_copied: int
-    atomic_destination: bool
-    source_stability: FileReadStability
     receipt: EnvironmentOperationReceipt
-
-
-type FileKind = Literal["file", "directory", "symlink", "other"]
-
-
-class FileQueryCursor(RootModel[str]):
-    model_config = ConfigDict(frozen=True)
 
 
 class FileMetadata(BaseModel):
@@ -949,23 +895,15 @@ class FileMetadata(BaseModel):
     path: str
     kind: FileKind
     size: int | None
-    revision: FileRevision | None
     writable: bool
 
 
-class FileListEntry(BaseModel):
+class FileEntriesResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    metadata: FileMetadata
-
-
-class FileListPage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    path: str
-    entries: tuple[FileListEntry, ...]
-    next_cursor: FileQueryCursor | None
-    content_complete: bool
+    entries: tuple[FileMetadata, ...]
+    offset: int
+    has_more: bool
 
 
 class FileQueryRequest(BaseModel):
@@ -976,26 +914,17 @@ class FileQueryRequest(BaseModel):
     recursive: bool = True
     include_hidden: bool = False
     kinds: frozenset[FileKind] | None = None
+    offset: int = 0
     max_results: int
-    cursor: FileQueryCursor | None = None
-
-
-class FileQueryPage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    entries: tuple[FileListEntry, ...]
-    next_cursor: FileQueryCursor | None
-    content_complete: bool
 
 
 class FileTextMatch(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     line: int
-    byte_column: int
     text: str
+    text_truncated: bool = False
 
 
 class FileTextSearchRequest(BaseModel):
@@ -1006,38 +935,24 @@ class FileTextSearchRequest(BaseModel):
     regex: bool = False
     case_sensitive: bool = True
     include_hidden: bool = False
+    offset: int = 0
     max_matches: int
-    max_bytes: int
-    cursor: FileQueryCursor | None = None
+    max_line_length: int = 2_000
 
 
-class FileTextSearchPage(BaseModel):
+class FileTextSearchResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     matches: tuple[FileTextMatch, ...]
-    next_cursor: FileQueryCursor | None
-    content_complete: bool
+    offset: int
+    has_more: bool
 
 
 class FileMutationResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: str
-    revision: FileRevision | None
     receipt: EnvironmentOperationReceipt
-
-
-class AsyncFileReader(Protocol):
-    def __aiter__(self) -> AsyncIterator[bytes]: ...
-
-    @property
-    def completion(self) -> FileReadCompletion | None: ...
-
-
-class AsyncFileWriter(Protocol):
-    async def write(self, chunk: bytes) -> None: ...
-    async def commit(self) -> FileWriteResult: ...
-    async def abort(self) -> None: ...
 
 
 class FileOperator(Protocol):
@@ -1045,44 +960,64 @@ class FileOperator(Protocol):
         self,
         path: str,
         *,
-        cursor: FileTextCursor | None = None,
-        start_line: int | None = None,
-        max_lines: int | None = None,
-        max_bytes: int | None = None,
-        expected_revision: FileRevision | None = None,
-    ) -> FileTextPage: ...
+        line_offset: int = 0,
+        line_limit: int = 200,
+        max_line_length: int = 2_000,
+    ) -> FileTextResult: ...
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> bytes: ...
+
+    def read_bytes_stream(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 65_536,
+    ) -> AsyncIterator[bytes]: ...
+
+    async def write_bytes_stream(
+        self,
+        path: str,
+        stream: AsyncIterable[bytes],
+        *,
+        mode: FileWriteMode,
+    ) -> FileWriteResult: ...
+
     async def write_text(
         self,
         path: str,
         text: str,
         *,
         mode: FileWriteMode,
-        expected_revision: FileRevision | None = None,
     ) -> FileWriteResult: ...
+
     async def patch_text(
         self,
         path: str,
         patch: str,
-        *,
-        expected_revision: FileRevision,
     ) -> FilePatchResult: ...
+
     async def stat(self, path: str) -> FileMetadata: ...
+
     async def list(
         self,
         path: str,
         *,
-        cursor: FileQueryCursor | None = None,
+        offset: int = 0,
         max_results: int,
         include_hidden: bool = False,
-    ) -> FileListPage: ...
-    async def query(
-        self,
-        request: FileQueryRequest,
-    ) -> FileQueryPage: ...
+    ) -> FileEntriesResult: ...
+
+    async def query(self, request: FileQueryRequest) -> FileEntriesResult: ...
     async def search_text(
-        self,
-        request: FileTextSearchRequest,
-    ) -> FileTextSearchPage: ...
+        self, request: FileTextSearchRequest
+    ) -> FileTextSearchResult: ...
+
     async def mkdir(
         self,
         path: str,
@@ -1090,60 +1025,46 @@ class FileOperator(Protocol):
         parents: bool = False,
         exist_ok: bool = False,
     ) -> FileMutationResult: ...
+
     async def move(
         self,
         source: str,
         destination: str,
         *,
-        expected_source_revision: FileRevision | None = None,
         replace: bool = False,
     ) -> FileMutationResult: ...
+
     async def remove(
         self,
         path: str,
         *,
         recursive: bool = False,
-        expected_revision: FileRevision | None = None,
     ) -> FileMutationResult: ...
-
-    def open_reader(
-        self,
-        path: str,
-        *,
-        byte_range: FileByteRange | None = None,
-        expected_revision: FileRevision | None = None,
-    ) -> AbstractAsyncContextManager[AsyncFileReader]: ...
-
-    def open_writer(
-        self,
-        path: str,
-        *,
-        mode: FileWriteMode,
-        expected_revision: FileRevision | None = None,
-    ) -> AbstractAsyncContextManager[AsyncFileWriter]: ...
 
     async def copy(
         self,
         source: str,
         destination: str,
         *,
-        expected_source_revision: FileRevision | None = None,
-        expected_destination_revision: FileRevision | None = None,
         replace: bool = False,
-        require_atomic_destination: bool = True,
-        require_stable_source: bool = False,
     ) -> FileCopyResult: ...
 ```
 
-`read_text`, `write_text`, and `patch_text` are strict UTF-8, revision-aware, bounded conveniences for Agent and editor semantics. `list`, `query`, and `search_text` return deterministically ordered complete entries or matches up to explicit item and byte ceilings and use opaque binding/revision/generation/request-scoped cursors for continuation. `mkdir`, `move`, and `remove` express explicit replacement, recursion, and compare-and-swap intent; provider root removal and cross-binding move are rejected. A cross-binding move is composed only as explicit copy plus separately authorized remove and is never presented as atomic. `open_reader` and `open_writer` carry exact raw bytes for any file type, including a text file being downloaded or uploaded. Ordinary callers never manage EIP transfer handles, frame offsets, attachment messages, or digest bookkeeping. A reader iterator terminates normally only after terminal count/digest verification; `completion` then contains a required digest and either honest `verified` or `unverified` stability. An EIP `changed` close maps to `conflict` rather than a provider-neutral successful completion. Writer context exit without successful `commit()` aborts. Direct-local and EIP adapters preserve those same observable rules even though only EIP needs a wire carrier.
+`read_text`, `write_text`, and `patch_text` are strict UTF-8, NUL-free conveniences for Agent and editor semantics; malformed or NUL-containing selected text is unsupported rather than exposed as an implementation exception. Direct Local and EIP define a line identically: LF ends a line, CRLF remains part of that LF-terminated line, other separators remain content, and a non-empty final suffix is one line. A text read always has a finite positive `line_limit`. `max_line_length` bounds each returned line without making an oversized source line unreadable; the retained prefix preserves its LF terminator when present, and `truncated_lines` identifies affected one-based source line numbers. The implementation scans incrementally and stops after it can determine `has_more`; it does not require loading or hashing the complete file. Text append requires an existing strict UTF-8, NUL-free file and reports only supplied payload bytes as written.
 
-The EIP adapter constructs these Harness models field by field: it maps the logical path, wraps provider revision and text-cursor values as frozen opaque Harness scalars, maps only a complete non-null EIP read digest into `FileReadCompletion`, wraps normalized receipt evidence with the selected Harness `binding_id`, and maps typed EIP errors separately without exposing `ReceiptRef` or a transfer handle. `VirtualFileOperator` routes by path; the selected backend remains authoritative for revision/cursor Environment, generation, request-shape, and resource scope, so a foreign opaque value fails as a typed conflict or invalid cursor rather than granting authority. `LocalFileOperator` constructs the same models from direct filesystem observations and its process-local operation evidence. Equal names or fields do not make generated EIP models part of the Harness core contract.
+The file surface defines no portable file-version concept, and mutations make no provider-global compare-and-swap claim. `read_text` skips a zero-based number of lines; `list`, `query`, and `search_text` skip a zero-based number of deterministically ordered items. Results return the starting offset, returned count or collection length, and `has_more`; callers compute the next offset directly. A bare query glob such as `*.py` matches basenames recursively; patterns containing `/` match complete root-relative paths, and a leading `/` anchors the pattern at the query root. Every call observes current provider state independently, so concurrent mutation can shift later results and no cursor, traversal snapshot, or stability promise exists. If a provider traversal safety ceiling prevents it from determining the bounded result honestly, the call fails explicitly rather than returning `has_more=false` over an unvisited suffix.
 
-`FileOperator.copy` is the one provider-neutral copy surface. `VirtualFileOperator` captures one topology snapshot and routes both paths. When one backend implements a semantically equivalent native copy, it can delegate and preserves `atomic_destination` and `source_stability`; otherwise it composes one reader and one staged writer under backpressure. A cross-binding copy always publishes through the destination writer's atomic commit and therefore returns `atomic_destination=true`. With `require_stable_source=true`, `unverified` completion aborts before commit; `changed` always fails. Without that requirement, `unverified` is returned honestly. The operation never promises global atomicity across source and destination.
+`search_text` emits at most one result for each matching LF-delimited line. Invalid UTF-8 or NUL-containing files are skipped, while a provider scan ceiling that prevents examining an otherwise eligible file fails explicitly. Search exposes the one-based line number and a bounded preview, not raw byte offsets or one result per occurrence. `text_truncated` states when the preview omits a suffix. `mkdir`, `move`, and `remove` express explicit replacement and recursion intent; provider root removal and cross-binding move are rejected. A cross-binding move is composed only as explicit copy plus separately authorized remove and is never presented as atomic.
+
+`read_bytes` is an at-most byte read: `length` is the maximum number of bytes to return, not an exact-length assertion. EOF before that maximum, zero length, and an offset at or beyond EOF all complete successfully with the available bytes. `read_bytes_stream` ends normally at source EOF; normal iterator exhaustion means success, while an iterator exception means failure. `write_bytes_stream` consumes one async byte stream and publishes the complete staged destination only after normal exhaustion. The provider handles its own transaction, transfer handles, digest verification, commit, and abort. Those mechanisms never become Harness reader/writer lease objects or completion evidence.
+
+`VirtualFileOperator` captures one topology snapshot and routes both copy paths. A same-binding backend may implement native copy. Cross-binding copy passes the source byte iterator directly to the destination's staged stream write under backpressure; normal source exhaustion is sufficient and no Harness-level range, digest, source-EOF proof, or atomic-strategy flag exists. Destination publication is always complete-candidate publication, but the operation never promises global atomicity across source and destination.
+
+The model-facing projection is narrower than the provider contract. Text view exposes `line_offset`, finite `line_limit`, and `max_line_length`; text write exposes only `overwrite` and `append`, mapping overwrite to provider `upsert`; copy exposes replacement intent but no publication strategy. Model tools never receive byte ranges, transfer handles, digests, frame offsets, or completion records.
 
 `VirtualFileOperator` also preserves longest-prefix virtual mount routing, read-only mounts, explicit backend availability, path-escape rejection, and stable-instance topology replacement from the prior SDK. It deliberately drops native-absolute fallback, exposed mutable mount lists, and instruction rendering from the low-level operator. Mount snapshots are immutable; an operation captures one snapshot before routing. Empty, one-mount, and mixed local/remote configurations use the same type.
 
-The facade exposes only operations negotiated by the descriptor and permitted by the binding ceiling. Unsupported operations stop before backend dispatch. File mutations express create, replace, append, or upsert semantics, optional compare-and-swap input, bounds, and provider idempotency identity. Text pages and search results are bounded; raw reads, writes, and cross-binding copy are truly streamed end to end. A default implementation cannot collect an unbounded stream merely to emulate `open_reader`, `open_writer`, or copy. Text/traversal cursors remain opaque and scoped to binding, generation, operation, request shape, and provider authorization; EIP raw transfer handles remain inside the low-level client and never enter Harness state or model-visible values.
+The facade exposes only operations negotiated by the descriptor and permitted by the binding ceiling. Unsupported operations stop before backend dispatch. File mutations express create, replace, append, or upsert intent, bounds, and provider idempotency identity; they do not imply exclusive ownership or a total order with commands and external native writers. Text and structured file results are bounded; raw reads, writes, and cross-binding copy are streamed end to end. A default implementation cannot collect an unbounded stream to emulate streaming or copy. File operations create no continuation state; EIP raw transfer handles remain inside the low-level client and never enter Harness state or model-visible values.
 
 ## Command, Process, and Retained-output Surface
 
@@ -1281,11 +1202,11 @@ Only the owning provider adapter unwraps a value after the aggregate has revalid
 
 Provider facets are selected-binding surfaces: they never route an alias or virtual path. The aggregate validates binding revision and generation, converts virtual selectors to binding-local values, and then dispatches. `ProviderShellOperations.exec()` and `ProviderProcessOperations.start()` therefore have no alias parameter; provider port calls receive `PortTarget.alias=None`. Provider output and process-control values remain binding-scoped so the aggregate and provider can both reject a foreign or stale handle.
 
-Exactly one of `cursor` or `start_offset` selects an output read, and exactly one reference or cursor selects release. Counts describe raw producer bytes before model encoding. Inline data is complete only when `content_complete=true`. A preview retains explicit offsets and never conceals a gap. References and cursors are opaque, non-authoritative, finite-lived, and bound to one binding revision, generation, producer, request shape, and current authorization. Reads are bounded again and never materialize a complete retained object by default.
+Exactly one of `cursor` or `start_offset` selects an output read, and exactly one reference or cursor selects release. Counts describe raw producer bytes before model encoding. Inline data is complete only when `content_complete=true`. A preview retains explicit offsets and never conceals a gap. References and cursors are opaque, non-authoritative, lifetime-scoped, and bound to one binding revision, generation, producer, request shape, and current authorization. Reads are bounded again and never materialize a complete retained object by default.
 
-`retain` is valid only when a sink with finite per-object and aggregate byte/object ceilings is reserved before producer overflow. A failed `retain` reservation returns explicit bounded truncation; a caller that requires failure selects `overflow="fail"` before dispatch. Failure never buffers without a bound, invents a workspace file, chooses another binding, or evicts an unrelated live object. Release, expiry, failed creation, process-record reclamation, and provider teardown return quota exactly once.
+`retain` is valid only when a sink enforces the finite per-capture byte limit and a finite provider aggregate storage ceiling while bytes are produced. A provider can reserve finite capacity before production or claim actual bytes incrementally, but one reference always describes a continuous available range and explicitly preserves raw producer counts and incompleteness across read pages. Exhaustion returns explicit bounded incompleteness according to the selected overflow semantics; a caller that requires termination selects `overflow="fail"` before dispatch. Failure never buffers without a bound, invents a workspace file, chooses another binding, or evicts an unrelated live object. Failed creation, abort, release, process-record reclamation, expiry where supported, and provider teardown return charged capacity exactly once.
 
-Direct-local output lives in a private binding-owned retention root and is removed on binding close. EIP references remain daemon-generation-owned and can survive a Harness run or protocol session only while that same daemon generation and provider record remain alive. Neither kind is portable Environment state.
+Direct Local output lives in a private binding-owned spool, has no TTL, and is removed on explicit release or binding close. EIP references remain daemon-generation-owned and can survive a Harness run or protocol session only while that same daemon generation and provider record remain alive. Neither kind is portable Environment state.
 
 For a managed model tool, the selected binding maps the already authorized `ToolOutputPolicy` to an equal or narrower `EnvironmentOutputPolicy` before dispatch. `overflow="environment_reference"` becomes `retain` only when that exact binding supports a reservable sink and the installed `EnvironmentToolsCapability` supplies its active result projector. A generic result without an unambiguous binding owner, or any run without that model projection, keeps the managed invocation boundary's explicit truncation or failure behavior. Provider-side capture bounds raw production, then the managed result path applies bounded semantic redaction and model encoding. Neither layer substitutes for the other.
 
@@ -1534,7 +1455,7 @@ class BoundProcessOperations(ProviderProcessOperations, Protocol):
     ) -> ProcessStartResult: ...
 ```
 
-All command strings, argument counts, environment entries, stdin values, limits, and output policies are finite and intersect provider and binding ceilings. `kind="argv"` is never reparsed by a shell and never uses request-controlled executable search paths. `kind="shell"` resolves only a descriptor-advertised trusted profile. The provider constructs a minimal payload environment; it never inherits the Harness or daemon process environment wholesale. Ambient credentials are not fallback input. A separately authorized compatibility projection is action-, audience-, and lifetime-bound and remains subject to redaction.
+All command strings, argument counts, environment entries, stdin values, limits, and output policies are finite and intersect provider and binding ceilings. `stdin_bytes` bounds the cumulative initial and later stdin bytes accepted for one process, not merely one write. `kind="argv"` is never reparsed by a shell and never uses request-controlled executable search paths. `kind="shell"` resolves only a descriptor-advertised trusted profile. The provider constructs a minimal payload environment; it never inherits the Harness or daemon process environment wholesale. Ambient credentials are not fallback input. A separately authorized compatibility projection is action-, audience-, and lifetime-bound and remains subject to redaction.
 
 `cwd` is absent, binding-relative, or within the selected alias's virtual root. The aggregate resolves it to a binding-local path before dispatch. `network="deny"` can only narrow provider policy; a backend that cannot enforce it returns unsupported before start. Missing requested resource limits use finite effective provider ceilings, not infinity.
 
@@ -1542,7 +1463,7 @@ Foreground execution returns only after the initial command is terminal and tree
 
 A background start returns a handle only after the provider has committed ownership and established that the requested executable started. Inspect, output read, stdin, signal, wait, kill, and release are separately authorized. They revalidate binding revision, generation, Agent identity, ownership, and provider policy on every call. No API accepts a native PID or arbitrary signal.
 
-Initial-command status and whole-tree cleanup are independent. Releasing an active or cleanup-pending process is a conflict. Provider session loss does not prove process termination. A process can outlive a Harness run only when the selected provider and Host lifecycle keep its Environment runtime alive; its handle still remains non-portable. Refresh or removal never adopts the process under another binding revision or generation.
+Initial-command status and whole-tree cleanup are independent. Releasing an active or cleanup-pending process is a conflict; a terminal `cleanup="failed"` record is still explicitly releasable after the provider has confirmed that the native process ended. Direct Local returns the active-process slot when tree cleanup becomes terminal but retains the lightweight terminal record, status, and output references until explicit process release or binding close; a terminal record therefore does not consume active OS-process capacity. Process release retains its record until output cleanup finishes, so cancellation can be retried without losing the handle or topology fence. Provider session loss does not prove process termination. A process can outlive a Harness run only when the selected provider and Host lifecycle keep its Environment runtime alive; its handle still remains non-portable. Refresh or removal never adopts the process under another binding revision or generation.
 
 ## Port Observation
 
@@ -1592,7 +1513,7 @@ The contract observes only policy-authorized TCP listeners within the selected E
 
 ### Media consumers
 
-File transfer and retained output are not model-media APIs. A consumer that wants to supply an Environment image to a model reads through `open_reader`, applies a separate bounded spool or buffer limit, sniffs and validates media type, decodes or compresses under its own policy, and only then constructs provider-supported `BinaryContent` or a trusted URL. Small media can be collected within the model/provider ceiling; larger media remains in bounded spool storage while transformed or uploaded. Envd never receives model capability, prompt, MIME-trust, vision, or token-budget semantics, and the Harness never asks it to base64 a complete file into JSON.
+File transfer and retained output are not model-media APIs. A consumer that wants to supply an Environment image to a model reads through `read_bytes_stream`, applies a separate bounded spool or buffer limit, sniffs and validates media type, decodes or compresses under its own policy, and only then constructs provider-supported `BinaryContent` or a trusted URL. Small media can be collected within the model/provider ceiling; larger media remains in bounded spool storage while transformed or uploaded. Envd never receives model capability, prompt, MIME-trust, vision, or token-budget semantics, and the Harness never asks it to base64 a complete file into JSON.
 
 ## Failure Surface
 
@@ -1609,7 +1530,7 @@ Transport loss after a mutation is unknown unless `agent-envd` can replay the sa
 - Opaque handles keep ownership authoritative at the provider, at the cost of provider-dependent reattachment.
 - A stable facade gives trusted code and optional Capabilities one interface without reproducing EIP lifecycle or transport internals.
 - Scoped readiness lets providers overlap provisioning with input and Capability setup, but any model-surface dependency still blocks the first dependent request and every operation must preserve typed failure and cancellation.
-- Supporting direct-local and EIP-backed implementations adds two backend packages, but one provider-neutral semantic contract and shared virtual routing prevent their tool behavior from diverging. Local embedding stays lightweight while sandbox enforcement remains beside sandbox resources.
+- Supporting direct-local and EIP-backed implementations adds two backend packages, but one provider-neutral semantic contract and shared virtual routing prevent their tool behavior from diverging. Direct Local stays lightweight by trusting Host-controlled namespace structure and the embedding OS account; race-hardened resource brokerage and sandbox enforcement remain beside sandbox resources.
 - A dedicated Environment envelope field keeps lifecycle data out of Capability namespaces, at the cost of a separate provider state-codec compatibility axis.
 
 ## Invariants
@@ -1620,20 +1541,20 @@ Transport loss after a mutation is unknown unless `agent-envd` can replay the sa
 04. Live topology changes do not mutate static instructions or tool schemas; every new logical run's optional model projection emits one fresh snapshot at its first eligible ordinary boundary, then uses public request hooks and native enqueue for later changes.
 05. `BoundEnvironment` closes over trusted Identity rather than accepting it from callers.
 06. Harness validation is lexical; provider canonicalization and native enforcement remain authoritative.
-07. Programmatic handles and cursors are exact-type opaque, non-serializable scoped values; model tools expose only bounded run-local compact references for process and retained-output follow-up operations.
+07. Programmatic process, output, and transfer selectors are exact-type opaque scoped values; model tools expose bounded run-local compact references only for process and retained-output follow-up operations, while file tools use explicit offsets.
 08. Every process-control action re-authorizes with the provider.
 09. Mutating retry uses provider idempotency or reconciliation evidence.
 10. Host launch state is consumed before binding construction; `EnvironmentState` restores only explicitly portable backend-local data into fresh, already reachable bindings and never restores authority or topology. EIP daemon-generation selectors are never included.
 11. Desired topology requests contain no observed descriptor; only successful provider entry publishes a new `EnvironmentBinding`, while later authenticated observation can mark that immutable binding unavailable.
-12. `LocalFileOperator` and `LocalShell` are first-class direct backends; EIP-backed sandbox and remote backends are first-class peers, and neither is a compatibility fallback for the other.
+12. Direct Local and EIP-backed sandbox or remote bindings are first-class peers behind provider-neutral facets; neither is a compatibility fallback for the other, and concrete backend facets are not public construction APIs.
 13. `VirtualFileOperator` routes recursively immutable mount snapshots without native-path fallback; direct and EIP operations preserve one provider-neutral file and shell contract with separate bounded text conveniences and raw async readers/writers.
-14. Direct and EIP retained outputs obey finite aggregate bytes and object counts in addition to per-call limits; allocation, release, expiry, binding teardown, and daemon teardown cannot bypass those ceilings or change the owning lifetime model.
+14. Direct Local retained output obeys a finite actual-byte spool ceiling and explicit-release/binding lifetime; EIP retained output obeys its finite byte, object, and expiry ceilings. Allocation, incremental claim or reservation, release, abort, expiry where supported, and owner teardown cannot bypass the owning provider's resource ceiling.
 15. For EIP-backed bindings, stdio, HTTP, and WebSocket do not change method semantics.
 16. Binding entry establishes trustworthy identity, descriptors, routing, and readiness paths; it does not imply that unrelated operation resources are already provisioned.
 17. Scoped readiness is typed, idempotent, binding-revision- and generation-bound, requires non-empty aggregate operation coverage across a non-empty selected binding set, and never restores or grants authority.
 18. The Harness owns direct EIP Environment adaptation but delegates generated wire models, JSON-RPC, raw-transfer attachment/framing, authentication, sessions, integrity bookkeeping, and transport cleanup to `converge-agent-envd-client`.
 19. Environment file transfer is client-neutral and model-agnostic; model media conversion and product browser delivery are downstream policies, not envd behavior.
-20. Command and retained-output producers apply finite per-operation and aggregate ceilings before unbounded materialization; references, cursors, and process handles are never portable state.
+20. Command and retained-output producers apply finite in-memory, per-capture, active-resource, and aggregate-spool ceilings during incremental production; streamable file, stdin, and search inputs are not converted into arbitrary whole-object provider caps. References, cursors, and process handles are never portable state.
 21. Port operations only observe authorized local TCP state and never imply provider ingress or public exposure.
 22. Provider descriptors, permissions, facets, availability, and readiness paths agree before publication; a facet-less advertised operation never enters routing.
 23. A transferred provider candidate is owned exactly once by the aggregate, which exits entered scopes and idempotently discards every unentered or failed-entry candidate.
@@ -1642,7 +1563,7 @@ Transport loss after a mutation is unknown unless `agent-envd` can replay the sa
 26. Portable state declares whether it requires the same logical resource or supports cross-resource import, and neither mode grants Host lifecycle authority.
 27. Initial state restore runs against the fixed initial snapshot before controller activation; `apply()` can begin only after successful restore or confirmation that no state was supplied.
 28. Late-bound consumers use the observer's immutable initial version and the aggregate's read-only successfully restored state version; neither observation owns state or grants topology authority.
-29. `revision-N`, `cursor-N`, `process-N`, and `output-N` references are concurrency-safe, monotonically allocated model projections within one logical run; they are never persisted, reused, exposed to provider APIs, or resolved without exact-scope and live Environment revalidation.
+29. `process-N` and `output-N` references are concurrency-safe, monotonically allocated model projections within one logical run; they are never persisted, reused, exposed to provider APIs, or resolved without exact-scope and live Environment revalidation.
 30. The active Environment tools projection is the sole owner of compact-reference allocation; without its typed result projector, managed overflow cannot return `output-N` and must use bounded truncation or failure.
 31. Public aggregate and Direct Local constructors fully determine lifecycle ownership, immutable local authority, finite limits, and no-operation behavior without requiring callers to instantiate coordinator internals.
-32. `environment-actions/1` uses exact catalog values and one action-to-family/facet mapping; unknown actions, prefixes, families, Toolset IDs, and provider capabilities never widen a ceiling or dispatch.
+32. `environment-actions/2` uses exact catalog values and one action-to-family/facet mapping; unknown actions, prefixes, families, Toolset IDs, and provider capabilities never widen a ceiling or dispatch.

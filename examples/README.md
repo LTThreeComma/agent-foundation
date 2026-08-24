@@ -8,6 +8,7 @@ This directory contains runnable, tested examples of public Agent Foundation ext
 | ------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | Publish and compose an Environment provider | [Integration package examples](plugins/README.md#environment-provider-factory) | Selected entry-point and explicit factory modes, Host JSON configuration, provider bindings, and multi-environment routing |
 | Wrap the complete Harness run               | [Integration package examples](plugins/README.md#harness-plugin)               | Preferred YAML/JSON auto configuration, call-site enable override, direct objects, parameters, and per-run isolation       |
+| Persist and resume a Harness run            | [Host persistence example](hosting/README.md)                                  | Host-owned Execution/Attempt fencing, selected `HarnessState`, fresh bindings, replacement runs, and terminal commit       |
 
 Run every integration package example and its focused checks from the repository root:
 
@@ -25,9 +26,14 @@ uv run plugin-example-environment-code
 uv run plugin-example-harness-entrypoint
 uv run plugin-example-harness-code
 uv run pytest
+
+cd ../hosting
+uv sync --locked
+uv run host-persistence-example
+uv run pytest
 ```
 
-Neither demo needs a model API key or network access after dependencies are installed.
+No example needs a model API key or network access after dependencies are installed.
 
 ## How to Use These Examples
 

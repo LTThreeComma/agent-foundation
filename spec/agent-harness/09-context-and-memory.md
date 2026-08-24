@@ -75,7 +75,7 @@ Messages are appended only at complete semantic boundaries. Tool calls and resul
 
 ## Working State Capability
 
-Tasks, notes, and per-Agent TODOs form one optional Working State Capability because they share tool presentation, bounded dynamic guidance, and persistence ownership while retaining distinct child-sharing rules.
+Tasks and notes form one optional Working State Capability because they share tool presentation, bounded dynamic guidance, and persistence ownership while retaining distinct child-sharing rules.
 
 ```python
 class TaskState(BaseModel):
@@ -104,7 +104,6 @@ class WorkingState(BaseModel):
     tasks: TaskState | None = None
     provider_cursor: ProviderTaskCursor | None = None
     notes: Mapping[str, str] = Field(default_factory=dict)
-    todos: tuple[TodoItem, ...] = ()
 
 
 class TaskStateCell(Protocol):
@@ -144,7 +143,7 @@ The first-party model-facing task reference is `task-{N}`, where `N` is a positi
 
 The Capability:
 
-- contributes task, note, and TODO Toolsets selected by configuration;
+- contributes task and note Toolsets selected by configuration;
 - contributes bounded dynamic user context describing relevant state;
 - stores its owned `WorkingState` in one `AgentContextState` namespace;
 - exposes a typed `TaskStateCell` for linearizable local or provider-backed task mutations;
@@ -160,7 +159,7 @@ In `provider` mode, `tasks` must be absent and every run requires one fresh Host
 
 Inline children use `DelegationContextPolicy.task_state="shared"` by default and receive an identity-bound view over the same local or provider-backed task store. A child view can list, create, claim, update, and complete tasks subject to current tool and Host policy. `claim(task_id)` resolves the compact reference only inside that bound task scope, derives the claimant from a stable non-authoritative `AgentInstanceRef` captured when the cell is bound, verifies dependencies and eligibility, advances a monotonic revision under the cell's linearization boundary, is idempotent for the same owner, and conflicts for another owner. General update and dependency mutation require the expected revision; task creation allocates the next compact reference under the same boundary, so concurrent children cannot duplicate IDs or silently overwrite one another.
 
-The child does not serialize a second copy of borrowed task state into its private nested `HarnessState`. In `local` mode, the parent Working State entry remains the sole snapshot owner: before each successful cell mutation returns, the parent Capability replaces `WorkingState.tasks` with that mutation's immutable revised `TaskState` under the Agent Context state lock. In `provider` mode, the Host provider is the sole task-data authority and the parent entry keeps `tasks=None`; after a successful provider mutation it may replace only the bounded observed cursor. A later parent export copies the applicable local snapshot or non-authoritative cursor together with the Delegation Capability's child-private continuation snapshots without a generic export callback or second state registry. Notes and TODOs remain private to one Agent instance. No non-task Capability state, mutable whole `WorkingState`, `AgentContextState`, or `AgentContext` object crosses the inline child boundary.
+The child does not serialize a second copy of borrowed task state into its private nested `HarnessState`. In `local` mode, the parent Working State entry remains the sole snapshot owner: before each successful cell mutation returns, the parent Capability replaces `WorkingState.tasks` with that mutation's immutable revised `TaskState` under the Agent Context state lock. In `provider` mode, the Host provider is the sole task-data authority and the parent entry keeps `tasks=None`; after a successful provider mutation it may replace only the bounded observed cursor. A later parent export copies the applicable local snapshot or non-authoritative cursor together with the Delegation Capability's child-private continuation snapshots without a generic export callback or second state registry. Notes remain private to one Agent instance. No non-task Capability state, mutable whole `WorkingState`, `AgentContextState`, or `AgentContext` object crosses the inline child boundary.
 
 A process-local Host can deliberately retain a local task cell for background children. A distributed Host selects `provider` mode and uses a durable task provider or service API with equivalent claim, mutation-idempotency, compare-and-swap, and stale-owner reconciliation semantics rather than sharing Python memory. If a provider mutation from an inline child outlives the enclosing parent checkpoint, the Host uses the mutation's trusted run provenance to reconcile that owner before replacement work proceeds; the Harness neither rolls it back nor lets a new child silently override it. Provider task data and lifecycle are not smuggled into a parent or child Harness snapshot.
 
@@ -255,7 +254,7 @@ Provider writes can be inline when required for consistency or emitted as host w
 | State                                       | Owner                                                                                             |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Active Pydantic messages                    | `HarnessState.message_history`                                                                    |
-| Local task snapshot, notes, and TODOs       | Working State Capability; inline children can receive an explicit task view                       |
+| Local task snapshot and notes               | Working State Capability; inline children can receive an explicit task view                       |
 | Provider-backed task data and scope         | Host task provider; Working State exports only an optional observed cursor                        |
 | Loaded skills or discovered tools           | Owning discovery Capability                                                                       |
 | Compaction-only metadata                    | Compaction Capability                                                                             |
@@ -301,7 +300,7 @@ Direct instructions, public model-request hooks, native enqueue, and Capability 
 
 ### One Working State Capability vs. Independent Managers
 
-Tasks, notes, and TODOs share tool presentation and one state owner without turning `AgentContext` into a collection of managers. A typed task cell supports atomic parent/child coordination, while notes, TODOs, messages, and unrelated Capability state remain isolated.
+Tasks and notes share tool presentation and one state owner without turning `AgentContext` into a collection of managers. A typed task cell supports atomic parent/child coordination, while notes, messages, and unrelated Capability state remain isolated.
 
 ### Host-owned Memory Work vs. Automatic Background Tasks
 

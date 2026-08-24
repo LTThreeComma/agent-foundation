@@ -24,7 +24,6 @@
           "kind": "file",
           "modified_at": "2026-08-20T14:00:00.123456789Z",
           "path": {"mount_id": "workspace", "path": "/src/main.py"},
-          "revision": "revision-1",
           "size_bytes": 128
         }
       }
@@ -33,8 +32,7 @@
       "type": "FileFindParams",
       "value": {
         "context": {"operation_id": "op-find"},
-        "max_depth": 8,
-        "mode": "glob",
+        "kinds": ["file"],
         "pattern": "**/*.py",
         "root": {"mount_id": "workspace", "path": "/src"}
       }

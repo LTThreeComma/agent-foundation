@@ -12,12 +12,19 @@ message EIPClientInfo {
   string version = 2;
 }
 
+enum ResourceAuthority {
+  RESOURCE_AUTHORITY_UNSPECIFIED = 0;
+  RESOURCE_AUTHORITY_SCOPED = 1 [(eip_enum_value).json_name = "scoped"];
+  RESOURCE_AUTHORITY_SERVER = 2 [(eip_enum_value).json_name = "server"];
+}
+
 message InitializeParams {
   repeated string supported_protocol_versions = 1 [(eip_field).min_length = 1];
   EIPClientInfo client = 2;
   string expected_environment_id = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   repeated string required_capabilities = 4;
   repeated string optional_capabilities = 5;
+  optional ResourceAuthority resource_authority = 6 [(eip_field).default_string = "scoped"];
 }
 
 message EIPServerInfo {
@@ -89,6 +96,11 @@ message IsolationPosture {
   IsolationCleanupGuarantee cleanup_guarantee = 7;
 }
 
+message ResourceAuthorityDescriptor {
+  ResourceAuthority mode = 1;
+  optional string root_mount_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+}
+
 message EnvironmentDescriptor {
   string environment_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   uint64 generation = 2 [(eip_field).minimum = 1];
@@ -97,6 +109,7 @@ message EnvironmentDescriptor {
   repeated ShellProfileDescriptor shell_profiles = 5;
   EIPLimits limits = 6;
   IsolationPosture isolation = 7;
+  ResourceAuthorityDescriptor resource_authority = 8;
 }
 
 message InitializeResult {

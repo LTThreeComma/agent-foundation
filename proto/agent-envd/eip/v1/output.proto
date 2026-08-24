@@ -58,16 +58,6 @@ message OutputCapture {
   optional google.protobuf.Timestamp expires_at = 13;
 }
 
-message StructuredOutputDisposition {
-  bool producer_complete = 1;
-  bool content_complete = 2;
-  uint64 emitted_items = 3;
-  optional uint64 dropped_items = 4;
-  uint64 encoded_bytes = 5;
-  optional OutputCursor cursor = 6;
-  optional google.protobuf.Timestamp expires_at = 7;
-}
-
 message OutputReadParams {
   EIPCallContext context = 1;
   OutputReference reference = 2;

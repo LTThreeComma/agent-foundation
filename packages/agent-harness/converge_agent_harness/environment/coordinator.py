@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 from collections.abc import AsyncGenerator, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -198,7 +199,7 @@ class _ShellFacade:
             entered,
             EnvironmentAction.SHELL_EXEC,
             "shell",
-            timeout_seconds=request.limits.wall_time_seconds,
+            timeout_seconds=provider_request.limits.wall_time_seconds,
         ):
             shell = entered.operations.shell
             if shell is None:
@@ -395,7 +396,11 @@ class CompositeBoundEnvironment(BoundEnvironment):
             topology.topology_version: (initial_digest, initial_receipt)
         }
         self._committed_changes = 0
-        self._files = VirtualFileOperator(self._prepare_file, self._virtualize_provider_path)
+        self._files = VirtualFileOperator(
+            self.resolve_path,
+            self._prepare_file,
+            self._virtualize_provider_path,
+        )
         self._shell = _ShellFacade(self)
         self._processes = _ProcessFacade(self)
         self._ports = _PortFacade(self)
@@ -821,7 +826,22 @@ class CompositeBoundEnvironment(BoundEnvironment):
             selected = self.resolve_path(request.cwd, alias=alias)
             entered = self._entered[selected.binding_id]
             cwd = selected.path
-        return entered, request.model_copy(update={"cwd": cwd})
+        limits = request.limits
+        ceiling = entered.public.descriptor.limits.get("max_wall_time_seconds")
+        ceiling_value: float | None = None
+        if not isinstance(ceiling, bool) and isinstance(ceiling, int | float):
+            try:
+                candidate = float(ceiling)
+            except OverflowError:
+                pass
+            else:
+                if math.isfinite(candidate) and candidate > 0:
+                    ceiling_value = candidate
+        if ceiling_value is not None:
+            requested = limits.wall_time_seconds
+            effective = ceiling_value if requested is None else min(requested, ceiling_value)
+            limits = limits.model_copy(update={"wall_time_seconds": effective})
+        return entered, request.model_copy(update={"cwd": cwd, "limits": limits})
 
     def _entered_for_handle(self, handle: BoundProcessHandle) -> _EnteredBinding:
         if not isinstance(handle, BoundProcessHandle):
@@ -858,11 +878,15 @@ class CompositeBoundEnvironment(BoundEnvironment):
     @asynccontextmanager
     async def _prepare_file(
         self,
-        path: str,
+        selected: EnvironmentPath,
         action: EnvironmentAction,
     ) -> AsyncGenerator[_PreparedFile]:
-        selected = self.resolve_path(path)
-        entered = self.require_action(selected.binding_id, action)
+        entered = self._entered_by_revision.get((selected.binding_id, selected.binding_revision))
+        if entered is None:
+            raise EnvironmentError(
+                "Environment binding revision is unavailable.",
+                code="environment_stale_binding",
+            )
         async with self._operation_lease(entered, action, "files"):
             if entered.operations.files is None:
                 raise EnvironmentError("File operation facet is unavailable.", code="environment_unsupported")
@@ -1091,7 +1115,10 @@ class CompositeBoundEnvironment(BoundEnvironment):
         timeout = (
             DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS
             if timeout_seconds is None
-            else max(DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS, timeout_seconds + 5.0)
+            else max(
+                DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS,
+                timeout_seconds + DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS,
+            )
         )
         key = self._revision_key(entered)
         if action not in entered.public.permission_ceiling.operations:

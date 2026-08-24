@@ -17,7 +17,7 @@ A background process record is an EIP-visible projection over manager-owned nati
 | Provider ingress for a listening process                               | Provider adapter                                 | Separate from starting or observing the process              |
 | Durable Agent attempt and completion                                   | Host                                             | Never owned by process exit or envd receipt                  |
 
-Command permission is the intersection of authenticated daemon-user authority, configured shell and executable policy, the selected working-directory mount, Environment generation, daemon safety limits, and execution-isolation posture.
+Command permission is the intersection of authenticated daemon-user authority, the session's fixed resource-authority mode, configured shell and executable policy, the selected working-directory mount, Environment generation, daemon safety limits, and execution-isolation posture. Resource authority controls which cwd and relative executable sources EIP can select; execution isolation independently controls what the started child can reach.
 
 ## Command Model
 
@@ -68,7 +68,7 @@ Every string, argument count, script byte length, environment entry, initial std
 
 ### Structured argv
 
-`kind="argv"` executes exactly one executable with the supplied argument vector. Envd never concatenates or reparses the values through a shell. `executable` is either a bare name with no separator or a relative path resolved from the canonical `cwd` inside that same mount. Native absolute executable paths are invalid EIP input. A bare name resolves only through daemon-owned fixed executable search roots; a relative path receives mount canonicalization, executable-source policy, and symlink containment. Neither form uses an ambient daemon `PATH` or a request-controlled search directory.
+`kind="argv"` executes exactly one executable with the supplied argument vector. Envd never concatenates or reparses the values through a shell. `executable` is either a bare name with no separator or a relative path resolved from the canonical `cwd` inside that same effective mount. Native absolute executable strings are invalid EIP input; a caller that needs a particular file selects an authorized cwd and expresses the executable relative to it. A bare name resolves only through daemon-owned fixed executable search roots. In `scoped` authority, a relative path also requires that mount's executable-source policy. In `server` authority, it can select any executable file under the effective server-root mount that the envd OS identity can execute. Neither form uses an ambient daemon `PATH` or a request-controlled search directory.
 
 ### Explicit shell profiles
 
@@ -101,7 +101,7 @@ A descriptor reports only logical profile information, not native helper paths o
 
 ### Working directory
 
-`cwd` selects one configured mount and is canonicalized under [Resource Operations](04-resource-operations.md). It must be an existing directory allowed for command execution. In EIP 1.0 this is the command's only ordinary Environment mount: required isolation exposes that complete mount with its configured read/write ceiling and does not expose other EIP mounts. Read-only mounts can be working directories but remain read-only. Curated immutable runtime roots plus private `HOME` and temporary roots remain available as defined by the isolation contract. A valid cwd grants no additional logical mount authority. Required isolation pins and contains its native identity; disabled native execution performs only the admission-time path snapshot described by [Execution Isolation](07-execution-isolation.md#disabled-mode-meaning).
+`cwd` selects one effective mount and is canonicalized under [Resource Operations](04-resource-operations.md). It must be an existing directory allowed for command execution. In `scoped` authority the configured mount must permit command cwd use; read-only mounts can be working directories but remain read-only. In `server` authority any represented directory visible to envd can be selected. In EIP 1.0 this is the command's ordinary Environment mount for required isolation; curated immutable runtime roots plus private `HOME` and temporary roots remain available as defined by the isolation contract. A valid cwd grants no additional EIP mount authority. Required isolation pins and contains its native identity while independently applying protected-path and child-containment policy; disabled native execution performs only the admission-time path snapshot described by [Execution Isolation](07-execution-isolation.md#disabled-mode-meaning).
 
 ### Environment construction
 
@@ -483,4 +483,5 @@ Keeping processes under the daemon's single manager lets normal background work 
 11. Session loss does not terminate a process; every process remains generation-scoped and daemon-owned, and daemon shutdown terminates all remaining command trees.
 12. Active and terminal process records are both bounded; only terminal fully cleaned records can expire or be capacity-reclaimed before generation end.
 13. A failed or unavailable isolation backend never triggers native fallback.
-14. Cleanup uncertainty is explicit: only `complete` proves full teardown, and `residual_confined` is valid solely under an active required-isolation boundary.
+14. Resource authority is fixed by initialization: `scoped` limits cwd and relative executables to configured command grants, while `server` permits the daemon-visible server roots without disabling command policy, limits, environment filtering, process ownership, or isolation.
+15. Cleanup uncertainty is explicit: only `complete` proves full teardown, and `residual_confined` is valid solely under an active required-isolation boundary.

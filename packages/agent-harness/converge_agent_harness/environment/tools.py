@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -11,7 +10,7 @@ from contextvars import ContextVar
 from copy import copy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, TypeVar, cast
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic_ai import RunContext
@@ -43,25 +42,17 @@ from .commands import (
     ProcessStatus,
     ShellCommand,
 )
-from .files import (
-    FileMetadata,
-    FileQueryCursor,
-    FileQueryRequest,
-    FileRevision,
-    FileTextCursor,
-    FileTextSearchRequest,
-    FileWriteMode,
-)
+from .files import FileMetadata, FileQueryRequest, FileTextSearchRequest
 from .models import ENVIRONMENT_ACTION_DISPATCH, EnvironmentAction, EnvironmentError
 from .retention import BoundOutputReference, EnvironmentOutputCapture, EnvironmentOutputPolicy
-from .virtual_files import VirtualFileOperator, _FileResultProvenance
+from .virtual_files import VirtualFileOperator
 
 ENVIRONMENT_TOOLS_CAPABILITY_ID = "converge.environment-tools"
 _ENVIRONMENT_TOOLSET_ID = "converge-environment-tools"
 _MAX_MODEL_TEXT_BYTES = 256 * 1024
 _MAX_MODEL_RESULTS = 1_000
 _MAX_MODEL_OUTPUT_BYTES = 1024 * 1024
-_REFERENCE_PATTERN = re.compile(r"^(revision|cursor|process|output)-([1-9][0-9]*)$")
+_REFERENCE_PATTERN = re.compile(r"^(process|output)-([1-9][0-9]*)$")
 
 _PositiveTextBytes = Annotated[int, Field(gt=0, le=_MAX_MODEL_TEXT_BYTES)]
 _PositiveOutputBytes = Annotated[int, Field(gt=0, le=_MAX_MODEL_OUTPUT_BYTES)]
@@ -69,13 +60,12 @@ _PositiveResults = Annotated[int, Field(gt=0, le=_MAX_MODEL_RESULTS)]
 _NonNegativeOffset = Annotated[int, Field(ge=0)]
 _PositiveTimeout = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 _NonNegativeTimeout = Annotated[float, Field(ge=0, allow_inf_nan=False)]
-_CursorT = TypeVar("_CursorT", FileTextCursor, FileQueryCursor)
 
 _STABLE_INSTRUCTIONS = """Environment tools operate on the live run Environment.
 Use relative paths or /workspace for the current default binding. Use /environment/{alias} for another binding.
 Aliases are ordinary strings because topology can change without changing tool schemas.
-Values named revision-N, cursor-N, process-N, and output-N are opaque references valid only in this logical run.
-Reuse them only with the same path or request shape that produced them. Never invent, alter, or persist a reference.
+Values named process-N and output-N are opaque references valid only in this logical run.
+Never invent, alter, or persist a reference.
 Environment tool results are bounded semantic JSON. A result with ok=false is a terminal operation result; adapt the
 request instead of repeating it blindly. Shell and process wall-time limits are owned by the Environment provider.
 The Harness does not impose an additional Agent-wide tool timeout."""
@@ -109,20 +99,11 @@ class _AuthorizationFence:
     unresolved: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class _BoundFileReference:
-    binding: _BindingFence
-    provider_path: str
-    request_scope: str | None
-    value: FileRevision | FileTextCursor | FileQueryCursor
-
-
 @dataclass(slots=True)
 class _ReferenceEntry:
-    kind: Literal["revision", "cursor", "process", "output"]
+    kind: Literal["process", "output"]
     reference: str
     value: object
-    scope: str | None
     expires_at: datetime | None
     active: bool = True
 
@@ -132,20 +113,19 @@ class _CompactReferenceTable:
 
     def __init__(self, max_entries: int) -> None:
         self._max_entries = max_entries
-        self._next = {"revision": 1, "cursor": 1, "process": 1, "output": 1}
+        self._next = {"process": 1, "output": 1}
         self._entries: dict[str, _ReferenceEntry] = {}
-        self._keys: dict[tuple[str, str | None, object], str] = {}
+        self._keys: dict[tuple[str, object], str] = {}
         self._lock = threading.Lock()
 
     def register(
         self,
-        kind: Literal["revision", "cursor", "process", "output"],
+        kind: Literal["process", "output"],
         value: object,
         *,
-        scope: str | None = None,
         expires_at: datetime | None = None,
     ) -> str:
-        key = (kind, scope, value)
+        key = (kind, value)
         with self._lock:
             existing_ref = self._keys.get(key)
             if existing_ref is not None:
@@ -171,7 +151,6 @@ class _CompactReferenceTable:
                 kind=kind,
                 reference=reference,
                 value=value,
-                scope=scope,
                 expires_at=expires_at,
             )
             self._entries[reference] = entry
@@ -181,37 +160,8 @@ class _CompactReferenceTable:
     def resolve(
         self,
         reference: str,
-        kind: Literal["revision", "cursor", "process", "output"],
-        *,
-        scope: str | None = None,
+        kind: Literal["process", "output"],
     ) -> object:
-        match = _REFERENCE_PATTERN.fullmatch(reference)
-        if match is None or match.group(1) != kind:
-            raise EnvironmentError(
-                f"Expected a {kind} compact reference.",
-                code="environment_reference_invalid",
-            )
-        with self._lock:
-            entry = self._entries.get(reference)
-            if entry is None or entry.kind != kind or entry.scope != scope:
-                raise EnvironmentError(
-                    "Environment compact reference is unknown or has the wrong scope.",
-                    code="environment_reference_invalid",
-                )
-            self._expire(entry)
-            if not entry.active:
-                raise EnvironmentError(
-                    "Environment compact reference is no longer available.",
-                    code="environment_reference_stale",
-                )
-            return entry.value
-
-    def resolve_value(
-        self,
-        reference: str,
-        kind: Literal["revision", "cursor", "process", "output"],
-    ) -> object:
-        """Resolve an entry whose package-private value carries its own exact scope."""
         match = _REFERENCE_PATTERN.fullmatch(reference)
         if match is None or match.group(1) != kind:
             raise EnvironmentError(
@@ -233,7 +183,7 @@ class _CompactReferenceTable:
                 )
             return entry.value
 
-    def tombstone(self, reference: str, kind: Literal["revision", "cursor", "process", "output"]) -> None:
+    def tombstone(self, reference: str, kind: Literal["process", "output"]) -> None:
         with self._lock:
             entry = self._entries.get(reference)
             if entry is None or entry.kind != kind:
@@ -243,7 +193,7 @@ class _CompactReferenceTable:
                 )
             entry.active = False
 
-    def tombstone_value(self, kind: Literal["revision", "cursor", "process", "output"], value: object) -> None:
+    def tombstone_value(self, kind: Literal["process", "output"], value: object) -> None:
         with self._lock:
             for entry in self._entries.values():
                 if entry.kind == kind and entry.value == value:
@@ -765,39 +715,24 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         ctx: RunContext[AgentContext],
         path: str,
         *,
-        cursor: str | None = None,
-        start_line: Annotated[int | None, Field(ge=1)] = None,
-        max_lines: _PositiveResults | None = 200,
-        max_bytes: _PositiveTextBytes = 64 * 1024,
-        expected_revision: str | None = None,
+        line_offset: _NonNegativeOffset = 0,
+        line_limit: _PositiveResults = 200,
+        max_line_length: _PositiveTextBytes = 2_000,
     ) -> dict[str, JsonValue]:
-        shape = _request_scope(
-            "read_text",
-            {
-                "path": self._file_reference_scope(path),
-                "start_line": start_line,
-                "max_lines": max_lines,
-                "max_bytes": max_bytes,
-            },
-        )
         return await self._execute_file(
             lambda: ctx.deps.environment.files.read_text(
                 path,
-                cursor=self._cursor(cursor, FileTextCursor, shape, path),
-                start_line=start_line,
-                max_lines=max_lines,
-                max_bytes=max_bytes,
-                expected_revision=self._revision(expected_revision, path),
+                line_offset=line_offset,
+                line_limit=line_limit,
+                max_line_length=max_line_length,
             ),
-            lambda page, provenance: {
-                "path": page.path,
-                "revision": self._revision_reference(page.path, page.revision, provenance),
-                "text": page.text,
-                "start": {"line": page.start.line, "byte_column": page.start.byte_column},
-                "end": {"line": page.end.line, "byte_column": page.end.byte_column},
-                "next_cursor": self._cursor_reference(page.next_cursor, shape, page.path, provenance),
-                "content_complete": page.content_complete,
-                "truncated": page.truncated,
+            lambda result: {
+                "path": result.path,
+                "text": result.text,
+                "line_offset": result.line_offset,
+                "lines_read": result.lines_read,
+                "has_more": result.has_more,
+                "truncated_lines": list(result.truncated_lines),
             },
         )
 
@@ -807,19 +742,16 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         path: str,
         text: str,
         *,
-        mode: FileWriteMode = "upsert",
-        expected_revision: str | None = None,
+        mode: Literal["overwrite", "append"] = "overwrite",
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.write_text(
                 path,
                 text,
-                mode=mode,
-                expected_revision=self._revision(expected_revision, path),
+                mode="append" if mode == "append" else "upsert",
             ),
-            lambda result, provenance: {
+            lambda result: {
                 "path": result.path,
-                "revision": self._revision_reference(result.path, result.revision, provenance),
                 "bytes_written": result.bytes_written,
             },
         )
@@ -829,18 +761,11 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         ctx: RunContext[AgentContext],
         path: str,
         patch: str,
-        *,
-        expected_revision: str,
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
-            lambda: ctx.deps.environment.files.patch_text(
-                path,
-                patch,
-                expected_revision=cast(FileRevision, self._revision(expected_revision, path)),
-            ),
-            lambda result, provenance: {
+            lambda: ctx.deps.environment.files.patch_text(path, patch),
+            lambda result: {
                 "path": result.path,
-                "revision": self._revision_reference(result.path, result.revision, provenance),
                 "hunks_applied": result.hunks_applied,
             },
         )
@@ -852,7 +777,7 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.stat(path),
-            lambda metadata, provenance: self._project_metadata(metadata, provenance),
+            lambda metadata: self._project_metadata(metadata),
         )
 
     async def environment_list(
@@ -860,30 +785,21 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         ctx: RunContext[AgentContext],
         path: str,
         *,
-        cursor: str | None = None,
+        offset: _NonNegativeOffset = 0,
         max_results: _PositiveResults = 100,
         include_hidden: bool = False,
     ) -> dict[str, JsonValue]:
-        shape = _request_scope(
-            "list",
-            {
-                "path": self._file_reference_scope(path),
-                "max_results": max_results,
-                "include_hidden": include_hidden,
-            },
-        )
         return await self._execute_file(
             lambda: ctx.deps.environment.files.list(
                 path,
-                cursor=self._cursor(cursor, FileQueryCursor, shape, path),
+                offset=offset,
                 max_results=max_results,
                 include_hidden=include_hidden,
             ),
-            lambda page, provenance: {
-                "path": page.path,
-                "entries": [self._project_metadata(entry.metadata, provenance) for entry in page.entries],
-                "next_cursor": self._cursor_reference(page.next_cursor, shape, page.path, provenance),
-                "content_complete": page.content_complete,
+            lambda result: {
+                "entries": [self._project_metadata(entry) for entry in result.entries],
+                "offset": result.offset,
+                "has_more": result.has_more,
             },
         )
 
@@ -896,33 +812,24 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         recursive: bool = True,
         include_hidden: bool = False,
         kinds: Sequence[Literal["file", "directory", "symlink", "other"]] | None = None,
+        offset: _NonNegativeOffset = 0,
         max_results: _PositiveResults = 100,
-        cursor: str | None = None,
     ) -> dict[str, JsonValue]:
-        fields: dict[str, JsonValue] = {
-            "root": self._file_reference_scope(root),
-            "pattern": pattern,
-            "recursive": recursive,
-            "include_hidden": include_hidden,
-            "kinds": cast(JsonValue, sorted(kinds)) if kinds is not None else None,
-            "max_results": max_results,
-        }
-        shape = _request_scope("query", fields)
         request = FileQueryRequest(
             root=root,
             pattern=pattern,
             recursive=recursive,
             include_hidden=include_hidden,
             kinds=frozenset(kinds) if kinds is not None else None,
+            offset=offset,
             max_results=max_results,
-            cursor=self._cursor(cursor, FileQueryCursor, shape, root),
         )
         return await self._execute_file(
             lambda: ctx.deps.environment.files.query(request),
-            lambda page, provenance: {
-                "entries": [self._project_metadata(entry.metadata, provenance) for entry in page.entries],
-                "next_cursor": self._cursor_reference(page.next_cursor, shape, root, provenance),
-                "content_complete": page.content_complete,
+            lambda result: {
+                "entries": [self._project_metadata(entry) for entry in result.entries],
+                "offset": result.offset,
+                "has_more": result.has_more,
             },
         )
 
@@ -935,45 +842,34 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         regex: bool = False,
         case_sensitive: bool = True,
         include_hidden: bool = False,
+        offset: _NonNegativeOffset = 0,
         max_matches: _PositiveResults = 100,
-        max_bytes: _PositiveTextBytes = 64 * 1024,
-        cursor: str | None = None,
+        max_line_length: _PositiveTextBytes = 2_000,
     ) -> dict[str, JsonValue]:
-        fields: dict[str, JsonValue] = {
-            "root": self._file_reference_scope(root),
-            "pattern": pattern,
-            "regex": regex,
-            "case_sensitive": case_sensitive,
-            "include_hidden": include_hidden,
-            "max_matches": max_matches,
-            "max_bytes": max_bytes,
-        }
-        shape = _request_scope("search_text", fields)
         request = FileTextSearchRequest(
             root=root,
             pattern=pattern,
             regex=regex,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
+            offset=offset,
             max_matches=max_matches,
-            max_bytes=max_bytes,
-            cursor=self._cursor(cursor, FileQueryCursor, shape, root),
+            max_line_length=max_line_length,
         )
         return await self._execute_file(
             lambda: ctx.deps.environment.files.search_text(request),
-            lambda page, provenance: {
+            lambda result: {
                 "matches": [
                     {
                         "path": match.path,
-                        "revision": self._revision_reference(match.path, match.revision, provenance),
                         "line": match.line,
-                        "byte_column": match.byte_column,
                         "text": match.text,
+                        "text_truncated": match.text_truncated,
                     }
-                    for match in page.matches
+                    for match in result.matches
                 ],
-                "next_cursor": self._cursor_reference(page.next_cursor, shape, root, provenance),
-                "content_complete": page.content_complete,
+                "offset": result.offset,
+                "has_more": result.has_more,
             },
         )
 
@@ -987,10 +883,7 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.mkdir(path, parents=parents, exist_ok=exist_ok),
-            lambda result, provenance: {
-                "path": result.path,
-                "revision": self._revision_reference(result.path, result.revision, provenance),
-            },
+            lambda result: {"path": result.path},
         )
 
     async def environment_move(
@@ -999,20 +892,15 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         source: str,
         destination: str,
         *,
-        expected_source_revision: str | None = None,
         replace_existing: bool = False,
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.move(
                 source,
                 destination,
-                expected_source_revision=self._revision(expected_source_revision, source),
                 replace=replace_existing,
             ),
-            lambda result, provenance: {
-                "path": result.path,
-                "revision": self._revision_reference(result.path, result.revision, provenance),
-            },
+            lambda result: {"path": result.path},
         )
 
     async def environment_remove(
@@ -1021,15 +909,13 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         path: str,
         *,
         recursive: bool = False,
-        expected_revision: str | None = None,
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.remove(
                 path,
                 recursive=recursive,
-                expected_revision=self._revision(expected_revision, path),
             ),
-            lambda result, provenance: {"path": result.path, "removed": True},
+            lambda result: {"path": result.path, "removed": True},
         )
 
     async def environment_copy(
@@ -1038,28 +924,17 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
         source: str,
         destination: str,
         *,
-        expected_source_revision: str | None = None,
-        expected_destination_revision: str | None = None,
         replace_existing: bool = False,
-        require_atomic_destination: bool = True,
-        require_stable_source: bool = False,
     ) -> dict[str, JsonValue]:
         return await self._execute_file(
             lambda: ctx.deps.environment.files.copy(
                 source,
                 destination,
-                expected_source_revision=self._revision(expected_source_revision, source),
-                expected_destination_revision=self._revision(expected_destination_revision, destination),
                 replace=replace_existing,
-                require_atomic_destination=require_atomic_destination,
-                require_stable_source=require_stable_source,
             ),
-            lambda result, provenance: {
+            lambda result: {
                 "path": result.path,
-                "revision": self._revision_reference(result.path, result.revision, provenance),
                 "bytes_copied": result.bytes_copied,
-                "atomic_destination": result.atomic_destination,
-                "source_stability": result.source_stability,
             },
         )
 
@@ -1292,7 +1167,7 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
                 "available_end": result.capture.available_end,
                 "next_offset": (
                     max((chunk.start_offset + len(chunk.data) for chunk in result.chunks), default=start_offset)
-                    if not result.capture.content_complete
+                    if result.next_cursor is not None
                     else None
                 ),
             },
@@ -1370,165 +1245,14 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
     async def _execute_file(
         self,
         operation: Callable[[], Awaitable[Any]],
-        project: Callable[[Any, _FileResultProvenance], Mapping[str, JsonValue]],
+        project: Callable[[Any], Mapping[str, JsonValue]],
     ) -> dict[str, JsonValue]:
-        files = self._environment.files
-        if not isinstance(files, VirtualFileOperator):
+        if not isinstance(self._environment.files, VirtualFileOperator):
             raise DefinitionError(
                 "EnvironmentToolsCapability requires the Harness virtual file facade.",
                 code="environment_tools_invalid",
             )
-        token = files.begin_result_capture()
-        try:
-            return await self._execute(
-                operation,
-                lambda result: project(result, files.result_provenance()),
-            )
-        finally:
-            files.reset_result_capture(token)
-
-    def _file_reference_context(self, path: str) -> tuple[_BindingFence, str]:
-        selected = self._environment.resolve_path(path)
-        binding = next(
-            (item for item in self._environment.topology.bindings if item.binding_id == selected.binding_id),
-            None,
-        )
-        if binding is None or binding.binding_revision != selected.binding_revision:
-            raise EnvironmentError("File binding is stale.", code="environment_stale_binding")
-        return (
-            _BindingFence(
-                binding_id=binding.binding_id,
-                binding_revision=binding.binding_revision,
-                observed_generation=binding.descriptor.generation,
-            ),
-            selected.path,
-        )
-
-    @staticmethod
-    def _captured_file_reference_context(
-        path: str,
-        provenance: _FileResultProvenance,
-    ) -> tuple[_BindingFence, str]:
-        return (
-            _BindingFence(
-                binding_id=provenance.binding_id,
-                binding_revision=provenance.binding_revision,
-                observed_generation=provenance.observed_generation,
-            ),
-            provenance.provider_path(path),
-        )
-
-    @staticmethod
-    def _file_scope(
-        binding: _BindingFence,
-        provider_path: str,
-        request_scope: str | None = None,
-    ) -> str:
-        return _request_scope(
-            "file_reference",
-            {
-                "binding_id": binding.binding_id,
-                "binding_revision": binding.binding_revision,
-                "generation": binding.observed_generation,
-                "path": provider_path,
-                "request_scope": request_scope,
-            },
-        )
-
-    def _file_reference_scope(self, path: str, request_scope: str | None = None) -> str:
-        binding, provider_path = self._file_reference_context(path)
-        return self._file_scope(binding, provider_path, request_scope)
-
-    def _validate_file_reference(
-        self,
-        reference: _BoundFileReference,
-        *,
-        path: str,
-        request_scope: str | None,
-    ) -> None:
-        binding, provider_path = self._file_reference_context(path)
-        if (
-            reference.binding != binding
-            or reference.provider_path != provider_path
-            or reference.request_scope != request_scope
-        ):
-            raise EnvironmentError(
-                "File compact reference does not match the live binding and request.",
-                code="environment_reference_stale",
-            )
-
-    def _revision(self, reference: str | None, path: str) -> FileRevision | None:
-        if reference is None:
-            return None
-        value = self._references.resolve_value(reference, "revision")
-        if not isinstance(value, _BoundFileReference) or not isinstance(value.value, FileRevision):
-            raise EnvironmentError(
-                "File revision reference has an incompatible value.",
-                code="environment_reference_invalid",
-            )
-        self._validate_file_reference(value, path=path, request_scope=None)
-        return value.value
-
-    def _revision_reference(
-        self,
-        path: str,
-        revision: FileRevision | None,
-        provenance: _FileResultProvenance,
-    ) -> str | None:
-        if revision is None:
-            return None
-        binding, provider_path = self._captured_file_reference_context(path, provenance)
-        value = _BoundFileReference(
-            binding=binding,
-            provider_path=provider_path,
-            request_scope=None,
-            value=revision,
-        )
-        return self._references.register(
-            "revision",
-            value,
-            scope=self._file_scope(binding, provider_path),
-        )
-
-    def _cursor(
-        self,
-        reference: str | None,
-        expected_type: type[_CursorT],
-        scope: str,
-        path: str,
-    ) -> _CursorT | None:
-        if reference is None:
-            return None
-        value = self._references.resolve_value(reference, "cursor")
-        if not isinstance(value, _BoundFileReference) or not isinstance(value.value, expected_type):
-            raise EnvironmentError(
-                "File cursor reference has an incompatible value.",
-                code="environment_reference_invalid",
-            )
-        self._validate_file_reference(value, path=path, request_scope=scope)
-        return value.value
-
-    def _cursor_reference(
-        self,
-        cursor: FileTextCursor | FileQueryCursor | None,
-        scope: str,
-        path: str,
-        provenance: _FileResultProvenance,
-    ) -> str | None:
-        if cursor is None:
-            return None
-        binding, provider_path = self._captured_file_reference_context(path, provenance)
-        value = _BoundFileReference(
-            binding=binding,
-            provider_path=provider_path,
-            request_scope=scope,
-            value=cursor,
-        )
-        return self._references.register(
-            "cursor",
-            value,
-            scope=self._file_scope(binding, provider_path, scope),
-        )
+        return await self._execute(operation, project)
 
     def _process(self, reference: str) -> Any:
         from .commands import BoundProcessHandle
@@ -1544,16 +1268,12 @@ class _EnvironmentToolsRunCapability(EnvironmentToolsCapability, _EnvironmentRes
             raise EnvironmentError("Output reference has an incompatible value.", code="environment_reference_invalid")
         return value
 
-    def _project_metadata(
-        self,
-        metadata: FileMetadata,
-        provenance: _FileResultProvenance,
-    ) -> dict[str, JsonValue]:
+    @staticmethod
+    def _project_metadata(metadata: FileMetadata) -> dict[str, JsonValue]:
         return {
             "path": metadata.path,
             "kind": metadata.kind,
             "size": metadata.size,
-            "revision": self._revision_reference(metadata.path, metadata.revision, provenance),
             "writable": metadata.writable,
         }
 
@@ -1701,11 +1421,6 @@ def _optional_string_argument(arguments: Mapping[str, object], name: str) -> str
             code="environment_request_invalid",
         )
     return value
-
-
-def _request_scope(operation: str, values: Mapping[str, JsonValue]) -> str:
-    digest = hashlib.sha256(dump_json_bytes(dict(values), sort_keys=True)).hexdigest()
-    return f"{operation}:{digest}"
 
 
 def _bounded_topology_json(payload: dict[str, JsonValue], max_bytes: int) -> str:

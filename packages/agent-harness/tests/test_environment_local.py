@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
+import converge_agent_harness as harness_module
+import converge_agent_harness.environment as environment_module
+import converge_agent_harness.environment.local as local_module
+import converge_agent_harness.environment.local.files as local_files_module
+import converge_agent_harness.environment.local.processes as local_processes_module
+import converge_agent_harness.environment.local.retention as local_retention_module
 import pytest
 from converge_agent_harness import (
     AgentIdentityRef,
@@ -9,8 +17,11 @@ from converge_agent_harness import (
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
     DirectLocalFilePolicy,
-    DirectLocalRetentionPolicy,
+    DirectLocalOutputPolicy,
+    DirectLocalPortPolicy,
+    DirectLocalProcessPolicy,
     DirectLocalRootConfiguration,
+    DirectLocalShellProfile,
     EnvironmentAction,
     EnvironmentBindingRequest,
     EnvironmentError,
@@ -19,9 +30,8 @@ from converge_agent_harness import (
     EnvironmentStateLimits,
     EnvironmentTopologyLimits,
     EnvironmentTopologyRequest,
-    FileByteRange,
     FileQueryRequest,
-    FileRevision,
+    FileTextSearchRequest,
     OpaqueOutputReference,
     create_environment_run_binding,
 )
@@ -36,6 +46,78 @@ def _instance() -> AgentInstanceContext:
     return AgentInstanceContext(
         identity=AgentIdentityRef(issuer="test", subject="agent"),
         agent_instance_id="agent-1",
+    )
+
+
+def test_direct_local_internal_facets_are_not_public_exports() -> None:
+    for module in (harness_module, environment_module, local_module):
+        assert "LocalFileOperator" not in module.__all__
+        assert "LocalShell" not in module.__all__
+        assert not hasattr(module, "LocalFileOperator")
+        assert not hasattr(module, "LocalShell")
+
+
+def test_direct_local_policy_defaults_cover_only_materialized_values_and_live_resources() -> None:
+    files = DirectLocalFilePolicy()
+    assert files.max_value_bytes == 16 * 1024 * 1024
+
+    processes = DirectLocalProcessPolicy()
+    assert processes.max_concurrent_processes == 128
+    assert processes.max_wall_time_seconds == 24 * 60 * 60
+    assert processes.terminate_grace_seconds == 5
+
+    outputs = DirectLocalOutputPolicy()
+    assert outputs.max_buffer_bytes == 1024 * 1024
+    assert outputs.max_spool_bytes == 64 * 1024 * 1024 * 1024
+
+    with pytest.raises(ValidationError):
+        DirectLocalFilePolicy(max_file_bytes=64 * 1024 * 1024)
+    with pytest.raises(ValidationError):
+        DirectLocalProcessPolicy(max_stdin_bytes=64 * 1024 * 1024)
+    with pytest.raises(ValidationError):
+        DirectLocalOutputPolicy(retention_seconds=60)
+    with pytest.raises(ValidationError):
+        DirectLocalPortPolicy(enabled=True)
+    with pytest.raises(ValidationError):
+        DirectLocalShellProfile(profile_id="relative", executable=Path("bin/sh"))
+    with pytest.raises(ValidationError):
+        DirectLocalShellProfile(profile_id="", executable=Path("/bin/sh"))
+
+
+def _two_binding_aggregate(source: Path, destination: Path):
+    providers = (
+        DirectLocalEnvironmentProviderBinding(
+            DirectLocalEnvironmentConfiguration(
+                environment_id="local-source",
+                root=DirectLocalRootConfiguration(path=source, ownership="caller_owned"),
+            )
+        ),
+        DirectLocalEnvironmentProviderBinding(
+            DirectLocalEnvironmentConfiguration(
+                environment_id="local-destination",
+                root=DirectLocalRootConfiguration(path=destination, ownership="caller_owned"),
+            )
+        ),
+    )
+    request = EnvironmentTopologyRequest(
+        topology_version=1,
+        bindings=tuple(
+            EnvironmentBindingRequest(
+                binding_id=f"binding-{alias}",
+                binding_revision=1,
+                alias=alias,
+                permission_ceiling=EnvironmentPermissionSet(operations=frozenset(EnvironmentAction)),
+                default_working_directory="/",
+                provider_binding=provider,
+            )
+            for alias, provider in zip(("source", "destination"), providers, strict=True)
+        ),
+        default_binding_id="binding-source",
+    )
+    return create_environment_run_binding(
+        initial_topology=request,
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
     )
 
 
@@ -77,7 +159,7 @@ def _aggregate(
     )
 
 
-async def test_direct_local_text_revision_patch_copy_and_routing(tmp_path: Path) -> None:
+async def test_direct_local_text_patch_copy_and_routing(tmp_path: Path) -> None:
     binding = _aggregate(tmp_path)
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         written = await environment.files.write_text(
@@ -85,32 +167,50 @@ async def test_direct_local_text_revision_patch_copy_and_routing(tmp_path: Path)
             "alpha\nbeta\n",
             mode="create",
         )
-        assert isinstance(written.revision, FileRevision)
-        page = await environment.files.read_text("note.txt")
-        assert page.text == "alpha\nbeta\n"
-        assert page.path == "note.txt"
+        assert written.bytes_written == len(b"alpha\nbeta\n")
+        observed = await environment.files.read_text("note.txt")
+        assert observed.text == "alpha\nbeta\n"
+        assert observed.path == "note.txt"
 
         patched = await environment.files.patch_text(
             "/workspace/note.txt",
             "@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
-            expected_revision=written.revision,
         )
         assert patched.hunks_applied == 1
         copied = await environment.files.copy(
             "/workspace/note.txt",
             "/workspace/copied.txt",
         )
-        assert copied.atomic_destination is True
+        assert copied.bytes_copied == len(b"alpha\ngamma\n")
         assert (tmp_path / "copied.txt").read_text() == "alpha\ngamma\n"
 
-        with pytest.raises(EnvironmentError) as stale:
-            await environment.files.write_text(
-                "/workspace/note.txt",
-                "wrong",
-                mode="replace",
-                expected_revision=written.revision,
-            )
-        assert stale.value.code == "environment_conflict"
+
+@pytest.mark.parametrize(
+    ("source", "patch", "expected"),
+    [
+        ("a\rb\n", "@@ -1 +1 @@\n-a\rb\n+x\n", "x\n"),
+        ("a\u2028b\n", "@@ -1 +1 @@\n-a\u2028b\n+x\n", "x\n"),
+        (
+            "tail",
+            "@@ -1 +1 @@\n-tail\n\\ No newline at end of file\n+done\n\\ No newline at end of file",
+            "done",
+        ),
+    ],
+)
+async def test_direct_local_patch_uses_lf_only_lines_without_normalizing_content(
+    tmp_path: Path,
+    source: str,
+    patch: str,
+    expected: str,
+) -> None:
+    (tmp_path / "value.txt").write_text(source)
+    binding = _aggregate(tmp_path)
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        result = await environment.files.patch_text("/workspace/value.txt", patch)
+
+    assert result.hunks_applied == 1
+    assert (tmp_path / "value.txt").read_text() == expected
 
 
 async def test_direct_local_rejects_escape_symlink_and_read_only_mutation(tmp_path: Path) -> None:
@@ -131,6 +231,63 @@ async def test_direct_local_rejects_escape_symlink_and_read_only_mutation(tmp_pa
         with pytest.raises(EnvironmentError) as denied:
             await environment.files.write_text("/workspace/new.txt", "x", mode="create")
         assert denied.value.code == "environment_denied"
+
+
+async def test_file_only_binding_does_not_advertise_or_create_output_operations(tmp_path: Path) -> None:
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="local-files-only",
+            root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
+        )
+    )
+    async with provider.bind(
+        run_id="run-1",
+        instance=_instance(),
+        binding_id="binding-1",
+        binding_revision=1,
+    ) as entered:
+        assert entered.operations.outputs is None
+        assert "outputs" not in entered.descriptor.operation_families
+        assert EnvironmentAction.OUTPUT_READ not in entered.descriptor.permissions.operations
+
+
+async def test_binding_teardown_attempts_spool_and_owned_root_cleanup_after_process_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owned = tmp_path / "owned-cleanup"
+    retention_closed = False
+    original_retention_close = local_retention_module.LocalRetentionStore.close
+
+    async def fail_process_close(manager) -> None:
+        raise RuntimeError("forced process cleanup failure")
+
+    async def observe_retention_close(store) -> None:
+        nonlocal retention_closed
+        retention_closed = True
+        await original_retention_close(store)
+
+    monkeypatch.setattr(local_processes_module.LocalProcessManager, "close", fail_process_close)
+    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "close", observe_retention_close)
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="local-cleanup-failure",
+            root=DirectLocalRootConfiguration(path=owned, ownership="binding_owned"),
+            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="forced process cleanup failure"):
+        async with provider.bind(
+            run_id="run-1",
+            instance=_instance(),
+            binding_id="binding-1",
+            binding_revision=1,
+        ):
+            pass
+
+    assert retention_closed is True
+    assert not owned.exists()
 
 
 async def test_binding_owned_root_is_exclusive_and_removed(tmp_path: Path) -> None:
@@ -167,51 +324,265 @@ async def test_binding_owned_root_is_exclusive_and_removed(tmp_path: Path) -> No
     assert not owned.exists()
 
 
-async def test_raw_transfer_limits_and_uncommitted_writer_abort(tmp_path: Path) -> None:
+async def test_raw_reads_are_at_most_and_stream_writes_publish_only_on_success(tmp_path: Path) -> None:
     (tmp_path / "large.bin").write_bytes(b"12345")
     binding = _aggregate(
         tmp_path,
-        file_policy=DirectLocalFilePolicy(
-            max_text_bytes=16,
-            max_transfer_bytes=4,
-            max_query_results=10,
-            max_query_bytes=16,
-        ),
+        file_policy=DirectLocalFilePolicy(max_value_bytes=4),
     )
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         with pytest.raises(EnvironmentError) as too_large:
-            async with environment.files.open_reader("/workspace/large.bin"):
-                pass
+            await environment.files.read_bytes("/workspace/large.bin")
         assert too_large.value.code == "environment_too_large"
 
-        async with environment.files.open_reader(
-            "/workspace/large.bin",
-            byte_range=FileByteRange(offset=1, length=4),
-        ) as reader:
-            assert b"".join([chunk async for chunk in reader]) == b"2345"
+        assert (
+            await environment.files.read_bytes(
+                "/workspace/large.bin",
+                offset=1,
+                length=4,
+            )
+            == b"2345"
+        )
+        assert (
+            await environment.files.read_bytes(
+                "/workspace/large.bin",
+                offset=100,
+                length=100,
+            )
+            == b""
+        )
+        assert (
+            await environment.files.read_bytes(
+                "/workspace/large.bin",
+                length=0,
+            )
+            == b""
+        )
 
-        async with environment.files.open_writer("/workspace/aborted.bin", mode="create") as writer:
-            await writer.write(b"data")
+        shrinking = tmp_path / "shrinking.bin"
+        shrinking.write_bytes(b"12")
+        assert (
+            await environment.files.read_bytes(
+                "/workspace/shrinking.bin",
+                length=100,
+            )
+            == b"12"
+        )
+
+        appended = await environment.files.write_text(
+            "/workspace/shrinking.bin",
+            "3",
+            mode="append",
+        )
+        assert appended.bytes_written == 1
+        assert shrinking.read_bytes() == b"123"
+
+        patch_target = tmp_path / "patch-target.txt"
+        patch_target.write_text("a\n")
+        with pytest.raises(EnvironmentError) as patch_too_large:
+            await environment.files.patch_text(
+                "/workspace/patch-target.txt",
+                "@@ -1 +1 @@\n-a\n+abcde\n",
+            )
+        assert patch_too_large.value.code == "environment_too_large"
+        assert patch_target.read_text() == "a\n"
+
+        with pytest.raises(EnvironmentError) as missing_append:
+            await environment.files.write_text(
+                "/workspace/missing.txt",
+                "x",
+                mode="append",
+            )
+        assert missing_append.value.code == "environment_not_found"
+        assert not (tmp_path / "missing.txt").exists()
+
+        invalid_append = tmp_path / "invalid-append.bin"
+        invalid_append.write_bytes(b"\xff")
+        with pytest.raises(EnvironmentError) as unsupported_append:
+            await environment.files.write_text(
+                "/workspace/invalid-append.bin",
+                "x",
+                mode="append",
+            )
+        assert unsupported_append.value.code == "environment_unsupported"
+        assert invalid_append.read_bytes() == b"\xff"
+
+        async def interrupted_stream():
+            yield b"data"
+            raise RuntimeError("source failed")
+
+        with pytest.raises(RuntimeError, match="source failed"):
+            await environment.files.write_bytes_stream(
+                "/workspace/aborted.bin",
+                interrupted_stream(),
+                mode="create",
+            )
         assert not (tmp_path / "aborted.bin").exists()
         assert not tuple(tmp_path.glob(".converge-write-*"))
 
-        with pytest.raises(EnvironmentError) as append_too_large:
-            async with environment.files.open_writer("/workspace/large.bin", mode="append"):
-                pass
-        assert append_too_large.value.code == "environment_too_large"
+        streamed = b"".join([chunk async for chunk in environment.files.read_bytes_stream("/workspace/large.bin")])
+        assert streamed == b"12345"
+
+        appended_large = await environment.files.write_text("/workspace/large.bin", "x", mode="append")
+        assert appended_large.bytes_written == 1
+        assert (tmp_path / "large.bin").read_bytes() == b"12345x"
+
+        (tmp_path / "unbounded-stream.bin").write_bytes(b"123456789")
+        unbounded = b"".join(
+            [chunk async for chunk in environment.files.read_bytes_stream("/workspace/unbounded-stream.bin")]
+        )
+        assert unbounded == b"123456789"
+
+        async def larger_than_value_limit():
+            yield b"1234"
+            yield b"56789"
+
+        streamed_write = await environment.files.write_bytes_stream(
+            "/workspace/streamed.bin",
+            larger_than_value_limit(),
+            mode="create",
+        )
+        assert streamed_write.bytes_written == 9
+        assert (tmp_path / "streamed.bin").read_bytes() == b"123456789"
         assert not tuple(tmp_path.glob(".converge-write-*"))
 
 
-async def test_query_is_deterministic_bounded_and_cursor_continues(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cross_binding", [False, True])
+async def test_copy_accepts_source_eof_without_completion_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cross_binding: bool,
+) -> None:
+    if cross_binding:
+        source_root = tmp_path / "source"
+        destination_root = tmp_path / "destination"
+        source_root.mkdir()
+        destination_root.mkdir()
+        binding = _two_binding_aggregate(source_root, destination_root)
+        source = source_root / "value.bin"
+        destination = destination_root / "copied.bin"
+        destination_path = "/environment/destination/copied.bin"
+    else:
+        source_root = tmp_path
+        binding = _aggregate(source_root)
+        source = source_root / "value.bin"
+        destination = source_root / "copied.bin"
+        destination_path = "/workspace/copied.bin"
+    source.write_bytes(b"abcdefgh")
+    original = local_files_module.LocalFileOperator.read_bytes_stream
+
+    async def shrink_then_read(operator, path, *, chunk_size=65_536):
+        if operator._root == source_root.resolve() and path == "/value.bin":
+            source.write_bytes(b"abc")
+        async for chunk in original(operator, path, chunk_size=chunk_size):
+            yield chunk
+
+    monkeypatch.setattr(local_files_module.LocalFileOperator, "read_bytes_stream", shrink_then_read)
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        copied = await environment.files.copy("/workspace/value.bin", destination_path)
+    assert copied.bytes_copied == 3
+    assert destination.read_bytes() == b"abc"
+    assert not tuple(destination.parent.glob(".converge-write-*"))
+
+
+async def test_text_read_uses_zero_based_line_offsets_without_splitting_utf8_lines(tmp_path: Path) -> None:
+    content = "skip\naaaaaétail\nlast\n"
+    (tmp_path / "value.txt").write_text(content)
+    binding = _aggregate(tmp_path)
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        first = await environment.files.read_text(
+            "/workspace/value.txt",
+            line_offset=1,
+            line_limit=1,
+        )
+        assert first.text == "aaaaaétail\n"
+        assert first.line_offset == 1
+        assert first.lines_read == 1
+        assert first.has_more is True
+        assert first.truncated_lines == ()
+
+        truncated = await environment.files.read_text(
+            "/workspace/value.txt",
+            line_offset=1,
+            line_limit=1,
+            max_line_length=5,
+        )
+        assert truncated.text == "aaaaa\n"
+        assert truncated.truncated_lines == (2,)
+        assert truncated.has_more is True
+
+        second = await environment.files.read_text(
+            "/workspace/value.txt",
+            line_offset=first.line_offset + first.lines_read,
+            line_limit=1,
+        )
+        assert second.text == "last\n"
+        assert second.line_offset == 2
+        assert second.lines_read == 1
+        assert second.has_more is False
+
+        exhausted = await environment.files.read_text(
+            "/workspace/value.txt",
+            line_offset=3,
+            line_limit=1,
+        )
+        assert exhausted.text == ""
+        assert exhausted.lines_read == 0
+        assert exhausted.has_more is False
+
+        (tmp_path / "invalid-after-page.txt").write_bytes(b"valid\n\xff")
+        valid_page = await environment.files.read_text(
+            "/workspace/invalid-after-page.txt",
+            line_limit=1,
+        )
+        assert valid_page.text == "valid\n"
+        assert valid_page.lines_read == 1
+        assert valid_page.has_more is True
+        with pytest.raises(EnvironmentError) as invalid_page:
+            await environment.files.read_text(
+                "/workspace/invalid-after-page.txt",
+                line_offset=1,
+                line_limit=1,
+            )
+        assert invalid_page.value.code == "environment_unsupported"
+        with pytest.raises(EnvironmentError) as invalid_patch:
+            await environment.files.patch_text(
+                "/workspace/invalid-after-page.txt",
+                "@@ -1 +1 @@\n-valid\n+updated\n",
+            )
+        assert invalid_patch.value.code == "environment_unsupported"
+
+        boundaries = tmp_path / "boundaries.txt"
+        boundaries.write_text("a\rb\nc\u2028d\r\ne")
+        selected = await environment.files.read_text(
+            "/workspace/boundaries.txt",
+            line_offset=1,
+            line_limit=1,
+        )
+        assert selected.text == "c\u2028d\r\n"
+        assert selected.lines_read == 1
+        assert selected.has_more is True
+        searched = await environment.files.search_text(
+            FileTextSearchRequest(
+                root="/workspace",
+                pattern="d",
+                max_matches=10,
+            )
+        )
+        match = next(match for match in searched.matches if match.path.endswith("boundaries.txt"))
+        assert match.line == 2
+        assert match.text == "c\u2028d\r"
+        assert match.text_truncated is False
+
+
+async def test_query_is_deterministic_bounded_and_offset_continues(tmp_path: Path) -> None:
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "1.txt").write_text("1")
     (tmp_path / "a" / "2.txt").write_text("2")
     (tmp_path / "b.txt").write_text("b")
     (tmp_path / ".hidden.txt").write_text("hidden")
-    binding = _aggregate(
-        tmp_path,
-        file_policy=DirectLocalFilePolicy(max_query_results=2),
-    )
+    binding = _aggregate(tmp_path)
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         request = FileQueryRequest(
             root="/workspace",
@@ -222,14 +593,101 @@ async def test_query_is_deterministic_bounded_and_cursor_continues(tmp_path: Pat
             max_results=2,
         )
         first = await environment.files.query(request)
-        assert [entry.metadata.path for entry in first.entries] == [
+        assert [entry.path for entry in first.entries] == [
             "/workspace/a/1.txt",
             "/workspace/a/2.txt",
         ]
-        assert first.next_cursor is not None
-        second = await environment.files.query(request.model_copy(update={"cursor": first.next_cursor}))
-        assert [entry.metadata.path for entry in second.entries] == ["/workspace/b.txt"]
-        assert second.content_complete is True
+        assert first.offset == 0
+        assert first.has_more is True
+
+        second = await environment.files.query(request.model_copy(update={"offset": first.offset + len(first.entries)}))
+        assert [entry.path for entry in second.entries] == ["/workspace/b.txt"]
+        assert second.offset == 2
+        assert second.has_more is False
+
+        deep_glob = "/".join(["**"] * 1_200 + ["*.txt"])
+        deep_result = await environment.files.query(
+            request.model_copy(update={"pattern": deep_glob, "max_results": 10})
+        )
+        assert [entry.path for entry in deep_result.entries] == [
+            "/workspace/a/1.txt",
+            "/workspace/a/2.txt",
+            "/workspace/b.txt",
+        ]
+        assert deep_result.has_more is False
+
+        with pytest.raises(EnvironmentError) as invalid_pattern:
+            await environment.files.query(request.model_copy(update={"pattern": "x" * (16 * 1024 + 1)}))
+        assert invalid_pattern.value.code == "environment_request_invalid"
+
+
+async def test_search_iterates_lines_without_materializing_a_second_line_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "many-lines.txt").write_text("\n" * 10_000 + "needle\n")
+    monkeypatch.setattr(
+        local_files_module,
+        "_split_lf_lines",
+        lambda _: pytest.fail("search must not materialize patch line collections"),
+    )
+    binding = _aggregate(tmp_path)
+
+    async with binding.bind(run_id="run-search-lines", instance=_instance()) as environment:
+        result = await environment.files.search_text(
+            FileTextSearchRequest(root="/workspace", pattern="needle", max_matches=10)
+        )
+
+    assert len(result.matches) == 1
+    assert result.matches[0].line == 10_001
+
+
+async def test_search_skips_nul_files_and_streams_files_larger_than_value_limit(tmp_path: Path) -> None:
+    nul_file = tmp_path / "nul.txt"
+    nul_file.write_bytes(b"needle\x00hidden\n")
+    binding = _aggregate(tmp_path)
+    async with binding.bind(run_id="run-nul", instance=_instance()) as environment:
+        result = await environment.files.search_text(
+            FileTextSearchRequest(
+                root="/workspace",
+                pattern="needle",
+                max_matches=10,
+            )
+        )
+        assert result.matches == ()
+        assert result.has_more is False
+
+    nul_file.unlink()
+    (tmp_path / "large.txt").write_text("haystack\n" * 10 + "needle\n")
+    limited = _aggregate(tmp_path, file_policy=DirectLocalFilePolicy(max_value_bytes=16))
+    async with limited.bind(run_id="run-large", instance=_instance()) as environment:
+        result = await environment.files.search_text(
+            FileTextSearchRequest(root="/workspace", pattern="needle", max_matches=10)
+        )
+        assert [match.path for match in result.matches] == ["/workspace/large.txt"]
+
+        (tmp_path / "long-line.txt").write_text("x" * 17 + " needle\n")
+        with pytest.raises(EnvironmentError) as too_large:
+            await environment.files.search_text(
+                FileTextSearchRequest(root="/workspace", pattern="needle", max_matches=10)
+            )
+        assert too_large.value.code == "environment_too_large"
+
+
+async def test_search_result_page_does_not_limit_file_traversal(tmp_path: Path) -> None:
+    for index in range(20):
+        (tmp_path / f"{index:02}.txt").write_text("needle\n")
+    binding = _aggregate(tmp_path)
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        first = await environment.files.search_text(
+            FileTextSearchRequest(root="/workspace", pattern="needle", max_matches=2)
+        )
+        assert [match.path for match in first.matches] == [
+            "/workspace/00.txt",
+            "/workspace/01.txt",
+        ]
+        assert first.has_more is True
 
 
 async def test_local_retention_is_bounded_readable_and_released(tmp_path: Path) -> None:
@@ -237,6 +695,7 @@ async def test_local_retention_is_bounded_readable_and_released(tmp_path: Path) 
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
+            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
         )
     )
     async with provider.bind(
@@ -246,29 +705,99 @@ async def test_local_retention_is_bounded_readable_and_released(tmp_path: Path) 
         binding_revision=1,
     ) as entered:
         store = entered.operations.outputs
+        assert store is not None
         policy = EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain")
-        capture = await store.capture(b"abcdefghij", policy)
-        assert capture.kind == "retained"
-        assert capture.reference is not None
-        result = await store.read(capture.reference, policy=policy)
+        writer = await store.reserve(max_bytes=64)
+        assert await writer.write(b"abcdefghij") == 10
+        reference = await writer.commit()
+        result = await store.read(reference, policy=policy)
         assert result.chunks[0].data == b"abcd"
         assert result.next_cursor is not None
-        await store.release(reference=capture.reference)
+        await store.release(reference=reference)
         with pytest.raises(EnvironmentError):
-            await store.read(capture.reference, policy=policy)
+            await store.read(reference, policy=policy)
 
 
-async def test_retention_reservations_count_toward_object_quota(tmp_path: Path) -> None:
+async def test_retention_stops_capturing_after_the_first_quota_gap(tmp_path: Path) -> None:
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="local-output-gap",
+            root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
+            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            outputs=DirectLocalOutputPolicy(max_buffer_bytes=4, max_spool_bytes=6),
+        )
+    )
+    async with provider.bind(
+        run_id="run-1",
+        instance=_instance(),
+        binding_id="binding-1",
+        binding_revision=1,
+    ) as entered:
+        store = entered.operations.outputs
+        assert store is not None
+        blocker = await store.reserve(max_bytes=64)
+        assert await blocker.write(b"block!") == 6
+        blocker_reference = await blocker.commit()
+
+        writer = await store.reserve(max_bytes=64)
+        assert await writer.write(b"prefix") == 0
+        await store.release(reference=blocker_reference)
+        assert await writer.write(b"suffix") == 0
+        await writer.abort()
+        assert store._used_bytes == 0
+
+
+async def test_retained_read_serializes_with_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="local-output-race",
+            root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
+            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+        )
+    )
+    async with provider.bind(
+        run_id="run-1",
+        instance=_instance(),
+        binding_id="binding-1",
+        binding_revision=1,
+    ) as entered:
+        store = entered.operations.outputs
+        assert store is not None
+        writer = await store.reserve(max_bytes=64)
+        assert await writer.write(b"abcdefghij") == 10
+        reference = await writer.commit()
+        started = threading.Event()
+        proceed = threading.Event()
+        original_read_range = local_retention_module._read_range
+
+        def blocking_read_range(path: Path, offset: int, size: int) -> bytes:
+            started.set()
+            assert proceed.wait(timeout=1)
+            return original_read_range(path, offset, size)
+
+        monkeypatch.setattr(local_retention_module, "_read_range", blocking_read_range)
+        policy = EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain")
+        read_task = asyncio.create_task(store.read(reference, policy=policy))
+        assert await asyncio.to_thread(started.wait, 1)
+        release_task = asyncio.create_task(store.release(reference=reference))
+        await asyncio.sleep(0)
+        assert not release_task.done()
+        proceed.set()
+        result = await read_task
+        await release_task
+        assert result.chunks[0].data == b"abcd"
+
+
+async def test_retention_accounts_actual_bytes_and_refunds_release(tmp_path: Path) -> None:
     provider = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
             environment_id="local-output-quota",
             root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
-            retention=DirectLocalRetentionPolicy(
-                max_object_bytes=8,
-                max_total_bytes=16,
-                max_objects=1,
-                max_lifetime_seconds=60,
-            ),
+            shell_profiles=(DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),),
+            outputs=DirectLocalOutputPolicy(max_buffer_bytes=4, max_spool_bytes=8),
         )
     )
     async with provider.bind(
@@ -278,13 +807,24 @@ async def test_retention_reservations_count_toward_object_quota(tmp_path: Path) 
         binding_revision=1,
     ) as entered:
         store = entered.operations.outputs
-        first = await store.reserve(max_bytes=8)
-        with pytest.raises(EnvironmentError) as exhausted:
-            await store.reserve(max_bytes=8)
-        assert exhausted.value.code == "environment_quota_exceeded"
-        await first.abort()
-        second = await store.reserve(max_bytes=8)
-        await second.abort()
+        assert store is not None
+        first = await store.reserve(max_bytes=64)
+        second = await store.reserve(max_bytes=64)
+        assert store._used_bytes == 0
+        assert await first.write(b"abcdef") == 6
+        assert await second.write(b"ghijkl") == 2
+        assert store._used_bytes == 8
+        first_reference = await first.commit()
+        second_reference = await second.commit()
+
+        await store.release(reference=first_reference)
+        assert store._used_bytes == 2
+        third = await store.reserve(max_bytes=64)
+        assert await third.write(b"mnopqr") == 6
+        await third.abort()
+        assert store._used_bytes == 2
+        await store.release(reference=second_reference)
+        assert store._used_bytes == 0
 
 
 async def test_opaque_output_reference_is_exact_python_only() -> None:

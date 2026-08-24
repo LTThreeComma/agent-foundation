@@ -14,6 +14,7 @@ from converge_agent_harness import (
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
     DirectLocalRootConfiguration,
+    DirectLocalShellProfile,
     EnvironmentAction,
     EnvironmentBindingRequest,
     EnvironmentError,
@@ -32,19 +33,15 @@ from converge_agent_harness import (
     create_environment_run_binding,
     create_noop_environment_run_binding,
 )
-from converge_agent_harness.environment.files import FileMetadata, FileRevision
+from converge_agent_harness.environment.files import FileWriteResult
+from converge_agent_harness.environment.models import EnvironmentOperationReceipt
 from converge_agent_harness.environment.retention import BoundOutputReference, OpaqueOutputReference
 from converge_agent_harness.environment.tools import (
-    _BoundFileReference,
     _CompactReferenceTable,
     _EnvironmentRetainedToolResult,
     _EnvironmentToolsRunCapability,
 )
-from converge_agent_harness.environment.virtual_files import (
-    VirtualFileOperator,
-    _FileResultProvenance,
-    _PreparedFile,
-)
+from converge_agent_harness.environment.virtual_files import VirtualFileOperator, _PreparedFile
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
     PluginOrdering,
@@ -90,11 +87,16 @@ def _policy() -> InvocationPolicyCapability:
     return InvocationPolicyCapability(evaluator=_Allow(), max_dispatch_retries=0)
 
 
-def _local_binding(root: Path):
+def _local_binding(root: Path, *, process_output: bool = False):
     provider = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
             environment_id="environment-tools-test",
             root=DirectLocalRootConfiguration(path=root, ownership="caller_owned"),
+            shell_profiles=(
+                (DirectLocalShellProfile(profile_id="posix", executable=Path("/bin/sh").resolve()),)
+                if process_output
+                else ()
+            ),
         )
     )
     request = EnvironmentTopologyRequest(
@@ -222,7 +224,7 @@ async def test_capability_projects_stable_tools_and_one_bounded_fresh_topology_s
     assert executable.definition.agent.tool_timeout is None
 
 
-async def test_file_tools_use_scoped_compact_revisions_and_native_managed_policy(tmp_path: Path) -> None:
+async def test_file_tools_omit_file_revisions_and_use_native_managed_policy(tmp_path: Path) -> None:
     model_calls = 0
     tool_results: list[dict[str, Any]] = []
 
@@ -242,7 +244,7 @@ async def test_file_tools_use_scoped_compact_revisions_and_native_managed_policy
             yield {
                 0: DeltaToolCall(
                     name="environment_write_text",
-                    json_args=json.dumps({"path": "note.txt", "text": "one", "mode": "create"}),
+                    json_args=json.dumps({"path": "note.txt", "text": "one", "mode": "overwrite"}),
                     tool_call_id="write-1",
                 )
             }
@@ -254,8 +256,7 @@ async def test_file_tools_use_scoped_compact_revisions_and_native_managed_policy
                         {
                             "path": "/workspace/note.txt",
                             "text": "two",
-                            "mode": "replace",
-                            "expected_revision": returns[0]["revision"],
+                            "mode": "overwrite",
                         }
                     ),
                     tool_call_id="write-2",
@@ -279,11 +280,14 @@ async def test_file_tools_use_scoped_compact_revisions_and_native_managed_policy
     assert model_calls == 3
     assert (tmp_path / "note.txt").read_text() == "two"
     assert tool_results[0]["ok"] is True
-    assert tool_results[0]["revision"] == "revision-1"
-    assert tool_results[1]["revision"] == "revision-2"
+    assert tool_results[0]["bytes_written"] == 3
+    assert tool_results[1]["bytes_written"] == 3
+    assert "revision" not in tool_results[0]
+    assert "revision" not in tool_results[1]
 
 
-async def test_compact_references_survive_inner_model_recovery_attempts(tmp_path: Path) -> None:
+async def test_explicit_file_offsets_survive_inner_model_recovery_attempts(tmp_path: Path) -> None:
+    (tmp_path / "recovered.txt").write_text("one\ntwo\n")
     failed_once = False
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
@@ -299,9 +303,9 @@ async def test_compact_references_survive_inner_model_recovery_attempts(tmp_path
         if not returns:
             yield {
                 0: DeltaToolCall(
-                    name="environment_write_text",
-                    json_args=json.dumps({"path": "/workspace/recovered.txt", "text": "one", "mode": "create"}),
-                    tool_call_id="recover-write-1",
+                    name="environment_read_text",
+                    json_args=json.dumps({"path": "/workspace/recovered.txt", "line_offset": 0, "line_limit": 1}),
+                    tool_call_id="recover-read-1",
                 )
             }
         elif len(returns) == 1 and not failed_once:
@@ -310,16 +314,15 @@ async def test_compact_references_survive_inner_model_recovery_attempts(tmp_path
         elif len(returns) == 1:
             yield {
                 0: DeltaToolCall(
-                    name="environment_write_text",
+                    name="environment_read_text",
                     json_args=json.dumps(
                         {
                             "path": "/workspace/recovered.txt",
-                            "text": "two",
-                            "mode": "replace",
-                            "expected_revision": returns[0]["revision"],
+                            "line_offset": returns[0]["line_offset"] + returns[0]["lines_read"],
+                            "line_limit": 1,
                         }
                     ),
-                    tool_call_id="recover-write-2",
+                    tool_call_id="recover-read-2",
                 )
             }
         else:
@@ -343,28 +346,25 @@ async def test_compact_references_survive_inner_model_recovery_attempts(tmp_path
     )
 
     assert result.output_or_raise() == "done"
-    assert (tmp_path / "recovered.txt").read_text() == "two"
+    assert (tmp_path / "recovered.txt").read_text() == "one\ntwo\n"
     assert result.usage.requests == 4
 
 
-def test_compact_reference_table_is_scoped_bounded_monotonic_and_tombstoned() -> None:
+def test_compact_reference_table_is_bounded_monotonic_and_tombstoned() -> None:
     table = _CompactReferenceTable(max_entries=2)
-    revision = object()
+    process = object()
 
-    assert table.register("revision", revision, scope="/workspace/a") == "revision-1"
-    assert table.register("revision", revision, scope="/workspace/a") == "revision-1"
-    with pytest.raises(Exception) as wrong_scope:
-        table.resolve("revision-1", "revision", scope="/workspace/b")
-    assert getattr(wrong_scope.value, "code", None) == "environment_reference_invalid"
+    assert table.register("process", process) == "process-1"
+    assert table.register("process", process) == "process-1"
 
-    table.tombstone("revision-1", "revision")
+    table.tombstone("process-1", "process")
     with pytest.raises(Exception) as stale:
-        table.resolve("revision-1", "revision", scope="/workspace/a")
+        table.resolve("process-1", "process")
     assert getattr(stale.value, "code", None) == "environment_reference_stale"
 
-    assert table.register("cursor", object(), scope="query:one") == "cursor-1"
+    assert table.register("output", object()) == "output-1"
     with pytest.raises(Exception) as exhausted:
-        table.register("output", object())
+        table.register("process", object())
     assert getattr(exhausted.value, "code", None) == "environment_reference_exhausted"
 
 
@@ -445,9 +445,7 @@ async def test_managed_dispatch_fails_stale_when_policy_wait_refreshes_binding(t
     assert observed["error"]["code"] == "environment_stale_binding"
 
 
-async def test_file_references_and_managed_authorization_are_fenced_by_binding_revision(
-    tmp_path: Path,
-) -> None:
+async def test_managed_authorization_is_fenced_by_binding_revision(tmp_path: Path) -> None:
     aggregate = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=aggregate)
     replacement = DirectLocalEnvironmentProviderBinding(
@@ -478,18 +476,6 @@ async def test_file_references_and_managed_authorization_are_fenced_by_binding_r
             run_id="run-1",
             environment=environment,
         )
-        revision = FileRevision("provider-revision")
-        binding, provider_path = capability._file_reference_context("relative.txt")
-        provenance = _FileResultProvenance(
-            binding_id=binding.binding_id,
-            binding_revision=binding.binding_revision,
-            observed_generation=binding.observed_generation,
-            paths=(("relative.txt", provider_path),),
-        )
-        compact = capability._revision_reference("relative.txt", revision, provenance)
-        assert compact == "revision-1"
-        assert capability._revision(compact, "/workspace/relative.txt") == revision
-
         resolver = capability._resource_resolver("environment.stat")
         resources = await resolver(
             {"path": "/workspace/relative.txt"},
@@ -498,9 +484,6 @@ async def test_file_references_and_managed_authorization_are_fenced_by_binding_r
         assert len(resources) == 1
         await aggregate.controller.apply(refresh)
 
-        with pytest.raises(Exception) as stale_reference:
-            capability._revision(compact, "/workspace/relative.txt")
-        assert getattr(stale_reference.value, "code", None) == "environment_reference_stale"
         with pytest.raises(Exception) as stale_authorization:
             capability._assert_authorized_fence()
         assert getattr(stale_authorization.value, "code", None) == "environment_stale_binding"
@@ -620,7 +603,10 @@ async def test_managed_environment_reference_uses_the_run_capability_table(tmp_p
     )
     result = await executable.run(
         "produce",
-        bindings=RunBindings.local(environment=_local_binding(tmp_path), capabilities=(_policy(),)),
+        bindings=RunBindings.local(
+            environment=_local_binding(tmp_path, process_output=True),
+            capabilities=(_policy(),),
+        ),
     )
 
     assert result.output_or_raise() == "done"
@@ -681,7 +667,7 @@ async def test_large_environment_result_is_bounded_without_retry_shaped_failure(
             yield {
                 0: DeltaToolCall(
                     name="environment_read_text",
-                    json_args=json.dumps({"path": "/workspace/large.txt", "max_bytes": 256 * 1024}),
+                    json_args=json.dumps({"path": "/workspace/large.txt", "line_limit": 1}),
                     tool_call_id="large-read-1",
                 )
             }
@@ -702,9 +688,11 @@ async def test_large_environment_result_is_bounded_without_retry_shaped_failure(
     )
 
     assert result.output_or_raise() == "done"
-    assert observed["complete"] is False
-    assert observed["truncated"] is True
-    assert isinstance(observed["content"], str)
+    assert observed["ok"] is True
+    assert observed["has_more"] is False
+    assert observed["truncated_lines"] == [1]
+    assert isinstance(observed["text"], str)
+    assert len(observed["text"]) == 2_000
 
 
 async def test_agent_spec_tool_retries_exhaust_once_without_environment_retry_loop() -> None:
@@ -743,58 +731,75 @@ async def test_agent_spec_tool_retries_exhaust_once_without_environment_retry_lo
     assert len(retry_parts) == 2
 
 
-async def test_file_projection_uses_operation_revision_after_concurrent_refresh() -> None:
-    class Backend:
-        async def stat(self, path: str) -> FileMetadata:
-            return FileMetadata(
+@pytest.mark.parametrize("source_fails", [False, True])
+async def test_cross_binding_copy_uses_plain_stream_completion(source_fails: bool) -> None:
+    class SourceBackend:
+        async def read_bytes_stream(self, path: str, *, chunk_size: int = 65_536):
+            del path, chunk_size
+            yield b"data"
+            if source_fails:
+                raise RuntimeError("source failed")
+
+    class DestinationBackend:
+        def __init__(self) -> None:
+            self.data: bytes | None = None
+
+        async def write_bytes_stream(self, path: str, stream, *, mode: str) -> FileWriteResult:
+            del mode
+            staged = bytearray()
+            async for chunk in stream:
+                staged.extend(chunk)
+            self.data = bytes(staged)
+            return FileWriteResult(
                 path=path,
-                kind="file",
-                size=1,
-                revision=FileRevision("old-token"),
-                writable=True,
+                bytes_written=len(staged),
+                receipt=EnvironmentOperationReceipt(
+                    binding_id="binding-destination",
+                    binding_revision=1,
+                    observed_generation="generation-destination",
+                    operation_id="operation-1",
+                    stage="completed",
+                    outcome="succeeded",
+                ),
             )
 
+    source_backend = SourceBackend()
+    destination_backend = DestinationBackend()
+    topology_revision = 1
+    prepared_revisions: list[int] = []
+
+    def resolve(path: str) -> EnvironmentPath:
+        source = path == "source"
+        return EnvironmentPath(
+            binding_id="binding-source" if source else "binding-destination",
+            binding_revision=topology_revision,
+            path=f"/{path}",
+        )
+
     @asynccontextmanager
-    async def prepare(path: str, action: EnvironmentAction):
-        del action
+    async def prepare(selected: EnvironmentPath, action: EnvironmentAction):
+        nonlocal topology_revision
+        source = action is EnvironmentAction.FILE_COPY_SOURCE
+        prepared_revisions.append(selected.binding_revision)
+        if source:
+            topology_revision = 2
         yield _PreparedFile(
-            selected=EnvironmentPath(
-                binding_id="binding-1",
-                binding_revision=1,
-                path=f"/{path}",
-            ),
-            observed_generation="generation-1",
-            backend=Backend(),
+            selected=selected,
+            observed_generation="generation-source" if source else "generation-destination",
+            backend=source_backend if source else destination_backend,
             validate_result=lambda value: None,
         )
 
-    files = VirtualFileOperator(prepare, lambda selected, path: path)
-
-    class RefreshedEnvironment:
-        def __init__(self) -> None:
-            self.files = files
-
-        def resolve_path(self, path: str, *, alias: str | None = None) -> EnvironmentPath:
-            del path, alias
-            raise AssertionError("projection must not resolve the live revision")
-
-    environment = RefreshedEnvironment()
-    capability = _EnvironmentToolsRunCapability(
-        _configuration(),
-        run_id="run-1",
-        environment=cast(Any, environment),
-    )
-    context = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=environment)))
-
-    result = await capability.environment_stat(context, "value.txt")
-
-    assert result["ok"] is True
-    reference = cast(str, result["revision"])
-    retained = capability._references.resolve_value(reference, "revision")
-    assert isinstance(retained, _BoundFileReference)
-    assert retained.binding.binding_revision == 1
-    assert retained.binding.observed_generation == "generation-1"
-    assert retained.provider_path == "/value.txt"
+    files = VirtualFileOperator(resolve, prepare, lambda selected, path: path)
+    if source_fails:
+        with pytest.raises(RuntimeError, match="source failed"):
+            await files.copy("source", "destination")
+        assert destination_backend.data is None
+    else:
+        result = await files.copy("source", "destination")
+        assert result.bytes_copied == 4
+        assert destination_backend.data == b"data"
+    assert prepared_revisions == [1, 1]
 
 
 class _ApplyTopologyAfterResultPlugin(AbstractHarnessPlugin):
