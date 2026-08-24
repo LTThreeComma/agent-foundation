@@ -10,7 +10,6 @@ on:
       - ".github/workflows/release-sdk-rust.yml"
       - ".github/workflows/release-sdk-typescript.yml"
       - "Cargo.toml"
-      - "Makefile"
       - "pyproject.toml"
       - "sdk/**"
   push:
@@ -22,7 +21,6 @@ on:
       - ".github/workflows/release-sdk-rust.yml"
       - ".github/workflows/release-sdk-typescript.yml"
       - "Cargo.toml"
-      - "Makefile"
       - "pyproject.toml"
       - "sdk/**"
   workflow_dispatch:
@@ -62,24 +60,20 @@ jobs:
             go:
               - '.github/workflows/ci-sdks.yml'
               - '.github/workflows/release-sdk-go.yml'
-              - 'Makefile'
               - 'sdk/go/**'
             python:
               - '.github/workflows/ci-sdks.yml'
               - '.github/workflows/release-sdk-python.yml'
-              - 'Makefile'
               - 'pyproject.toml'
               - 'sdk/python/**'
             rust:
               - '.github/workflows/ci-sdks.yml'
               - '.github/workflows/release-sdk-rust.yml'
               - 'Cargo.toml'
-              - 'Makefile'
               - 'sdk/rust/**'
             typescript:
               - '.github/workflows/ci-sdks.yml'
               - '.github/workflows/release-sdk-typescript.yml'
-              - 'Makefile'
               - 'sdk/typescript/**'
 
   python:

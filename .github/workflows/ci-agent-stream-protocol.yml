@@ -6,7 +6,6 @@ on:
     paths:
       - ".github/workflows/ci-agent-stream-protocol.yml"
       - ".github/workflows/release-harness.yml"
-      - "Makefile"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
       - "pyproject.toml"
@@ -18,7 +17,6 @@ on:
     paths:
       - ".github/workflows/ci-agent-stream-protocol.yml"
       - ".github/workflows/release-harness.yml"
-      - "Makefile"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
       - "pyproject.toml"
@@ -48,8 +46,6 @@ jobs:
             runner: ubuntu-24.04
           - name: Windows
             runner: windows-2025
-          - name: macOS
-            runner: macos-15
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout

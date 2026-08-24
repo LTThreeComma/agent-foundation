@@ -3,6 +3,25 @@ name: Development Images
 on:
   push:
     branches: [main]
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/images.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "Dockerfile.sandbox"
+      - "LICENSE"
+      - "apps/foundation-web/**"
+      - "crates/agent-envd/**"
+      - "packages/agent-envd-client/pyproject.toml"
+      - "packages/agent-harness/pyproject.toml"
+      - "packages/agent-stream-protocol/pyproject.toml"
+      - "packages/agent-ui/pyproject.toml"
+      - "packages/foundation-service/**"
+      - "packages/logging/**"
+      - "pyproject.toml"
+      - "scripts/docker-entrypoint.sh"
+      - "uv.lock"
   workflow_dispatch:
 
 env:
@@ -28,9 +47,13 @@ jobs:
           - name: foundation-service
             file: Dockerfile
             image: ghcr.io/converge-ai-labs/agent-foundation-service
+            local_image: agent-foundation-service:local
+            check_target: image-check-foundation-service
           - name: sandbox
             file: Dockerfile.sandbox
             image: ghcr.io/converge-ai-labs/agent-foundation-sandbox
+            local_image: agent-foundation-sandbox:local
+            check_target: image-check-sandbox
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -56,18 +79,27 @@ jobs:
             type=raw,value=dev
             type=sha,prefix=sha-,format=long
 
-      - name: Build and publish image
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.file }}
           # Development publishing is intentionally native amd64 only; other architectures build locally.
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          push: false
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ matrix.local_image }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BUILD_VERSION=dev
             BUILD_REVISION=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: Smoke-check image
+        run: make ${{ matrix.check_target }}
+
+      - name: Publish image
+        run: docker push --all-tags "${{ matrix.image }}"

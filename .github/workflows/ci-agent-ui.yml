@@ -7,7 +7,6 @@ on:
       - ".github/workflows/ci-agent-ui.yml"
       - ".github/workflows/release-agent-ui.yml"
       - ".gitignore"
-      - "Makefile"
       - "apps/harness-ui/**"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
@@ -26,7 +25,6 @@ on:
       - ".github/workflows/ci-agent-ui.yml"
       - ".github/workflows/release-agent-ui.yml"
       - ".gitignore"
-      - "Makefile"
       - "apps/harness-ui/**"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
@@ -62,8 +60,6 @@ jobs:
             runner: ubuntu-24.04
           - name: Windows
             runner: windows-2025
-          - name: macOS
-            runner: macos-15
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout

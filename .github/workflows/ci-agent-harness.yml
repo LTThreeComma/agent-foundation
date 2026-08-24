@@ -6,7 +6,6 @@ on:
     paths:
       - ".github/workflows/ci-agent-harness.yml"
       - ".github/workflows/release-harness.yml"
-      - "Makefile"
       - "packages/agent-harness/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -15,7 +14,6 @@ on:
     paths:
       - ".github/workflows/ci-agent-harness.yml"
       - ".github/workflows/release-harness.yml"
-      - "Makefile"
       - "packages/agent-harness/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -42,6 +40,7 @@ jobs:
             runner: ubuntu-24.04
           - name: Windows
             runner: windows-2025
+          # macOS protects the Harness filesystem, process, and environment integrations from regressions.
           - name: macOS
             runner: macos-15
     runs-on: ${{ matrix.runner }}

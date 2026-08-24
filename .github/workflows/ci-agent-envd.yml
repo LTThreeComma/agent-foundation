@@ -8,7 +8,6 @@ on:
       - ".github/workflows/release-agent-envd.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "Makefile"
       - "crates/agent-envd/**"
       - "packages/agent-envd-client/**"
       - "proto/agent-envd/eip/**"
@@ -25,7 +24,6 @@ on:
       - ".github/workflows/release-agent-envd.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "Makefile"
       - "crates/agent-envd/**"
       - "packages/agent-envd-client/**"
       - "proto/agent-envd/eip/**"
@@ -71,7 +69,6 @@ jobs:
             daemon:
               - '.github/workflows/ci-agent-envd.yml'
               - '.github/workflows/release-agent-envd.yml'
-              - 'Makefile'
               - 'crates/agent-envd/**'
               - 'proto/agent-envd/eip/**'
               - 'Cargo.toml'
@@ -81,7 +78,6 @@ jobs:
             client:
               - '.github/workflows/ci-agent-envd.yml'
               - '.github/workflows/release-agent-envd.yml'
-              - 'Makefile'
               - 'packages/agent-envd-client/**'
               - 'proto/agent-envd/eip/**'
               - 'scripts/eip_codegen/**'
@@ -91,7 +87,6 @@ jobs:
             protocol:
               - '.github/workflows/ci-agent-envd.yml'
               - '.github/workflows/release-agent-envd.yml'
-              - 'Makefile'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'crates/agent-envd/Cargo.toml'
@@ -199,6 +194,7 @@ jobs:
             cache-key: windows
             complete: false
             components: ""
+          # macOS exercises the Seatbelt-backed execution-isolation path.
           - name: macOS
             runner: macos-15
             cache-key: macos

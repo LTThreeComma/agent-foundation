@@ -430,16 +430,23 @@ image-sandbox: ## Build the local sandbox image with agent-envd
 .PHONY: images
 images: image-foundation-service image-sandbox ## Build all local container images
 
-.PHONY: image-check
-image-check: images ## Build and smoke-check all container images
+.PHONY: image-check-foundation-service
+image-check-foundation-service: ## Smoke-check the existing foundation-service container image
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(FOUNDATION_SERVICE_IMAGE)")" = "app"
-	@test "$$(docker image inspect --format '{{.Config.User}}' "$(SANDBOX_IMAGE)")" = "sandbox"
 	@docker run --rm --entrypoint sh "$(FOUNDATION_SERVICE_IMAGE)" -c 'test -r /app/web/index.html && ! command -v node'
 	@docker run --rm --entrypoint python "$(FOUNDATION_SERVICE_IMAGE)" -c 'from converge_foundation_service.asgi import app; assert str(app.state.settings.web_dist_dir) == "/app/web"'
+
+.PHONY: image-check-sandbox
+image-check-sandbox: ## Smoke-check the existing sandbox container image
+	@test "$$(docker image inspect --format '{{.Config.User}}' "$(SANDBOX_IMAGE)")" = "sandbox"
 	@docker run --rm \
 		--env AGENT_ENVD_ENVIRONMENT_ID=image-check \
 		--env AGENT_ENVD_EXECUTION_ISOLATION=disabled \
 		--entrypoint agent-envd "$(SANDBOX_IMAGE)"
+
+.PHONY: image-check
+image-check: images ## Build and smoke-check all container images
+	@$(MAKE) --no-print-directory image-check-foundation-service image-check-sandbox
 
 .PHONY: python-check
 python-check: lint typecheck ## Run Python workspace lint and type checks
