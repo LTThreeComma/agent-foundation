@@ -8,10 +8,31 @@ import "agent-envd/eip/v1/options.proto";
 import "agent-envd/eip/v1/output.proto";
 import "agent-envd/eip/v1/resource.proto";
 
+message ExecutableName {
+  string kind = 1 [(eip_field).const_string = "name"];
+  string name = 2;
+}
+
+message ExecutablePath {
+  string kind = 1 [(eip_field).const_string = "path"];
+  EIPPath path = 2;
+}
+
+message ExecutableSpec {
+  option (eip_message).discriminated_union = true;
+  oneof executable {
+    ExecutableName name = 1;
+    ExecutablePath path = 2;
+  }
+}
+
 message ArgvCommand {
+  reserved 2;
+  reserved "executable";
+
   string kind = 1 [(eip_field).const_string = "argv"];
-  string executable = 2;
   repeated string arguments = 3;
+  ExecutableSpec executable_spec = 4;
 }
 
 message ShellCommand {
@@ -177,18 +198,24 @@ message ProcessInspectResult {
 }
 
 message ProcessReadOutputParams {
+  reserved 3, 4;
+  reserved "stdout_cursor", "stderr_cursor";
+
   EIPCallContext context = 1;
   ProcessHandle handle = 2;
-  optional OutputCursor stdout_cursor = 3;
-  optional OutputCursor stderr_cursor = 4;
   optional uint64 wait_ms = 5 [(eip_field).default_uint = 0];
   optional OutputPolicy output_policy = 6;
+  uint64 stdout_offset = 7;
+  uint64 stderr_offset = 8;
 }
 
 message ProcessStreamRead {
+  reserved 2;
+  reserved "next_cursor";
+
   repeated OutputSegment chunks = 1;
-  optional OutputCursor next_cursor = 2;
   OutputCapture capture = 3;
+  uint64 next_offset = 4;
 }
 
 message ProcessReadOutputResult {

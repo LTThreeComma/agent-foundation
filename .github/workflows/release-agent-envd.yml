@@ -336,6 +336,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve image tags
+        id: image-tags
+        env:
+          IMAGE: ${{ env.SANDBOX_IMAGE }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE:$VERSION"
+            if [[ "$VERSION" != *-rc.* ]]; then
+              echo "$IMAGE:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish image
         uses: docker/build-push-action@v6
         with:
@@ -344,9 +359,7 @@ jobs:
           # Release publishing is intentionally native amd64 only; other architectures build locally.
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.SANDBOX_IMAGE }}:${{ needs.prepare.outputs.version }}
-            ${{ env.SANDBOX_IMAGE }}:latest
+          tags: ${{ steps.image-tags.outputs.tags }}
           build-args: |
             BUILD_VERSION=${{ needs.prepare.outputs.version }}
             BUILD_REVISION=${{ github.sha }}
@@ -359,9 +372,11 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           version_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}')"
-          latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
           test -n "$version_digest"
-          test "$version_digest" = "$latest_digest"
+          if [[ "$VERSION" != *-rc.* ]]; then
+            latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
+            test "$version_digest" = "$latest_digest"
+          fi
 
   create-release:
     name: Create GitHub Release

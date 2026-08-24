@@ -25,31 +25,20 @@ message OutputReference {
   string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
 }
 
-message OutputCursor {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
-message ReceiptRef {
-  option (eip_message).transparent = true;
-  string value = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-}
-
 message ContentDigest {
   string algorithm = 1 [(eip_field).const_string = "sha256"];
   string value = 2 [(eip_field).string_format = EIP_STRING_FORMAT_SHA256];
 }
 
 message EIPCallContext {
-  reserved 4;
-  reserved "invocation_grant";
+  reserved 2, 3, 4;
+  reserved "deadline", "idempotency_key", "invocation_grant";
 
   string operation_id = 1 [
     (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
     (eip_field).max_length = 128
   ];
-  optional google.protobuf.Timestamp deadline = 2;
-  optional string idempotency_key = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  optional uint64 timeout_ms = 5 [(eip_field).minimum = 1];
 }
 
 enum ReceiptStage {
@@ -71,7 +60,9 @@ enum ReceiptOutcome {
 }
 
 message OperationReceipt {
-  ReceiptRef receipt_ref = 1;
+  reserved 1;
+  reserved "receipt_ref";
+
   string operation_id = 2 [
     (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
     (eip_field).max_length = 128
@@ -106,14 +97,14 @@ message OperationCancelResult {
 }
 
 message ReceiptGetParams {
+  reserved 2;
+  reserved "receipt_ref";
+
   EIPCallContext context = 1;
-  oneof selector {
-    ReceiptRef receipt_ref = 2;
-    string operation_id = 3 [
-      (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
-      (eip_field).max_length = 128
-    ];
-  }
+  string operation_id = 3 [
+    (eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER,
+    (eip_field).max_length = 128
+  ];
 }
 
 message ReceiptGetResult {

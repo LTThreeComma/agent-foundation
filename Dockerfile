@@ -17,6 +17,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY packages/agent-envd-client/pyproject.toml packages/agent-envd-client/pyproject.toml
 COPY packages/agent-harness/pyproject.toml packages/agent-harness/pyproject.toml
+COPY packages/agent-stream-protocol/pyproject.toml packages/agent-stream-protocol/pyproject.toml
+COPY packages/agent-ui/pyproject.toml packages/agent-ui/pyproject.toml
 COPY packages/logging/pyproject.toml packages/logging/pyproject.toml
 COPY packages/foundation-service/pyproject.toml packages/foundation-service/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \

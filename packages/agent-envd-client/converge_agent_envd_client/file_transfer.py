@@ -4,9 +4,8 @@ import asyncio
 import hashlib
 import secrets
 from collections.abc import Coroutine
-from datetime import datetime
 from types import TracebackType
-from typing import Any, Self, cast
+from typing import Any, Self
 
 from converge_agent_envd_client.eip.v1 import (
     EIP_DATA_FRAME_HEADER_BYTES,
@@ -50,15 +49,15 @@ class EIPFileReader:
         path: EIPPath,
         *,
         byte_range: FileByteRange | None,
-        transfer_deadline: datetime | None,
+        transfer_timeout_ms: int | None,
     ) -> None:
         self._requester = requester
         self._client = client
         self._params = FileReaderOpenParams(
-            context=_new_context(with_idempotency=True),
+            context=_new_context(),
             path=path,
             byte_range=byte_range,
-            transfer_deadline=cast(str | None, transfer_deadline),
+            transfer_timeout_ms=transfer_timeout_ms,
         )
         self._opened: FileReaderOpenResult | None = None
         self._channel: TransferChannel | None = None
@@ -140,24 +139,20 @@ class EIPFileReader:
             if frame.offset != self._received_bytes:
                 await self._reset_for_protocol(frame.offset)
                 raise EIPProtocolError("reader terminal offset does not match consumed bytes")
-            await self._requester.send_data_frame(
-                channel,
-                DataFrame(
-                    kind=DataFrameKind.END_ACK,
-                    handle=channel.handle,
-                    offset=self._received_bytes,
-                ),
-            )
             result = await self._client.file_close_reader(
                 FileReaderCloseParams(
                     context=_new_context(),
                     reader=self.opened.reader,
-                    accept_complete=True,
                 )
             )
+            try:
+                self._verify_completion(result.completion)
+            except EIPProtocolError as error:
+                self._finalize_channel()
+                await _ignore_cleanup_failure(self._requester.close_for_protocol_error(error))
+                raise
             self._completion = result.completion
             self._finalize_channel()
-            self._verify_completion(result.completion)
             raise StopAsyncIteration
         if frame.kind is DataFrameKind.RESET:
             raise _peer_reset("reader", frame)
@@ -199,18 +194,6 @@ class EIPFileReader:
             except BaseException as error:
                 channel_retired = self._requester.transfer_is_retired(channel)
                 first_error = error
-        if self._opened is not None:
-            try:
-                await self._client.file_close_reader(
-                    FileReaderCloseParams(
-                        context=_new_context(),
-                        reader=self._opened.reader,
-                        accept_complete=False,
-                    )
-                )
-            except BaseException as error:
-                if first_error is None:
-                    first_error = error
         if channel_retired:
             self._channel = None
             self._finalized = True
@@ -237,14 +220,12 @@ class EIPFileReader:
             pass
 
     def _verify_completion(self, completion: FileReadCompletion) -> None:
-        if not completion.complete:
-            raise EIPProtocolError("reader accepted a complete stream but envd reported it incomplete")
         if completion.produced_bytes != self._received_bytes:
             raise EIPProtocolError("reader byte count differs from envd completion evidence")
         if self._max_bytes is None or completion.produced_bytes > self._max_bytes:
             raise EIPProtocolError("reader completion exceeds the negotiated maximum")
         digest = completion.digest
-        if digest is None or digest.algorithm != "sha256" or digest.value != self._hasher.hexdigest():
+        if digest.algorithm != "sha256" or digest.value != self._hasher.hexdigest():
             raise EIPProtocolError("reader digest differs from envd completion evidence")
 
     def _require_channel(self) -> TransferChannel:
@@ -274,17 +255,17 @@ class EIPFileWriter:
         mode: FileWriteMode,
         *,
         executable: bool | None,
-        transfer_deadline: datetime | None,
+        transfer_timeout_ms: int | None,
         max_transfer_frame_bytes: int,
     ) -> None:
         self._requester = requester
         self._client = client
         self._params = FileWriterOpenParams(
-            context=_new_context(with_idempotency=True),
+            context=_new_context(),
             path=path,
             mode=mode,
             executable=executable,
-            transfer_deadline=cast(str | None, transfer_deadline),
+            transfer_timeout_ms=transfer_timeout_ms,
         )
         self._max_transfer_frame_bytes = max_transfer_frame_bytes
         self._opened: FileWriterOpenResult | None = None
@@ -292,7 +273,7 @@ class EIPFileWriter:
         self._hasher = hashlib.sha256()
         self._transferred_bytes = 0
         self._result: FileWriterCommitResult | None = None
-        self._commit_context = _new_context(with_idempotency=True)
+        self._commit_context = _new_context()
         self._entered = False
         self._sealed = False
         self._finalized = False
@@ -497,11 +478,8 @@ class EIPFileWriter:
         self._finalized = True
 
 
-def _new_context(*, with_idempotency: bool = False) -> EIPCallContext:
-    return EIPCallContext(
-        operation_id=f"op-{secrets.token_urlsafe(9)}",
-        idempotency_key=f"key-{secrets.token_urlsafe(9)}" if with_idempotency else None,
-    )
+def _new_context() -> EIPCallContext:
+    return EIPCallContext(operation_id=f"op-{secrets.token_urlsafe(9)}")
 
 
 def _expect_frame(frame: DataFrame, kind: DataFrameKind, *, offset: int) -> None:

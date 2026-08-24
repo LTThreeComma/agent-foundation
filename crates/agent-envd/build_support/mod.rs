@@ -17,7 +17,6 @@ const TOOLING_MESSAGES: &[&str] = &[
 const TOOLING_ENUMS: &[&str] = &[
     "MethodKind",
     "IdempotencyClass",
-    "IdempotencyKeyMode",
     "ErrorFamily",
     "EIPStringFormat",
     "TransferAction",
@@ -39,10 +38,8 @@ struct MethodRecord {
     rpc_name: String,
     rust_name: String,
     jsonrpc_method: String,
-    capability: Option<String>,
     kind: String,
     idempotency: String,
-    idempotency_key: String,
     introduced: String,
     error_family: String,
     transfer_action: Option<String>,
@@ -956,12 +953,6 @@ fn render_validation_impl(
                 "        if {sum} != 1 {{ return Err(ValidationError(\"exactly one of {names} must be present\".to_owned())); }}\n"
             ));
         }
-        if descriptor.name() == "FileReadCompletion" {
-            output.push_str(
-                "        if self.complete && self.digest.is_none() { return Err(ValidationError(\"complete reads require a digest\".to_owned())); }\n\
-                 \x20       if !self.complete && self.digest.is_some() { return Err(ValidationError(\"incomplete reads cannot expose a digest\".to_owned())); }\n",
-            );
-        }
         if descriptor.name() == "OutputPolicy" {
             output.push_str(
                 "        if self.max_inline_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_bytes cannot exceed max_output_bytes\".to_owned())); }\n",
@@ -971,20 +962,17 @@ fn render_validation_impl(
             output.push_str(
                 "        if self.available_start > self.available_end { return Err(ValidationError(\"available_start cannot exceed available_end\".to_owned())); }\n\
                  \x20       match self.kind {\n\
-                 \x20           OutputKind::Empty if self.produced_bytes != 0 || self.captured_bytes != 0 || self.dropped_bytes != 0 || self.available_start != 0 || self.available_end != 0 || self.inline.is_some() || self.preview.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"empty output must contain no bytes or retained state\".to_owned())),\n\
-                 \x20           OutputKind::Inline if self.inline.is_none() || self.preview.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"inline output requires only inline data\".to_owned())),\n\
+                 \x20           OutputKind::Empty if self.produced_bytes != 0 || self.captured_bytes != 0 || self.dropped_bytes != 0 || self.available_start != 0 || self.available_end != 0 || self.inline.is_some() || self.preview.is_some() || self.reference.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"empty output must contain no bytes or retained state\".to_owned())),\n\
+                 \x20           OutputKind::Inline if self.inline.is_none() || self.preview.is_some() || self.reference.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"inline output requires only inline data\".to_owned())),\n\
                  \x20           OutputKind::Retained if self.reference.is_none() || self.inline.is_some() || self.expires_at.is_none() => return Err(ValidationError(\"retained output requires a reference and expiry\".to_owned())),\n\
-                 \x20           OutputKind::Truncated if self.inline.is_some() || self.reference.is_some() || self.cursor.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"truncated output cannot contain retained or inline state\".to_owned())),\n\
+                 \x20           OutputKind::Truncated if self.inline.is_some() || self.reference.is_some() || self.expires_at.is_some() => return Err(ValidationError(\"truncated output cannot contain retained or inline state\".to_owned())),\n\
                  \x20           _ => {}\n\
                  \x20       }\n",
             );
         }
         if descriptor.name() == "EIPLimits" {
             output.push_str(
-                "        if self.max_inline_output_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_output_bytes cannot exceed max_output_bytes\".to_owned())); }\n\
-                 \x20       if self.max_processes > self.max_process_records { return Err(ValidationError(\"max_processes cannot exceed max_process_records\".to_owned())); }\n\
-                 \x20       if self.max_concurrent_operations > self.max_operation_records { return Err(ValidationError(\"max_concurrent_operations cannot exceed max_operation_records\".to_owned())); }\n\
-                 \x20       if self.max_concurrent_file_transfers > self.max_file_transfer_records { return Err(ValidationError(\"max_concurrent_file_transfers cannot exceed max_file_transfer_records\".to_owned())); }\n",
+                "        if self.max_inline_output_bytes > self.max_output_bytes { return Err(ValidationError(\"max_inline_output_bytes cannot exceed max_output_bytes\".to_owned())); }\n",
             );
         }
         if descriptor.name() == "EIPErrorData" {
@@ -1249,10 +1237,7 @@ fn method_records(
                 record.jsonrpc_method
             ));
         }
-        if record.idempotency == "unspecified"
-            || record.idempotency_key == "unspecified"
-            || record.error_family == "unspecified"
-        {
+        if record.idempotency == "unspecified" || record.error_family == "unspecified" {
             return Err(format!(
                 "EIP method {} has incomplete method options",
                 record.jsonrpc_method
@@ -1301,15 +1286,11 @@ fn method_record(
     extensions: &Extensions,
 ) -> Result<MethodRecord, String> {
     let option = extension_message(method.options(), &extensions.method)?;
-    let capability = string_field(&option, "capability")?;
     let kind = enum_field_name(&option, "kind")?
         .trim_start_matches("METHOD_KIND_")
         .to_ascii_lowercase();
     let idempotency = enum_field_name(&option, "idempotency")?
         .trim_start_matches("IDEMPOTENCY_CLASS_")
-        .to_ascii_lowercase();
-    let idempotency_key = enum_field_name(&option, "idempotency_key")?
-        .trim_start_matches("IDEMPOTENCY_KEY_MODE_")
         .to_ascii_lowercase();
     let error_family = enum_field_name(&option, "error_family")?
         .trim_start_matches("ERROR_FAMILY_")
@@ -1333,10 +1314,8 @@ fn method_record(
             .replace('.', "_")
             .to_snake_case(),
         jsonrpc_method: string_field(&option, "jsonrpc_method")?,
-        capability: (!capability.is_empty()).then_some(capability),
         kind,
         idempotency,
-        idempotency_key,
         introduced: format!("{major}.{minor}"),
         error_family,
         transfer_action,
@@ -1432,10 +1411,8 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
          pub struct MethodSpec {\n\
          \x20   pub name: &'static str,\n\
-         \x20   pub capability: Option<&'static str>,\n\
          \x20   pub kind: &'static str,\n\
          \x20   pub idempotency: &'static str,\n\
-         \x20   pub idempotency_key: &'static str,\n\
          \x20   pub introduced: &'static str,\n\
          \x20   pub error_family: &'static str,\n\
          \x20   pub transfer_action: Option<&'static str>,\n\
@@ -1446,10 +1423,6 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
          pub static METHODS: &[MethodSpec] = &[\n",
     );
     for method in methods {
-        let capability = method
-            .capability
-            .as_ref()
-            .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
         let result = method
             .result_type
             .as_deref()
@@ -1463,12 +1436,10 @@ fn render_registry(output: &mut String, methods: &[MethodRecord]) {
             .as_ref()
             .map_or_else(|| "None".to_owned(), |value| format!("Some(\"{value}\")"));
         output.push_str(&format!(
-            "    MethodSpec {{ name: \"{}\", capability: {}, kind: \"{}\", idempotency: \"{}\", idempotency_key: \"{}\", introduced: \"{}\", error_family: \"{}\", transfer_action: {}, transfer_direction: {}, params_type: \"{}\", result_type: \"{}\" }},\n",
+            "    MethodSpec {{ name: \"{}\", kind: \"{}\", idempotency: \"{}\", introduced: \"{}\", error_family: \"{}\", transfer_action: {}, transfer_direction: {}, params_type: \"{}\", result_type: \"{}\" }},\n",
             method.jsonrpc_method,
-            capability,
             method.kind,
             method.idempotency,
-            method.idempotency_key,
             method.introduced,
             method.error_family,
             transfer_action,
@@ -1519,15 +1490,15 @@ fn render_dispatch(output: &mut String, methods: &[MethodRecord]) {
          \x20   InvalidParams(DecodeError),\n\
          \x20   InvalidResult(ValidationError),\n\
          \x20   Encode(serde_json::Error),\n\
-         \x20   Method(EIPError),\n\
+         \x20   Method { error: EIPError, method: &'static str, params: serde_json::Value },\n\
          }\n\n\
          pub async fn dispatch<H: EipHandler>(handler: &H, method: &str, params_json: &str) -> Result<serde_json::Value, DispatchError> {\n\
          \x20   match method {\n",
     );
     for method in methods {
         output.push_str(&format!(
-            "        \"{}\" => {{ let params: {} = decode(params_json).map_err(DispatchError::InvalidParams)?; let result = handler.{}(params).await.map_err(DispatchError::Method)?; result.validate().map_err(DispatchError::InvalidResult)?; serde_json::to_value(result).map_err(DispatchError::Encode) }},\n",
-            method.jsonrpc_method, method.params_type, method.rust_name
+            "        \"{}\" => {{ let params: {} = decode(params_json).map_err(DispatchError::InvalidParams)?; let normalized_params = serde_json::to_value(&params).map_err(DispatchError::Encode)?; let result = handler.{}(params).await.map_err(|error| DispatchError::Method {{ error, method: \"{}\", params: normalized_params }})?; result.validate().map_err(DispatchError::InvalidResult)?; serde_json::to_value(result).map_err(DispatchError::Encode) }},\n",
+            method.jsonrpc_method, method.params_type, method.rust_name, method.jsonrpc_method
         ));
     }
     output.push_str("        _ => Err(DispatchError::MethodNotFound),\n    }\n}\n");

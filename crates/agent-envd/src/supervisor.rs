@@ -703,8 +703,8 @@ async fn signal_tree(tree_id: Option<u32>, signal: ControlSignal, _child: &mut C
 }
 
 #[cfg(not(unix))]
-async fn signal_tree(_tree_id: Option<u32>, _signal: ControlSignal, child: &mut Child) -> bool {
-    child.start_kill().is_ok()
+async fn signal_tree(_tree_id: Option<u32>, _signal: ControlSignal, _child: &mut Child) -> bool {
+    false
 }
 
 #[cfg(unix)]

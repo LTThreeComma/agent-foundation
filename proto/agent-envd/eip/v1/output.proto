@@ -52,34 +52,38 @@ message OutputCapture {
   optional EncodedBytes inline = 7;
   optional OutputPreview preview = 8;
   optional OutputReference reference = 9;
-  optional OutputCursor cursor = 10;
+  reserved 10;
+  reserved "cursor";
   uint64 available_start = 11;
   uint64 available_end = 12;
   optional google.protobuf.Timestamp expires_at = 13;
 }
 
 message OutputReadParams {
+  reserved 3;
+  reserved "cursor";
+
   EIPCallContext context = 1;
   OutputReference reference = 2;
-  oneof position {
-    OutputCursor cursor = 3;
-    uint64 start_offset = 4;
-  }
+  uint64 start_offset = 4;
   optional OutputPolicy output_policy = 5;
 }
 
 message OutputReadResult {
+  reserved 2;
+  reserved "next_cursor";
+
   repeated OutputSegment chunks = 1;
-  optional OutputCursor next_cursor = 2;
   OutputCapture capture = 3;
+  uint64 next_offset = 4;
 }
 
 message OutputReleaseParams {
+  reserved 3;
+  reserved "cursor";
+
   EIPCallContext context = 1;
-  oneof selector {
-    OutputReference reference = 2;
-    OutputCursor cursor = 3;
-  }
+  OutputReference reference = 2;
 }
 
 message OutputReleaseResult {

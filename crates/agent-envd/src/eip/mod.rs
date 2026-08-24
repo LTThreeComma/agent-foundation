@@ -95,7 +95,11 @@ mod tests {
         let value = serde_json::json!({
             "context": {"operation_id": "op-defaults"},
             "request": {
-                "command": {"kind": "argv", "executable": "true", "arguments": []},
+                "command": {
+                    "kind": "argv",
+                    "executable_spec": {"kind": "name", "name": "true"},
+                    "arguments": []
+                },
                 "cwd": {"mount_id": "workspace", "path": "/repo"},
                 "environment": {"set": {}, "unset": []},
                 "network": "configured",
@@ -116,7 +120,10 @@ mod tests {
             serde_json::json!({
                 "context": {"operation_id": "op-defaults"},
                 "request": {
-                    "command": {"kind": "argv", "executable": "true"},
+                    "command": {
+                        "kind": "argv",
+                        "executable_spec": {"kind": "name", "name": "true"}
+                    },
                     "cwd": {"mount_id": "workspace", "path": "/repo"}
                 }
             })
@@ -132,22 +139,9 @@ mod tests {
             "max_operation_duration_ms": 1,
             "max_inline_output_bytes": 1,
             "max_output_bytes": 1,
-            "max_retained_bytes": 1,
-            "max_retained_objects": 1,
-            "max_retention_ttl_ms": 1,
-            "max_operation_records": 1,
-            "operation_record_ttl_ms": 1,
-            "session_idle_ttl_ms": 1,
-            "max_process_records": 1,
-            "terminal_process_record_ttl_ms": 1,
             "max_transfer_frame_bytes": 25,
             "max_concurrent_file_transfers": 1,
-            "max_file_transfer_records": 1,
-            "file_transfer_record_ttl_ms": 1,
-            "max_staged_file_bytes": 1,
-            "max_staged_file_objects": 1,
-            "file_transfer_idle_ttl_ms": 1,
-            "max_file_transfer_duration_ms": 1
+            "max_file_transfer_bytes": 1
         })
     }
 
@@ -159,9 +153,8 @@ mod tests {
         for (field, value) in [
             ("max_request_bytes", 0),
             ("max_inline_output_bytes", 2),
-            ("max_processes", 2),
-            ("max_concurrent_operations", 2),
-            ("max_concurrent_file_transfers", 2),
+            ("max_transfer_frame_bytes", 24),
+            ("max_file_transfer_bytes", 0),
         ] {
             let mut invalid = limits.clone();
             invalid[field] = value.into();
@@ -273,7 +266,7 @@ mod tests {
         let duplicate_receipt_selector = r#"{"context":{"operation_id":"op-query"},"receipt_ref":"receipt-1","operation_id":"op-target"}"#;
         assert!(decode::<ReceiptGetParams>(duplicate_receipt_selector).is_err());
 
-        let duplicate_map_key = r#"{"context":{"operation_id":"op"},"request":{"command":{"kind":"argv","executable":"true"},"cwd":{"mount_id":"workspace","path":"/repo"},"environment":{"set":{"PATH":"one","PATH":"two"}},"output_policy":{"max_inline_bytes":1,"max_output_bytes":1,"overflow":"truncate"}}}"#;
+        let duplicate_map_key = r#"{"context":{"operation_id":"op"},"request":{"command":{"kind":"argv","executable_spec":{"kind":"name","name":"true"}},"cwd":{"mount_id":"workspace","path":"/repo"},"environment":{"set":{"PATH":"one","PATH":"two"}},"output_policy":{"max_inline_bytes":1,"max_output_bytes":1,"overflow":"truncate"}}}"#;
         assert!(decode::<ShellExecParams>(duplicate_map_key).is_err());
     }
 

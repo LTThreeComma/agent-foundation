@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import converge_agent_envd_client.requester as requester_module
@@ -32,6 +31,7 @@ from converge_agent_envd_client.eip.v1 import (
     EnvironmentDescribeResult,
     EnvironmentDescriptor,
     ErrorType,
+    ExecutionFeatures,
     IsolationBackend,
     IsolationCleanupGuarantee,
     IsolationMode,
@@ -40,8 +40,6 @@ from converge_agent_envd_client.eip.v1 import (
     JsonRpcErrorResponse,
     JsonRpcRequest,
     JsonRpcSuccessResponse,
-    ResourceAuthority,
-    ResourceAuthorityDescriptor,
     RetryHint,
     decode_model,
     encode_model,
@@ -98,7 +96,7 @@ def descriptor(generation: int) -> EnvironmentDescriptor:
     return EnvironmentDescriptor(
         environment_id="env-test",
         generation=generation,
-        capabilities=("environment.describe", "session.close"),
+        available_methods=("environment.describe", "session.close"),
         limits=EIPLimits(
             max_request_bytes=1024,
             max_response_bytes=1024,
@@ -107,24 +105,10 @@ def descriptor(generation: int) -> EnvironmentDescriptor:
             max_operation_duration_ms=1000,
             max_inline_output_bytes=1,
             max_output_bytes=1,
-            max_retained_bytes=1,
-            max_retained_objects=1,
-            max_retention_ttl_ms=1,
-            max_operation_records=4,
-            operation_record_ttl_ms=1,
-            session_idle_ttl_ms=1000,
-            max_process_records=1,
-            terminal_process_record_ttl_ms=1,
             max_transfer_frame_bytes=1024,
             max_concurrent_file_transfers=1,
-            max_file_transfer_records=1,
-            file_transfer_record_ttl_ms=1,
-            max_staged_file_bytes=1,
-            max_staged_file_objects=1,
-            file_transfer_idle_ttl_ms=1,
-            max_file_transfer_duration_ms=1,
+            max_file_transfer_bytes=1,
         ),
-        resource_authority=ResourceAuthorityDescriptor(mode=ResourceAuthority.SCOPED),
         isolation=IsolationPosture(
             mode=IsolationMode.DISABLED,
             backend=IsolationBackend.OUTER_HOST,
@@ -133,6 +117,14 @@ def descriptor(generation: int) -> EnvironmentDescriptor:
             network_containment=False,
             network_policy=IsolationNetworkPolicy.HOST,
             cleanup_guarantee=IsolationCleanupGuarantee.OUTER_HOST,
+        ),
+        execution_features=ExecutionFeatures(
+            process_count_limit=False,
+            memory_bytes_limit=False,
+            cpu_time_limit=False,
+            per_command_network_deny=False,
+            signal_interrupt=False,
+            signal_terminate=False,
         ),
     )
 
@@ -193,7 +185,6 @@ def test_request_coordinator_raises_typed_method_error() -> None:
                 error_type=ErrorType.UNSUPPORTED,
                 retry_hint=RetryHint.NEVER,
                 dispatch_stage=DispatchStage.PRE_DISPATCH,
-                capability="environment.describe",
             ),
         )
         await transport.responses.put(encode_model(JsonRpcErrorResponse(jsonrpc="2.0", id=request.id, error=error)))
@@ -253,7 +244,7 @@ def test_cancelled_wait_keeps_correlation_until_late_response() -> None:
     asyncio.run(scenario())
 
 
-def test_deadline_covers_waiting_for_admission() -> None:
+def test_relative_timeout_covers_waiting_for_admission() -> None:
     async def scenario() -> None:
         transport = FakeTransport()
         requester = RequestCoordinator(transport, max_in_flight=1, request_timeout=None)
@@ -263,10 +254,9 @@ def test_deadline_covers_waiting_for_admission() -> None:
         )
         first_request = decode_sent_request(await transport.sent.get())
 
-        deadline = datetime.now(UTC) + timedelta(milliseconds=20)
         with pytest.raises(EIPRequestTimeoutError) as captured:
             await client.environment_describe(
-                EnvironmentDescribeParams(context=EIPCallContext(operation_id="deadline", deadline=deadline))
+                EnvironmentDescribeParams(context=EIPCallContext(operation_id="timed", timeout_ms=20))
             )
         assert captured.value.dispatched is False
         assert transport.sent.empty()
@@ -279,7 +269,7 @@ def test_deadline_covers_waiting_for_admission() -> None:
 
 
 @pytest.mark.parametrize("delayed_encoding", [1, 2])
-def test_deadline_expired_during_encoding_is_not_dispatched(
+def test_request_timeout_expired_during_encoding_is_not_dispatched(
     monkeypatch: pytest.MonkeyPatch,
     delayed_encoding: int,
 ) -> None:
@@ -340,7 +330,6 @@ def test_descriptor_refresh_narrows_limits_and_identity_violation_is_terminal() 
                 "max_request_bytes": 512,
                 "max_response_bytes": 512,
                 "max_concurrent_operations": 1,
-                "max_operation_records": 1,
             }
         )
         narrowed = descriptor(1).model_copy(update={"limits": narrowed_limits})
@@ -383,8 +372,55 @@ def test_descriptor_refresh_narrows_limits_and_identity_violation_is_terminal() 
         with pytest.raises(EIPSessionStateError):
             _ = session.client
 
+    async def limit_widening_violation() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport, request_timeout=1)
+        session = EIPSession(requester, descriptor(1))
+        narrowed_limits = descriptor(1).limits.model_copy(update={"max_request_bytes": 512})
+        narrowed = descriptor(1).model_copy(update={"limits": narrowed_limits})
+        first_refresh = asyncio.create_task(session.describe())
+        first_request = decode_sent_request(await transport.sent.get())
+        await transport.responses.put(success_response(first_request.id, 1, narrowed))
+        assert (await first_refresh).limits.max_request_bytes == 512
+
+        second_refresh = asyncio.create_task(session.describe())
+        second_request = decode_sent_request(await transport.sent.get())
+        await transport.responses.put(success_response(second_request.id, 1, descriptor(1)))
+        with pytest.raises(EIPProtocolError, match="limits widened"):
+            await second_refresh
+        assert session.descriptor.limits.max_request_bytes == 512
+        assert transport.closed
+
+    async def method_widening_violation() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport, request_timeout=1)
+        initial = descriptor(1).model_copy(update={"available_methods": ("environment.describe",)})
+        session = EIPSession(requester, initial)
+        refresh = asyncio.create_task(session.describe())
+        request = decode_sent_request(await transport.sent.get())
+        await transport.responses.put(success_response(request.id, 1, descriptor(1)))
+        with pytest.raises(EIPProtocolError, match="available methods widened"):
+            await refresh
+        assert transport.closed
+
+    async def posture_change_violation() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport, request_timeout=1)
+        session = EIPSession(requester, descriptor(1))
+        changed_isolation = descriptor(1).isolation.model_copy(update={"network_policy": IsolationNetworkPolicy.DENY})
+        changed = descriptor(1).model_copy(update={"isolation": changed_isolation})
+        refresh = asyncio.create_task(session.describe())
+        request = decode_sent_request(await transport.sent.get())
+        await transport.responses.put(success_response(request.id, 1, changed))
+        with pytest.raises(EIPProtocolError, match="isolation posture changed"):
+            await refresh
+        assert transport.closed
+
     asyncio.run(narrowing())
     asyncio.run(identity_violation())
+    asyncio.run(limit_widening_violation())
+    asyncio.run(method_widening_violation())
+    asyncio.run(posture_change_violation())
 
 
 def test_session_rejects_invalid_local_admission_before_initialize() -> None:

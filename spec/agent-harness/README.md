@@ -19,10 +19,10 @@ The Harness owns code-first Agent construction, a narrow optional plugin configu
 | [06-execution-context-and-lifecycle.md](06-execution-context-and-lifecycle.md)           | Logical run lifecycle, inner model attempts, cancellation, terminal results, and cleanup                                           |
 | [07-tool-execution.md](07-tool-execution.md)                                             | Native and managed function tools, client-side external tools, policy, credentials, and deferred results                           |
 | [08-environment-integration.md](08-environment-integration.md)                           | Environment lifecycle resource, provider bindings, dynamic topology, optional model projection, operations, state, and enforcement |
-| [09-context-and-memory.md](09-context-and-memory.md)                                     | History, context assembly, working state, compaction, and memory boundary                                                          |
+| [09-context-and-memory.md](09-context-and-memory.md)                                     | History, runtime context, handoff, skills, working state, resource acquisition, compaction, and memory boundary                    |
 | [10-snapshot-and-resume.md](10-snapshot-and-resume.md)                                   | `HarnessState`, interrupted-history normalization, import/export, and Host persistence boundary                                    |
 | [11-delegation-and-subagents.md](11-delegation-and-subagents.md)                         | Child topology, inline delegation, and Host asynchronous-child boundary                                                            |
-| [12-events-observability-and-usage.md](12-events-observability-and-usage.md)             | Events, telemetry, native usage, and accounting boundary                                                                           |
+| [12-events-observability-and-usage.md](12-events-observability-and-usage.md)             | Events, telemetry, mixed-source usage attribution, reporting, and accounting boundary                                              |
 | [13-hosting-contract.md](13-hosting-contract.md)                                         | Host-owned schemas/reconstruction, fresh bindings, durable lifecycle, and completion mapping                                       |
 | [14-public-api-and-packaging.md](14-public-api-and-packaging.md)                         | Public Python API, package boundary, errors, and compatibility                                                                     |
 | [15-security-compatibility-and-tradeoffs.md](15-security-compatibility-and-tradeoffs.md) | Trust boundaries, authority, data safety, compatibility, and trade-offs                                                            |
@@ -45,7 +45,7 @@ Read `06`, `10`, and `16`. Provider transport retry, exact history repair, seman
 
 ### Integrate Tools or Environments
 
-Read `07`, `08`, `13`, and `15`. Environment is a fixed run lifecycle resource; `EnvironmentToolsCapability` is only its optional model-facing projection. For durable client-tool delivery, also read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
+Read `07`, `08`, `13`, and `15`. Environment is a fixed run lifecycle resource; `DynamicEnvironmentCapability` is only its optional model-facing projection. For durable client-tool delivery, also read [Foundation Service Client-Side Tools](../foundation-service/02-client-side-tools.md).
 
 ### Implement Hosting or Persistence
 

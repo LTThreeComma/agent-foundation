@@ -4,20 +4,20 @@
 
 `agent-envd` exposes semantic, mount-scoped filesystem operations and bounded observation of local listening ports. It resolves native paths and races inside the Environment boundary rather than exposing host absolute paths or asking the EIP client to emulate filesystem behavior through low-level syscalls.
 
-Every session selects one immutable resource-authority mode during EIP initialization. `scoped` exposes only trusted configured mounts and remains the default. `server` exposes logical mounts for the complete native filesystem namespace visible to the envd process, but only when trusted daemon configuration explicitly permits that ceiling. Both modes continue to use platform-neutral `EIPPath` values; neither accepts a native host path from the client.
+Every session observes the daemon's immutable trusted mount configuration. The descriptor exposes those logical mounts and one optional `root_mount_id`; a caller cannot add a native root or select a broader server-filesystem mode. An operator that intentionally needs whole-filesystem breadth configures `/` or explicit platform volume roots as ordinary mounts. Every request still uses platform-neutral `EIPPath` values rather than native host paths.
 
 ## Boundaries
 
-| Concern                                                                                  | Owner                                                    | Relationship                                        |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------- |
-| Resource-authority ceiling, scoped roots, writable ceilings, and port-observation policy | Operator or provider adapter                             | Trusted immutable daemon configuration              |
-| Harness virtual `/workspace` and `/environment/{alias}` routing                          | Harness                                                  | Resolves to one binding before EIP dispatch         |
-| Logical mount paths and file, search, and port methods                                   | This document                                            | Stable EIP resource contract                        |
-| Native path canonicalization, symlink containment, bounded publication, and receipts     | `agent-envd`                                             | Authoritative provider enforcement                  |
-| Provider ingress, public URL, tunnel, or container port publishing                       | Provider adapter                                         | Outside EIP port observation                        |
-| Raw file-transfer framing, attachment, and backpressure                                  | [Transports and Sessions](03-transports-and-sessions.md) | Carries bytes for the transfer lifecycle owned here |
+| Concern                                                                              | Owner                                                    | Relationship                                        |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------- | --------------------------------------------------- |
+| Configured roots, writable ceilings, allowed methods, and port-observation policy    | Operator or provider adapter                             | Trusted immutable daemon configuration              |
+| Harness virtual `/workspace` and `/environment/{alias}` routing                      | Harness                                                  | Resolves to one binding before EIP dispatch         |
+| Logical mount paths and file, search, and port methods                               | This document                                            | Stable EIP resource contract                        |
+| Native path canonicalization, symlink containment, bounded publication, and receipts | `agent-envd`                                             | Authoritative provider enforcement                  |
+| Provider ingress, public URL, tunnel, or container port publishing                   | Provider adapter                                         | Outside EIP port observation                        |
+| Raw file-transfer framing, attachment, and backpressure                              | [Transports and Sessions](03-transports-and-sessions.md) | Carries bytes for the transfer lifecycle owned here |
 
-Filesystem selectors and port numbers are not authority. Every method also crosses authentication, capability checks, current generation, and configured ceilings.
+Filesystem selectors and port numbers are not authority. Every method also crosses trusted-session checks, exact method availability, current generation, mount policy, and configured ceilings.
 
 ## Mount Model
 
@@ -33,9 +33,7 @@ class TrustedMountConfig(BaseModel):
     allowed_operations: frozenset[str]
 ```
 
-`native_root` is operator-only secret-adjacent configuration: envd canonicalizes it, validates policy against that canonical path, opens the final component without following a link, and retains the opened directory as the mount's capability root. The launching provider must keep the root's containing directory outside payload or other untrusted mutation during that startup sequence; after open, renaming the native path does not retarget the retained capability. This bootstrap authority precondition replaces any portable FileID requirement. Envd never returns the native root in EIP. `allowed_operations` is a subset of the file-read, file-write, search, command-cwd, and executable-source families supported by the daemon. `writable=false` is an absolute ceiling for scoped file methods and required-isolation command grants. A writable mount does not assert exclusive control over contents: commands, provider tooling, and other processes with native access can mutate them concurrently.
-
-A `server` session uses daemon-synthesized mount descriptors rather than accepting roots from the client. Each descriptor represents one complete native filesystem root, is writable only to the extent the envd OS identity can write it, enables the implemented operation families, and is subject to the same finite per-file and daemon-global limits. The session descriptor names one `root_mount_id`; all selectors remain mount-local logical paths. Envd refuses server authority rather than exposing an incomplete or falsely portable root set.
+`native_root` is operator-only secret-adjacent configuration: envd canonicalizes it, validates policy against that canonical path, opens the final component without following a link, and retains the opened directory as the mount's capability root. The launching provider must keep the root's containing directory outside payload or other untrusted mutation during that startup sequence; after open, renaming the native path does not retarget the retained capability. This bootstrap authority precondition replaces any portable FileID requirement. Envd never returns the native root in EIP. `allowed_operations` is a subset of exact file, search, command-cwd, and executable-source operations supported by the daemon. `writable=false` is an absolute ceiling for file mutations and required-isolation command grants. A writable mount does not assert exclusive control over contents: commands, provider tooling, and other processes with native access can mutate them concurrently.
 
 The following objects are serialized EIP JSON:
 
@@ -56,9 +54,17 @@ class MountDescriptor(BaseModel):
 
 `mount_id` is a bounded stable logical ID within one Environment generation. `logical_root` is a display-only EIP path such as `/`; it is not a host path. `path` is absolute within that logical mount, begins with `/`, uses `/` separators on the wire, contains no NUL, and is validated lexically before native resolution. `/` is the mount root; otherwise empty interior segments, a trailing separator, `.`, and `..` are rejected instead of normalized into another request.
 
-A scoped mount configuration binds the logical ID to one canonical native directory, read-only or read-write ceiling, protected-path checks, allowed operation families, file-size bounds, and platform semantics. `supports_atomic_replace=true` means envd can build and integrity-check a complete candidate in the destination directory and publish it with one same-filesystem atomic rename. It does not mean envd exclusively owns the destination, serialize external writers, or provide compare-and-swap. The descriptor reports observed behavior but cannot widen configuration or OS authority.
+A mount configuration binds the logical ID to one canonical native directory, read-only or read-write ceiling, protected-path checks, exact allowed operations, mutation-size bounds, and platform semantics. `supports_atomic_replace=true` means envd can build and integrity-check a complete candidate in the destination directory and publish it with one same-filesystem atomic rename. It does not mean envd exclusively owns the destination, serialize external writers, or provide compare-and-swap. The descriptor reports observed behavior but cannot widen configuration or OS authority.
 
-Configured scoped mount roots are non-overlapping after canonicalization unless they are exact aliases with identical policy intentionally represented as one mount. Ancestor/descendant roots with competing policies are rejected at startup. Server-root mounts are a separate session view and therefore do not compete with configured scoped mounts.
+Configured mount roots are non-overlapping after canonicalization unless exact aliases intentionally share identical policy and one logical identity. Ancestor/descendant roots with competing policies are rejected at startup. `max_file_bytes` bounds complete mutation candidates; it does not reject metadata reads, a bounded reader range, or incremental search merely because the source regular file is larger. Those operations use their own transfer, response, work, and duration ceilings.
+
+### Protected runtime subtraction
+
+Generation-private runtime, output spool, connector/bootstrap state, supervisor control, probe sentinels, logs, installed helpers, and credential-bearing roots are protected even when a configured mount is their native ancestor. Envd opens or fixes each protected root during startup and derives a resource-layer deny set from native identities and canonical topology. Choosing a runtime parent outside ordinary narrow mounts is preferred but never substitutes for this enforcement because an intentional `/` or volume-root mount physically contains almost every daemon path.
+
+Every file method applies protected-root subtraction independently of command isolation. A direct selection of a protected root or descendant is denied without disclosure. Component resolution refuses a symlink, junction, mount point, reparse point, or replaced parent that would enter a protected identity. `file.list`, `file.find`, `file.search`, and recursive mutation test an entry before returning protected metadata or descending, so traversal cannot enumerate names below the boundary. Staged candidates remain destination-local but cannot be created inside a protected root through EIP authority.
+
+Startup validates mount/protected-root topology and the exact platform-relative implementation. A broad mount is unavailable when the platform/filesystem cannot provide no-follow protected subtraction for all advertised operations. Required execution isolation performs a separate subtraction for payload commands; passing one layer never substitutes for the other.
 
 ## Canonicalization and Symlinks
 
@@ -164,7 +170,7 @@ class FileReaderOpenParams(BaseModel):
     context: EIPCallContext
     path: EIPPath
     byte_range: FileByteRange | None = None
-    transfer_deadline: datetime | None = None
+    transfer_timeout_ms: int | None = None
 
 
 class FileReaderOpenResult(BaseModel):
@@ -175,31 +181,27 @@ class FileReaderOpenResult(BaseModel):
 
 class FileReadCompletion(BaseModel):
     produced_bytes: int
-    digest: ContentDigest | None
-    complete: bool
+    digest: ContentDigest
 
 
 class FileReaderCloseParams(BaseModel):
     context: EIPCallContext
     reader: FileReaderHandle
-    accept_complete: bool
 
 
 class FileReaderCloseResult(BaseModel):
     completion: FileReadCompletion
 ```
 
-`offset` and `length` count bytes, but `length` is a maximum, not an exact-read assertion. The producer starts at `offset` and stops at the earlier of source EOF or the requested maximum. Zero length, offset at or beyond EOF, and EOF before `length` all produce a clean empty or short stream. A source read error is still a transfer reset. Omitting `length` selects the bytes available from `offset` at open; the open fails if that observed upper bound exceeds the mount's finite per-transfer ceiling. Later growth is not added to that transfer, while later shrinkage simply produces a shorter successful stream. The selector remains an observation bound, not a snapshot or exact-length promise. It is a low-level mechanism for HTTP Range, random access, or a bounded download and is not exposed through the Harness model tools.
+`offset` and `length` count bytes, but `length` is a maximum, not an exact-read assertion. The producer starts at `offset` and stops at source EOF or the requested maximum. Zero length, offset at or beyond EOF, and EOF before `length` produce a clean empty or short stream. Source read failure resets the transfer. Omitting `length` selects bytes available from `offset` subject to `max_file_transfer_bytes`; a caller reads a larger file through explicit bounded ranges rather than a server cursor. Later growth is not added, while later shrinkage can produce a shorter successful stream. The range is an observation bound, not a snapshot or exact-length promise.
 
-The call context deadline bounds opening only. `expires_at` is the minimum of a valid requested `transfer_deadline` and the daemon's absolute transfer-duration ceiling. Valid progress refreshes the shorter idle timer but never extends `expires_at`.
+The call context timeout bounds opening only. `transfer_timeout_ms` is a positive relative duration narrowed by daemon transfer policy and converted to a monotonic deadline at open. `expires_at` reports the resulting current absolute observation for diagnostics; it is not caller-supplied time or a lease. Valid progress can refresh an internal idle timer without extending the transfer-duration ceiling.
 
-After open, the selected transport attaches exactly one server-to-client stream to `reader`. Data-frame offsets start at zero and remain contiguous regardless of the native starting offset. For stdio and WebSocket, the client sends `END_ACK` only after its high-level consumer has drained every queued chunk and observed `END`; HTTP exact-body completion is equivalent. Gaps, duplicates, unexpected direction, source I/O failure, cancellation, or carrier failure reset the transfer rather than masquerading as EOF.
+After open, the carrier attaches exactly one server-to-client stream. Attachment offsets start at zero regardless of native offset. Envd emits `END` after clean producer termination. Readers never use `END_ACK`; successful `file.close_reader` is the sole consumer-acceptance action and is legal only after the public consumer drained every chunk. A high-level reader computes count and SHA-256 while yielding, then compares its evidence with the close result. Early exit sends `RESET` when possible and performs no close acceptance.
 
-The first `file.close_reader` call linearizes the caller's decision. `accept_complete=true` succeeds only after clean producer termination and consumer acknowledgement. `accept_complete=false` cancels or discards the attachment and returns an incomplete result. A high-level EIP reader computes its own count and SHA-256 while yielding chunks, accepts completion only after normal iteration exhaustion, and compares its evidence with envd. Early context exit performs incomplete close.
+`produced_bytes` and the required SHA-256 digest describe bytes delivered by the accepted stream. They are transfer-integrity evidence only and do not prove immutable source content, source EOF position, pathname stability, or a filesystem snapshot.
 
-`produced_bytes` is the count delivered to the carrier. A complete result includes the SHA-256 digest and must match the client's local count and digest; an incomplete result has `digest=null`. These are transport-integrity facts only. They do not become a provider-neutral completion model and do not prove immutable source content, source EOF position, or an application-level snapshot.
-
-A reader awaiting first close remains active and bounded by its session and transfer deadlines. Reader handles cannot cross sessions, survive reconnect, become retained-output references, or enter Harness state.
+A reader awaiting close remains active and bounded by session and transfer lifetime. Reader handles cannot cross sessions, survive reconnect, become retained-output references, or enter Harness state.
 
 ### `file.list`
 
@@ -221,9 +223,10 @@ class FileListResult(BaseModel):
     entries: tuple[FileListEntry, ...]
     offset: int
     has_more: bool
+    omitted_unrepresentable_entries: int
 ```
 
-`file.list` returns only immediate children. Entries are ordered bytewise by relative path. `offset` is the zero-based number of ordered entries to skip, `max_results` is positive, and `has_more` reports whether another entry existed. Hidden names are omitted unless `include_hidden=true`. Each call observes current state independently. Unsafe native names fail explicitly rather than being lossily decoded or silently skipped.
+`file.list` returns only immediate children. Representable entries are ordered bytewise by relative path. `offset` is the zero-based number of ordered representable entries to skip, `max_results` is positive, and `has_more` reports whether another representable entry existed. Hidden names are omitted unless requested. Native names that cannot be represented safely in portable UTF-8 EIP paths are omitted rather than lossily decoded; `omitted_unrepresentable_entries` reports the bounded count observed during that page's traversal.
 
 ### `file.find`
 
@@ -245,6 +248,7 @@ class FileFindResult(BaseModel):
     entries: tuple[FileListEntry, ...]
     offset: int
     has_more: bool
+    omitted_unrepresentable_entries: int
 ```
 
 The glob matches each descendant's `/`-separated path relative to `root`; `root` itself is not a result. A bare pattern without `/`, such as `*.py`, matches the basename at any traversed depth. A pattern containing `/` matches the complete relative path, and a leading `/` explicitly anchors that path at `root`. The supported syntax is `*`, `?`, `**`, and bracket character classes. Within a path pattern, `*`, `?`, and classes do not cross `/`, while `**` matches complete path segments. An empty `kinds` tuple accepts every file kind. `recursive=false` restricts the operation to immediate children. Results share `file.list` ordering and offset semantics.
@@ -277,19 +281,20 @@ class FileSearchResult(BaseModel):
     matches: tuple[FileSearchMatch, ...]
     offset: int
     has_more: bool
+    omitted_unrepresentable_entries: int
 ```
 
 Search recursively considers regular files under `root`, omitting hidden path components unless requested. A file containing invalid UTF-8 or NUL is skipped deterministically. Literal and regex matching are applied independently to each complete logical line and cannot span LF boundaries. `case_sensitive=false` uses explicit Unicode case-insensitive matching.
 
 `line_number` is one-based. `preview` is the containing line with only its LF terminator removed and at most `max_line_length` characters; `preview_truncated` reports an omitted suffix. EIP does not expose a raw byte offset or duplicate the same line for several occurrences. Results are ordered by relative path and then line number.
 
-Pattern size, traversal work, file bytes, result count, preview length, response bytes, and duration are finite. `offset` skips ordered matching lines, `max_results` bounds the returned slice, and `has_more` reports another match in that observation. A response-byte ceiling can narrow the result count; if even the first selected item cannot fit, the method returns `output_limit_exceeded`. Cancellation and deadlines return typed errors rather than partial success.
+Pattern size, incremental traversal work, bytes scanned per file and operation, result count, preview length, response bytes, and duration are finite. A source file can exceed the mutation candidate limit; search streams bounded chunks and applies its independent scan ceiling. `offset` skips ordered matching lines, `max_results` bounds the page, and `has_more` reports another match in that observation. Implementations page deterministically without retaining a complete traversal/result set merely to return the first page. Unrepresentable path entries are omitted and counted. A response ceiling can narrow result count; if the first selected item cannot fit, the method returns `output_limit_exceeded`. Cancellation and timeout return typed errors rather than partial success.
 
 Neither find nor search follows a symlink outside the selected mount or reads special files. Their result text remains untrusted content and is subject to later Harness output and redaction policy.
 
 ## Mutation Operations
 
-All mutations return an `OperationReceipt` and resulting current metadata when applicable. A method validates its entire semantic request before native mutation. Idempotency support is method- and mode-specific and follows [EIP Protocol](02-eip-protocol.md#common-operation-context).
+All mutations return an `OperationReceipt` and resulting current metadata when applicable. A method validates its semantic request before native mutation. Operation-ID replay, conflict, and unknown-outcome rules follow [EIP Protocol](02-eip-protocol.md#common-operation-context-and-replay).
 
 File mutation modes express publication intent, not global concurrency control. Envd serializes only its own critical sections where required for internal ownership; commands and external native writers do not participate in that lock. A complete-candidate rename prevents readers from observing envd's partial candidate bytes, but another writer can modify or replace the destination before or after publication. `create` uses native no-replace publication when supported. `replace`, `upsert`, append, patch, copy, move, and remove validate their ordinary shape requirements at the latest practical boundary, but they do not compare a caller-supplied revision or promise a total order across all writers. When concurrent publications race, the filesystem's completion order determines the final entry, and the caller must read or reconcile afterward when the final state matters.
 
@@ -317,9 +322,9 @@ class FileWriteTextResult(BaseModel):
     receipt: OperationReceipt
 ```
 
-The exact UTF-8 encoding of `text` is bounded by request, response-independent file, and mount limits before staging. Envd rejects NUL and performs no newline, Unicode-normalization, encoding, or BOM transformation. `create` intends absence, `replace` intends an existing regular file, `upsert` allows either, and `append` produces a replacement containing the bytes envd reads followed by the supplied bytes. Append requires an existing strict UTF-8, NUL-free file and an idempotency key so replay through envd does not duplicate one accepted operation. The parent directory must already exist; callers use the separately receipted `file.mkdir` operation rather than hiding directory creation inside a write.
+The exact UTF-8 encoding of `text` is bounded by request, response-independent file, and mount limits before staging. Envd rejects NUL and performs no newline, Unicode-normalization, encoding, or BOM transformation. `create` intends absence, `replace` intends an existing regular file, `upsert` allows either, and `append` produces a replacement containing the bytes envd reads followed by the supplied bytes. Append requires an existing strict UTF-8, NUL-free file. Repeating the same operation ID and semantic digest replays the accepted operation rather than appending twice. The parent directory must already exist; callers use the separately receipted `file.mkdir` operation rather than hiding directory creation inside a write.
 
-Every mode stages a complete candidate with a bounded random name in the destination directory. The candidate can be visible to commands or other native actors that can list or mutate that directory; it is neither a confidentiality boundary nor a lock. Envd records the digest of the intended complete bytes while building the candidate, rehashes the held candidate immediately before one same-filesystem directory-entry publication, and treats the native rename result as the publication boundary. It does not require a portable native identity token to bind that open handle to the candidate name: an independently authoritative native writer can replace the named entry or destination before or after publication, just as it can replace the destination directly. The digest proves the bytes envd received and verified, not exclusive control of shared native directory state. Integrity failure or a cancellation proven before publication removes the candidate and leaves the destination unchanged unless another native actor independently mutates those entries. A daemon crash can leave a recognizable candidate as ordinary Environment state; no startup-wide filesystem scan is required. Transport loss after method acceptance does not itself cancel this single-request mutation; the client reconciles its operation ID, idempotency key, receipt, or observed resource state before retrying.
+Every mode stages a complete candidate with a bounded random name in the destination directory. The candidate can be visible to commands or other native actors that can list or mutate that directory; it is neither a confidentiality boundary nor a lock. Envd records the digest of the intended complete bytes while building the candidate, rehashes the held candidate immediately before one same-filesystem directory-entry publication, and treats the native rename result as the publication boundary. It does not require a portable native identity token to bind that open handle to the candidate name: an independently authoritative native writer can replace the named entry or destination before or after publication, just as it can replace the destination directly. The digest proves the bytes envd received and verified, not exclusive control of shared native directory state. Integrity failure or a cancellation proven before publication removes the candidate and leaves the destination unchanged unless another native actor independently mutates those entries. A daemon crash can leave a recognizable candidate as ordinary Environment state; no startup-wide filesystem scan is required. Carrier loss after method acceptance does not cancel this mutation; the client reconciles its operation ID, receipt, or observed resource state before starting another operation.
 
 ### Binary writer
 
@@ -334,7 +339,7 @@ class FileWriterOpenParams(BaseModel):
     path: EIPPath
     mode: FileWriteMode
     executable: bool | None = None
-    transfer_deadline: datetime | None = None
+    transfer_timeout_ms: int | None = None
 
 
 class FileWriterOpenResult(BaseModel):
@@ -371,21 +376,21 @@ class FileWriterAbortResult(BaseModel):
     ]
 ```
 
-`file.open_writer` authorizes the destination, reserves one writer and staging-object record, and creates and holds open a complete-file candidate with a bounded random name in the destination directory. The parent directory must already exist. For append, envd copies the currently observed existing file into the candidate before accepting uploaded bytes, and the copied prefix consumes staging quota. The candidate receives restrictive permissions but can be visible to any actor that already controls that directory. Open returns only after failure can still be rolled back without changing the destination. `max_transfer_bytes` is the current individual hard ceiling, including the remaining final-file allowance for append; aggregate staging capacity is still reserved incrementally and is not promised by that value. The call context deadline bounds opening only, while `transfer_deadline`, idle expiry, and `expires_at` follow the same finite rules as a reader.
+`file.open_writer` authorizes the destination, reserves one writer and staging-object record, and creates and holds open a complete-file candidate with a bounded random name in the destination directory. The parent directory must already exist. For append, envd copies the currently observed existing file into the candidate before accepting uploaded bytes, and the copied prefix consumes staging quota. The candidate receives restrictive permissions but can be visible to any actor that already controls that directory. Open returns only after failure can still be rolled back without changing the destination. `max_transfer_bytes` is the current individual hard ceiling, including remaining final-file allowance for append; aggregate staging capacity is reserved incrementally and is not promised by that value. The call context timeout bounds opening only, while relative `transfer_timeout_ms`, internal idle expiry, and observed `expires_at` follow the reader rules.
 
-The transport then attaches exactly one client-to-server data stream. Payload offsets begin at zero and cover only bytes supplied by this transfer, including append bytes but not the copied prefix. Envd enforces exact contiguous offsets, frame and total limits, incremental staging quota, idle and absolute deadlines, and SHA-256 while writing bounded chunks. A terminal data marker or HTTP request-body EOF closes the data attachment but does not mutate the target.
+The transport then attaches exactly one client-to-server data stream. Payload offsets begin at zero and cover only bytes supplied by this transfer, including append bytes but not the copied prefix. Envd enforces exact contiguous offsets, frame and total limits, incremental staging quota, idle and duration ceilings, and SHA-256 while writing bounded chunks. Client `END` followed by envd `END_ACK` seals the attachment but does not mutate the target.
 
 `file.commit_writer` is eligible only after a clean terminal marker and data-plane acknowledgement has sealed the writer. Its domain admission is one coordinator linearization: while the session still admits work, envd validates the sealed writer and exact requested byte count/`transfer_digest` against attachment observations, reserves the generation-scoped operation record, and transfers candidate ownership from the session to that operation atomically. A request mismatch transitions the session-owned writer to cleanup and returns `integrity_mismatch` without handoff or target mutation. If session closing wins first, commit fails pre-dispatch and session cleanup owns deletion; if handoff wins first, every session cleanup path ignores the candidate and the operation proceeds independently.
 
-After handoff, envd revalidates the held candidate's complete size and metadata and hashes the complete sealed candidate immediately before rename. For create, replace, and upsert that full hash must equal `transfer_digest`; for append envd revalidates the copied prefix bytes and hashes the staged suffix range against `transfer_digest`. Any held-candidate mismatch returns `integrity_mismatch`, deletes the candidate, and performs no target mutation unless another native actor independently mutates the shared directory. Envd then revalidates destination path shape, mode intent, size, metadata, and current policy; syncs the held file and, where the platform supplies a supported directory-sync primitive, the containing directory; and performs one native directory-entry publication without claiming portable identity binding or compare-and-swap. After ownership handoff the transfer deadline no longer owns cleanup; the commit call context and daemon operation-duration ceiling bound the accepted mutation. The result and receipt identify that mutation completion boundary. Atomic visibility and available `fsync` behavior do not imply Host durable Agent completion, exclusive control against another native writer, or a stronger universal power-loss guarantee than the selected filesystem and provider actually supply.
+After handoff, envd revalidates the held candidate's complete size and metadata and hashes the complete sealed candidate immediately before rename. For create, replace, and upsert that full hash must equal `transfer_digest`; for append envd revalidates the copied prefix bytes and hashes the staged suffix range against `transfer_digest`. Any held-candidate mismatch returns `integrity_mismatch`, deletes the candidate, and performs no target mutation unless another native actor independently mutates the shared directory. Envd then revalidates destination path shape, mode intent, size, metadata, and current policy; syncs the held file and, where the platform supplies a supported directory-sync primitive, the containing directory; and performs one native directory-entry publication without claiming portable identity binding or compare-and-swap. After ownership handoff the transfer timeout no longer owns cleanup; the commit call timeout and daemon operation-duration ceiling bound the accepted mutation. The result and receipt identify that mutation completion boundary. Atomic visibility and available `fsync` behavior do not imply Host durable Agent completion, exclusive control against another native writer, or a stronger universal power-loss guarantee than the selected filesystem and provider actually supply.
 
-`file.abort_writer`, early context exit, data-carrier failure, transfer expiry, session loss, and daemon drain delete the candidate and leave the destination unchanged only while the writer remains open, receiving, or sealed. Once commit owns the candidate, abort reports `commit_in_progress` or `already_committed` and cannot promise rollback; session cleanup never races deletion against that commit. Cancellation and connection loss during commit preserve the ordinary completed/cancelled/unknown distinction. Staged bytes and object quota are returned exactly once only after commit removes ownership or deletion is confirmed. A failed unlink or uncertain cleanup remains conservatively charged, is not silently orphaned, and puts the mount or daemon into a cleanup-fault/draining state for operator repair.
+`file.abort_writer`, early context exit, data-carrier failure, transfer expiry, session loss, and daemon drain delete the candidate and leave the destination unchanged only while the writer remains open, receiving, or sealed. Once commit owns the candidate, abort reports `commit_in_progress` or `already_committed` and cannot promise rollback; session cleanup never races deletion against that commit. Cancellation and connection loss during commit preserve the ordinary completed/cancelled/unknown distinction. Staged bytes and object quota are returned exactly once only after commit removes ownership or deletion is confirmed. A failed unlink or uncertain cleanup remains conservatively charged and enters a bounded cleanup-retry owner. One transient failure does not permanently fault an otherwise safe mount. New affected staging is blocked only when unproven owned bytes, retry exhaustion, or a configured orphan threshold makes further accounting unsafe; daemon drain preserves unresolved cleanup evidence.
 
-Commit accepts an idempotency key and retains generation-scoped result and receipt evidence. If the response is lost after possible commit, a fresh authenticated session reconciles by commit `operation_id`, receipt, or retained idempotency record before opening another writer. The old writer itself never becomes valid in the new session. A matching completed idempotency record can replay the prior result without re-authorizing that expired writer for another native commit; an absent record cannot.
+Commit retains generation-scoped result and receipt evidence under its operation ID. If the response is lost after possible commit, a fresh initialized session reconciles that operation ID before opening another writer. The old writer never becomes valid in the new session. A matching retained operation can replay its prior result without re-authorizing the expired writer; absent evidence cannot prove non-dispatch.
 
 For create, replace, and upsert, `transfer_digest` identifies the complete bytes envd received and verified in the held candidate; for append it identifies only the newly supplied suffix, while envd verifies the copied staged prefix. It is a transfer and held-candidate integrity fact, not a portable native file-version token or an assertion that a concurrently writable destination path still contains those bytes.
 
-A high-level writer hides the handle, attachment handshake, offsets, terminal marker and acknowledgement, digest, and abort path. `commit()` seals the data attachment, sends a fresh operation ID and idempotency key, verifies the local count and digest against envd, and returns the published metadata and receipt. Exiting without successful commit aborts.
+A high-level writer hides the handle, attachment handshake, offsets, terminal marker and acknowledgement, digest, and abort path. `commit()` seals the data attachment, uses one fresh operation ID, verifies local count and digest against envd, and returns published metadata and receipt. Exiting without successful commit aborts.
 
 ### `file.mkdir`
 
@@ -521,11 +526,11 @@ class PortWaitResult(BaseModel):
     observation: PortObservation
 ```
 
-`port.inspect` returns one observation. `port.wait` uses the `EIPCallContext.deadline` as its finite wait boundary and returns when the desired status is observed or that deadline expires. The base contract follows the Linux/POSIX TCP port domain: `port` is an integer in `1..65535`; port `0` is valid for listener allocation but is never an observable listening target. Availability of `port.observe` and any narrower current policy determine whether the call is admitted; EIP does not define a configurable default port-range grant. Arbitrary remote hosts, UDP scanning, raw sockets, packet capture, and host-network enumeration are not part of this capability.
+`port.inspect` returns one observation. `port.wait` uses the effective relative `EIPCallContext.timeout_ms` as its finite wait boundary and returns when the desired status is observed or that deadline expires. The base contract follows the Linux/POSIX TCP port domain: `port` is an integer in `1..65535`; port `0` is valid for listener allocation but is never an observable listening target. Exact availability of `port.inspect` or `port.wait` and any narrower current policy determine admission; EIP does not define a configurable default port-range grant. Arbitrary remote hosts, UDP scanning, raw sockets, packet capture, and host-network enumeration are not methods.
 
 When the platform can safely attribute a listener to an envd-managed process in the current daemon generation, `managed_process` can be returned. An unmanaged listener is reported only as policy permits and never reveals a PID or identity. `unknown` is used when namespace, platform, or permission prevents trustworthy observation.
 
-A command in isolated Linux `deny` networking has its own empty network namespace and cannot expose an IP listener to envd or the provider. A command using `host` network or an explicit outer sandbox network can be observed only from the network boundary where envd runs. The descriptor reports capability honestly.
+A command under required `deny` networking has no usable IP path through the platform backend and cannot expose an ordinary listener to envd or the provider. A command using `host` or explicit outer-sandbox networking is observable only from the network boundary where envd runs. The descriptor reports the applicable port methods and isolation posture honestly.
 
 Provider adapters own the mapping from a successfully observed local port to a public, tunneled, or container-exposed endpoint. EIP never treats listening status as proof that an external route exists or is authorized.
 
@@ -533,13 +538,13 @@ Provider adapters own the mapping from a successfully observed local port to a p
 
 EIP 1.0 does not ask envd to fetch an arbitrary URL. An authenticated Host or product gateway applies its own network, redirect, credential, content, and egress policy, reads the external source incrementally, and writes it through a binary writer. This keeps SSRF-sensitive network authority outside the Environment daemon and gives URL downloads, browser uploads, generated artifacts, and cross-Environment copies the same staged commit path.
 
-A browser is not given the daemon API key or a raw EIP session. A product-facing file gateway authenticates the user, resolves a scoped Environment binding, re-authorizes the path and action, and proxies bytes with bounded memory and backpressure. Browser preview or download uses a binary reader even for `.txt`; an online text editor uses an explicit read followed by a write or patch and reconciles the resulting observation without assuming global compare-and-swap. A product HTTP Range request maps to one reader opened with the corresponding byte range.
+A browser is not given the daemon API key or a raw EIP session. A product-facing file gateway authenticates the user, resolves an authorized Environment binding, re-authorizes the path and action, and proxies bytes with bounded memory and backpressure. Browser preview or download uses a binary reader even for `.txt`; an online text editor uses an explicit read followed by a write or patch and reconciles the resulting observation without assuming global compare-and-swap. A product HTTP Range request maps to one reader opened with the corresponding byte range.
 
 ## Resource Lifetime
 
-Native files and directories are provider Environment state and can remain after envd exits. EIP does not serialize a filesystem snapshot or daemon registry. Process handles, operation records, receipts, output references, output cursors, and private spool data exist only in the current daemon generation. Because complete candidates are destination-local, a crash can leave a bounded-name candidate beside its intended destination. It is ordinary visible Environment state after daemon ownership is lost; envd does not scan an arbitrary filesystem tree at startup or claim it can distinguish every old candidate from a user-created file safely. A fresh authenticated protocol session in the current generation can continue using generation-owned records where their owning contract permits it; a daemon restart cannot.
+Native files and directories are provider Environment state and can remain after envd exits. EIP does not serialize a filesystem snapshot or daemon registry. Process handles, operation records, receipts, output references, and private spool data exist only in the current daemon generation. Because complete candidates are destination-local, a crash can leave a bounded-name candidate beside its intended destination. It is ordinary visible Environment state after daemon ownership is lost; envd does not scan an arbitrary filesystem tree at startup or claim it can distinguish every old candidate from a user-created file safely. A fresh authenticated protocol session in the current generation can continue using generation-owned records where their owning contract permits it; a daemon restart cannot.
 
-File reader and writer handles are the deliberate exception to generation-wide reconnectability. They are ephemeral, single-attachment resources bound to the exact initialized session and authenticated data carrier that opened them. Session close, idle expiry, carrier loss, or reconnect closes readers and aborts pre-handoff writers. A handoff-complete writer's operation record and attached receipt/idempotency evidence remain generation-scoped for reconciliation even though its transfer handle is gone.
+File reader and writer handles are the deliberate exception to generation-wide reconnectability. They are ephemeral, single-attachment resources bound to the exact initialized session and authenticated data carrier that opened them. Session close, idle expiry, carrier loss, or reconnect closes readers and aborts pre-handoff writers. A handoff-complete writer's operation record and attached receipt evidence remain generation-scoped for reconciliation even though its transfer handle is gone.
 
 ## Failure Semantics
 
@@ -549,7 +554,7 @@ File reader and writer handles are the deliberate exception to generation-wide r
 | Symlink or canonical target escapes policy     | `denied`                                                  | Pre-dispatch for requested mutation              |
 | Publication intent no longer holds             | `conflict`                                                | No requested publication when detected before it |
 | Text-result or structured-result bound reached | `has_more=true` or `output_limit_exceeded`                | No hidden completeness claim                     |
-| Reader interrupted or source read fails        | Incomplete close or transport/source failure              | Delivered bytes are not reported as complete     |
+| Reader interrupted or source read fails        | Reset or carrier/source failure                           | Delivered bytes are not reported as complete     |
 | Writer frame, count, or digest mismatch        | `integrity_mismatch`; staged candidate removed            | No destination mutation                          |
 | Atomic replacement unsupported                 | `unsupported` before dispatch                             | No destination mutation                          |
 | Transport lost before writer commit            | Writer abort and staged-candidate cleanup                 | Destination remains unchanged                    |
@@ -560,23 +565,23 @@ File reader and writer handles are the deliberate exception to generation-wide r
 
 ## Compatibility
 
-File method semantics are capability-gated independently from native platform. New metadata fields can be additive, but changing path normalization, symlink behavior, text decoding, range meaning, transfer-handle scope, data offset or integrity rules, write-mode defaults, commit atomicity, metadata meaning, search dialect, or traversal ordering requires an incompatible protocol revision.
+File method availability is reported by exact JSON-RPC method independently for each platform. New metadata fields can be additive, but changing path normalization, symlink behavior, text decoding, range meaning, transfer-handle scope, data offset or integrity rules, write-mode defaults, commit atomicity, metadata meaning, search dialect, or traversal ordering requires an incompatible protocol revision.
 
-Providers can expose narrower limits and omit unsupported methods. A client never infers support from operating system, Docker/E2B labels, or daemon package version. Common conformance tests use both resource-authority modes, symlink escapes, concurrent replacement, raw transfer backpressure, interruption cleanup, integrity mismatch, output bounds, publication intent, receipt ambiguity, path-find/content-search distinctions, and explicit-offset fixtures.
+Providers can expose narrower limits and omit unsupported methods. A client never infers support from operating system, Docker/E2B labels, or daemon package version. Common conformance tests use configured mounts, symlink/reparse escapes, concurrent replacement, raw transfer backpressure, interruption cleanup, integrity mismatch, output bounds, publication intent, receipt ambiguity, path-find/content-search distinctions, omission counts, and explicit-offset fixtures.
 
 ## Invariants
 
 01. Every filesystem operand selects one effective logical mount and never accepts a native root from request data; a multi-path operation authorizes each operand independently.
-02. Lexical validation and native canonicalization both apply; symlinks cannot expand authority beyond a scoped mount or a selected server root.
-03. Scoped read-only mount policy constrains both file methods and command filesystem grants; server authority remains bounded by envd's OS-visible namespace and independent command isolation.
+02. Lexical validation and native canonicalization both apply; symlinks and reparse points cannot expand authority beyond a configured mount or enter a protected daemon root.
+03. Configured read-only mount policy constrains both file methods and command filesystem grants; whole-filesystem breadth requires an explicit ordinary mount, resource-layer protected-root subtraction, and independent command-layer subtraction, never a session mode.
 04. Every text result, traversal, query, patch, data frame, file, staged candidate, transfer, result, and duration has a finite bound.
 05. Text convenience operations are strict UTF-8 and bounded; arbitrary complete content uses a raw binary reader or writer rather than JSON/base64.
 06. One binary reader carries one opened file interval sequentially; only terminal consumer acceptance reports a complete count and digest, while no file-version or snapshot-isolation claim is fabricated.
 07. One binary writer stages a bounded complete candidate in the destination directory; the candidate is not private or a lock, publication never exposes envd's partial bytes, and quota is released only after ownership transfer or confirmed deletion.
-08. File transfer handles are single-attachment and session-scoped; generation-scoped commit operation records and their attached receipt/idempotency evidence, not transfer resumption, reconcile an ambiguous commit.
+08. File transfer handles are single-attachment and session-scoped; generation-scoped commit operation records and attached receipt evidence, not transfer resumption, reconcile an ambiguous commit.
 09. Atomic publication is claimed only for one complete-candidate rename or native move primitive; it never implies global ordering or compare-and-swap, and cross-mount move never masquerades as atomic.
 10. Every mutating method returns bounded side-effect evidence and preserves unknown outcome after ambiguous commit response loss.
 11. Port methods observe only policy-authorized local TCP targets in `1..65535` and never create external exposure or scan remote hosts.
 12. `file.find` matches relative path names and never reads file content; `file.search` matches UTF-8 regular-file content and uses path globs only for file selection.
-13. Native files and crash-left destination-local candidates can outlive envd, while process, operation, receipt, retained-output, output-cursor, transfer, and spool records never outlive their owning session or daemon generation.
+13. Native files and crash-left destination-local candidates can outlive envd, while process, operation, receipt, retained-output, transfer, and spool records never outlive their owning session or daemon generation.
 14. Provider lifecycle state, transport state, and Host durable execution state never enter an EIP state export because EIP defines no state export or restore method.

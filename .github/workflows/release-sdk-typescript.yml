@@ -82,6 +82,7 @@ jobs:
           package-manager-cache: false
 
       - name: Prevent the latest dist-tag from moving backward
+        if: ${{ !contains(needs.build.outputs.version, '-rc.') }}
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
@@ -101,7 +102,14 @@ jobs:
           JS
 
       - name: Publish package with npm Trusted Publishing
-        run: npm publish ./dist/*.tgz --access public
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [[ "$VERSION" == *-rc.* ]]; then
+            npm publish ./dist/*.tgz --access public --tag rc
+          else
+            npm publish ./dist/*.tgz --access public
+          fi
 
   create-release:
     name: Create GitHub Release

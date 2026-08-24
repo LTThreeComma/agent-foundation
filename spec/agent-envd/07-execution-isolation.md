@@ -2,326 +2,334 @@
 
 ## Design Position
 
-Every `shell.exec` and `process.start` command is treated as untrusted local code. By default, envd places each command tree inside an operating-system sandbox before the requested executable starts: Linux uses bubblewrap namespaces and macOS uses Seatbelt. This inner layer protects host resources outside explicitly granted command roots when envd runs directly on a user machine.
+Every `shell.exec` and `process.start` command is untrusted local code. By default, envd places each command tree inside a required operating-system isolation backend before the requested executable starts:
 
-A deployment that already runs envd inside a container, VM, E2B environment, or equivalent sandbox can explicitly select `disabled`. In that mode the outer host owns command filesystem, process, device, IPC, and network containment. Envd retains transactional spawn, session-selected resource authority, command validation, environment filtering, process ownership, output bounds, quotas, signaling, and cleanup, but it makes no inner-sandbox claim.
+- Linux uses bubblewrap namespaces;
+- macOS uses Seatbelt;
+- Windows uses an AppContainer or equivalent restricted capability token plus capability-specific filesystem and network ACL projection, and a non-breakaway Job Object for complete process-tree ownership and cleanup.
 
-There is no `auto`, `best_effort`, or probe-driven fallback. Required isolation either passes its production probe and remains active or the daemon fails before transport admission.
+Linux, macOS, and Windows are all required targets with platform-native containment and truthful cleanup semantics.
 
-## Security Boundary and Non-goals
+A deployment that already places envd inside a container, VM, remote sandbox, or equivalent boundary can explicitly configure `disabled`. That delegates child containment to the outer Host while preserving command validation, configured-mount authorization, transactional spawn, environment filtering, process ownership, output bounds, quotas, signaling, and cleanup.
 
-The required backends provide host containment for an Environment under the daemon's OS user and configured roots. They reduce accidental destructive behavior and malicious dependency-script access to unrelated files, credentials, processes, and IPC. They are not a hostile multi-tenant boundary and do not claim resistance to kernel, bubblewrap, or Seatbelt vulnerabilities.
+There is no `auto`, `best_effort`, or probe-driven fallback. Required isolation either passes its production probe for the active platform and policy or envd fails before carrier admission.
 
-The isolation layer does not:
+## Boundaries
 
-- provision a container or VM;
-- isolate trusted envd file methods from envd itself;
-- turn installed Harness Python plugins into untrusted code;
-- provide domain-name egress policy;
-- promise identical macOS and Linux process-tree teardown strength;
-- replace daemon admission, output quotas, wall-time limits, or outer resource controls;
-- accept profiles, helper paths, native roots, disable flags, user IDs, or network widening from EIP callers.
+| Concern                                                                                   | Owner                                                                          | Relationship                                             |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| Outer container, VM, remote sandbox, identity, and teardown                               | Host provider                                                                  | Can be the explicit containment owner in `disabled` mode |
+| Required/disabled selection, runtime roots, network ceiling, and trusted payload identity | [Daemon Lifecycle and Configuration](01-daemon-lifecycle-and-configuration.md) | Immutable trusted bootstrap                              |
+| Configured mount authority and file-operation policy                                      | [Resource Operations](04-resource-operations.md)                               | Supplies only operator-approved roots                    |
+| Per-command policy, platform backend, probe, posture, and cleanup guarantee               | This document                                                                  | Establishes child containment before exec                |
+| Command schema, transactional start, process state, and semantic controls                 | [Command and Process Execution](05-command-and-process-execution.md)           | Uses one backend-neutral execution object                |
 
-A stronger VM-backed provider can replace the physical containment tier while preserving EIP and Harness contracts. Its lifecycle remains provider-owned rather than part of this per-command backend.
+Required isolation protects host resources outside configured command grants from payload code running under envd's ordinary OS authority. It is not a kernel-hard hostile multi-tenant boundary and does not claim resistance to kernel, bubblewrap, Seatbelt, AppContainer, or privileged Host compromise.
+
+The isolation layer does not provision a container or VM, isolate envd file methods from envd itself, make Harness plugins untrusted, provide domain-name egress policy, or accept a profile, native root, helper, token, SID, entitlement, disable flag, or network widening from EIP.
 
 ## Configuration Contract
 
-| Environment variable                         | Values                              | Default    | Meaning                                                                                         |
-| -------------------------------------------- | ----------------------------------- | ---------- | ----------------------------------------------------------------------------------------------- |
-| `AGENT_ENVD_EXECUTION_ISOLATION`             | `required`, `disabled`              | `required` | Enables fail-closed envd-native isolation or explicitly delegates containment to the outer host |
-| `AGENT_ENVD_EXECUTION_NETWORK`               | `host`, `deny`                      | `host`     | Maximum IP-network posture for required isolation                                               |
-| `AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS` | JSON array of absolute path strings | `[]`       | Adds operator-trusted read-only executable/runtime roots in required mode                       |
-| `AGENT_ENVD_EXECUTION_UID`                   | Positive decimal OS user ID         | Unset      | Optional Linux final-payload identity; valid only with paired GID and trusted daemon authority  |
-| `AGENT_ENVD_EXECUTION_GID`                   | Positive decimal OS group ID        | Unset      | Optional Linux final-payload primary group                                                      |
+| Environment variable                         | Values                       | Default    | Meaning                                                                       |
+| -------------------------------------------- | ---------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| `AGENT_ENVD_EXECUTION_ISOLATION`             | `required`, `disabled`       | `required` | Enables fail-closed envd-native isolation or delegates containment explicitly |
+| `AGENT_ENVD_EXECUTION_NETWORK`               | `host`, `deny`               | `host`     | Maximum IP-network posture in required mode                                   |
+| `AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS` | JSON array of absolute paths | `[]`       | Adds operator-trusted executable/runtime roots                                |
+| `AGENT_ENVD_EXECUTION_UID`                   | Positive decimal OS user ID  | Unset      | Optional Linux final-payload identity; requires paired GID                    |
+| `AGENT_ENVD_EXECUTION_GID`                   | Positive decimal OS group ID | Unset      | Optional Linux final-payload primary group                                    |
 
-The valid isolation/path/network matrix is:
+The valid matrix is:
 
-| Isolation  | Configured network | Extra read-only roots | Result                                                                                                                           |
-| ---------- | ------------------ | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `required` | `host`             | Empty or valid        | Commands have required filesystem/process containment and can use host IP networking; a request can narrow one command to `deny` |
-| `required` | `deny`             | Empty or valid        | Every command has required containment and denied IP networking                                                                  |
-| `disabled` | `host`             | Empty                 | Valid explicit delegation to the outer sandbox or operator risk acceptance                                                       |
-| `disabled` | `deny`             | Any                   | Invalid because native spawn cannot honestly enforce network denial                                                              |
-| `disabled` | `host`             | Non-empty             | Invalid because envd cannot honestly enforce command read-only roots without an isolation backend                                |
+| Isolation  | Network | Extra read-only roots | Result                                                                               |
+| ---------- | ------- | --------------------- | ------------------------------------------------------------------------------------ |
+| `required` | `host`  | Empty or valid        | Required containment with host-visible IP networking; a request can narrow to `deny` |
+| `required` | `deny`  | Empty or valid        | Required containment with IP networking denied                                       |
+| `disabled` | `host`  | Empty                 | Explicit outer-Host containment                                                      |
+| `disabled` | `deny`  | Any                   | Invalid because native spawn alone cannot prove network denial                       |
+| `disabled` | `host`  | Non-empty             | Invalid because envd cannot enforce those roots as read-only without a backend       |
 
-Unknown values and every unlisted combination fail startup. Container detection, root UID, CI, debug build, test mode, daemon transport, executable path, and failed backend probing never select `disabled` implicitly.
+Unknown values and every unlisted combination fail startup. Container detection, root/admin identity, CI, debug mode, transport choice, executable location, and failed probing never select `disabled`.
 
-The optional payload UID and GID are paired trusted configuration, never request environment values. On Linux, envd validates that it has authority to adopt the identity, clears supplementary groups, sets real/effective/saved GID and UID immediately before final payload exec, verifies the resulting identity, proves root cannot be regained, and applies `PR_SET_NO_NEW_PRIVS`. Any failure is reported through the gated exec handshake. On unsupported platforms the paired setting fails startup.
+Linux payload UID/GID values are paired trusted configuration. Envd verifies authority, clears supplementary groups, establishes the final real/effective/saved IDs, proves root cannot be regained, and applies no-new-privileges before exec. The fields are invalid on macOS and Windows and are never sourced from request environment values.
 
-All isolation configuration is immutable for one Environment generation. EIP command input can only narrow `host` to `deny` when the required backend advertises and probes that behavior.
+All isolation configuration is immutable for one daemon generation. A request can narrow configured `host` to `deny` only when the active backend's production probe proves that per-command posture.
 
-## Ownership and Policy Snapshot
+## Policy Snapshot and Backend Contract
 
-One isolation manager is created before transport readiness. It owns immutable backend identity, protected roots, curated runtime roots, execution home and temporary roots, payload identity, network ceiling, and probe evidence.
+One isolation manager is created before local readiness. It owns immutable backend identity, protected roots, configured mounts, curated runtime roots, execution home and temporary roots, network ceiling, trusted payload identity, and production-probe evidence.
 
 Each command captures one policy snapshot containing:
 
 - Environment identity and generation;
-- the session's fixed `scoped` or `server` resource authority;
-- the canonical `cwd` mount root and its effective read/write ceiling;
-- canonical cwd and executable authority;
+- canonical configured `cwd` mount and its read/write/execute ceiling;
+- a typed executable selected by trusted name roots or an authorized `EIPPath`;
 - curated runtime and explicit extra read-only roots;
-- private execution home and temporary root;
+- fresh generation-private execution home and temporary roots;
 - protected-path identities;
-- effective host-or-deny network posture;
-- final payload identity and environment;
-- backend-independent wall-time, output, and process lifecycle limits.
+- effective `host` or `deny` network posture;
+- final payload identity and rebuilt environment;
+- wall-time, output, process, and backend resource limits.
 
-A later provider topology change does not mutate a running command's sandbox. Revoking the mount or authority held by an existing process requires completing the active backend's cleanup contract before the revocation is acknowledged. A required backend terminates old-generation trees on daemon restart; disabled mode delegates any process that escaped envd's managed native lifecycle to outer-Host generation teardown. Generation-namespaced selectors are never retargeted.
+The backend returns one backend-neutral execution object to the sole command execution manager. Callers use semantic status, interrupt, terminate, force cleanup, initial-command wait, and tree-cleanup wait. They never assume that a host child PID is the requested executable, the complete tree, or the signaling target.
 
-The isolation manager returns a backend-neutral execution object to the sole command execution manager. Callers cannot assume the host child PID is the requested executable, process-group leader, or complete tree. Status, signaling, force cleanup, initial-command wait, and tree-cleanup wait use semantic operations defined by [Command and Process Execution](05-command-and-process-execution.md).
+A later mount or provider change does not mutate an existing command snapshot. Revoking a root used by a live command requires the backend's cleanup contract to reach a terminal result before revocation is acknowledged. Selectors from an old generation are never retargeted.
 
 ## Filesystem Authority
 
-Required isolation starts from deny-by-default filesystem authority.
+Required isolation starts deny-by-default and exposes only:
 
-| Root class                                                                       | Payload access                                                                                                              |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Command `cwd` mount                                                              | The complete selected scoped mount, or selected server-root mount, subject to effective authority and protected-path denial |
-| Private execution home                                                           | Read-write; distinct from the daemon or host user's home                                                                    |
-| Private execution temporary root                                                 | Read-write and presented through forced temporary-directory environment values                                              |
-| Curated immutable platform runtime                                               | Read and executable mapping only as required for shells, loaders, tools, certificates, locale, and basic account resolution |
-| Explicit extra read-only root                                                    | Read and executable mapping, after trusted startup validation                                                               |
-| Minimal devices and inherited stdio                                              | Backend-specific minimum for null, random, terminal, and pipe behavior                                                      |
-| Envd daemon state, transport, retention, helper, config, logs, and control roots | Denied                                                                                                                      |
-| Host home, unrelated workspaces, credentials, sockets, and everything else       | Denied                                                                                                                      |
+| Root class                                                                               | Payload access                                                                                                   |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Command `cwd` configured mount                                                           | Full selected mount, bounded by configured read/write and command policy                                         |
+| Private execution home                                                                   | Read-write; distinct from host or daemon home                                                                    |
+| Private execution temporary root                                                         | Read-write; forced through temporary-directory environment variables                                             |
+| Curated platform runtime                                                                 | Read and execute only as required for supported shells, loaders, tools, certificates, locale, and account lookup |
+| Explicit extra root                                                                      | Read and execute only after trusted startup validation                                                           |
+| Minimal devices and inherited stdio                                                      | Platform-specific minimum                                                                                        |
+| Daemon config, carrier, runtime control, retained output, helpers, logs, and credentials | Denied                                                                                                           |
+| Host home, unrelated workspaces, sockets, credentials, and every other root              | Denied                                                                                                           |
 
-Runtime roots are narrow reviewed paths, not whatever appears in `PATH`. The daemon does not recursively expose `/`, a host home, `/opt`, `/usr/local`, or package-manager mutable state merely for compatibility. Platform-owned shell, loader, library, certificate, locale, and compiler roots can be curated per supported target. User-managed toolchains require explicit extra read-only roots and never receive implicit write authority.
+An operator that intentionally needs whole-filesystem breadth configures an ordinary trusted mount such as `/` on POSIX or explicit volume roots on Windows. The session cannot switch envd into a special server-filesystem mode. Even a broad configured mount does not expose protected envd control paths to a required-isolation payload; startup and per-command policy must be able to subtract or deny them truthfully.
 
-Required isolation grants executable mapping only where code execution is intended. It does not mount host SSH agents, container-engine sockets, D-Bus sockets, cloud metadata credentials, daemon API sockets, Keychain configuration, or unrelated Unix sockets.
+Runtime roots are reviewed paths, not ambient `PATH`. User-managed toolchains require explicit extra read-only roots. Required isolation does not expose SSH agents, container-engine sockets, D-Bus endpoints, Keychain configuration, cloud credentials, daemon carrier state, or unrelated IPC merely for compatibility.
 
 ### Protected paths and overlap
 
-Protected paths include daemon configuration and credentials, `AGENT_ENVD_RUNTIME_DIR` except exact dedicated execution-home and temporary children, retained-output storage, transport sockets, logs, install and helper roots, service definitions, isolation control data, and probe sentinels.
+Protected paths include daemon configuration and secrets, attachment/bootstrap material, generation runtime control, retained-output spool, staging ownership metadata, logs, installed helpers, execution policy data, and probe sentinels. Protected denial has precedence over configured grants.
 
-Protected denial has absolute precedence. Every root is canonicalized, checked for prohibited overlap, and opened as a capability root before use. The launching provider keeps each configured root's containing directory outside payload or other untrusted mutation during bootstrap, and envd opens the root's final component without following a link; this prevents path retargeting without a portable FileID. In `scoped` authority, a selected mount, runtime root, or extra root is rejected when it equals, contains, or is contained by a protected path, equals the host filesystem root or host home, or overlaps another authorized root with a different policy. The exact dedicated execution-home and temporary children are explicit protected-parent exceptions.
+Every configured root is canonicalized, checked for prohibited overlap, opened or otherwise fixed using the strongest platform capability available, and kept stable by the provider during bootstrap. Ancestor/descendant roots with conflicting policy are invalid. Exact generation-private execution-home and temporary children are deliberate exceptions to their protected parent.
 
-A server-root mount necessarily contains protected paths. Required isolation therefore masks or denies those nested paths with backend-enforced precedence while exposing the remainder of the selected root. The production probe must prove that this subtraction works on the active backend; if it cannot, commands under `server` authority are unavailable in required mode rather than silently exposing control state or falling back. This exception affects child filesystem construction only: server-authority EIP file methods still represent the envd process's own native filesystem visibility. Symlink aliases and protected-path overlap are evaluated after canonicalization, and command setup uses the already opened authorized roots rather than accepting another request-selected native root.
+A broad mount is accepted in required mode only when the active backend can enforce protected-path subtraction. If the production probe cannot prove that subtraction, startup fails; envd never exposes a protected subtree or silently changes to disabled execution.
 
-### Disabled-mode meaning
-
-In `disabled` mode, envd still validates the requested cwd, session resource authority, executable policy, command schema, and EIP file operations. Those cwd and relative-executable checks are admission-time path snapshots, not descriptor-pinned execution identities: a concurrently mutable native directory can change after validation and before spawn. In `scoped` authority this mode does not claim that the child is restricted to configured mounts; in `server` authority the selection is already intentionally as broad as envd's represented filesystem roots. In either case the payload can access every path, process, device, IPC endpoint, and network resource made visible by its outer container/VM or native host OS user.
-
-Envd's disabled native supervisor targets the initial Unix process group and uses best-effort task-tree operations on Windows. A payload can deliberately call `setsid`, create a new process group, or use an equivalent platform mechanism to leave Unix observation; Windows cannot recover a complete descendant set after the initial process exits without an outer Job Object. `cleanup="complete"` in this mode proves cleanup only for that platform-native managed target; the descriptor therefore reports `process_containment=false` and `cleanup_guarantee="outer_host"`. The outer Host must provide PID namespace, Job Object, container/VM destruction, or an equivalent generation boundary when escaped descendants must not survive.
-
-The outer host must also prevent payloads from inspecting envd memory, its original process environment, service configuration, trusted proxy headers, retained output, or private control channels; otherwise a payload can steal `AGENT_ENVD_API_KEY` or bypass the EIP boundary. Destination-local staged candidates are intentionally neither a confidentiality boundary nor a lock; envd verifies the complete held candidate and uses one same-directory publication but does not serialize another actor that already controls that writable directory. A distinct final payload UID/GID, outer mount and process/PID isolation, protected process filesystems, and removal of debugger/root capability are valid mechanisms. Explicit `disabled` mode accepts the outer boundary only when it provides that separation, not merely because a container exists.
-
-The descriptor therefore reports envd inner filesystem, process, and network isolation as false. An outer provider can separately report its own sandbox posture through Host-owned provider metadata; envd never conflates the two.
+The path checks establish configured authority, not portable compare-and-swap against another actor with native write access. Commands and external native writers can change authorized content concurrently. File mutation integrity remains limited to held objects and transfer evidence as defined by [Resource Operations](04-resource-operations.md).
 
 ## Child Environment and Launch Integrity
 
-Request-controlled environment is dangerous before isolation because dynamic loaders, language runtimes, and helper lookup can execute behavior. Envd therefore separates launcher and payload environments:
+Envd separates launcher and payload environments:
 
-- bubblewrap, `sandbox-exec`, the trusted supervisor, and payload launcher receive only a minimal daemon-owned environment;
-- the command plan and final environment travel through a bounded inherited descriptor using a typed versioned encoding;
-- internal descriptors have fixed purpose and close-on-exec behavior;
-- request values are installed only in the final payload after the sandbox, release gate, payload identity, and no-new-privileges policy are active;
-- all other inherited descriptors close before payload exec.
+- bubblewrap, `sandbox-exec`, Windows launch helpers, the supervisor, and policy constructors receive only a minimal daemon-owned environment;
+- the typed command plan and final payload environment travel through a bounded private inherited channel;
+- request values are installed only after the final sandbox/token, release gate, payload identity, and no-new-privileges posture are active;
+- internal handles and descriptors have fixed purpose, bounded framing, and close-on-exec or non-inheritable behavior;
+- every unrelated descriptor or Windows handle is closed before requested executable entry.
 
-Command arguments are structured argv. Paths become backend parameters or descriptor-backed sources and are never concatenated into a Seatbelt profile or shell wrapper. Trusted helpers resolve from verified absolute configuration and release-integrity checks, not the workspace or child `PATH`.
+Arguments remain structured values. Paths become backend parameters or held authorities and are never interpolated into shell text, a Seatbelt profile, an ACL command line, or a helper script. Helpers resolve from verified trusted locations, never the workspace or payload `PATH`.
 
-The final payload environment is cleared and rebuilt as defined by [Command and Process Execution](05-command-and-process-execution.md#environment-construction). It can include only daemon-allowlisted ordinary compatibility values, including operator proxy configuration, plus explicit trusted and request layers. `HOME` and temporary-directory variables always point to private execution roots. `AGENT_ENVD_API_KEY`, transport/session values, daemon state paths, internal carrier names, dynamic-loader values, and ambient cloud or service credentials are absent.
+The final payload environment is rebuilt by the command owner. `HOME` and temporary values point to private generation roots. Daemon attachment credentials, `AGENT_ENVD_*` control values, runtime paths, dynamic-loader injection values, ambient service credentials, internal handle names, and carrier state are absent.
 
 ## Transactional Spawn
 
-Isolation participates in the shared two-phase start transaction:
+Every platform backend participates in one prepare/commit/release transaction:
 
 ```mermaid
 sequenceDiagram
     participant Manager as Execution manager
     participant Backend as Isolation backend
     participant Supervisor
-    participant Store as Process/output stores
+    participant Store as Process/output owners
     participant Payload
 
-    Manager->>Backend: prepare immutable policy with closed gate
-    Backend->>Supervisor: enter final sandbox and start typed control channel
+    Manager->>Backend: prepare immutable policy with gate closed
+    Backend->>Supervisor: enter final isolation and establish control channel
     Supervisor-->>Manager: ready under final policy
-    Manager->>Store: commit native ownership and quotas
+    Manager->>Store: commit ownership and quotas
     Store-->>Manager: committed
     Manager->>Supervisor: release
-    Supervisor->>Payload: apply final identity/environment and exec
-    Payload-->>Manager: exec success by close-on-exec acknowledgement
+    Supervisor->>Payload: install final environment and exec
+    Payload-->>Manager: exec success through close-on-exec acknowledgement
 ```
 
-No requested executable or payload launcher with request environment runs before final sandbox entry and store commit. Every precommit failure leaves the gate closed and forces bounded helper cleanup. A confirmed pre-exec failure safely releases unpublished state. Loss of evidence after gate release retains conservative ownership and returns `unknown_outcome`; it never rolls possible dispatch back into a pre-dispatch result or retries with disabled isolation.
+No requested executable or request-influenced launcher runs before final isolation and owner commit. A precommit failure leaves the gate closed and forces bounded helper cleanup. Confirmed pre-exec failure removes unpublished state. Loss of evidence after gate release retains conservative ownership and produces `unknown_outcome`; it never retries under a weaker backend.
 
-The supervisor protocol separately reports:
+The supervisor protocol reports final-policy readiness, release acceptance, payload-launcher readiness, requested-executable exec success or setup failure, initial-command terminal status, backend loss, and cleanup outcome. Frames are typed and length-checked before buffer growth. A wrapper's exit never replaces requested-command status.
 
-- final-policy ready;
-- release accepted;
-- final-payload launcher ready;
-- requested executable exec success or bounded setup error;
-- initial-command terminal status;
-- backend loss;
-- tree-cleanup outcome.
+## Linux Bubblewrap Backend
 
-A wrapper's exit cannot overwrite requested-command status. Control frames and plans are bounded, typed, and authenticated by private inherited descriptors rather than parseable command strings or ambient environment variables.
+Linux required mode uses a verified non-setuid bubblewrap release component. Envd never searches `PATH`, uses a setuid helper, or falls back after host policy denies user namespaces.
 
-## Linux bubblewrap Backend
+For each command the backend creates:
 
-Linux required isolation uses a verified non-setuid bubblewrap component as filesystem and namespace constructor. The helper is selected by trusted release-relative identity, is a regular executable with no setuid/setgid bit or file capabilities, and is verified as part of the envd release unit. Envd never searches `PATH` or falls back to an arbitrary distro helper.
-
-For each command tree, the backend creates:
-
-- a fresh user and mount namespace;
-- an empty synthetic root populated only with approved read-only and read-write projections;
+- fresh user and mount namespaces;
+- an empty synthetic root populated only by approved projections;
 - a PID namespace with private `/proc` and an envd-owned PID 1 supervisor;
 - isolated IPC and UTS namespaces;
 - minimal `/dev`;
-- a new session and dropped capabilities;
-- `PR_SET_NO_NEW_PRIVS` before final payload exec;
-- a fresh network namespace when effective network posture is `deny`.
+- a new session, dropped capabilities, and no-new-privileges;
+- a fresh network namespace with no host routes when effective policy is `deny`.
 
-Source roots come from already authorized opened roots or backend-specific descriptor/path representations rather than request-selected native paths. The provider-owned bootstrap stability and envd's no-follow final-component open select the authorized capability without a portable native FileID. Backend setup revalidates path shape and protected-path policy at its publication boundary but does not claim compare-and-swap over later content mutations by another actor with independent native authority. The namespace supervisor reaps descendants, preserves the initial executable's status, forwards supported interrupt/terminate semantics, and tears down residual descendants after the initial command exits. Force cleanup destroys the namespace from the outer manager. A descendant cannot escape cleanup by creating another process group or session inside the PID namespace.
+The supervisor reaps descendants, preserves initial-executable status, maps semantic signals, and destroys residual descendants. A descendant cannot evade cleanup by creating another process group or session inside the PID namespace. Force cleanup destroys the namespace from the outer manager.
 
-The network-deny mechanism is a fresh network namespace with no host routes. It preserves Unix-domain IPC created inside the sandbox and does not claim domain-level filtering. Host D-Bus, SSH-agent, container-engine, and similar sockets remain absent because they are not mounted.
-
-Landlock is not a primary or automatic fallback because it does not provide the same synthetic filesystem, PID namespace, private `/proc`, device, IPC, and network semantics. It can be defense in depth only when the bubblewrap contract remains satisfied.
-
-Required Linux support is advertised only on targets whose kernel, unprivileged user namespace, LSM, linkage, helper, and namespace behavior pass the production probe. A disabled user-namespace configuration or LSM denial fails required startup; envd never uses a privileged setuid helper to bypass host policy.
+Required Linux availability means the installed helper, linkage, kernel, LSM, unprivileged user namespaces, mount behavior, protected-path subtraction, PID lifecycle, and selected network posture passed the production probe.
 
 ## macOS Seatbelt Backend
 
-macOS required isolation uses the fixed system Seatbelt launcher at `/usr/bin/sandbox-exec` with a dynamically generated `deny default` profile. Paths are passed as canonical profile parameters rather than interpolated profile source. Descendants inherit the Seatbelt restriction.
+macOS required mode uses `/usr/bin/sandbox-exec` with a generated `deny default` Seatbelt profile. Canonical paths are passed as profile parameters rather than interpolated into profile source. Descendants inherit the restriction.
 
-The profile permits only the reviewed minimum for:
+The profile grants only reviewed process execution, selected configured/runtime roots, private home/temp, minimal devices, narrow platform IPC, and the effective IP-network posture. It denies unrelated paths, Unix sockets, Mach services, IOKit clients, preferences, and IPC by default. A reviewed versioned Mach-service allowlist avoids blanket Keychain or `securityd` access. The claim is limited to deny-by-default filesystem and reviewed service grants rather than absolute Keychain isolation across every macOS release.
 
-- process fork and exec;
-- signaling and process inspection within the same sandbox where stable Seatbelt filters support it;
-- selected filesystem roots and executable mappings;
-- required devices, pseudo-terminals, and narrow platform IPC;
-- selected IP socket behavior under the effective network posture.
+Under `host`, required IP socket and DNS/trust operations are granted while filesystem policy remains. Under `deny`, IP networking grants are omitted while only narrow local platform IPC remains.
 
-The profile denies unrelated host paths, Unix sockets, Mach services, IOKit user clients, preferences, and IPC by default. It uses a reviewed versioned Mach-service allowlist and does not intentionally grant blanket Keychain or `securityd` access. Because stable complete Keychain-denial probing is not available across all supported macOS versions, the security claim is limited to deny-by-default filesystem and reviewed service grants rather than absolute Keychain isolation.
+The supervisor tracks the initial process group and observable descendants. macOS has no PID namespace, so complete exit can be unprovable after a descendant escapes observation. Such a descendant remains under inherited Seatbelt policy and yields `cleanup="residual_confined"`; loss of confinement evidence yields cleanup failure.
 
-Under `host`, the profile allows required IP socket operations and DNS/trust services while retaining filesystem and process restrictions. Under `deny`, it omits IP networking grants while preserving only narrow Unix-domain and platform IPC required for ordinary subprocess behavior.
+Seatbelt's public launch surface is deprecated. Each supported macOS release must pass the production probe. Removal or semantic breakage fails required startup; envd does not silently substitute an unreviewed sandbox.
 
-The gated supervisor starts under the final Seatbelt profile, tracks the initial process group, forwards semantic signals, and performs bounded descendant cleanup. macOS has no PID namespace, so a descendant that escapes tracked group observation might outlive cleanup. It remains under inherited Seatbelt confinement, and envd reports `residual_confined` rather than falsely claiming complete teardown. A failed confinement guarantee is `cleanup_failed`.
+## Windows AppContainer and Job Backend
 
-Apple deprecates `sandbox-exec`/Seatbelt's public launch surface. Envd treats that as an explicit compatibility cost: each supported macOS release must pass the production probe, and removal or semantic breakage fails required startup. App Sandbox is not a transparent replacement because it requires signed application entitlements and app-oriented file grants. Any signed-helper or Virtualization.framework replacement remains behind the same observable EIP and execution-manager contracts.
+Windows required mode combines two independent mechanisms:
+
+1. **AppContainer or equivalent restricted capability token** establishes the payload security principal and default-deny capability boundary. Capability-specific filesystem and network grants define what that principal can access.
+2. **Job Object ownership** establishes the complete process-tree lifecycle. Every payload process enters one non-breakaway job before it can execute; kill-on-job-close and active-process controls provide bounded whole-tree cleanup.
+
+A Job Object alone is not a sandbox. It cannot replace the AppContainer/restricted-token and ACL projection that enforces filesystem and network containment. Conversely, an AppContainer token alone does not prove complete descendant cleanup.
+
+### Capability and ACL projection
+
+For each command, envd creates a command-unique, generation-owned AppContainer package/capability SID or an equivalent restricted identity. No two live commands share that authority principal, even when their current projections are equal; adding an ACE for a later command therefore cannot widen an already-running command's token. Envd constructs the identity and an explicit capability plan from the immutable command snapshot:
+
+- the selected configured mount receives only the required read/execute or read/write rights;
+- curated runtime and extra roots receive read/execute rights only;
+- private home and temporary roots receive read/write rights;
+- protected and unrelated paths receive no grant;
+- named-pipe, registry, COM, device, and other capabilities are absent unless the backend contract explicitly requires and probes a narrow grant;
+- `host` receives the reviewed network capabilities needed for ordinary outer-Environment IP networking;
+- `deny` receives no IP-network capability.
+
+ACL projection is capability-specific and least-authority. Envd does not grant the broad daemon user, Users group, Everyone, or an ambient package identity to make a command work. It applies grants through native security APIs, not shell commands, and records every ACL mutation it owns. Existing ACLs that already grant another principal are outside envd's exclusivity claim, but they do not widen the AppContainer token unless that token or one of its enabled capabilities is included.
+
+A projection must not leave durable command authority after the command tree and generation end. Every ACE, projection root/alias, profile, package SID, and capability SID has one command owner. After job-empty evidence, envd removes only that owner's tagged ACEs, restores preserved descriptors, deletes command-private projections and profiles, and then returns their capacity. Concurrent commands' entries are never coalesced or removed. Failed restoration, profile deletion, or identity cleanup remains conservatively owned and charged, enters bounded retry/fault handling, and reports cleanup failure when authority removal cannot be proven. Envd never destructively rewrites an operator's complete ACL or treats a failed rollback as success.
+
+A configured root is available for Windows command execution only when the filesystem supports the required security descriptor and no-follow/reparse behavior. A root whose ACL cannot be projected without widening authority is rejected before payload release. Protected-path subtraction and reparse-point containment must pass the production probe.
+
+### Job and process controls
+
+The backend creates the Job Object before payload release, disables child breakaway, assigns the gated initial process before it can execute request code, and retains the job handle in the execution owner. Descendants inherit job membership. Completion-port or equivalent native notifications drive process accounting without polling an untrusted PID list.
+
+`interrupt` and `terminate` are advertised only when the backend has distinct, tested semantic mechanisms for the selected process kind. Unsupported semantic signals return `unsupported`; they are never silently mapped to force kill. `process.kill` closes or terminates the owned job and waits for job-empty evidence. `cleanup="complete"` under this backend means the job reported no remaining members; its descriptor reports `cleanup_guarantee="job_complete"`.
+
+The production probe proves token identity, filesystem read/write grants and denials, protected-path/reparse containment, network posture, inherited restriction, non-breakaway descendants, status preservation, semantic signals that are advertised, and job-wide cleanup. Merely creating an AppContainer profile or Job Object is insufficient.
+
+## Disabled Mode
+
+In `disabled` mode envd still validates configured mounts, cwd, typed executable, command schema, environment, limits, and process ownership. Those path checks are admission-time authority checks, not proof that the child cannot access other resources visible to its outer OS identity.
+
+The payload can access every path, process, device, IPC endpoint, and network resource made visible by its outer container, VM, sandbox, or native account. The outer Host must also prevent payload access to envd memory, bootstrap credentials, service configuration, carrier state, retained output, and control channels. Running untrusted payloads with the same unrestricted process-inspection, debugger, administrator/root, or control-channel authority as envd is not a valid outer boundary.
+
+Envd uses the strongest ordinary native process target available, including Job Objects on Windows where configured, but does not claim child filesystem or network containment. The descriptor reports backend `outer_host`, all containment booleans false, and cleanup guarantee `outer_host`. Complete outer teardown remains provider evidence, not an envd inference.
 
 ## Network Policy
 
-| Effective policy | Linux required                                                                  | macOS required                                                              | Disabled                                  |
-| ---------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------- |
-| `host`           | Keeps host IP networking while filesystem, PID, mount, and IPC isolation remain | Grants IP networking under Seatbelt while filesystem/process policy remains | Outer sandbox or host owns all networking |
-| `deny`           | Fresh network namespace with no host routes                                     | No IP network grants; narrow required local IPC remains                     | Unsupported                               |
+| Effective policy | Linux required                              | macOS required            | Windows required                           | Disabled                   |
+| ---------------- | ------------------------------------------- | ------------------------- | ------------------------------------------ | -------------------------- |
+| `host`           | Host IP namespace remains visible           | Reviewed IP socket grants | Reviewed AppContainer network capabilities | Outer Host owns networking |
+| `deny`           | Fresh network namespace with no host routes | IP socket grants omitted  | No IP-network capability                   | Unsupported                |
 
-`host` means unrestricted IP networking as visible from the outer Environment, including localhost services, LAN, cloud metadata endpoints, inbound binds, downloads, and exfiltration of intentionally readable sandbox content. It is a compatibility posture, not an egress-security claim.
-
-Daemon configured `deny` is a ceiling for every command. Configured `host` allows a request to narrow one command to `deny` only when the backend probe validated both paths. Neither mode provides domain, URL, port-destination, proxy, or metadata-only policy. Such behavior belongs to an explicit provider network/proxy capability.
+`host` means unrestricted IP networking visible from the outer Environment, including localhost, LAN, metadata endpoints, inbound binds, downloads, and exfiltration of readable data. It is compatibility, not egress filtering. Neither posture defines domain, URL, port-destination, proxy, or metadata-only rules.
 
 ## Production Probe and Readiness
 
-In `required` mode, envd runs the same installed helper, profile builder, supervisor, path policy, payload launcher, and cleanup path used for real commands before binding a network listener or accepting stdio initialization.
+Required mode runs the installed backend, policy builder, supervisor, payload launcher, and cleanup path before local readiness and before stdio initialization or reverse-WebSocket connection admission.
 
-The bounded probe proves:
+The bounded platform probe proves:
 
-- configured helper/system-launcher selection and executable integrity;
-- allowed read and configured mount write behavior;
-- read-only mount denial;
-- protected and random host sentinel denial, including nested protected-path masking for server-root commands;
-- symlink containment;
-- execution home and temporary root behavior;
-- child environment secret and descriptor hygiene;
-- descendant inheritance after fork and exec;
-- initial-command status preservation;
-- signal and whole-tree cleanup behavior;
-- effective host or deny networking;
-- per-command network narrowing when advertised;
-- platform-specific namespace or Seatbelt posture.
+- helper/system API selection and integrity;
+- configured mount read/write behavior and read-only denial;
+- protected and random host sentinel denial, including subtraction from a broad configured mount;
+- symlink or reparse-point containment;
+- private home and temporary roots;
+- child environment and inherited descriptor/handle hygiene;
+- descendant restriction after fork/spawn and exec;
+- requested-executable status preservation;
+- advertised signal semantics;
+- whole-tree cleanup at the reported guarantee;
+- configured and per-command network posture;
+- platform-specific namespace, Seatbelt, AppContainer/ACL, and Job evidence.
 
-Checking that `bwrap` or `/usr/bin/sandbox-exec` exists is insufficient. A timeout, helper mismatch, unsupported kernel/OS, LSM denial, profile failure, filesystem-policy discrepancy, network discrepancy, or cleanup failure causes daemon startup failure.
-
-Disabled mode runs no sandbox conformance probe, emits one prominent structured startup warning, and reports false inner-isolation posture. It does not warn once per command.
+A timeout, helper mismatch, unsupported kernel/OS/filesystem, LSM denial, profile failure, ACL restoration failure, network discrepancy, or cleanup discrepancy fails startup. Disabled mode runs no sandbox conformance probe, emits one structured startup warning, and reports false inner containment.
 
 ## Descriptor Posture
 
-The Environment descriptor includes:
+The serialized descriptor posture is:
 
 ```python
 class IsolationPosture(BaseModel):
     mode: Literal["required", "disabled"]
     backend: Literal[
-        "linux_bubblewrap", "macos_seatbelt", "outer_host"
+        "linux_bubblewrap",
+        "macos_seatbelt",
+        "windows_appcontainer",
+        "outer_host",
     ]
     filesystem_containment: bool
     process_containment: bool
     network_containment: bool
     network_policy: Literal["host", "deny"]
     cleanup_guarantee: Literal[
-        "namespace_complete", "residual_confined_possible", "outer_host"
+        "namespace_complete",
+        "residual_confined_possible",
+        "job_complete",
+        "outer_host",
     ]
 ```
 
-For required mode, true fields mean the production probe passed for the current generation. `network_containment` is true only for effective daemon-wide `deny`. A required backend that probes per-command denial adds `execution.network_deny` to `EnvironmentDescriptor.capabilities`; disabled mode omits it. Enforceable optional tree limits use the capability keys `execution.limit.process_count`, `execution.limit.memory`, and `execution.limit.cpu_time`. Envd advertises one only when the selected backend or trusted outer resource controller can enforce it for the complete command tree rather than only the initial process.
+True fields in required mode mean the production probe passed for this generation. `network_containment` is true only for daemon-wide `deny` and does not imply that a configured `host` posture can narrow one command. Exact optional request truth is separate in `EnvironmentDescriptor.execution_features`: process-count, memory-byte, CPU-time, per-command-deny, interrupt, and terminate booleans become true only after the active production path proves those semantics. `process.signal` is available exactly when one advertised signal action is true; other command methods remain independently available when optional limits are false.
 
-For disabled mode, all three containment booleans are false, backend is `outer_host`, and cleanup guarantee states that envd itself cannot claim containment beyond managed native lifecycle.
-
-The descriptor reveals no native profile, helper path, protected path, host identity, sentinel, API key, or outer provider security claim. A Host can combine envd posture with separately trusted container/VM metadata but never rewrites envd's own report.
+The descriptor reveals no helper path, profile source, SID, ACL, protected root, sentinel, host identity, or outer-provider claim.
 
 ## Failure Semantics
 
-| Failure                                                                 | Outcome                                                                  |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Invalid mode/network/path/payload-identity matrix                       | Daemon startup fails before readiness                                    |
-| Required backend unsupported, helper invalid, or production probe fails | Daemon startup fails; no fallback                                        |
-| Per-command root or policy construction fails                           | `execution_isolation_failed` before payload release                      |
-| Supervisor not ready under final policy                                 | Prepared tree killed/reaped; no payload starts                           |
-| Store commit fails                                                      | Gate remains closed; prepared tree killed/reaped                         |
-| Gate, payload identity, or no-new-privileges setup fails                | Public start rolls back; tree cleaned; `execution_isolation_failed`      |
-| Selected requested executable cannot be executed                        | Public start rolls back; tree cleaned; `command_start_failed`            |
-| Child filesystem or network access denied                               | Ordinary command stderr/exit behavior; never fallback                    |
-| Backend lost after exec                                                 | Strongest cleanup, `backend_lost`, and receipt/unknown-outcome semantics |
-| Linux namespace cleanup fails                                           | `cleanup_failed`; complete teardown not claimed                          |
-| macOS descendants cannot all be observed but remain under Seatbelt      | `residual_confined` with explicit posture                                |
-| Disabled native cleanup cannot prove residual exit                      | `cleanup_failed`, never `residual_confined`                              |
+| Failure                                                                      | Outcome                                                            |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Invalid isolation/network/path/identity configuration                        | Startup fails before readiness                                     |
+| Required backend unsupported or production probe fails                       | Startup fails; no fallback                                         |
+| Per-command policy, token, namespace, profile, ACL, or root projection fails | `execution_isolation_failed` before payload release                |
+| Supervisor is not ready under final policy                                   | Prepared tree is cleaned; no payload starts                        |
+| Owner-store commit fails                                                     | Gate remains closed; prepared tree is cleaned                      |
+| Gate, identity, token, or no-new-privileges setup fails                      | Public start rolls back with `execution_isolation_failed`          |
+| Requested executable cannot execute                                          | Public start rolls back with `command_start_failed`                |
+| Child access is denied                                                       | Ordinary child stderr/exit behavior; never unsandboxed retry       |
+| Backend evidence is lost after exec                                          | Strongest cleanup plus `backend_lost` and unknown-outcome evidence |
+| Linux namespace cleanup fails                                                | `cleanup_failed`; completeness not claimed                         |
+| macOS descendants remain provably Seatbelt-confined but unobservable         | `residual_confined`                                                |
+| Windows Job Object cannot prove empty or ACL cleanup is uncertain            | `cleanup_failed`; job/authority cleanup not claimed                |
+| Disabled native target cannot prove cleanup                                  | `cleanup_failed`; never `residual_confined`                        |
 
-Safe diagnostics identify platform and failure class but exclude command text, environment, API key, profile source, helper path, denied path, file content, and sensitive host structure.
+Diagnostics identify platform and bounded failure class but exclude command text, environment, credential, profile source, SID, ACL contents, helper path, denied path, file content, and sensitive host structure.
 
 ## Compatibility and Conformance
 
-An isolation backend is compatible only when it preserves:
+A backend is compatible only when it preserves required/disabled fail-closed selection, configured-mount and protected-path semantics, transactional no-unregistered-execution, requested-executable acknowledgement and status, semantic process controls, cleanup outcomes, child-environment hygiene, descriptor posture, and production probing.
 
-- required/disabled fail-closed selection;
-- command policy and protected-path semantics;
-- transactional no-unregistered-execution gate;
-- initial executable exec acknowledgement and status;
-- backend-neutral signaling and cleanup outcomes;
-- child environment and descriptor hygiene;
-- descriptor posture and startup probe behavior.
+Changing backend internals is compatible behind those facts. Weakening deny-by-default roots, silently falling back, reporting complete cleanup without evidence, mapping unsupported signals to kill, treating a Job Object as filesystem containment, or making profiles/capabilities request-selectable is incompatible.
 
-Changing backend internals behind those contracts is compatible. Weakening deny-by-default roots, silently falling back, reporting complete cleanup without evidence, changing `disabled` to mean “best effort,” or exposing a request-selectable profile is incompatible and requires explicit architecture revision.
-
-Conformance includes failure injection before and after every transactional boundary, native platform tests for descendant inheritance and cleanup, filesystem overlap and symlink races, secret/descriptor inheritance, host/deny networking, common toolchain compatibility, and disabled-mode posture. Every published native target runs its probe and tests on the actual supported OS/kernel matrix rather than relying solely on cross-compilation.
+Conformance includes native tests on every published OS/architecture, failure injection around transactional boundaries, descendant inheritance and cleanup, root overlap and link/reparse behavior, credential/handle inheritance, host/deny networking, common toolchain compatibility, and disabled posture. Cross-compilation does not substitute for native Windows, macOS, or Linux runtime evidence.
 
 ## Trade-offs
 
-### Native isolation instead of per-command VM
+### Native isolation across three operating systems
 
-Bubblewrap and Seatbelt have low startup and deployment cost and preserve host toolchains. They provide weaker protection than a VM and inherit platform limitations, especially deprecated Seatbelt and macOS process cleanup. Deployments requiring hostile multi-tenancy use an outer VM/container provider and can disable the redundant inner layer explicitly.
+Three native backends increase implementation and release-matrix cost. They preserve local toolchains and low startup overhead while giving direct-machine deployments a real fail-closed boundary. Providers that require hostile multi-tenancy still use an outer VM or equivalent sandbox.
 
-### Fail closed instead of automatic compatibility fallback
+### Windows capability projection plus Job ownership
 
-Required mode can make envd unavailable on machines with disabled user namespaces, restrictive LSM policy, or changed Seatbelt behavior. This is preferable to silently turning a packaging or OS regression into unrestricted host execution. The operator can explicitly accept the outer-host boundary with `disabled`.
+AppContainer/ACL projection adds lifecycle-sensitive ACL work, and Job Objects add a separate process owner. Keeping both is necessary: capability projection owns resource containment; the job owns descendants and cleanup. Collapsing them would overstate one mechanism's guarantees.
 
-### Curated runtime roots instead of ambient `PATH`
+### Fail closed instead of compatibility fallback
 
-Narrow runtime grants can require explicit configuration for Homebrew, Nix, or custom toolchains. They prevent command convenience from exposing mutable package state, credentials, or the whole host filesystem.
+Required mode can make envd unavailable when user namespaces, Seatbelt, AppContainer, ACL projection, or Job semantics are unavailable. Explicit `disabled` lets a trusted outer provider own containment without silently turning a platform regression into unrestricted execution.
 
 ## Invariants
 
-01. Every command uses exactly one immutable isolation policy snapshot selected before transactional preparation.
-02. Required mode defaults on, runs a production probe before transport admission, and never falls back.
-03. Disabled mode is explicit and delegates only OS command containment; all other envd controls remain active.
-04. EIP callers cannot select isolation mode, backend, profile, helper, native root, payload identity, or wider network policy.
-05. Required filesystem authority starts deny-by-default and includes only the command's effective `cwd` mount, private execution roots, curated runtime, explicit read-only roots, minimal devices, and stdio; a server-root command still excludes envd protected control paths.
-06. Scoped protected-path overlap is rejected symmetrically after canonicalization; server-root overlap is denied by backend-enforced masking proven at startup; configured root parents remain provider-owned during bootstrap; and final-component no-follow opening prevents a substituted link from widening grants.
-07. Request environment reaches only the final payload after isolation and identity setup; daemon secrets and transport state never reach helpers or payloads.
-08. No requested executable starts before final sandbox readiness and process/output ownership commit.
-09. Linux uses verified non-setuid bubblewrap with user/mount/PID/IPC/UTS namespaces, private `/proc`, PID 1 supervision, and optional network namespace.
-10. macOS uses a parameterized deny-default Seatbelt profile and reports its no-PID-namespace cleanup limitation honestly.
-11. Network `host` is unrestricted IP compatibility, while `deny` is actual IP-network removal; neither implies domain policy.
-12. Only provider evidence can report complete cleanup; disabled native mode never calls an unobserved residual confined.
-13. Envd posture reports only its inner layer and never infers outer container, VM, or provider isolation strength.
+01. Every command uses one immutable isolation policy snapshot before transactional preparation.
+02. Required isolation is the default on Linux, macOS, and Windows, probes before carrier admission, and never falls back.
+03. Disabled mode is explicit and delegates only child containment; all other envd controls remain active.
+04. EIP callers cannot select isolation mode, backend, helper, profile, AppContainer identity, ACL, native root, payload identity, or wider network policy.
+05. Required filesystem authority contains only the configured command mount, private execution roots, curated runtime, explicit read-only roots, minimal devices, and stdio, with protected-path denial taking precedence.
+06. Request values reach only the final payload after isolation and identity setup; daemon credentials and carrier state never reach helpers or payloads.
+07. No requested executable runs before final backend readiness and process/output ownership commit.
+08. Linux uses verified non-setuid bubblewrap with mount/user/PID/IPC/UTS isolation, private `/proc`, PID 1 supervision, and optional network namespace.
+09. macOS uses parameterized deny-default Seatbelt and reports its no-PID-namespace cleanup limitation honestly.
+10. Windows required mode combines AppContainer/restricted capabilities and capability-specific ACL/network projection for containment with a non-breakaway Job Object for complete process-tree ownership.
+11. A Windows Job Object alone is never reported as filesystem or network isolation, and unsupported signal semantics are never mapped silently to kill.
+12. Network `host` is unrestricted outer-Environment IP compatibility; `deny` removes IP authority through the active backend; neither is domain policy.
+13. Only backend evidence can report complete cleanup, and only macOS required isolation can report a residual as still confined without proving exit.
+14. Envd posture reports only its own inner layer and never infers outer container, VM, or provider strength.

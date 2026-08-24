@@ -16,10 +16,10 @@ use crate::{
     eip::{
         self, DispatchError, DispatchStage, EIPError, EIPErrorData, EIPServerInfo, EipHandler,
         EnvironmentDescribeParams, EnvironmentDescribeResult, EnvironmentDescriptor, ErrorType,
-        InitializeParams, InitializeResult, IsolationBackend, IsolationCleanupGuarantee,
-        IsolationMode, IsolationNetworkPolicy, IsolationPosture, JsonRpcErrorResponse, JsonRpcId,
-        JsonRpcRequest, JsonRpcSuccessResponse, ReceiptOutcome, ReceiptStage, ResourceAuthority,
-        ResourceAuthorityDescriptor, RetryHint, SessionCloseParams, SessionCloseResult,
+        ExecutionFeatures, InitializeParams, InitializeResult, IsolationBackend,
+        IsolationCleanupGuarantee, IsolationMode, IsolationNetworkPolicy, IsolationPosture,
+        JsonRpcErrorResponse, JsonRpcId, JsonRpcRequest, JsonRpcSuccessResponse, ReceiptOutcome,
+        ReceiptStage, RetryHint, SessionCloseParams, SessionCloseResult,
     },
     mount::MountRegistry,
     operation::{
@@ -48,7 +48,6 @@ struct SessionAdmission {
 
 struct SessionAdmissionState {
     lifecycle: SessionState,
-    resource_authority: Option<ResourceAuthority>,
     active_session_work: usize,
 }
 
@@ -119,7 +118,6 @@ struct AuthoritySurface {
 
 struct AuthoritySurfaces {
     scoped: AuthoritySurface,
-    server: Option<AuthoritySurface>,
 }
 
 pub(crate) struct Daemon {
@@ -429,48 +427,84 @@ impl Drop for OwnedOperationTaskGuard {
 fn build_descriptor(
     config: &Config,
     generation: u64,
-    authority: ResourceAuthority,
     mounts: &MountRegistry,
     execution: Option<&ExecutionManager>,
 ) -> EnvironmentDescriptor {
-    let mut capabilities = BASE_CAPABILITIES
+    let mut available_methods = BASE_CAPABILITIES
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    capabilities.extend([
+    available_methods.extend([
         "operation.cancel".to_owned(),
-        "port.observe".to_owned(),
-        "receipt.read".to_owned(),
+        "port.inspect".to_owned(),
+        "port.wait".to_owned(),
+        "receipt.get".to_owned(),
     ]);
-    if mounts.has_complete_read_family() {
-        capabilities.push("file.read".to_owned());
+    for (operation, methods) in [
+        ("stat", &["file.stat"][..]),
+        ("read_text", &["file.read_text"][..]),
+        (
+            "open_reader",
+            &["file.open_reader", "file.close_reader"][..],
+        ),
+        ("list", &["file.list"][..]),
+        ("find", &["file.find"][..]),
+        ("search", &["file.search"][..]),
+        ("write_text", &["file.write_text"][..]),
+        (
+            "open_writer",
+            &[
+                "file.open_writer",
+                "file.commit_writer",
+                "file.abort_writer",
+            ][..],
+        ),
+        ("mkdir", &["file.mkdir"][..]),
+        ("patch_text", &["file.patch_text"][..]),
+        ("copy", &["file.copy"][..]),
+        ("move", &["file.move"][..]),
+        ("remove", &["file.remove"][..]),
+    ] {
+        if mounts.supports_anywhere(operation) {
+            available_methods.extend(methods.iter().map(|method| (*method).to_owned()));
+        }
     }
-    if mounts.has_complete_write_family() {
-        capabilities.push("file.write".to_owned());
-    }
-    if mounts.supports_anywhere("find") {
-        capabilities.push("file.find".to_owned());
-    }
-    if mounts.supports_anywhere("search") {
-        capabilities.push("file.search".to_owned());
-    }
-    if execution.is_some() && mounts.supports_commands() {
-        capabilities.extend([
+    let execution_available = execution.is_some() && mounts.supports_commands();
+    let execution_features = ExecutionFeatures {
+        process_count_limit: false,
+        memory_bytes_limit: false,
+        cpu_time_limit: false,
+        per_command_network_deny: false,
+        signal_interrupt: execution_available && cfg!(unix),
+        signal_terminate: execution_available && cfg!(unix),
+    };
+    if execution_available {
+        available_methods.extend([
             "output.read".to_owned(),
-            "process.manage".to_owned(),
+            "output.release".to_owned(),
             "shell.exec".to_owned(),
+            "process.start".to_owned(),
+            "process.inspect".to_owned(),
+            "process.read_output".to_owned(),
+            "process.write_stdin".to_owned(),
+            "process.close_stdin".to_owned(),
+            "process.wait".to_owned(),
+            "process.kill".to_owned(),
+            "process.release".to_owned(),
         ]);
+        if execution_features.signal_interrupt || execution_features.signal_terminate {
+            available_methods.push("process.signal".to_owned());
+        }
     }
-    capabilities.sort();
+    available_methods.sort();
     EnvironmentDescriptor {
         environment_id: config.environment_id.clone(),
         generation,
-        capabilities,
         mounts: mounts.descriptors(),
         shell_profiles: execution
             .map(ExecutionManager::shell_profiles)
             .unwrap_or_default(),
-        limits: config.limits.clone(),
+        limits: config.limits.descriptor(),
         isolation: IsolationPosture {
             mode: IsolationMode::Disabled,
             backend: IsolationBackend::OuterHost,
@@ -480,10 +514,9 @@ fn build_descriptor(
             network_policy: IsolationNetworkPolicy::Host,
             cleanup_guarantee: IsolationCleanupGuarantee::OuterHost,
         },
-        resource_authority: ResourceAuthorityDescriptor {
-            mode: authority,
-            root_mount_id: mounts.root_mount_id().map(str::to_owned),
-        },
+        root_mount_id: mounts.root_mount_id().map(str::to_owned),
+        available_methods,
+        execution_features,
     }
 }
 
@@ -504,10 +537,7 @@ impl Daemon {
             })?;
         let operation_record_ttl = Duration::from_millis(config.limits.operation_record_ttl_ms);
         let scoped_mounts = MountRegistry::initialize_scoped(config).map_err(|error| {
-            DaemonInitError::new(format!("scoped mount initialization failed: {error}"))
-        })?;
-        let server_mounts = MountRegistry::initialize_server(config).map_err(|error| {
-            DaemonInitError::new(format!("server mount initialization failed: {error}"))
+            DaemonInitError::new(format!("mount initialization failed: {error}"))
         })?;
         let transfers = TransferRegistry::new(config, generation)
             .map_err(|_| DaemonInitError::new("transfer registry initialization failed"))?;
@@ -525,29 +555,13 @@ impl Daemon {
             .map_err(|_| DaemonInitError::new("retention store initialization failed"))?;
         let execution = ExecutionManager::new(config, generation, retention.clone())
             .map_err(|_| DaemonInitError::new("execution manager initialization failed"))?;
-        let scoped_descriptor = build_descriptor(
-            config,
-            generation,
-            ResourceAuthority::Scoped,
-            &scoped_mounts,
-            execution.as_ref(),
-        );
-        let server = server_mounts.map(|mounts| AuthoritySurface {
-            descriptor: build_descriptor(
-                config,
-                generation,
-                ResourceAuthority::Server,
-                &mounts,
-                execution.as_ref(),
-            ),
-            mounts,
-        });
+        let scoped_descriptor =
+            build_descriptor(config, generation, &scoped_mounts, execution.as_ref());
         let surfaces = AuthoritySurfaces {
             scoped: AuthoritySurface {
                 mounts: scoped_mounts,
                 descriptor: scoped_descriptor,
             },
-            server,
         };
         let (closed, _) = watch::channel(false);
         Ok(Self {
@@ -555,7 +569,6 @@ impl Daemon {
             session: SessionAdmission {
                 state: Mutex::new(SessionAdmissionState {
                     lifecycle: SessionState::Uninitialized,
-                    resource_authority: None,
                     active_session_work: 0,
                 }),
                 idle: Notify::new(),
@@ -739,6 +752,15 @@ impl Daemon {
         };
         let is_initialization = request.method == "initialize";
         let result = eip::dispatch(self, &request.method, &params_json).await;
+        if let Err(DispatchError::Method {
+            error,
+            method,
+            params,
+        }) = &result
+        {
+            self.operations
+                .finish_dispatched_failure(method, params, error.clone());
+        }
         if is_initialization && result.is_err() {
             self.close_if_uninitialized();
         }
@@ -789,26 +811,22 @@ impl Daemon {
                 "session is already initialized",
             )),
             SessionState::Initialized => {
-                let surface = state
-                    .resource_authority
-                    .and_then(|authority| self.surface_for(authority))
-                    .ok_or_else(|| {
-                        protocol_error(
-                            ErrorType::InternalError,
-                            "initialized session has no resource authority",
-                        )
-                    })?;
-                if let Some(capability) = method_capability(method)
-                    && !surface
-                        .descriptor
-                        .capabilities
-                        .iter()
-                        .any(|advertised| advertised == capability)
+                if !eip::METHODS.iter().any(|known| known.name == method) {
+                    return Err(protocol_error(
+                        ErrorType::MethodNotFound,
+                        "method not found",
+                    ));
+                }
+                let surface = &self.surfaces.scoped;
+                if !surface
+                    .descriptor
+                    .available_methods
+                    .iter()
+                    .any(|advertised| advertised == method)
                 {
-                    return Err(error_with_capability(
+                    return Err(protocol_error(
                         ErrorType::Unsupported,
-                        "method capability is not available",
-                        capability,
+                        "method is not available",
                     ));
                 }
                 Ok(())
@@ -828,27 +846,10 @@ impl Daemon {
         }
     }
 
-    fn surface_for(&self, authority: ResourceAuthority) -> Option<&AuthoritySurface> {
-        match authority {
-            ResourceAuthority::Scoped => Some(&self.surfaces.scoped),
-            ResourceAuthority::Server => self.surfaces.server.as_ref(),
-        }
-    }
-
     #[allow(clippy::result_large_err)]
     fn effective_surface(&self) -> Result<&AuthoritySurface, EIPError> {
-        let authority = self.session.state().resource_authority.ok_or_else(|| {
-            protocol_error(
-                ErrorType::NotInitialized,
-                "session resource authority is not initialized",
-            )
-        })?;
-        self.surface_for(authority).ok_or_else(|| {
-            protocol_error(
-                ErrorType::InternalError,
-                "session resource authority is unavailable",
-            )
-        })
+        self.ensure_initialized()?;
+        Ok(&self.surfaces.scoped)
     }
 
     #[allow(clippy::result_large_err)]
@@ -978,7 +979,7 @@ impl EipHandler for Daemon {
             ));
         }
 
-        let surface = self.surface_for(params.resource_authority);
+        let surface = &self.surfaces.scoped;
         let failure = if !params
             .supported_protocol_versions
             .iter()
@@ -988,29 +989,21 @@ impl EipHandler for Daemon {
                 ErrorType::ProtocolIncompatible,
                 "no mutually supported EIP protocol version",
             ))
-        } else if surface.is_none() {
-            Some(protocol_error(
-                ErrorType::ProtocolIncompatible,
-                "requested resource authority exceeds the daemon ceiling",
-            ))
         } else if params.expected_environment_id != self.surfaces.scoped.descriptor.environment_id {
             Some(protocol_error(
                 ErrorType::ProtocolIncompatible,
                 "expected Environment identity does not match",
             ))
         } else {
-            let descriptor = &surface
-                .expect("surface availability was checked")
-                .descriptor;
+            let descriptor = &surface.descriptor;
             params
-                .required_capabilities
+                .required_methods
                 .iter()
-                .find(|required| !descriptor.capabilities.contains(required))
+                .find(|required| !descriptor.available_methods.contains(required))
                 .map(|required| {
-                    error_with_capability(
+                    protocol_error(
                         ErrorType::ProtocolIncompatible,
-                        "required capability is not available",
-                        required,
+                        format!("required method is not available: {required}"),
                     )
                 })
         };
@@ -1021,11 +1014,7 @@ impl EipHandler for Daemon {
             return Err(error);
         }
 
-        let descriptor = surface
-            .expect("successful authority negotiation has a surface")
-            .descriptor
-            .clone();
-        state.resource_authority = Some(params.resource_authority);
+        let descriptor = surface.descriptor.clone();
         state.lifecycle = SessionState::Initialized;
         Ok(InitializeResult {
             protocol_version: eip::EIP_PROTOCOL_VERSION.to_owned(),
@@ -1124,7 +1113,7 @@ impl EipHandler for Daemon {
             };
         let result = self
             .transfers
-            .close_reader(&params.reader, params.accept_complete)
+            .close_reader(&params.reader)
             .await
             .map_err(map_transfer_error)?;
         operation
@@ -1380,12 +1369,6 @@ impl EipHandler for Daemon {
     ) -> Result<eip::FileWriteTextResult, EIPError> {
         self.ensure_initialized()?;
         ensure_deadline(&params.context)?;
-        if params.mode == eip::FileWriteMode::Append && params.context.idempotency_key.is_none() {
-            return Err(protocol_error(
-                ErrorType::InvalidParams,
-                "append requires an idempotency_key",
-            ));
-        }
         let (work, operation) =
             self.admit_owned_record("file.write_text", &params.context, &params)?;
         let operation = match operation {
@@ -1701,7 +1684,7 @@ impl EipHandler for Daemon {
     ) -> Result<eip::OperationCancelResult, EIPError> {
         self.ensure_initialized()?;
         ensure_deadline(&params.context)?;
-        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let operation =
             match self.admit_record("operation.cancel", &params.context, &params, true)? {
                 BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1755,14 +1738,10 @@ impl EipHandler for Daemon {
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
-        let receipt = if let Some(reference) = &params.receipt_ref {
-            self.operations.receipt_by_ref(reference)
-        } else if let Some(operation_id) = &params.operation_id {
-            self.operations.receipt_by_operation(operation_id)
-        } else {
-            None
-        }
-        .ok_or_else(|| protocol_error(ErrorType::NotFoundOrDenied, "receipt was not found"))?;
+        let receipt = self
+            .operations
+            .receipt_by_operation(&params.operation_id)
+            .ok_or_else(|| protocol_error(ErrorType::NotFoundOrDenied, "receipt was not found"))?;
         let result = eip::ReceiptGetResult { receipt };
         operation
             .finish(&result, None)
@@ -1800,17 +1779,7 @@ impl EipHandler for Daemon {
             BeginOutcome::New(operation) => operation,
         };
         let (operation, receipt) = mutation_receipt(operation, "output.release")?;
-        let released = if let Some(reference) = &params.reference {
-            self.retention.release_reference(reference)
-        } else if let Some(cursor) = &params.cursor {
-            self.retention.release_cursor(cursor)
-                || self
-                    .execution
-                    .as_ref()
-                    .is_some_and(|execution| execution.release_cursor(cursor))
-        } else {
-            false
-        };
+        let released = self.retention.release_reference(&params.reference);
         let result = eip::OutputReleaseResult {
             released,
             receipt: receipt.clone(),
@@ -1832,7 +1801,7 @@ impl EipHandler for Daemon {
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
-        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let observation = inspect_port(&params.target, deadline).await;
         let result = eip::PortInspectResult { observation };
         operation
@@ -1846,7 +1815,7 @@ impl EipHandler for Daemon {
         params: eip::PortWaitParams,
     ) -> Result<eip::PortWaitResult, EIPError> {
         self.ensure_initialized()?;
-        let requested_deadline = params.context.deadline.ok_or_else(|| {
+        let requested_deadline = params.context.timeout_ms.ok_or_else(|| {
             protocol_error(
                 ErrorType::InvalidParams,
                 "port.wait requires a finite context deadline",
@@ -1916,13 +1885,6 @@ impl EipHandler for Daemon {
                         return Err(ProcessError::PreDispatchTimeout);
                     }
                     None => {}
-                }
-                if params
-                    .context
-                    .deadline
-                    .is_some_and(|deadline| deadline <= chrono::Utc::now())
-                {
-                    return Err(ProcessError::PreDispatchTimeout);
                 }
                 Ok(())
             })
@@ -2017,7 +1979,7 @@ impl EipHandler for Daemon {
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
-        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let process = loop {
             if let Some(interruption) = self.operations.interruption(&params.context.operation_id) {
                 let error_type = match interruption {
@@ -2056,13 +2018,13 @@ impl EipHandler for Daemon {
                 BeginOutcome::ReplayFailure(error) => return Err(*error),
                 BeginOutcome::New(operation) => operation,
             };
-        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let (process, stdout, stderr) = self
             .execution_manager()?
             .read_output(
                 &params.handle,
-                params.stdout_cursor.as_ref(),
-                params.stderr_cursor.as_ref(),
+                params.stdout_offset,
+                params.stderr_offset,
                 params.wait_ms,
                 params.output_policy.as_ref(),
                 deadline,
@@ -2197,7 +2159,7 @@ impl EipHandler for Daemon {
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
-        let deadline = effective_deadline(params.context.deadline, self.max_operation_duration)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let execution = self.execution_manager()?;
         let process = match execution
             .kill(
@@ -2274,7 +2236,7 @@ impl EipHandler for Daemon {
         let execution = self.execution_manager()?;
         let mounts = self.effective_surface()?.mounts.clone();
         let hard_deadline =
-            effective_deadline(params.context.deadline, self.max_operation_duration)?;
+            effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let started = match execution
             .start(&mounts, &params.request, false, || {
                 match self.operations.interruption(&params.context.operation_id) {
@@ -2285,13 +2247,6 @@ impl EipHandler for Daemon {
                         return Err(ProcessError::PreDispatchTimeout);
                     }
                     None => {}
-                }
-                if params
-                    .context
-                    .deadline
-                    .is_some_and(|deadline| deadline <= chrono::Utc::now())
-                {
-                    return Err(ProcessError::PreDispatchTimeout);
                 }
                 Ok(())
             })
@@ -2535,35 +2490,27 @@ fn mutation_receipt_at(
     Ok((operation, receipt))
 }
 
-#[allow(clippy::result_large_err)]
-fn ensure_deadline(context: &eip::EIPCallContext) -> Result<(), EIPError> {
-    if context
-        .deadline
-        .is_some_and(|deadline| deadline <= chrono::Utc::now())
-    {
-        Err(protocol_error(
-            ErrorType::Timeout,
-            "operation deadline has expired",
-        ))
-    } else {
-        Ok(())
-    }
+#[allow(clippy::unnecessary_wraps, clippy::result_large_err)]
+fn ensure_deadline(_context: &eip::EIPCallContext) -> Result<(), EIPError> {
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
 fn effective_deadline(
-    requested: Option<chrono::DateTime<chrono::Utc>>,
+    requested_ms: Option<u64>,
     hard_duration: Duration,
 ) -> Result<Instant, EIPError> {
     let now = Instant::now();
-    let hard = now + hard_duration;
-    let Some(requested) = requested else {
-        return Ok(hard);
-    };
-    let remaining = (requested - chrono::Utc::now())
-        .to_std()
-        .map_err(|_| protocol_error(ErrorType::Timeout, "operation deadline has expired"))?;
-    Ok(hard.min(now + remaining))
+    let requested = requested_ms
+        .map(Duration::from_millis)
+        .unwrap_or(hard_duration);
+    if requested.is_zero() {
+        return Err(protocol_error(
+            ErrorType::Timeout,
+            "operation timeout has expired",
+        ));
+    }
+    Ok(now + requested.min(hard_duration))
 }
 
 async fn inspect_port(target: &eip::PortTarget, deadline: Instant) -> eip::PortObservation {
@@ -2680,6 +2627,13 @@ fn map_resource_error(error: ResourceError) -> EIPError {
 }
 
 fn map_process_error(error: ProcessError) -> EIPError {
+    let gap_bounds = match error {
+        ProcessError::RetentionGap {
+            available_start,
+            available_end,
+        } => Some((available_start, available_end)),
+        _ => None,
+    };
     let (error_type, message, retry_hint) = match error {
         ProcessError::Invalid => (
             ErrorType::InvalidParams,
@@ -2694,16 +2648,16 @@ fn map_process_error(error: ProcessError) -> EIPError {
         ProcessError::Denied => (
             ErrorType::Denied,
             "command execution was denied by configured policy",
-            RetryHint::AfterAuthorityChange,
+            RetryHint::AfterRefresh,
         ),
         ProcessError::NotFound => (
             ErrorType::NotFoundOrDenied,
             "process handle was not found",
             RetryHint::Never,
         ),
-        ProcessError::InvalidHandle => (
-            ErrorType::InvalidHandle,
-            "process output cursor is invalid",
+        ProcessError::RetentionGap { .. } => (
+            ErrorType::RetentionGap,
+            "process output is unavailable at the requested offset",
             RetryHint::Never,
         ),
         ProcessError::Busy => (
@@ -2759,6 +2713,10 @@ fn map_process_error(error: ProcessError) -> EIPError {
     };
     let mut mapped = protocol_error(error_type, message);
     mapped.data.retry_hint = retry_hint;
+    if let Some((available_start, available_end)) = gap_bounds {
+        mapped.data.available_start = Some(available_start);
+        mapped.data.available_end = Some(available_end);
+    }
     mapped
 }
 
@@ -2806,11 +2764,6 @@ fn map_retention_error(error: RetentionError) -> EIPError {
             "invalid output policy or selector",
             RetryHint::Never,
         ),
-        RetentionError::InvalidHandle => (
-            ErrorType::InvalidHandle,
-            "output cursor is invalid or expired",
-            RetryHint::Never,
-        ),
         RetentionError::Gap { .. } => (
             ErrorType::RetentionGap,
             "retained output is unavailable at the requested offset",
@@ -2818,7 +2771,7 @@ fn map_retention_error(error: RetentionError) -> EIPError {
         ),
         RetentionError::Busy => (
             ErrorType::Busy,
-            "retained output cursor capacity is exhausted",
+            "retained output capacity is exhausted",
             RetryHint::AfterCapacity,
         ),
         RetentionError::OutputLimit => (
@@ -2841,15 +2794,8 @@ fn map_retention_error(error: RetentionError) -> EIPError {
     mapped
 }
 
-fn method_capability(method: &str) -> Option<&'static str> {
-    eip::METHODS
-        .iter()
-        .find(|spec| spec.name == method)
-        .and_then(|spec| spec.capability)
-}
-
-fn map_dispatch_error(error: DispatchError, method: &str) -> EIPError {
-    let mut error = match error {
+fn map_dispatch_error(error: DispatchError, _method: &str) -> EIPError {
+    match error {
         DispatchError::MethodNotFound => {
             protocol_error(ErrorType::MethodNotFound, "method not found")
         }
@@ -2859,12 +2805,8 @@ fn map_dispatch_error(error: DispatchError, method: &str) -> EIPError {
         DispatchError::InvalidResult(_) | DispatchError::Encode(_) => {
             protocol_error(ErrorType::InternalError, "method result encoding failed")
         }
-        DispatchError::Method(error) => error,
-    };
-    if error.data.capability.is_none() {
-        error.data.capability = method_capability(method).map(ToOwned::to_owned);
+        DispatchError::Method { error, .. } => error,
     }
-    error
 }
 
 fn map_registry_error(error: RegistryError) -> EIPError {
@@ -2877,16 +2819,6 @@ fn map_registry_error(error: RegistryError) -> EIPError {
         RegistryError::DeadlineExpired => (
             ErrorType::Timeout,
             "operation deadline has expired",
-            RetryHint::Never,
-        ),
-        RegistryError::IdempotencyDisallowed => (
-            ErrorType::InvalidParams,
-            "idempotency_key is not allowed for this method",
-            RetryHint::Never,
-        ),
-        RegistryError::IdempotencyConflict => (
-            ErrorType::IdempotencyConflict,
-            "idempotency key was reused for a different request",
             RetryHint::Never,
         ),
         RegistryError::InProgress => (
@@ -3014,7 +2946,6 @@ fn protocol_error(error_type: ErrorType, message: impl Into<String>) -> EIPError
             operation_id: None,
             environment_id: None,
             generation: None,
-            capability: None,
             field: None,
             handle_kind: None,
             produced_bytes: None,
@@ -3029,16 +2960,6 @@ fn protocol_error(error_type: ErrorType, message: impl Into<String>) -> EIPError
             available_end: None,
         },
     }
-}
-
-fn error_with_capability(
-    error_type: ErrorType,
-    message: impl Into<String>,
-    capability: &str,
-) -> EIPError {
-    let mut error = protocol_error(error_type, message);
-    error.data.capability = Some(capability.to_owned());
-    error
 }
 
 fn error_type_message(error_type: ErrorType) -> &'static str {
@@ -3149,12 +3070,12 @@ mod tests {
         json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
     }
 
-    fn initialize_params(required_capabilities: Value) -> Value {
+    fn initialize_params(required_methods: Value) -> Value {
         json!({
             "supported_protocol_versions": ["1.0"],
             "client": {"name": "test", "version": "1"},
             "expected_environment_id": "env-test",
-            "required_capabilities": required_capabilities
+            "required_methods": required_methods
         })
     }
 
@@ -3187,14 +3108,26 @@ mod tests {
         assert_eq!(initialized["result"]["protocol_version"], "1.0");
         assert_eq!(initialized["result"]["descriptor"]["generation"], 7);
         assert_eq!(
-            initialized["result"]["descriptor"]["capabilities"],
+            initialized["result"]["descriptor"]["available_methods"],
             json!([
                 "environment.describe",
                 "operation.cancel",
-                "port.observe",
-                "receipt.read",
+                "port.inspect",
+                "port.wait",
+                "receipt.get",
                 "session.close"
             ])
+        );
+        assert_eq!(
+            initialized["result"]["descriptor"]["execution_features"],
+            json!({
+                "process_count_limit": false,
+                "memory_bytes_limit": false,
+                "cpu_time_limit": false,
+                "per_command_network_deny": false,
+                "signal_interrupt": false,
+                "signal_terminate": false
+            })
         );
 
         let described: Value = serde_json::from_slice(
@@ -3245,8 +3178,7 @@ mod tests {
             FileWriterOpenParams {
                 context: EIPCallContext {
                     operation_id: "open-before-close".to_owned(),
-                    deadline: None,
-                    idempotency_key: None,
+                    timeout_ms: None,
                 },
                 path: EIPPath {
                     mount_id: "workspace".to_owned(),
@@ -3254,7 +3186,7 @@ mod tests {
                 },
                 mode: FileWriteMode::Create,
                 executable: None,
-                transfer_deadline: None,
+                transfer_timeout_ms: None,
             },
         )
         .await
@@ -3294,8 +3226,7 @@ mod tests {
             FileWriteTextParams {
                 context: EIPCallContext {
                     operation_id: "write-after-close".to_owned(),
-                    deadline: None,
-                    idempotency_key: Some("write-after-close-key".to_owned()),
+                    timeout_ms: None,
                 },
                 path: EIPPath {
                     mount_id: "workspace".to_owned(),
@@ -3335,8 +3266,7 @@ mod tests {
                     .operation_cancel(OperationCancelParams {
                         context: EIPCallContext {
                             operation_id: "pending-cancel".to_owned(),
-                            deadline: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
-                            idempotency_key: None,
+                            timeout_ms: Some(1_000),
                         },
                         target_operation_id: "pending-target".to_owned(),
                     })
@@ -3347,8 +3277,7 @@ mod tests {
         let target_params = EnvironmentDescribeParams {
             context: EIPCallContext {
                 operation_id: "pending-target".to_owned(),
-                deadline: None,
-                idempotency_key: None,
+                timeout_ms: None,
             },
         };
         let target = daemon
@@ -3387,10 +3316,7 @@ mod tests {
                     .operation_cancel(OperationCancelParams {
                         context: EIPCallContext {
                             operation_id: "timeout-cancel".to_owned(),
-                            deadline: Some(
-                                chrono::Utc::now() + chrono::Duration::milliseconds(100),
-                            ),
-                            idempotency_key: None,
+                            timeout_ms: Some(100),
                         },
                         target_operation_id: "timeout-target".to_owned(),
                     })
@@ -3419,8 +3345,7 @@ mod tests {
                     .operation_cancel(OperationCancelParams {
                         context: EIPCallContext {
                             operation_id: "close-cancel".to_owned(),
-                            deadline: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
-                            idempotency_key: None,
+                            timeout_ms: Some(1_000),
                         },
                         target_operation_id: "close-target".to_owned(),
                     })
@@ -3480,7 +3405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_operation_ids_remain_reserved() {
+    async fn completed_operation_ids_replay_the_original_result() {
         let config = Config::for_test("env-test");
         let daemon = Daemon::with_generation(&config, 9).expect("daemon builds");
         let _ = initialize(&daemon).await;
@@ -3495,7 +3420,7 @@ mod tests {
         assert_eq!(first["result"]["descriptor"]["generation"], 9);
         let repeated: Value = serde_json::from_slice(&daemon.handle_payload(&describe).await)
             .expect("response is JSON");
-        assert_eq!(repeated["error"]["code"], -32060);
+        assert_eq!(repeated["result"], first["result"]);
     }
 
     #[tokio::test]
@@ -3594,7 +3519,28 @@ mod tests {
         .expect("response is JSON");
 
         assert_eq!(response["error"]["code"], -32012);
-        assert_eq!(response["error"]["data"]["capability"], "file.read");
+        assert_eq!(response["error"]["data"]["error_type"], "unsupported");
+    }
+
+    #[tokio::test]
+    async fn unknown_method_is_method_not_found() {
+        let config = Config::for_test("env-test");
+        let daemon = Daemon::with_generation(&config, 9).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+
+        let response: Value = serde_json::from_slice(
+            &daemon
+                .handle_payload(&request(
+                    json!(2),
+                    "vendor.unknown",
+                    json!({"context": {"operation_id": "unknown-method"}}),
+                ))
+                .await,
+        )
+        .expect("response is JSON");
+
+        assert_eq!(response["error"]["code"], -32601);
+        assert_eq!(response["error"]["data"]["error_type"], "method_not_found");
     }
 
     #[tokio::test]
@@ -3643,7 +3589,7 @@ mod tests {
 
         let open_params = |operation_id: &str| {
             json!({
-                "context": {"operation_id": operation_id, "idempotency_key": "reader-key"},
+                "context": {"operation_id": operation_id},
                 "path": {"mount_id": "workspace", "path": "/replay.txt"}
             })
         };
@@ -3664,38 +3610,23 @@ mod tests {
                 .handle_payload(&request(
                     json!(13),
                     "file.open_reader",
-                    open_params("reader-open-2"),
+                    open_params("reader-open-1"),
                 ))
                 .await,
         )
         .expect("reader replay response");
         assert_eq!(replayed["result"]["reader"], reader);
-        let closed: Value = serde_json::from_slice(
+        let independently_opened: Value = serde_json::from_slice(
             &daemon
                 .handle_payload(&request(
                     json!(14),
-                    "file.close_reader",
-                    json!({
-                        "context": {"operation_id": "reader-close"},
-                        "reader": reader,
-                        "accept_complete": false
-                    }),
-                ))
-                .await,
-        )
-        .expect("reader close response");
-        assert_eq!(closed["result"]["completion"]["complete"], false);
-        let reopened: Value = serde_json::from_slice(
-            &daemon
-                .handle_payload(&request(
-                    json!(15),
                     "file.open_reader",
-                    open_params("reader-open-3"),
+                    open_params("reader-open-2"),
                 ))
                 .await,
         )
-        .expect("reader reopen response");
-        assert_eq!(reopened["result"]["reader"], "reader-c-2");
+        .expect("independent reader response");
+        assert_eq!(independently_opened["result"]["reader"], "reader-c-2");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3741,7 +3672,7 @@ mod tests {
                     json!(3),
                     "file.write_text",
                     json!({
-                        "context": {"operation_id": "quota-write-blocked", "idempotency_key": "quota-blocked-key"},
+                        "context": {"operation_id": "quota-write-blocked"},
                         "path": {"mount_id": "workspace", "path": "/inline.txt"},
                         "mode": "create",
                         "text": "blocked"
@@ -3774,7 +3705,7 @@ mod tests {
                     json!(5),
                     "file.write_text",
                     json!({
-                        "context": {"operation_id": "quota-write-after-abort", "idempotency_key": "quota-after-key"},
+                        "context": {"operation_id": "quota-write-after-abort"},
                         "path": {"mount_id": "workspace", "path": "/inline.txt"},
                         "mode": "create",
                         "text": "released"
@@ -3807,11 +3738,11 @@ mod tests {
         });
         let daemon = Daemon::with_generation(&config, 12).expect("daemon builds");
         let initialized = initialize(&daemon).await;
-        let capabilities = initialized["result"]["descriptor"]["capabilities"]
+        let available_methods = initialized["result"]["descriptor"]["available_methods"]
             .as_array()
-            .expect("capabilities array");
-        for capability in ["file.read", "file.write", "file.find", "file.search"] {
-            assert!(capabilities.iter().any(|value| value == capability));
+            .expect("available methods array");
+        for method in ["file.stat", "file.write_text", "file.find", "file.search"] {
+            assert!(available_methods.iter().any(|value| value == method));
         }
 
         let write: Value = serde_json::from_slice(
@@ -3820,7 +3751,7 @@ mod tests {
                     json!(2),
                     "file.write_text",
                     json!({
-                        "context": {"operation_id": "write-e2e", "idempotency_key": "write-key"},
+                        "context": {"operation_id": "write-e2e"},
                         "path": {"mount_id": "workspace", "path": "/block2.txt"},
                         "mode": "create",
                         "text": "block2\n"
@@ -3834,8 +3765,6 @@ mod tests {
             fs::read_to_string(native.join("block2.txt")).expect("file"),
             "block2\n"
         );
-        let receipt_ref = write["result"]["receipt"]["receipt_ref"].clone();
-
         let receipt: Value = serde_json::from_slice(
             &daemon
                 .handle_payload(&request(
@@ -3843,7 +3772,7 @@ mod tests {
                     "receipt.get",
                     json!({
                         "context": {"operation_id": "receipt-e2e"},
-                        "receipt_ref": receipt_ref
+                        "operation_id": "write-e2e"
                     }),
                 ))
                 .await,
@@ -3879,7 +3808,7 @@ mod tests {
                     json!(41),
                     "file.write_text",
                     json!({
-                        "context": {"operation_id": "failed-write", "idempotency_key": "failed-key"},
+                        "context": {"operation_id": "failed-write"},
                         "path": {"mount_id": "workspace", "path": "/missing.txt"},
                         "mode": "replace",
                         "text": "never committed"
@@ -3913,7 +3842,7 @@ mod tests {
                     json!(43),
                     "file.write_text",
                     json!({
-                        "context": {"operation_id": "failed-write-retry", "idempotency_key": "failed-key"},
+                        "context": {"operation_id": "failed-write"},
                         "path": {"mount_id": "workspace", "path": "/missing.txt"},
                         "mode": "replace",
                         "text": "never committed"
@@ -3959,8 +3888,7 @@ mod tests {
         let params = FileWriteTextParams {
             context: EIPCallContext {
                 operation_id: "drain-write".to_owned(),
-                deadline: None,
-                idempotency_key: Some("drain-write-key".to_owned()),
+                timeout_ms: None,
             },
             path: EIPPath {
                 mount_id: "workspace".to_owned(),
@@ -4027,11 +3955,10 @@ mod tests {
         *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
         changed.notify_all();
 
-        let mut retry = params;
-        retry.context.operation_id = "drain-write-retry".to_owned();
+        let retry = params;
         let replay = daemon
             .begin_record("file.write_text", &retry.context, &retry, true)
-            .expect("matching idempotency key replays");
+            .expect("same operation identity replays");
         let BeginOutcome::ReplayFailure(error) = replay else {
             panic!("unknown-outcome failure replay expected");
         };
@@ -4054,8 +3981,7 @@ mod tests {
         let params = FileWriteTextParams {
             context: EIPCallContext {
                 operation_id: "late-write".to_owned(),
-                deadline: None,
-                idempotency_key: Some("late-write-key".to_owned()),
+                timeout_ms: None,
             },
             path: EIPPath {
                 mount_id: "workspace".to_owned(),
@@ -4098,7 +4024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_required_capability_negotiation_is_terminal() {
+    async fn failed_required_method_negotiation_is_terminal() {
         let config = Config::for_test("env-test");
         let daemon = Daemon::with_generation(&config, 10).expect("daemon builds");
 
@@ -4107,14 +4033,17 @@ mod tests {
                 .handle_payload(&request(
                     json!(1),
                     "initialize",
-                    initialize_params(json!(["file.read"])),
+                    initialize_params(json!(["file.stat"])),
                 ))
                 .await,
         )
         .expect("response is JSON");
 
         assert_eq!(response["error"]["code"], -32003);
-        assert_eq!(response["error"]["data"]["capability"], "file.read");
+        assert_eq!(
+            response["error"]["data"]["error_type"],
+            "protocol_incompatible"
+        );
         assert!(*daemon.subscribe_closed().borrow());
     }
 }

@@ -11,8 +11,8 @@ use base64::Engine as _;
 
 use crate::{
     eip::{
-        EncodedBytes, OutputCapture, OutputCursor, OutputKind, OutputOverflow, OutputPolicy,
-        OutputReadParams, OutputReadResult, OutputReference, OutputSegment,
+        EncodedBytes, OutputCapture, OutputKind, OutputOverflow, OutputPolicy, OutputReadParams,
+        OutputReadResult, OutputReference, OutputSegment,
     },
     operation::ShortIdAllocator,
 };
@@ -52,7 +52,6 @@ struct RetentionInner {
 #[derive(Default)]
 struct RetentionState {
     objects: BTreeMap<String, RetainedObject>,
-    cursors: BTreeMap<String, RetainedCursor>,
     released: BTreeSet<String>,
     released_order: VecDeque<String>,
 }
@@ -79,16 +78,9 @@ pub(crate) struct LiveOutput {
     release_on_drop: AtomicBool,
 }
 
-struct RetainedCursor {
-    reference: String,
-    offset: u64,
-    expires_at: Instant,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetentionError {
     Invalid,
-    InvalidHandle,
     Gap {
         available_start: u64,
         available_end: u64,
@@ -259,21 +251,7 @@ impl RetentionStore {
             });
         }
         let captured_bytes = capture.data.len() as u64;
-        let start = if let Some(cursor) = &params.cursor {
-            let cursor = state
-                .cursors
-                .get(&cursor.0)
-                .ok_or(RetentionError::InvalidHandle)?;
-            if cursor.reference != *reference || cursor.expires_at <= Instant::now() {
-                return Err(RetentionError::Gap {
-                    available_start: 0,
-                    available_end: captured_bytes,
-                });
-            }
-            cursor.offset
-        } else {
-            params.start_offset.ok_or(RetentionError::Invalid)?
-        };
+        let start = params.start_offset;
         if start > captured_bytes {
             return Err(RetentionError::Gap {
                 available_start: 0,
@@ -297,33 +275,8 @@ impl RetentionStore {
         let producer_complete = capture.producer_complete;
         let produced_bytes = capture.produced_bytes;
         let dropped_bytes = capture.dropped_bytes;
-        let expires_at = object.expires_at;
         let expires_at_utc = object.expires_at_utc;
         drop(capture);
-        let next_cursor = if end < captured_bytes {
-            if !self.inner.quota.reserve(0, 1) {
-                return Err(RetentionError::Busy);
-            }
-            match self.inner.selector_ids.next("output-cursor") {
-                Ok(selector) => {
-                    state.cursors.insert(
-                        selector.clone(),
-                        RetainedCursor {
-                            reference: reference.clone(),
-                            offset: end,
-                            expires_at,
-                        },
-                    );
-                    Some(OutputCursor(selector))
-                }
-                Err(_) => {
-                    self.inner.quota.release(0, 1);
-                    return Err(RetentionError::Internal);
-                }
-            }
-        } else {
-            None
-        };
         Ok(OutputReadResult {
             chunks: if start == end {
                 Vec::new()
@@ -333,7 +286,6 @@ impl RetentionStore {
                     data,
                 }]
             },
-            next_cursor: next_cursor.clone(),
             capture: OutputCapture {
                 kind: OutputKind::Retained,
                 producer_complete,
@@ -344,11 +296,11 @@ impl RetentionStore {
                 inline: None,
                 preview: None,
                 reference: Some(params.reference.clone()),
-                cursor: next_cursor,
                 available_start: 0,
                 available_end: captured_bytes,
                 expires_at: Some(expires_at_utc),
             },
+            next_offset: end,
         })
     }
 
@@ -357,26 +309,10 @@ impl RetentionStore {
             .prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
     }
 
-    pub(crate) fn reserve_external_cursor(&self) -> bool {
-        self.inner.quota.reserve(0, 1)
-    }
-
-    pub(crate) fn release_external_cursors(&self, count: usize) {
-        self.inner.quota.release(0, count);
-    }
-
     pub(crate) fn release_reference(&self, reference: &OutputReference) -> bool {
         let mut state = self.state();
         state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
         if let Some(object) = state.objects.remove(&reference.0) {
-            let cursor_count = state
-                .cursors
-                .values()
-                .filter(|cursor| cursor.reference == reference.0)
-                .count();
-            state
-                .cursors
-                .retain(|_, cursor| cursor.reference != reference.0);
             let captured_bytes = {
                 let mut capture = object
                     .capture
@@ -385,25 +321,13 @@ impl RetentionStore {
                 capture.readable = false;
                 std::mem::take(&mut capture.data).len() as u64
             };
-            self.inner.quota.release(captured_bytes, 1 + cursor_count);
+            self.inner.quota.release(captured_bytes, 1);
             state.remember_release(format!("reference:{}", reference.0), self.inner.max_objects);
             true
         } else {
             state
                 .released
                 .contains(&format!("reference:{}", reference.0))
-        }
-    }
-
-    pub(crate) fn release_cursor(&self, cursor: &OutputCursor) -> bool {
-        let mut state = self.state();
-        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
-        if state.cursors.remove(&cursor.0).is_some() {
-            self.inner.quota.release(0, 1);
-            state.remember_release(format!("cursor:{}", cursor.0), self.inner.max_objects);
-            true
-        } else {
-            state.released.contains(&format!("cursor:{}", cursor.0))
         }
     }
 
@@ -502,7 +426,6 @@ impl LiveOutput {
                 inline: None,
                 preview: None,
                 reference: Some(self.reference.clone()),
-                cursor: None,
                 available_start: 0,
                 available_end: captured_bytes,
                 expires_at,
@@ -522,7 +445,6 @@ impl LiveOutput {
                 inline: None,
                 preview: None,
                 reference: None,
-                cursor: None,
                 available_start: 0,
                 available_end: 0,
                 expires_at: None,
@@ -582,11 +504,6 @@ impl RetentionState {
             .map(|(reference, _)| reference.clone())
             .collect::<Vec<_>>();
         for reference in expired_objects {
-            let cursor_count = self
-                .cursors
-                .values()
-                .filter(|cursor| cursor.reference == reference)
-                .count();
             if let Some(object) = self.objects.remove(&reference) {
                 let captured_bytes = {
                     let mut capture = object
@@ -596,20 +513,7 @@ impl RetentionState {
                     capture.readable = false;
                     std::mem::take(&mut capture.data).len() as u64
                 };
-                quota.release(captured_bytes, 1 + cursor_count);
-            }
-            self.cursors
-                .retain(|_, cursor| cursor.reference != reference);
-        }
-        let expired_cursors = self
-            .cursors
-            .iter()
-            .filter(|(_, cursor)| cursor.expires_at <= now)
-            .map(|(selector, _)| selector.clone())
-            .collect::<Vec<_>>();
-        for selector in expired_cursors {
-            if self.cursors.remove(&selector).is_some() {
-                quota.release(0, 1);
+                quota.release(captured_bytes, 1);
             }
         }
         while self.released_order.len() > max_tombstones {
@@ -665,12 +569,10 @@ mod tests {
         let params = OutputReadParams {
             context: crate::eip::EIPCallContext {
                 operation_id: "read-one".to_owned(),
-                deadline: None,
-                idempotency_key: None,
+                timeout_ms: None,
             },
             reference: reference.clone(),
-            cursor: None,
-            start_offset: Some(0),
+            start_offset: 0,
             output_policy: Some(OutputPolicy {
                 max_inline_bytes: 2,
                 max_output_bytes: 8,
@@ -680,13 +582,19 @@ mod tests {
         let first = store.read(&params).expect("first read");
         let repeated = store.read(&params).expect("non-draining repeated read");
         assert_eq!(first.chunks, repeated.chunks);
-        let cursor = first.next_cursor.expect("continuation cursor");
-        assert!(store.release_cursor(&cursor));
-        assert!(store.release_cursor(&cursor));
-        assert!(
-            store.read(&params).is_ok(),
-            "cursor release preserves object"
-        );
+        assert_eq!(first.next_offset, 2);
+        let continued = store
+            .read(&OutputReadParams {
+                context: crate::eip::EIPCallContext {
+                    operation_id: "read-two".to_owned(),
+                    timeout_ms: None,
+                },
+                reference: reference.clone(),
+                start_offset: first.next_offset,
+                output_policy: params.output_policy.clone(),
+            })
+            .expect("continues from explicit offset");
+        assert_eq!(continued.next_offset, 4);
         assert_eq!(store.quota().0, 8);
         assert!(store.release_reference(&reference));
         assert_eq!(store.quota().0, 0);
@@ -755,12 +663,10 @@ mod tests {
                 .read(&OutputReadParams {
                     context: crate::eip::EIPCallContext {
                         operation_id: "detached-read".to_owned(),
-                        deadline: None,
-                        idempotency_key: None,
+                        timeout_ms: None,
                     },
                     reference: reference.clone(),
-                    cursor: None,
-                    start_offset: Some(0),
+                    start_offset: 0,
                     output_policy: None,
                 })
                 .is_ok()
@@ -784,10 +690,6 @@ mod tests {
             store.create_live_pair(Some(&policy)),
             Err(RetentionError::Busy)
         ));
-        assert_eq!(store.quota(), (0, 0));
-        assert!(store.reserve_external_cursor());
-        assert_eq!(store.quota(), (0, 1));
-        store.release_external_cursors(1);
         assert_eq!(store.quota(), (0, 0));
     }
 
@@ -839,12 +741,10 @@ mod tests {
         let result = store.read(&OutputReadParams {
             context: crate::eip::EIPCallContext {
                 operation_id: "expired-read".to_owned(),
-                deadline: None,
-                idempotency_key: None,
+                timeout_ms: None,
             },
             reference,
-            cursor: None,
-            start_offset: Some(0),
+            start_offset: 0,
             output_policy: None,
         });
         assert_eq!(

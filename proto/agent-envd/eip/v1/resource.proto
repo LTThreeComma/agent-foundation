@@ -81,13 +81,13 @@ message FileByteRange {
 }
 
 message FileReaderOpenParams {
-  reserved 4;
-  reserved "expected_revision";
+  reserved 4, 5;
+  reserved "expected_revision", "transfer_deadline";
 
   EIPCallContext context = 1;
   EIPPath path = 2;
   optional FileByteRange byte_range = 3;
-  optional google.protobuf.Timestamp transfer_deadline = 5;
+  optional uint64 transfer_timeout_ms = 6 [(eip_field).minimum = 1];
 }
 
 message FileReaderOpenResult {
@@ -100,18 +100,19 @@ message FileReaderOpenResult {
 }
 
 message FileReadCompletion {
-  reserved 1, 2, 5, 6;
-  reserved "range_start", "range_end", "source_eof_at_end", "stability";
+  reserved 1, 2, 5, 6, 7;
+  reserved "range_start", "range_end", "source_eof_at_end", "stability", "complete";
 
   uint64 produced_bytes = 3;
-  optional ContentDigest digest = 4;
-  bool complete = 7;
+  ContentDigest digest = 4;
 }
 
 message FileReaderCloseParams {
+  reserved 3;
+  reserved "accept_complete";
+
   EIPCallContext context = 1;
   FileReaderHandle reader = 2;
-  bool accept_complete = 3;
 }
 
 message FileReaderCloseResult {
@@ -141,6 +142,7 @@ message FileListResult {
   repeated FileListEntry entries = 1;
   uint64 offset = 3;
   bool has_more = 4;
+  uint64 omitted_unrepresentable_entries = 5;
 }
 
 message FileFindParams {
@@ -164,6 +166,7 @@ message FileFindResult {
   repeated FileListEntry entries = 1;
   uint64 offset = 3;
   bool has_more = 4;
+  uint64 omitted_unrepresentable_entries = 5;
 }
 
 enum SearchMode {
@@ -207,6 +210,7 @@ message FileSearchResult {
   repeated FileSearchMatch matches = 1;
   uint64 offset = 3;
   bool has_more = 4;
+  uint64 omitted_unrepresentable_entries = 5;
 }
 
 enum FileWriteMode {
@@ -238,14 +242,14 @@ message FileWriteTextResult {
 }
 
 message FileWriterOpenParams {
-  reserved 4;
-  reserved "expected_revision";
+  reserved 4, 6;
+  reserved "expected_revision", "transfer_deadline";
 
   EIPCallContext context = 1;
   EIPPath path = 2;
   FileWriteMode mode = 3;
   optional bool executable = 5;
-  optional google.protobuf.Timestamp transfer_deadline = 6;
+  optional uint64 transfer_timeout_ms = 7 [(eip_field).minimum = 1];
 }
 
 message FileWriterOpenResult {

@@ -8,8 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::eip::{
-    EIPCallContext, EIPError, OperationCancelStatus, OperationReceipt, ReceiptOutcome, ReceiptRef,
-    ReceiptStage,
+    EIPCallContext, EIPError, OperationCancelStatus, OperationReceipt, ReceiptOutcome, ReceiptStage,
 };
 
 #[derive(Clone)]
@@ -30,7 +29,6 @@ struct RegistryInner {
     max_records: usize,
     terminal_ttl: Duration,
     max_duration: Duration,
-    selector_ids: ShortIdAllocator,
 }
 
 #[derive(Default)]
@@ -42,7 +40,6 @@ struct RegistryState {
 struct OperationRecord {
     method: String,
     request_digest: String,
-    idempotency_key: Option<String>,
     status: RecordStatus,
     cancellation_requested: bool,
     deadline: Instant,
@@ -53,6 +50,7 @@ struct OperationRecord {
 
 enum RecordStatus {
     Active,
+    Completing,
     Terminal { completed_at: Instant },
 }
 
@@ -73,8 +71,6 @@ pub(crate) struct OperationLease {
 pub(crate) enum RegistryError {
     Collision,
     DeadlineExpired,
-    IdempotencyDisallowed,
-    IdempotencyConflict,
     InProgress,
     TerminalFailure,
     Capacity,
@@ -103,7 +99,6 @@ impl OperationRegistry {
                 max_records,
                 terminal_ttl,
                 max_duration,
-                selector_ids: ShortIdAllocator::for_generation(generation),
             }),
         }
     }
@@ -113,9 +108,9 @@ impl OperationRegistry {
         method: &str,
         context: &EIPCallContext,
         params: &P,
-        key_allowed: bool,
+        _key_allowed: bool,
     ) -> Result<BeginOutcome, RegistryError> {
-        self.begin_with_replay_validation(method, context, params, key_allowed, |_| true)
+        self.begin_with_replay_validation(method, context, params, _key_allowed, |_| true)
     }
 
     pub(crate) fn begin_with_replay_validation<P, F>(
@@ -123,90 +118,42 @@ impl OperationRegistry {
         method: &str,
         context: &EIPCallContext,
         params: &P,
-        key_allowed: bool,
+        _key_allowed: bool,
         replay_is_valid: F,
     ) -> Result<BeginOutcome, RegistryError>
     where
         P: Serialize,
         F: FnOnce(&serde_json::Value) -> bool,
     {
-        if context.idempotency_key.is_some() && !key_allowed {
-            return Err(RegistryError::IdempotencyDisallowed);
-        }
         let request_digest = canonical_request_digest(method, params)?;
         let now = Instant::now();
-        let deadline = operation_deadline(context.deadline, now, self.inner.max_duration)?;
+        let deadline = operation_deadline(context.timeout_ms, now, self.inner.max_duration)?;
         let mut state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         state.prune(now, self.inner.terminal_ttl);
-        if state.records.contains_key(&context.operation_id) {
-            return Err(RegistryError::Collision);
-        }
-        if let Some(key) = &context.idempotency_key {
-            let replay = state
-                .records
-                .values()
-                .find(|record| {
-                    record.method == method && record.idempotency_key.as_ref() == Some(key)
-                })
-                .map(|record| {
-                    if record.request_digest != request_digest {
-                        return Err(RegistryError::IdempotencyConflict);
-                    }
-                    match &record.status {
-                        RecordStatus::Active => Err(RegistryError::InProgress),
-                        RecordStatus::Terminal { .. } => {
-                            if let Some(result) = &record.result {
-                                Ok((Some(result.clone()), None, record.receipt.clone()))
-                            } else if let Some(failure) = &record.failure {
-                                Ok((None, Some(failure.clone()), record.receipt.clone()))
-                            } else {
-                                Err(RegistryError::TerminalFailure)
-                            }
-                        }
-                    }
-                })
-                .transpose()?;
-            if let Some((result, failure, receipt)) = replay {
-                let replay_valid = result.as_ref().is_none_or(replay_is_valid);
-                if replay_valid {
-                    while state.records.len() >= self.inner.max_records {
-                        if !state.reclaim_oldest_terminal() {
-                            return Err(RegistryError::Capacity);
-                        }
-                    }
-                    state.records.insert(
-                        context.operation_id.clone(),
-                        OperationRecord {
-                            method: method.to_owned(),
-                            request_digest: request_digest.clone(),
-                            idempotency_key: context.idempotency_key.clone(),
-                            status: RecordStatus::Terminal { completed_at: now },
-                            cancellation_requested: false,
-                            deadline: now,
-                            receipt,
-                            result: result.clone(),
-                            failure: failure.clone(),
-                        },
-                    );
-                    state.terminal_order.push_back(context.operation_id.clone());
-                    return match (result, failure) {
-                        (Some(result), None) => Ok(BeginOutcome::Replay(result)),
-                        (None, Some(failure)) => Ok(BeginOutcome::ReplayFailure(Box::new(failure))),
-                        _ => Err(RegistryError::TerminalFailure),
-                    };
-                }
-                for record in state.records.values_mut().filter(|record| {
-                    record.method == method && record.idempotency_key.as_ref() == Some(key)
-                }) {
-                    record.idempotency_key = None;
-                    record.result = None;
-                    record.failure = None;
-                }
+        if let Some(record) = state.records.get(&context.operation_id) {
+            if record.method != method || record.request_digest != request_digest {
+                return Err(RegistryError::Collision);
             }
+            return match &record.status {
+                RecordStatus::Active | RecordStatus::Completing => Err(RegistryError::InProgress),
+                RecordStatus::Terminal { .. } => {
+                    if let Some(result) = &record.result {
+                        if replay_is_valid(result) {
+                            Ok(BeginOutcome::Replay(result.clone()))
+                        } else {
+                            Err(RegistryError::TerminalFailure)
+                        }
+                    } else if let Some(failure) = &record.failure {
+                        Ok(BeginOutcome::ReplayFailure(Box::new(failure.clone())))
+                    } else {
+                        Err(RegistryError::TerminalFailure)
+                    }
+                }
+            };
         }
         while state.records.len() >= self.inner.max_records {
             if !state.reclaim_oldest_terminal() {
@@ -218,7 +165,6 @@ impl OperationRegistry {
             OperationRecord {
                 method: method.to_owned(),
                 request_digest,
-                idempotency_key: context.idempotency_key.clone(),
                 status: RecordStatus::Active,
                 cancellation_requested: false,
                 deadline,
@@ -245,7 +191,9 @@ impl OperationRegistry {
             return OperationCancelStatus::NotFound;
         };
         match record.status {
-            RecordStatus::Terminal { .. } => OperationCancelStatus::AlreadyTerminal,
+            RecordStatus::Completing | RecordStatus::Terminal { .. } => {
+                OperationCancelStatus::AlreadyTerminal
+            }
             RecordStatus::Active => {
                 record.cancellation_requested = true;
                 OperationCancelStatus::CancellationRequested
@@ -294,16 +242,51 @@ impl OperationRegistry {
             .and_then(|record| record.failure.clone())
     }
 
-    pub(crate) fn receipt_by_ref(&self, receipt_ref: &ReceiptRef) -> Option<OperationReceipt> {
-        self.inner
+    pub(crate) fn finish_dispatched_failure(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        failure: EIPError,
+    ) {
+        let Some(operation_id) = params
+            .as_object()
+            .and_then(|params| params.get("context"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|context| context.get("operation_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let Ok(request_digest) = canonical_request_digest(method, params) else {
+            return;
+        };
+        let mut state = self
+            .inner
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .records
-            .values()
-            .filter_map(|record| record.receipt.as_ref())
-            .find(|receipt| receipt.receipt_ref == *receipt_ref)
-            .cloned()
+            .unwrap_or_else(PoisonError::into_inner);
+        let published = if let Some(record) = state.records.get_mut(operation_id) {
+            if record.method == method
+                && record.request_digest == request_digest
+                && matches!(record.status, RecordStatus::Completing)
+                && record.result.is_none()
+                && record.failure.is_none()
+            {
+                record.status = RecordStatus::Terminal {
+                    completed_at: Instant::now(),
+                };
+                record.receipt = failure.data.receipt.clone();
+                record.failure = Some(failure);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if published {
+            state.terminal_order.push_back(operation_id.to_owned());
+        }
     }
 
     #[cfg(test)]
@@ -316,7 +299,12 @@ impl OperationRegistry {
         let active = state
             .records
             .values()
-            .filter(|record| matches!(record.status, RecordStatus::Active))
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    RecordStatus::Active | RecordStatus::Completing
+                )
+            })
             .count();
         let identifier_bytes = state.records.keys().map(String::len).sum();
         (active, state.records.len(), identifier_bytes)
@@ -346,7 +334,6 @@ impl OperationLease {
         outcome: Option<ReceiptOutcome>,
     ) -> Result<OperationReceipt, RegistryError> {
         Ok(OperationReceipt {
-            receipt_ref: ReceiptRef(self.registry.inner.selector_ids.next("receipt")?),
             operation_id: self.operation_id.clone(),
             method: method.to_owned(),
             environment_id: self.registry.inner.environment_id.clone(),
@@ -412,9 +399,20 @@ impl Drop for OperationLease {
         if let Some(failure) = self.failure_on_drop.take() {
             let (receipt, failure) = *failure;
             self.finish_value(None, Some(failure), Some(receipt));
-        } else {
-            self.finish_value(None, None, None);
+            return;
         }
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(record) = state.records.get_mut(&self.operation_id)
+            && matches!(record.status, RecordStatus::Active)
+        {
+            record.status = RecordStatus::Completing;
+        }
+        self.finished = true;
     }
 }
 
@@ -448,21 +446,19 @@ impl RegistryState {
 }
 
 fn operation_deadline(
-    requested: Option<chrono::DateTime<chrono::Utc>>,
+    requested_ms: Option<u64>,
     now: Instant,
     max_duration: Duration,
 ) -> Result<Instant, RegistryError> {
     let hard = now + max_duration;
-    let Some(requested) = requested else {
+    let Some(requested_ms) = requested_ms else {
         return Ok(hard);
     };
-    let remaining = (requested - chrono::Utc::now())
-        .to_std()
-        .map_err(|_| RegistryError::DeadlineExpired)?;
-    if remaining.is_zero() {
+    let requested = Duration::from_millis(requested_ms);
+    if requested.is_zero() {
         return Err(RegistryError::DeadlineExpired);
     }
-    Ok(hard.min(now + remaining))
+    Ok(hard.min(now + requested))
 }
 
 pub(crate) fn canonical_request_digest<P: Serialize>(
@@ -476,8 +472,7 @@ pub(crate) fn canonical_request_digest<P: Serialize>(
         .and_then(serde_json::Value::as_object_mut)
     {
         context.remove("operation_id");
-        context.remove("deadline");
-        context.remove("idempotency_key");
+        context.remove("timeout_ms");
     }
     let canonical = serde_json::to_vec(&value).map_err(|_| RegistryError::Encoding)?;
     let mut hasher = Sha256::new();
@@ -533,7 +528,7 @@ pub(crate) fn random_selector(prefix: &str) -> Result<String, RegistryError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::eip::EIPCallContext;
+    use crate::eip::{EIPCallContext, EIPError, ErrorType};
 
     use super::{
         BeginOutcome, OperationInterruption, OperationRegistry, RegistryError, ShortIdAllocator,
@@ -569,12 +564,12 @@ mod tests {
     #[test]
     fn canonical_digest_omits_context_correlation_fields() {
         let first = serde_json::json!({
-            "context": {"operation_id": "one", "deadline": "2026-08-21T00:00:00Z", "idempotency_key": "key"},
+            "context": {"operation_id": "one", "timeout_ms": 1_000},
             "path": {"mount_id": "workspace", "path": "/file"}
         });
         let second = serde_json::json!({
             "path": {"path": "/file", "mount_id": "workspace"},
-            "context": {"operation_id": "two", "idempotency_key": "other"}
+            "context": {"operation_id": "two"}
         });
         assert_eq!(
             canonical_request_digest("file.stat", &first).expect("digest"),
@@ -583,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_retains_terminal_ids_and_replays_matching_keys() {
+    fn registry_replays_only_the_same_operation_identity_and_request() {
         let registry = OperationRegistry::new(
             "env".to_owned(),
             7,
@@ -592,13 +587,12 @@ mod tests {
             std::time::Duration::from_secs(60),
         );
         let params = serde_json::json!({
-            "context": {"operation_id": "one", "idempotency_key": "key"},
+            "context": {"operation_id": "one"},
             "value": 1
         });
         let context = EIPCallContext {
             operation_id: "one".to_owned(),
-            deadline: None,
-            idempotency_key: Some("key".to_owned()),
+            timeout_ms: None,
         };
         let BeginOutcome::New(lease) = registry
             .begin("method", &context, &params, true)
@@ -611,24 +605,75 @@ mod tests {
             .expect("finishes");
 
         assert!(matches!(
-            registry.begin("method", &context, &params, true),
-            Err(RegistryError::Collision)
-        ));
-        let replay_context = EIPCallContext {
-            operation_id: "two".to_owned(),
-            deadline: None,
-            idempotency_key: Some("key".to_owned()),
-        };
-        assert!(matches!(
             registry
-                .begin("method", &replay_context, &params, true)
-                .expect("replays"),
+                .begin("method", &context, &params, true)
+                .expect("same operation replays"),
             BeginOutcome::Replay(_)
         ));
+        let mismatched = serde_json::json!({
+            "context": {"operation_id": "one"},
+            "value": 2
+        });
         assert!(matches!(
-            registry.begin("method", &replay_context, &params, true),
+            registry.begin("method", &context, &mismatched, true),
             Err(RegistryError::Collision)
         ));
+        assert!(matches!(
+            registry.begin("other.method", &context, &params, true),
+            Err(RegistryError::Collision)
+        ));
+    }
+
+    #[test]
+    fn dispatched_failure_is_published_atomically_after_lease_completion() {
+        let registry = OperationRegistry::new(
+            "env".to_owned(),
+            7,
+            2,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let params = serde_json::json!({
+            "context": {"operation_id": "failed"},
+            "path": {"mount_id": "workspace", "path": "/missing"}
+        });
+        let context = EIPCallContext {
+            operation_id: "failed".to_owned(),
+            timeout_ms: None,
+        };
+        let BeginOutcome::New(lease) = registry
+            .begin("file.stat", &context, &params, false)
+            .expect("operation begins")
+        else {
+            panic!("new operation expected")
+        };
+        drop(lease);
+
+        assert!(matches!(
+            registry.begin("file.stat", &context, &params, false),
+            Err(RegistryError::InProgress)
+        ));
+
+        let failure = serde_json::from_value::<EIPError>(serde_json::json!({
+            "code": -32011,
+            "message": "missing",
+            "data": {
+                "error_type": "not_found_or_denied",
+                "retry_hint": "never",
+                "dispatch_stage": "completed"
+            }
+        }))
+        .expect("typed failure");
+        registry.finish_dispatched_failure("file.stat", &params, failure);
+
+        let BeginOutcome::ReplayFailure(replayed) = registry
+            .begin("file.stat", &context, &params, false)
+            .expect("failure replays")
+        else {
+            panic!("failure replay expected")
+        };
+        assert_eq!(replayed.data.error_type, ErrorType::NotFoundOrDenied);
+        assert_eq!(replayed.message, "missing");
     }
 
     #[test]
@@ -642,8 +687,7 @@ mod tests {
         );
         let context = EIPCallContext {
             operation_id: "timed".to_owned(),
-            deadline: None,
-            idempotency_key: None,
+            timeout_ms: None,
         };
         let params = serde_json::json!({"context": {"operation_id": "timed"}});
         let _lease = match registry
@@ -663,8 +707,7 @@ mod tests {
 
         let expired = EIPCallContext {
             operation_id: "expired".to_owned(),
-            deadline: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
-            idempotency_key: None,
+            timeout_ms: Some(0),
         };
         assert!(matches!(
             registry.begin("method", &expired, &params, false),

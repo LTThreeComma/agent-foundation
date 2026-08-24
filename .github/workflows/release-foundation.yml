@@ -49,6 +49,18 @@ jobs:
       - name: Build Foundation Python distributions
         run: make foundation-python-build
 
+      - name: Verify Foundation artifact scope
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python scripts/check-release-version.py foundation "$VERSION"
+          python_version="${VERSION/-rc./rc}"
+          test -f "dist/converge_logging-${python_version}-py3-none-any.whl"
+          test -f "dist/converge_logging-${python_version}.tar.gz"
+          test -f "dist/converge_foundation_service-${python_version}-py3-none-any.whl"
+          test -f "dist/converge_foundation_service-${python_version}.tar.gz"
+          test "$(find dist -maxdepth 1 -type f \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l)" -eq 4
+
       - name: Upload Python distributions
         uses: actions/upload-artifact@v4
         with:
@@ -107,6 +119,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve image tags
+        id: image-tags
+        env:
+          IMAGE: ${{ env.FOUNDATION_SERVICE_IMAGE }}
+          VERSION: ${{ needs.build-python.outputs.version }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE:$VERSION"
+            if [[ "$VERSION" != *-rc.* ]]; then
+              echo "$IMAGE:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish image
         uses: docker/build-push-action@v6
         with:
@@ -115,9 +142,7 @@ jobs:
           # Release publishing is intentionally native amd64 only; other architectures build locally.
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.FOUNDATION_SERVICE_IMAGE }}:${{ needs.build-python.outputs.version }}
-            ${{ env.FOUNDATION_SERVICE_IMAGE }}:latest
+          tags: ${{ steps.image-tags.outputs.tags }}
           build-args: |
             BUILD_VERSION=${{ needs.build-python.outputs.version }}
             BUILD_REVISION=${{ github.sha }}
@@ -130,9 +155,11 @@ jobs:
           VERSION: ${{ needs.build-python.outputs.version }}
         run: |
           version_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}')"
-          latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
           test -n "$version_digest"
-          test "$version_digest" = "$latest_digest"
+          if [[ "$VERSION" != *-rc.* ]]; then
+            latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}')"
+            test "$version_digest" = "$latest_digest"
+          fi
 
   create-release:
     name: Create GitHub Release

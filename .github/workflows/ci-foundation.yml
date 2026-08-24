@@ -1,0 +1,138 @@
+name: Foundation CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".github/workflows/ci-foundation.yml"
+      - ".github/workflows/release-foundation.yml"
+      - "Makefile"
+      - "apps/foundation-web/**"
+      - "dev/**"
+      - "packages/foundation-service/**"
+      - "packages/logging/**"
+      - "pyproject.toml"
+      - "scripts/dev.sh"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci-foundation.yml"
+      - ".github/workflows/release-foundation.yml"
+      - "Makefile"
+      - "apps/foundation-web/**"
+      - "dev/**"
+      - "packages/foundation-service/**"
+      - "packages/logging/**"
+      - "pyproject.toml"
+      - "scripts/dev.sh"
+      - "uv.lock"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Foundation changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            python:
+              - '.github/workflows/ci-foundation.yml'
+              - '.github/workflows/release-foundation.yml'
+              - 'Makefile'
+              - 'dev/**'
+              - 'packages/foundation-service/**'
+              - 'packages/logging/**'
+              - 'pyproject.toml'
+              - 'scripts/dev.sh'
+              - 'uv.lock'
+            web:
+              - '.github/workflows/ci-foundation.yml'
+              - 'Makefile'
+              - 'apps/foundation-web/**'
+
+  python:
+    name: Foundation Python
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Synchronize Python workspace
+        run: uv sync --locked --all-packages
+
+      - name: Type-check Foundation Python packages
+        run: >-
+          uv run --locked pyright
+          packages/logging/converge_logging
+          packages/foundation-service/converge_foundation_service
+
+      - name: Test Foundation Python packages
+        run: >-
+          uv run --locked python -m pytest
+          packages/logging/tests
+          packages/foundation-service/tests
+
+      - name: Build Foundation Python distributions
+        run: |
+          uv build --package converge-logging --out-dir dist/foundation
+          uv build --package converge-foundation-service --out-dir dist/foundation
+
+  web:
+    name: Foundation Web
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/foundation-web/package-lock.json
+
+      - name: Run complete Foundation Web checks
+        run: make foundation-web-check-all

@@ -19,7 +19,6 @@ TOOLING_MESSAGES = {
 TOOLING_ENUMS = {
     "MethodKind",
     "IdempotencyClass",
-    "IdempotencyKeyMode",
     "ErrorFamily",
     "EIPStringFormat",
     "TransferAction",
@@ -417,20 +416,6 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "        return self",
                 ]
             )
-        if message.name == "FileReadCompletion":
-            lines.extend(
-                [
-                    "",
-                    "    @model_validator(mode='after')",
-                    "    def _validate_completion(self) -> FileReadCompletion:",
-                    "        if self.complete:",
-                    "            if self.digest is None:",
-                    "                raise ValueError('complete reads require a digest')",
-                    "        elif self.digest is not None:",
-                    "            raise ValueError('incomplete reads cannot expose a digest')",
-                    "        return self",
-                ]
-            )
         if message.name == "OutputPolicy":
             lines.extend(
                 [
@@ -463,25 +448,21 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "                        self.inline,",
                     "                        self.preview,",
                     "                        self.reference,",
-                    "                        self.cursor,",
-                    "                        self.expires_at,",
-                    "                    )",
+                    "                        self.expires_at,                    )",
                     "                )",
                     "            ):",
                     "                raise ValueError('empty output must contain no bytes or retained state')",
                     "        elif self.kind is OutputKind.INLINE:",
                     "            if self.inline is None or any(",
                     "                value is not None",
-                    "                for value in (self.preview, self.reference, self.cursor, self.expires_at)",
-                    "            ):",
+                    "                for value in (self.preview, self.reference, self.expires_at)            ):",
                     "                raise ValueError('inline output requires only inline data')",
                     "        elif self.kind is OutputKind.RETAINED:",
                     "            if self.reference is None or self.inline is not None or self.expires_at is None:",
                     "                raise ValueError('retained output requires a reference and expiry')",
                     "        elif self.kind is OutputKind.TRUNCATED and any(",
                     "            value is not None",
-                    "            for value in (self.inline, self.reference, self.cursor, self.expires_at)",
-                    "        ):",
+                    "            for value in (self.inline, self.reference, self.expires_at)        ):",
                     "            raise ValueError('truncated output cannot contain retained or inline state')",
                     "        return self",
                 ]
@@ -494,15 +475,6 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "    def _validate_limit_relationships(self) -> EIPLimits:",
                     "        if self.max_inline_output_bytes > self.max_output_bytes:",
                     "            raise ValueError('max_inline_output_bytes cannot exceed max_output_bytes')",
-                    "        if self.max_processes > self.max_process_records:",
-                    "            raise ValueError('max_processes cannot exceed max_process_records')",
-                    "        if self.max_concurrent_operations > self.max_operation_records:",
-                    "            raise ValueError('max_concurrent_operations cannot exceed max_operation_records')",
-                    "        if self.max_concurrent_file_transfers > self.max_file_transfer_records:",
-                    (
-                        "            raise ValueError("
-                        "'max_concurrent_file_transfers cannot exceed max_file_transfer_records')"
-                    ),
                     "        return self",
                 ]
             )
@@ -559,11 +531,6 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
         idempotency = (
             options.enum_name("IdempotencyClass", option.idempotency).removeprefix("IDEMPOTENCY_CLASS_").lower()
         )
-        key_mode = (
-            options.enum_name("IdempotencyKeyMode", option.idempotency_key)
-            .removeprefix("IDEMPOTENCY_KEY_MODE_")
-            .lower()
-        )
         error_family = options.enum_name("ErrorFamily", option.error_family).removeprefix("ERROR_FAMILY_").lower()
         transfer_action_value = (
             options.enum_name("TransferAction", option.transfer_action).removeprefix("TRANSFER_ACTION_").lower()
@@ -580,10 +547,8 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
             {
                 "rpc_name": method.name,
                 "jsonrpc_method": option.jsonrpc_method,
-                "capability": option.capability or None,
                 "kind": kind,
                 "idempotency": idempotency,
-                "idempotency_key": key_mode,
                 "introduced": f"{option.introduced_major}.{option.introduced_minor}",
                 "error_family": error_family,
                 "transfer_action": transfer_action,
@@ -604,8 +569,6 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
             raise ValueError(f"EIP 1.0 method {name} must use correlated request-response")
         if record["idempotency"] == "unspecified":
             raise ValueError(f"EIP method {name} has unspecified idempotency")
-        if record["idempotency_key"] == "unspecified":
-            raise ValueError(f"EIP method {name} has unspecified idempotency-key mode")
         if record["error_family"] == "unspecified":
             raise ValueError(f"EIP method {name} has unspecified error family")
         if record["introduced"].startswith("0."):
@@ -646,10 +609,8 @@ def render_methods(records: list[dict[str, Any]]) -> str:
         "@dataclass(frozen=True, slots=True)",
         "class MethodSpec[P, R]:",
         "    name: str",
-        "    capability: str | None",
         "    kind: Literal['request_response']",
         "    idempotency: str",
-        "    idempotency_key: Literal['disallowed', 'optional', 'required']",
         "    introduced: str",
         "    error_family: str",
         "    params_type: type[P]",
@@ -667,12 +628,9 @@ def render_methods(records: list[dict[str, Any]]) -> str:
                 "",
                 f"{constant} = MethodSpec(",
                 f"    name={record['jsonrpc_method']!r},",
-                f"    capability={record['capability']!r},",
                 f"    kind={record['kind']!r},",
                 f"    idempotency={record['idempotency']!r},",
-                f"    idempotency_key={record['idempotency_key']!r},",
-                f"    introduced={record['introduced']!r},",
-                f"    error_family={record['error_family']!r},",
+                f"    introduced={record['introduced']!r},    error_family={record['error_family']!r},",
                 f"    transfer_action={record['transfer_action']!r},",
                 f"    transfer_direction={record['transfer_direction']!r},",
                 f"    params_type={record['params_type']},",

@@ -24,6 +24,8 @@ from release_notes import (  # noqa: E402
 @pytest.mark.parametrize(
     ("component", "expected"),
     [
+        ("harness", "release/harness-v1.2.3"),
+        ("agent-ui", "release/agent-ui-v1.2.3"),
         ("foundation", "release/foundation-v1.2.3"),
         ("agent-envd", "release/agent-envd-v1.2.3"),
         ("sdk-python", "release/sdk/python/1.2.3"),
@@ -36,10 +38,12 @@ def test_builds_canonical_channel_tag(component: str, expected: str) -> None:
     assert release_tag(component, "1.2.3") == expected
 
 
-def test_finds_highest_lower_version_in_same_channel() -> None:
+def test_finds_highest_lower_stable_version_in_same_channel() -> None:
     tags = [
         "release/foundation-v1.9.0",
         "release/foundation-v1.10.0",
+        "release/foundation-v2.0.0-rc.1",
+        "release/foundation-v2.0.0-rc.2",
         "release/foundation-v2.0.0",
         "release/foundation-vnot-a-version",
         "release/agent-envd-v1.99.0",
@@ -47,6 +51,38 @@ def test_finds_highest_lower_version_in_same_channel() -> None:
     ]
 
     assert previous_release_tag("foundation", "2.0.0", tags) == "release/foundation-v1.10.0"
+
+
+def test_rc_release_uses_previous_rc_in_the_same_channel() -> None:
+    tags = [
+        "release/foundation-v1.10.0",
+        "release/foundation-v2.0.0-rc.1",
+        "release/foundation-v2.0.0-rc.2",
+        "release/harness-v2.0.0-rc.2",
+        "release/agent-ui-v2.0.0-rc.2",
+    ]
+
+    assert previous_release_tag("foundation", "2.0.0-rc.2", tags) == "release/foundation-v2.0.0-rc.1"
+    assert previous_release_tag("foundation", "2.0.0-rc.1", tags) == "release/foundation-v1.10.0"
+
+
+def test_harness_and_agent_ui_release_notes_are_independent() -> None:
+    tags = [
+        "release/harness-v1.2.2",
+        "release/agent-ui-v9.8.7",
+    ]
+
+    assert previous_release_tag("harness", "1.2.3", tags) == "release/harness-v1.2.2"
+    assert previous_release_tag("agent-ui", "9.8.8", tags) == "release/agent-ui-v9.8.7"
+
+
+def test_first_rc_ignores_abandoned_rc_train() -> None:
+    tags = [
+        "release/foundation-v1.5.0",
+        "release/foundation-v1.6.0-rc.3",
+    ]
+
+    assert previous_release_tag("foundation", "2.0.0-rc.1", tags) == "release/foundation-v1.5.0"
 
 
 def test_first_channel_release_has_no_previous_tag() -> None:
@@ -85,6 +121,20 @@ def test_builds_generated_notes_command_for_later_release() -> None:
         "--notes-start-tag",
         "release/sdk/python/1.2.2",
     ]
+
+
+def test_marks_rc_github_release_as_prerelease() -> None:
+    command = build_release_command(
+        component="sdk-typescript",
+        version="1.2.3-rc.4",
+        repository="converge-ai-labs/agent-foundation",
+        title="Foundation SDK for TypeScript 1.2.3-rc.4",
+        assets=["dist/package.tgz"],
+        previous_tag="release/sdk/typescript/1.2.3-rc.3",
+    )
+
+    assert "--prerelease" in command
+    assert command[-2:] == ["--notes-start-tag", "release/sdk/typescript/1.2.3-rc.3"]
 
 
 def test_builds_initial_release_command_without_cross_channel_notes() -> None:

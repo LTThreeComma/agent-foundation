@@ -32,7 +32,8 @@ enum ErrorType {
   ERROR_TYPE_CANCELLED = 19 [(eip_enum_value).json_name = "cancelled", (eip_enum_value).error_code = -32041];
   ERROR_TYPE_UNKNOWN_OUTCOME = 20 [(eip_enum_value).json_name = "unknown_outcome", (eip_enum_value).error_code = -32042];
   ERROR_TYPE_OPERATION_IN_PROGRESS = 21 [(eip_enum_value).json_name = "operation_in_progress", (eip_enum_value).error_code = -32043];
-  ERROR_TYPE_IDEMPOTENCY_CONFLICT = 22 [(eip_enum_value).json_name = "idempotency_conflict", (eip_enum_value).error_code = -32044];
+  reserved 22;
+  reserved "ERROR_TYPE_IDEMPOTENCY_CONFLICT";
   ERROR_TYPE_PROVIDER_UNAVAILABLE = 23 [(eip_enum_value).json_name = "provider_unavailable", (eip_enum_value).error_code = -32050];
   ERROR_TYPE_EXECUTION_ISOLATION_FAILED = 24 [(eip_enum_value).json_name = "execution_isolation_failed", (eip_enum_value).error_code = -32051];
   ERROR_TYPE_CLEANUP_FAILED = 25 [(eip_enum_value).json_name = "cleanup_failed", (eip_enum_value).error_code = -32052];
@@ -47,7 +48,8 @@ enum RetryHint {
   RETRY_HINT_SAME_REQUEST = 2 [(eip_enum_value).json_name = "same_request"];
   RETRY_HINT_AFTER_REFRESH = 3 [(eip_enum_value).json_name = "after_refresh"];
   RETRY_HINT_AFTER_CAPACITY = 4 [(eip_enum_value).json_name = "after_capacity"];
-  RETRY_HINT_AFTER_AUTHORITY_CHANGE = 5 [(eip_enum_value).json_name = "after_authority_change"];
+  reserved 5;
+  reserved "RETRY_HINT_AFTER_AUTHORITY_CHANGE";
   RETRY_HINT_RECONCILE_FIRST = 6 [(eip_enum_value).json_name = "reconcile_first"];
 }
 
@@ -70,7 +72,8 @@ message EIPErrorData {
   ];
   optional string environment_id = 5 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   optional uint64 generation = 6 [(eip_field).minimum = 1];
-  optional string capability = 7;
+  reserved 7;
+  reserved "capability";
   optional string field = 8;
   optional string handle_kind = 9;
   optional uint64 produced_bytes = 10;

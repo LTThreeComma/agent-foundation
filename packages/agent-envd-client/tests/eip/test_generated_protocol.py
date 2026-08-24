@@ -31,6 +31,7 @@ from converge_agent_envd_client.eip.v1.models import (
     EncodedBytes,
     ErrorType,
     FileFindParams,
+    FileReadCompletion,
     FileStatParams,
     FileStatResult,
     InitializeParams,
@@ -56,22 +57,9 @@ def valid_eip_limits() -> dict[str, int]:
         "max_operation_duration_ms": 1,
         "max_inline_output_bytes": 1,
         "max_output_bytes": 1,
-        "max_retained_bytes": 1,
-        "max_retained_objects": 1,
-        "max_retention_ttl_ms": 1,
-        "max_operation_records": 1,
-        "operation_record_ttl_ms": 1,
-        "session_idle_ttl_ms": 1,
-        "max_process_records": 1,
-        "terminal_process_record_ttl_ms": 1,
         "max_transfer_frame_bytes": 25,
         "max_concurrent_file_transfers": 1,
-        "max_file_transfer_records": 1,
-        "file_transfer_record_ttl_ms": 1,
-        "max_staged_file_bytes": 1,
-        "max_staged_file_objects": 1,
-        "file_transfer_idle_ttl_ms": 1,
-        "max_file_transfer_duration_ms": 1,
+        "max_file_transfer_bytes": 1,
     }
 
 
@@ -169,7 +157,11 @@ def test_explicit_wire_defaults_are_applied_but_omitted_canonically() -> None:
         {
             "context": {"operation_id": "op-defaults"},
             "request": {
-                "command": {"kind": "argv", "executable": "true", "arguments": []},
+                "command": {
+                    "kind": "argv",
+                    "executable_spec": {"kind": "name", "name": "true"},
+                    "arguments": [],
+                },
                 "cwd": {"mount_id": "workspace", "path": "/repo"},
                 "environment": {"set": {}, "unset": []},
                 "network": "configured",
@@ -185,7 +177,10 @@ def test_explicit_wire_defaults_are_applied_but_omitted_canonically() -> None:
     assert params.request.limits.wall_time_ms is None
     assert params.request.output_policy is None
     encoded_request = json.loads(encode_model(params))["request"]
-    assert encoded_request["command"] == {"executable": "true", "kind": "argv"}
+    assert encoded_request["command"] == {
+        "executable_spec": {"kind": "name", "name": "true"},
+        "kind": "argv",
+    }
     assert "network" not in encoded_request
     assert "environment" not in encoded_request
     assert "limits" not in encoded_request
@@ -201,12 +196,10 @@ def test_eip_limits_define_a_valid_omitted_output_policy() -> None:
         EIPLimits.model_validate({**limits, "max_request_bytes": 0})
     with pytest.raises(ValidationError, match="max_inline_output_bytes cannot exceed"):
         EIPLimits.model_validate({**limits, "max_inline_output_bytes": 2})
-    with pytest.raises(ValidationError, match="max_processes cannot exceed"):
-        EIPLimits.model_validate({**limits, "max_processes": 2})
-    with pytest.raises(ValidationError, match="max_concurrent_operations cannot exceed"):
-        EIPLimits.model_validate({**limits, "max_concurrent_operations": 2})
-    with pytest.raises(ValidationError, match="max_concurrent_file_transfers cannot exceed"):
-        EIPLimits.model_validate({**limits, "max_concurrent_file_transfers": 2})
+    with pytest.raises(ValidationError):
+        EIPLimits.model_validate({**limits, "max_transfer_frame_bytes": 24})
+    with pytest.raises(ValidationError):
+        EIPLimits.model_validate({**limits, "max_file_transfer_bytes": 0})
 
 
 def test_jsonrpc_integer_ids_use_signed_64_bit_range() -> None:
@@ -307,15 +300,13 @@ def test_eip_profile_rejects_out_of_range_numbers_and_non_utc_timestamps() -> No
             }
         )
     with pytest.raises(ValidationError):
-        EIPCallContext.model_validate({"operation_id": "op", "deadline": 0})
+        EIPCallContext.model_validate({"operation_id": "op", "timeout_ms": 0})
     with pytest.raises(ValidationError):
-        EIPCallContext.model_validate({"operation_id": "op", "deadline": "0"})
-    with pytest.raises(ValidationError):
-        EIPCallContext.model_validate({"operation_id": "op", "deadline": "2026-08-20T14:00:00"})
+        EIPCallContext.model_validate({"operation_id": "op", "timeout_ms": "1"})
 
-    context = EIPCallContext.model_validate({"operation_id": "op", "deadline": "2026-08-20T14:00:00.123456789Z"})
-    assert context.deadline == "2026-08-20T14:00:00.123456789Z"
-    assert json.loads(encode_model(context))["deadline"] == "2026-08-20T14:00:00.123456789Z"
+    context = EIPCallContext.model_validate({"operation_id": "op", "timeout_ms": 1_234})
+    assert context.timeout_ms == 1_234
+    assert json.loads(encode_model(context))["timeout_ms"] == 1_234
 
 
 def test_operation_ids_are_bounded_consistently() -> None:
@@ -339,6 +330,11 @@ def test_eip_profile_rejects_noncanonical_paths_and_base64() -> None:
         EncodedBytes(encoding="base64", data="aGVsbG8=")
     with pytest.raises(ValidationError):
         EncodedBytes(encoding="base64", data="AB")
+
+
+def test_completed_reader_requires_structural_digest_evidence() -> None:
+    with pytest.raises(ValidationError):
+        FileReadCompletion.model_validate({"produced_bytes": 0})
 
 
 def test_sha256_digest_profile_is_exact_and_lowercase() -> None:
@@ -384,11 +380,11 @@ def test_output_capture_rejects_unusable_structural_states() -> None:
         OutputCapture.model_validate({**base, "available_start": 2, "available_end": 1})
 
 
-def test_receipt_lookup_requires_exactly_one_selector() -> None:
+def test_receipt_lookup_requires_an_operation_id() -> None:
     base = {"context": {"operation_id": "op-query"}}
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError):
         ReceiptGetParams.model_validate(base)
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError):
         ReceiptGetParams.model_validate({**base, "receipt_ref": "receipt-1", "operation_id": "op-target"})
 
     assert ReceiptGetParams.model_validate({**base, "operation_id": "op-target"}).operation_id == "op-target"
@@ -416,13 +412,14 @@ def test_error_code_and_retention_gap_bounds_are_structural() -> None:
         )
 
 
-def test_exactly_one_output_position_is_required() -> None:
+def test_output_read_requires_an_explicit_offset() -> None:
     base = {
         "context": {"operation_id": "op"},
         "reference": "output-1",
         "output_policy": {"max_inline_bytes": 1, "max_output_bytes": 1, "overflow": "truncate"},
     }
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError):
         OutputReadParams.model_validate(base)
-    with pytest.raises(ValidationError, match="exactly one"):
+    with pytest.raises(ValidationError):
         OutputReadParams.model_validate({**base, "cursor": "cursor-1", "start_offset": 0})
+    assert OutputReadParams.model_validate({**base, "start_offset": 0}).start_offset == 0

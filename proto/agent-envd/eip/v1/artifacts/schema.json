@@ -11,9 +11,8 @@
           "title": "Arguments",
           "type": "array"
         },
-        "executable": {
-          "title": "Executable",
-          "type": "string"
+        "executable_spec": {
+          "$ref": "#/$defs/ExecutableSpec"
         },
         "kind": {
           "const": "argv",
@@ -23,7 +22,7 @@
       },
       "required": [
         "kind",
-        "executable"
+        "executable_spec"
       ],
       "title": "ArgvCommand",
       "type": "object"
@@ -259,37 +258,25 @@
     "EIPCallContext": {
       "additionalProperties": false,
       "properties": {
-        "deadline": {
-          "anyOf": [
-            {
-              "format": "date-time",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Deadline"
-        },
-        "idempotency_key": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Idempotency Key"
-        },
         "operation_id": {
           "maxLength": 128,
           "minLength": 1,
           "title": "Operation Id",
           "type": "string"
+        },
+        "timeout_ms": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Ms"
         }
       },
       "required": [
@@ -372,18 +359,6 @@
           ],
           "default": null,
           "title": "Available Start"
-        },
-        "capability": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Capability"
         },
         "captured_bytes": {
           "anyOf": [
@@ -575,18 +550,6 @@
     "EIPLimits": {
       "additionalProperties": false,
       "properties": {
-        "file_transfer_idle_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "File Transfer Idle Ttl Ms",
-          "type": "integer"
-        },
-        "file_transfer_record_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "File Transfer Record Ttl Ms",
-          "type": "integer"
-        },
         "max_concurrent_file_transfers": {
           "maximum": 18446744073709551615,
           "minimum": 1,
@@ -599,16 +562,10 @@
           "title": "Max Concurrent Operations",
           "type": "integer"
         },
-        "max_file_transfer_duration_ms": {
+        "max_file_transfer_bytes": {
           "maximum": 18446744073709551615,
           "minimum": 1,
-          "title": "Max File Transfer Duration Ms",
-          "type": "integer"
-        },
-        "max_file_transfer_records": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max File Transfer Records",
+          "title": "Max File Transfer Bytes",
           "type": "integer"
         },
         "max_inline_output_bytes": {
@@ -623,22 +580,10 @@
           "title": "Max Operation Duration Ms",
           "type": "integer"
         },
-        "max_operation_records": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Operation Records",
-          "type": "integer"
-        },
         "max_output_bytes": {
           "maximum": 18446744073709551615,
           "minimum": 1,
           "title": "Max Output Bytes",
-          "type": "integer"
-        },
-        "max_process_records": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Process Records",
           "type": "integer"
         },
         "max_processes": {
@@ -659,58 +604,10 @@
           "title": "Max Response Bytes",
           "type": "integer"
         },
-        "max_retained_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Retained Bytes",
-          "type": "integer"
-        },
-        "max_retained_objects": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Retained Objects",
-          "type": "integer"
-        },
-        "max_retention_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Retention Ttl Ms",
-          "type": "integer"
-        },
-        "max_staged_file_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Staged File Bytes",
-          "type": "integer"
-        },
-        "max_staged_file_objects": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Staged File Objects",
-          "type": "integer"
-        },
         "max_transfer_frame_bytes": {
           "maximum": 18446744073709551615,
           "minimum": 25,
           "title": "Max Transfer Frame Bytes",
-          "type": "integer"
-        },
-        "operation_record_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Operation Record Ttl Ms",
-          "type": "integer"
-        },
-        "session_idle_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Session Idle Ttl Ms",
-          "type": "integer"
-        },
-        "terminal_process_record_ttl_ms": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Terminal Process Record Ttl Ms",
           "type": "integer"
         }
       },
@@ -722,22 +619,9 @@
         "max_operation_duration_ms",
         "max_inline_output_bytes",
         "max_output_bytes",
-        "max_retained_bytes",
-        "max_retained_objects",
-        "max_retention_ttl_ms",
-        "max_operation_records",
-        "operation_record_ttl_ms",
-        "session_idle_ttl_ms",
-        "max_process_records",
-        "terminal_process_record_ttl_ms",
         "max_transfer_frame_bytes",
         "max_concurrent_file_transfers",
-        "max_file_transfer_records",
-        "file_transfer_record_ttl_ms",
-        "max_staged_file_bytes",
-        "max_staged_file_objects",
-        "file_transfer_idle_ttl_ms",
-        "max_file_transfer_duration_ms"
+        "max_file_transfer_bytes"
       ],
       "title": "EIPLimits",
       "type": "object"
@@ -833,18 +717,21 @@
     "EnvironmentDescriptor": {
       "additionalProperties": false,
       "properties": {
-        "capabilities": {
+        "available_methods": {
           "default": [],
           "items": {
             "type": "string"
           },
-          "title": "Capabilities",
+          "title": "Available Methods",
           "type": "array"
         },
         "environment_id": {
           "minLength": 1,
           "title": "Environment Id",
           "type": "string"
+        },
+        "execution_features": {
+          "$ref": "#/$defs/ExecutionFeatures"
         },
         "generation": {
           "maximum": 18446744073709551615,
@@ -866,8 +753,18 @@
           "title": "Mounts",
           "type": "array"
         },
-        "resource_authority": {
-          "$ref": "#/$defs/ResourceAuthorityDescriptor"
+        "root_mount_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Mount Id"
         },
         "shell_profiles": {
           "default": [],
@@ -883,7 +780,7 @@
         "generation",
         "limits",
         "isolation",
-        "resource_authority"
+        "execution_features"
       ],
       "title": "EnvironmentDescriptor",
       "type": "object"
@@ -911,7 +808,6 @@
         "cancelled",
         "unknown_outcome",
         "operation_in_progress",
-        "idempotency_conflict",
         "provider_unavailable",
         "execution_isolation_failed",
         "cleanup_failed",
@@ -921,6 +817,101 @@
       ],
       "title": "ErrorType",
       "type": "string"
+    },
+    "ExecutableName": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "name",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "title": "ExecutableName",
+      "type": "object"
+    },
+    "ExecutablePath": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "path",
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/EIPPath"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "title": "ExecutablePath",
+      "type": "object"
+    },
+    "ExecutableSpec": {
+      "discriminator": {
+        "mapping": {
+          "name": "#/$defs/ExecutableName",
+          "path": "#/$defs/ExecutablePath"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExecutableName"
+        },
+        {
+          "$ref": "#/$defs/ExecutablePath"
+        }
+      ]
+    },
+    "ExecutionFeatures": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_time_limit": {
+          "title": "Cpu Time Limit",
+          "type": "boolean"
+        },
+        "memory_bytes_limit": {
+          "title": "Memory Bytes Limit",
+          "type": "boolean"
+        },
+        "per_command_network_deny": {
+          "title": "Per Command Network Deny",
+          "type": "boolean"
+        },
+        "process_count_limit": {
+          "title": "Process Count Limit",
+          "type": "boolean"
+        },
+        "signal_interrupt": {
+          "title": "Signal Interrupt",
+          "type": "boolean"
+        },
+        "signal_terminate": {
+          "title": "Signal Terminate",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "process_count_limit",
+        "memory_bytes_limit",
+        "cpu_time_limit",
+        "per_command_network_deny",
+        "signal_interrupt",
+        "signal_terminate"
+      ],
+      "title": "ExecutionFeatures",
+      "type": "object"
     },
     "FileByteRange": {
       "additionalProperties": false,
@@ -1074,11 +1065,18 @@
           "minimum": 0,
           "title": "Offset",
           "type": "integer"
+        },
+        "omitted_unrepresentable_entries": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Omitted Unrepresentable Entries",
+          "type": "integer"
         }
       },
       "required": [
         "offset",
-        "has_more"
+        "has_more",
+        "omitted_unrepresentable_entries"
       ],
       "title": "FileFindResult",
       "type": "object"
@@ -1223,11 +1221,18 @@
           "minimum": 0,
           "title": "Offset",
           "type": "integer"
+        },
+        "omitted_unrepresentable_entries": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Omitted Unrepresentable Entries",
+          "type": "integer"
         }
       },
       "required": [
         "offset",
-        "has_more"
+        "has_more",
+        "omitted_unrepresentable_entries"
       ],
       "title": "FileListResult",
       "type": "object"
@@ -1381,20 +1386,8 @@
     "FileReadCompletion": {
       "additionalProperties": false,
       "properties": {
-        "complete": {
-          "title": "Complete",
-          "type": "boolean"
-        },
         "digest": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentDigest"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/ContentDigest"
         },
         "produced_bytes": {
           "maximum": 18446744073709551615,
@@ -1405,7 +1398,7 @@
       },
       "required": [
         "produced_bytes",
-        "complete"
+        "digest"
       ],
       "title": "FileReadCompletion",
       "type": "object"
@@ -1498,10 +1491,6 @@
     "FileReaderCloseParams": {
       "additionalProperties": false,
       "properties": {
-        "accept_complete": {
-          "title": "Accept Complete",
-          "type": "boolean"
-        },
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
@@ -1511,8 +1500,7 @@
       },
       "required": [
         "context",
-        "reader",
-        "accept_complete"
+        "reader"
       ],
       "title": "FileReaderCloseParams",
       "type": "object"
@@ -1555,18 +1543,19 @@
         "path": {
           "$ref": "#/$defs/EIPPath"
         },
-        "transfer_deadline": {
+        "transfer_timeout_ms": {
           "anyOf": [
             {
-              "format": "date-time",
-              "type": "string"
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Transfer Deadline"
+          "title": "Transfer Timeout Ms"
         }
       },
       "required": [
@@ -1759,11 +1748,18 @@
           "minimum": 0,
           "title": "Offset",
           "type": "integer"
+        },
+        "omitted_unrepresentable_entries": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Omitted Unrepresentable Entries",
+          "type": "integer"
         }
       },
       "required": [
         "offset",
-        "has_more"
+        "has_more",
+        "omitted_unrepresentable_entries"
       ],
       "title": "FileSearchResult",
       "type": "object"
@@ -2000,18 +1996,19 @@
         "path": {
           "$ref": "#/$defs/EIPPath"
         },
-        "transfer_deadline": {
+        "transfer_timeout_ms": {
           "anyOf": [
             {
-              "format": "date-time",
-              "type": "string"
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Transfer Deadline"
+          "title": "Transfer Timeout Ms"
         }
       },
       "required": [
@@ -2059,25 +2056,13 @@
           "title": "Expected Environment Id",
           "type": "string"
         },
-        "optional_capabilities": {
+        "required_methods": {
           "default": [],
           "items": {
             "type": "string"
           },
-          "title": "Optional Capabilities",
+          "title": "Required Methods",
           "type": "array"
-        },
-        "required_capabilities": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Required Capabilities",
-          "type": "array"
-        },
-        "resource_authority": {
-          "$ref": "#/$defs/ResourceAuthority",
-          "default": "scoped"
         },
         "supported_protocol_versions": {
           "items": {
@@ -2123,7 +2108,8 @@
       "enum": [
         "linux_bubblewrap",
         "macos_seatbelt",
-        "outer_host"
+        "outer_host",
+        "windows_appcontainer"
       ],
       "title": "IsolationBackend",
       "type": "string"
@@ -2132,7 +2118,8 @@
       "enum": [
         "namespace_complete",
         "residual_confined_possible",
-        "outer_host"
+        "outer_host",
+        "job_complete"
       ],
       "title": "IsolationCleanupGuarantee",
       "type": "string"
@@ -2326,9 +2313,6 @@
           ],
           "default": null
         },
-        "receipt_ref": {
-          "$ref": "#/$defs/ReceiptRef"
-        },
         "request_digest": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Request Digest",
@@ -2339,7 +2323,6 @@
         }
       },
       "required": [
-        "receipt_ref",
         "operation_id",
         "method",
         "environment_id",
@@ -2375,17 +2358,6 @@
         "content_complete": {
           "title": "Content Complete",
           "type": "boolean"
-        },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "dropped_bytes": {
           "maximum": 18446744073709551615,
@@ -2466,11 +2438,6 @@
       "title": "OutputCapture",
       "type": "object"
     },
-    "OutputCursor": {
-      "minLength": 1,
-      "title": "OutputCursor",
-      "type": "string"
-    },
     "OutputKind": {
       "enum": [
         "empty",
@@ -2543,50 +2510,9 @@
     },
     "OutputReadParams": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "oneOf": [
-            {
-              "properties": {
-                "cursor": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "cursor"
-              ]
-            },
-            {
-              "properties": {
-                "start_offset": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "start_offset"
-              ]
-            }
-          ]
-        }
-      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
-        },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "output_policy": {
           "anyOf": [
@@ -2603,23 +2529,16 @@
           "$ref": "#/$defs/OutputReference"
         },
         "start_offset": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Start Offset"
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Start Offset",
+          "type": "integer"
         }
       },
       "required": [
         "context",
-        "reference"
+        "reference",
+        "start_offset"
       ],
       "title": "OutputReadParams",
       "type": "object"
@@ -2638,20 +2557,16 @@
           "title": "Chunks",
           "type": "array"
         },
-        "next_cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "next_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Next Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "capture"
+        "capture",
+        "next_offset"
       ],
       "title": "OutputReadResult",
       "type": "object"
@@ -2663,65 +2578,17 @@
     },
     "OutputReleaseParams": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "oneOf": [
-            {
-              "properties": {
-                "reference": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "reference"
-              ]
-            },
-            {
-              "properties": {
-                "cursor": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "cursor"
-              ]
-            }
-          ]
-        }
-      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "reference": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputReference"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/OutputReference"
         }
       },
       "required": [
-        "context"
+        "context",
+        "reference"
       ],
       "title": "OutputReleaseParams",
       "type": "object"
@@ -3099,27 +2966,17 @@
           ],
           "default": null
         },
-        "stderr_cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "stderr_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Stderr Offset",
+          "type": "integer"
         },
-        "stdout_cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "stdout_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Stdout Offset",
+          "type": "integer"
         },
         "wait_ms": {
           "default": 0,
@@ -3131,7 +2988,9 @@
       },
       "required": [
         "context",
-        "handle"
+        "handle",
+        "stdout_offset",
+        "stderr_offset"
       ],
       "title": "ProcessReadOutputParams",
       "type": "object"
@@ -3379,20 +3238,16 @@
           "title": "Chunks",
           "type": "array"
         },
-        "next_cursor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputCursor"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "next_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Next Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "capture"
+        "capture",
+        "next_offset"
       ],
       "title": "ProcessStreamRead",
       "type": "object"
@@ -3509,68 +3364,20 @@
     },
     "ReceiptGetParams": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "oneOf": [
-            {
-              "properties": {
-                "receipt_ref": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "receipt_ref"
-              ]
-            },
-            {
-              "properties": {
-                "operation_id": {
-                  "not": {
-                    "type": "null"
-                  }
-                }
-              },
-              "required": [
-                "operation_id"
-              ]
-            }
-          ]
-        }
-      ],
       "properties": {
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
         "operation_id": {
-          "anyOf": [
-            {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Operation Id"
-        },
-        "receipt_ref": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ReceiptRef"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Operation Id",
+          "type": "string"
         }
       },
       "required": [
-        "context"
+        "context",
+        "operation_id"
       ],
       "title": "ReceiptGetParams",
       "type": "object"
@@ -3599,11 +3406,6 @@
       "title": "ReceiptOutcome",
       "type": "string"
     },
-    "ReceiptRef": {
-      "minLength": 1,
-      "title": "ReceiptRef",
-      "type": "string"
-    },
     "ReceiptStage": {
       "enum": [
         "accepted",
@@ -3623,47 +3425,12 @@
       "title": "RequestedProcessSignal",
       "type": "string"
     },
-    "ResourceAuthority": {
-      "enum": [
-        "scoped",
-        "server"
-      ],
-      "title": "ResourceAuthority",
-      "type": "string"
-    },
-    "ResourceAuthorityDescriptor": {
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/ResourceAuthority"
-        },
-        "root_mount_id": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Root Mount Id"
-        }
-      },
-      "required": [
-        "mode"
-      ],
-      "title": "ResourceAuthorityDescriptor",
-      "type": "object"
-    },
     "RetryHint": {
       "enum": [
         "never",
         "same_request",
         "after_refresh",
         "after_capacity",
-        "after_authority_change",
         "reconcile_first"
       ],
       "title": "RetryHint",

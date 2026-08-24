@@ -369,6 +369,8 @@ A retained cursor provides at-least-once replay. Consumers deduplicate by `event
 
 SSE, WebSocket, long polling, and another push transport can carry durable events plus live Harness observations. The transport identifies which envelopes are durable and cursor-addressable. A disconnected client recovers lifecycle truth from the durable cursor; it can be told that unretained content deltas were lost and use retained messages or final output rather than treating their absence as proof they never occurred.
 
+A Foundation AG-UI transport uses the shared [Agent Stream Protocol projection](../agent-stream-protocol/00-overview.md) for standard live and retained presentation envelopes. Foundation still owns Execution acceptance, durable lifecycle events, checkpoints, and replay cursors; AG-UI event delivery neither replaces those facts nor implies that every token-level observation is durable.
+
 A stream connection can open before or after acceptance, but opening it is not part of the acceptance transaction. Closing it does not cancel the Execution. Backpressure or a slow consumer affects only the delivery adapter unless explicit product policy submits a separate cancellation command.
 
 ## Outbound Event Delivery

@@ -64,7 +64,7 @@ struct ReaderRecord {
     expires_at: chrono::DateTime<chrono::Utc>,
     last_progress: Instant,
     cancellation: watch::Sender<bool>,
-    close_result: Option<(bool, FileReaderCloseResult)>,
+    close_result: Option<FileReaderCloseResult>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,6 @@ enum ReaderPhase {
     Open,
     Streaming,
     AwaitingAck,
-    Acknowledged,
     Reset,
     Closed,
 }
@@ -226,7 +225,7 @@ impl TransferRegistry {
         {
             return Err(TransferError::Limit);
         }
-        let expires_at = self.transfer_expiry(params.transfer_deadline)?;
+        let expires_at = self.transfer_expiry(params.transfer_timeout_ms)?;
         let handle = self
             .inner
             .selector_ids
@@ -257,55 +256,33 @@ impl TransferRegistry {
     pub(crate) async fn close_reader(
         &self,
         handle: &FileReaderHandle,
-        accept_complete: bool,
     ) -> Result<FileReaderCloseResult, TransferError> {
         let record = match self.record(&handle.0)? {
             TransferRecord::Reader(record) => record,
             TransferRecord::Writer(_) => return Err(TransferError::WrongKind),
         };
         let mut reader = record.lock().await;
-        if let Some((choice, result)) = &reader.close_result {
-            return if *choice == accept_complete {
-                Ok(result.clone())
-            } else {
-                Err(TransferError::Conflict)
-            };
+        if let Some(result) = &reader.close_result {
+            return Ok(result.clone());
         }
         if expired(reader.expires_at, reader.last_progress, self.inner.idle_ttl) {
             reader.cancellation.send_replace(true);
             reader.phase = ReaderPhase::Reset;
-            let result = FileReaderCloseResult {
-                completion: FileReadCompletion {
-                    produced_bytes: reader.produced,
-                    digest: None,
-                    complete: false,
-                },
-            };
-            reader.close_result = Some((false, result.clone()));
             let handle = reader.handle.clone();
             drop(reader);
             self.mark_terminal(&handle);
-            return if accept_complete {
-                Err(TransferError::Expired)
-            } else {
-                Ok(result)
-            };
+            return Err(TransferError::Expired);
         }
-        let complete = accept_complete && reader.phase == ReaderPhase::Acknowledged;
-        if accept_complete && !complete {
+        if reader.phase != ReaderPhase::AwaitingAck {
             return Err(TransferError::WrongState);
-        }
-        if !accept_complete {
-            reader.cancellation.send_replace(true);
         }
         let completion = FileReadCompletion {
             produced_bytes: reader.produced,
-            digest: complete.then(|| reader.digest.clone()).flatten(),
-            complete,
+            digest: reader.digest.clone().ok_or(TransferError::Internal)?,
         };
         let result = FileReaderCloseResult { completion };
         reader.phase = ReaderPhase::Closed;
-        reader.close_result = Some((accept_complete, result.clone()));
+        reader.close_result = Some(result.clone());
         drop(reader);
         self.mark_terminal(&handle.0);
         Ok(result)
@@ -381,7 +358,7 @@ impl TransferRegistry {
                 ))
             };
             let (copied, digest) =
-                tokio::time::timeout(self.operation_timeout(params.context.deadline)?, copy)
+                tokio::time::timeout(self.operation_timeout(params.context.timeout_ms)?, copy)
                     .await
                     .map_err(|_| TransferError::Timeout)??;
             if copied != prefix_bytes {
@@ -395,7 +372,7 @@ impl TransferRegistry {
             .try_clone()
             .map(tokio::fs::File::from_std)
             .map_err(|_| TransferError::Internal)?;
-        let expires_at = self.transfer_expiry(params.transfer_deadline)?;
+        let expires_at = self.transfer_expiry(params.transfer_timeout_ms)?;
         let handle = self
             .inner
             .selector_ids
@@ -632,15 +609,7 @@ impl TransferRegistry {
                 });
                 Ok(())
             }
-            DataFrameKind::EndAck => {
-                let mut reader = record.lock().await;
-                if reader.phase != ReaderPhase::AwaitingAck || frame.offset != reader.produced {
-                    return Err(TransferError::Protocol);
-                }
-                reader.phase = ReaderPhase::Acknowledged;
-                reader.last_progress = Instant::now();
-                Ok(())
-            }
+            DataFrameKind::EndAck => Err(TransferError::Protocol),
             DataFrameKind::Reset => {
                 let mut reader = record.lock().await;
                 if matches!(reader.phase, ReaderPhase::Reset | ReaderPhase::Closed) {
@@ -998,34 +967,30 @@ impl TransferRegistry {
         }
     }
 
-    fn operation_timeout(
-        &self,
-        requested: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Duration, TransferError> {
-        let Some(requested) = requested else {
-            return Ok(self.inner.max_operation_duration);
-        };
-        let remaining = (requested - chrono::Utc::now())
-            .to_std()
-            .map_err(|_| TransferError::Timeout)?;
-        if remaining.is_zero() {
+    fn operation_timeout(&self, requested_ms: Option<u64>) -> Result<Duration, TransferError> {
+        let requested = requested_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.inner.max_operation_duration);
+        if requested.is_zero() {
             return Err(TransferError::Timeout);
         }
-        Ok(remaining.min(self.inner.max_operation_duration))
+        Ok(requested.min(self.inner.max_operation_duration))
     }
 
     fn transfer_expiry(
         &self,
-        requested: Option<chrono::DateTime<chrono::Utc>>,
+        requested_ms: Option<u64>,
     ) -> Result<chrono::DateTime<chrono::Utc>, TransferError> {
-        let maximum = chrono::Utc::now()
-            + chrono::Duration::from_std(self.inner.max_duration)
-                .map_err(|_| TransferError::Internal)?;
-        let expires_at = requested.map_or(maximum, |deadline| deadline.min(maximum));
-        if expires_at <= chrono::Utc::now() {
+        let requested = requested_ms
+            .map(Duration::from_millis)
+            .unwrap_or(self.inner.max_duration)
+            .min(self.inner.max_duration);
+        if requested.is_zero() {
             return Err(TransferError::Expired);
         }
-        Ok(expires_at)
+        chrono::Duration::from_std(requested)
+            .map(|duration| chrono::Utc::now() + duration)
+            .map_err(|_| TransferError::Internal)
     }
 
     fn reserve_record(&self) -> Result<(), TransferError> {
@@ -1517,8 +1482,7 @@ mod tests {
     fn context(operation_id: &str) -> EIPCallContext {
         EIPCallContext {
             operation_id: operation_id.to_owned(),
-            deadline: None,
-            idempotency_key: None,
+            timeout_ms: None,
         }
     }
 
@@ -1580,7 +1544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reader_stream_requires_terminal_ack_before_complete_close() {
+    async fn reader_close_is_the_only_terminal_acceptance_action() {
         let (tree, _config, mounts, transfers, mut outbound) = setup(false, 60_000);
         let content = b"reader-content";
         fs::write(tree.child("native/source.bin"), content).expect("writes source");
@@ -1591,7 +1555,7 @@ mod tests {
                     context: context("open-reader"),
                     path: path("/source.bin"),
                     byte_range: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1627,29 +1591,14 @@ mod tests {
             }
         }
         assert_eq!(received, content);
-        assert_eq!(
-            transfers.close_reader(&opened.reader, true).await,
-            Err(TransferError::WrongState)
-        );
-        transfers
-            .handle_frame(DataFrame {
-                kind: DataFrameKind::EndAck,
-                handle: opened.reader.0.clone(),
-                offset: received.len() as u64,
-                payload: Vec::new(),
-                reset_status: None,
-            })
-            .await
-            .expect("acknowledges reader end");
         let completion = transfers
-            .close_reader(&opened.reader, true)
+            .close_reader(&opened.reader)
             .await
             .expect("closes complete reader")
             .completion;
-        assert!(completion.complete);
         assert_eq!(completion.produced_bytes, content.len() as u64);
         assert_eq!(
-            completion.digest.expect("complete digest").value,
+            completion.digest.value,
             format!("{:x}", Sha256::digest(content))
         );
     }
@@ -1669,7 +1618,7 @@ mod tests {
                         offset: 0,
                         length: Some(8),
                     }),
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1700,25 +1649,14 @@ mod tests {
             }
         }
         assert_eq!(received, b"abc");
-        transfers
-            .handle_frame(DataFrame {
-                kind: DataFrameKind::EndAck,
-                handle: opened.reader.0.clone(),
-                offset: received.len() as u64,
-                payload: Vec::new(),
-                reset_status: None,
-            })
-            .await
-            .expect("acknowledges short read");
         let completion = transfers
-            .close_reader(&opened.reader, true)
+            .close_reader(&opened.reader)
             .await
             .expect("short read closes successfully")
             .completion;
-        assert!(completion.complete);
         assert_eq!(completion.produced_bytes, 3);
         assert_eq!(
-            completion.digest.expect("short read digest").value,
+            completion.digest.value,
             format!("{:x}", Sha256::digest(b"abc"))
         );
     }
@@ -1738,7 +1676,7 @@ mod tests {
                     },
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await;
@@ -1752,7 +1690,7 @@ mod tests {
                     path: path("/target.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1856,7 +1794,7 @@ mod tests {
                     path: path("/reset.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1886,7 +1824,7 @@ mod tests {
                     path: path("/after-reset.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1925,7 +1863,7 @@ mod tests {
                     path: path("/close-during-commit.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -1992,7 +1930,7 @@ mod tests {
                         path: path("/late-open.bin"),
                         mode: FileWriteMode::Create,
                         executable: None,
-                        transfer_deadline: None,
+                        transfer_timeout_ms: None,
                     },
                 )
                 .await,
@@ -2014,7 +1952,7 @@ mod tests {
                     path: path("/append.bin"),
                     mode: FileWriteMode::Append,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -2119,21 +2057,20 @@ mod tests {
                     context: context("expiring-reader"),
                     path: path("/expired.bin"),
                     byte_range: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
             .expect("opens reader");
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         assert_eq!(
-            transfers.close_reader(&opened.reader, true).await,
+            transfers.close_reader(&opened.reader).await,
             Err(TransferError::Expired)
         );
-        let incomplete = transfers
-            .close_reader(&opened.reader, false)
-            .await
-            .expect("expired reader retains incomplete close evidence");
-        assert!(!incomplete.completion.complete);
+        assert_eq!(
+            transfers.close_reader(&opened.reader).await,
+            Err(TransferError::Expired)
+        );
         assert!(!transfers.is_live_reader(&opened.reader.0));
     }
 
@@ -2149,7 +2086,7 @@ mod tests {
                     path: path("/first.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await
@@ -2163,7 +2100,7 @@ mod tests {
                     path: path("/second.bin"),
                     mode: FileWriteMode::Create,
                     executable: None,
-                    transfer_deadline: None,
+                    transfer_timeout_ms: None,
                 },
             )
             .await

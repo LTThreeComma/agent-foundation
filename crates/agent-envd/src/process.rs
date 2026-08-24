@@ -20,12 +20,12 @@ use crate::{
     config::{CommandConfig, Config, reserved_environment_name, valid_environment_name},
     eip::{
         self, CleanupOutcome, CommandNetwork, CommandRequest, CommandSpec, EncodedBytes,
-        OutputCapture, OutputCursor, OutputKind, OutputOverflow, OutputPolicy, OutputPreview,
-        OutputSegment, ProcessHandle, ProcessInfo, ProcessOutputSnapshot, ProcessPhase,
-        ProcessSignal, ProcessStatus, ProcessStream, ProcessStreamRead, ProcessStreamSnapshot,
+        OutputCapture, OutputKind, OutputOverflow, OutputPolicy, OutputPreview, OutputSegment,
+        ProcessHandle, ProcessInfo, ProcessOutputSnapshot, ProcessPhase, ProcessSignal,
+        ProcessStatus, ProcessStream, ProcessStreamRead, ProcessStreamSnapshot,
         ProcessWaitCondition, RequestedProcessSignal, TerminationReason,
     },
-    mount::{CommandCwd, MountPathError, MountRegistry},
+    mount::{MountPathError, MountRegistry},
     operation::ShortIdAllocator,
     retention::{LiveOutput, RetentionError, RetentionStore},
     supervisor::{
@@ -36,7 +36,6 @@ use crate::{
 
 const SUPERVISOR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-const PROCESS_CURSOR_TTL: Duration = Duration::from_secs(300);
 const RESPONSE_RESERVE_BYTES: u64 = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +44,10 @@ pub(crate) enum ProcessError {
     Unsupported,
     Denied,
     NotFound,
-    InvalidHandle,
+    RetentionGap {
+        available_start: u64,
+        available_end: u64,
+    },
     Busy,
     Conflict,
     OutputLimit,
@@ -85,17 +87,9 @@ struct ManagerState {
     terminal_order: VecDeque<(Instant, String)>,
     released: BTreeMap<String, Instant>,
     released_order: VecDeque<String>,
-    cursors: BTreeMap<String, ProcessCursor>,
     active: usize,
     starts_in_progress: usize,
     draining: bool,
-}
-
-struct ProcessCursor {
-    handle: String,
-    stream: ProcessStream,
-    offset: u64,
-    expires_at: Instant,
 }
 
 struct ProcessRecord {
@@ -201,7 +195,6 @@ impl ExecutionManager {
                     terminal_order: VecDeque::new(),
                     released: BTreeMap::new(),
                     released_order: VecDeque::new(),
-                    cursors: BTreeMap::new(),
                     active: 0,
                     starts_in_progress: 0,
                     draining: false,
@@ -469,7 +462,7 @@ impl ExecutionManager {
             arguments,
             roots,
             mut environment,
-        } = self.resolve_command(&request.command, &cwd)?;
+        } = self.resolve_command(mounts, &request.command)?;
         validate_arguments(
             &arguments,
             self.inner.command.max_arguments,
@@ -544,22 +537,24 @@ impl ExecutionManager {
 
     fn resolve_command(
         &self,
+        mounts: &MountRegistry,
         command: &CommandSpec,
-        cwd: &CommandCwd,
     ) -> Result<ResolvedCommand, ProcessError> {
         match command {
             CommandSpec::Argv(argv) => {
-                if argv.executable.is_empty() || argv.executable.contains('\0') {
-                    return Err(ProcessError::Invalid);
-                }
-                let executable = if is_bare_executable(&argv.executable) {
-                    resolve_bare_executable(
-                        &argv.executable,
-                        &self.inner.command.trusted_executable_roots,
-                    )?
-                } else {
-                    cwd.resolve_relative_executable(&argv.executable)
-                        .map_err(map_mount_error)?
+                let executable = match &argv.executable_spec {
+                    eip::ExecutableSpec::Name(selector) => {
+                        if !valid_bare_executable_name(&selector.name) {
+                            return Err(ProcessError::Invalid);
+                        }
+                        resolve_bare_executable(
+                            &selector.name,
+                            &self.inner.command.trusted_executable_roots,
+                        )?
+                    }
+                    eip::ExecutableSpec::Path(selector) => mounts
+                        .resolve_executable(&selector.path)
+                        .map_err(map_mount_error)?,
                 };
                 Ok(ResolvedCommand {
                     executable,
@@ -766,10 +761,6 @@ impl ExecutionManager {
             state
                 .terminal_order
                 .retain(|(_, terminal_handle)| terminal_handle != &handle.0);
-            let released_cursors = remove_cursors_for_handle(&mut state, &handle.0);
-            self.inner
-                .retention
-                .release_external_cursors(released_cursors);
             if state
                 .released
                 .insert(handle.0.clone(), Instant::now())
@@ -791,8 +782,8 @@ impl ExecutionManager {
     pub(crate) async fn read_output(
         &self,
         handle: &ProcessHandle,
-        stdout_cursor: Option<&OutputCursor>,
-        stderr_cursor: Option<&OutputCursor>,
+        stdout_start: u64,
+        stderr_start: u64,
         wait_ms: u64,
         policy: Option<&OutputPolicy>,
         deadline: Instant,
@@ -804,11 +795,13 @@ impl ExecutionManager {
             self.inner.max_output_bytes,
             self.inner.max_response_bytes,
         )?;
-        let stdout_start = self.cursor_offset(&record, ProcessStream::Stdout, stdout_cursor)?;
-        let stderr_start = self.cursor_offset(&record, ProcessStream::Stderr, stderr_cursor)?;
-        let initial_stdout_end = record.stdout.snapshot().available_end;
-        let initial_stderr_end = record.stderr.snapshot().available_end;
-        if wait_ms > 0 && !record.is_terminal() {
+        let initial_stdout = record.stdout.snapshot();
+        let initial_stderr = record.stderr.snapshot();
+        let stdout_ready = read_start_has_data(&initial_stdout, stdout_start)?;
+        let stderr_ready = read_start_has_data(&initial_stderr, stderr_start)?;
+        let initial_stdout_end = initial_stdout.available_end;
+        let initial_stderr_end = initial_stderr.available_end;
+        if wait_ms > 0 && !record.is_terminal() && !stdout_ready && !stderr_ready {
             let wait_until = deadline.min(Instant::now() + Duration::from_millis(wait_ms));
             loop {
                 let notified = record.changed.notified();
@@ -830,15 +823,7 @@ impl ExecutionManager {
             }
         }
         let stdout = self.read_stream(&record, ProcessStream::Stdout, stdout_start, &policy)?;
-        let stderr = match self.read_stream(&record, ProcessStream::Stderr, stderr_start, &policy) {
-            Ok(stderr) => stderr,
-            Err(error) => {
-                if let Some(cursor) = &stdout.next_cursor {
-                    self.release_cursor(cursor);
-                }
-                return Err(error);
-            }
-        };
+        let stderr = self.read_stream(&record, ProcessStream::Stderr, stderr_start, &policy)?;
         Ok((record.info(&self.inner), stdout, stderr))
     }
 
@@ -998,30 +983,6 @@ impl ExecutionManager {
         true
     }
 
-    pub(crate) fn release_cursor(&self, cursor: &OutputCursor) -> bool {
-        let selector = format!("cursor:{}", cursor.0);
-        let mut state = self.state();
-        self.prune_locked(&mut state);
-        if state.cursors.remove(&cursor.0).is_some() {
-            self.inner.retention.release_external_cursors(1);
-            if state
-                .released
-                .insert(selector.clone(), Instant::now())
-                .is_none()
-            {
-                state.released_order.push_back(selector);
-            }
-            while state.released_order.len() > self.inner.max_records {
-                if let Some(expired) = state.released_order.pop_front() {
-                    state.released.remove(&expired);
-                }
-            }
-            true
-        } else {
-            state.released.contains_key(&selector)
-        }
-    }
-
     pub(crate) fn maintenance(&self) {
         let mut state = self.state();
         self.prune_locked(&mut state);
@@ -1093,14 +1054,6 @@ impl ExecutionManager {
             return Err(ProcessError::OutputLimit);
         }
         let end = start.saturating_add(data.len() as u64);
-        let next_cursor = if end < capture.available_end || !capture.producer_complete {
-            Some(self.create_cursor(record, stream, end)?)
-        } else {
-            None
-        };
-        let capture_cursor = (capture.kind == OutputKind::Retained)
-            .then(|| next_cursor.clone())
-            .flatten();
         Ok(ProcessStreamRead {
             chunks: if data.is_empty() {
                 Vec::new()
@@ -1110,70 +1063,9 @@ impl ExecutionManager {
                     data: encoded(&data),
                 }]
             },
-            next_cursor,
-            capture: OutputCapture {
-                cursor: capture_cursor,
-                ..capture
-            },
+            capture,
+            next_offset: end,
         })
-    }
-
-    fn create_cursor(
-        &self,
-        record: &ProcessRecord,
-        stream: ProcessStream,
-        offset: u64,
-    ) -> Result<OutputCursor, ProcessError> {
-        let selector = self
-            .inner
-            .ids
-            .next("process-cursor")
-            .map_err(|_| ProcessError::Internal)?;
-        let mut state = self.state();
-        self.prune_locked(&mut state);
-        let maximum = self.inner.max_records.saturating_mul(8).max(8);
-        while state.cursors.len() >= maximum {
-            let Some(oldest) = state.cursors.keys().next().cloned() else {
-                break;
-            };
-            if state.cursors.remove(&oldest).is_some() {
-                self.inner.retention.release_external_cursors(1);
-            }
-        }
-        if !self.inner.retention.reserve_external_cursor() {
-            return Err(ProcessError::Busy);
-        }
-        state.cursors.insert(
-            selector.clone(),
-            ProcessCursor {
-                handle: record.handle.0.clone(),
-                stream,
-                offset,
-                expires_at: Instant::now() + PROCESS_CURSOR_TTL,
-            },
-        );
-        Ok(OutputCursor(selector))
-    }
-
-    fn cursor_offset(
-        &self,
-        record: &ProcessRecord,
-        stream: ProcessStream,
-        cursor: Option<&OutputCursor>,
-    ) -> Result<u64, ProcessError> {
-        let Some(cursor) = cursor else {
-            return Ok(0);
-        };
-        let mut state = self.state();
-        self.prune_locked(&mut state);
-        let cursor = state
-            .cursors
-            .get(&cursor.0)
-            .ok_or(ProcessError::InvalidHandle)?;
-        if cursor.handle != record.handle.0 || cursor.stream != stream {
-            return Err(ProcessError::InvalidHandle);
-        }
-        Ok(cursor.offset)
     }
 
     fn record(&self, handle: &ProcessHandle) -> Result<Arc<ProcessRecord>, ProcessError> {
@@ -1225,11 +1117,6 @@ impl ExecutionManager {
 
     fn prune_locked(&self, state: &mut ManagerState) {
         let now = Instant::now();
-        let cursor_count = state.cursors.len();
-        state.cursors.retain(|_, cursor| cursor.expires_at > now);
-        self.inner
-            .retention
-            .release_external_cursors(cursor_count.saturating_sub(state.cursors.len()));
         while let Some(handle) = state.released_order.front() {
             let expired = state.released.get(handle).is_none_or(|released_at| {
                 now.duration_since(*released_at) >= self.inner.terminal_ttl
@@ -1250,10 +1137,6 @@ impl ExecutionManager {
                 && record.fully_cleaned()
             {
                 let record = state.records.remove(&handle).expect("record exists");
-                let released_cursors = remove_cursors_for_handle(state, &handle);
-                self.inner
-                    .retention
-                    .release_external_cursors(released_cursors);
                 record.release_output(&self.inner.retention);
             }
         }
@@ -1265,10 +1148,6 @@ impl ExecutionManager {
                 && record.fully_cleaned()
             {
                 let record = state.records.remove(&handle).expect("record exists");
-                let released_cursors = remove_cursors_for_handle(state, &handle);
-                self.inner
-                    .retention
-                    .release_external_cursors(released_cursors);
                 record.release_output(&self.inner.retention);
                 return true;
             }
@@ -1282,12 +1161,6 @@ impl ExecutionManager {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
-}
-
-fn remove_cursors_for_handle(state: &mut ManagerState, handle: &str) -> usize {
-    let before = state.cursors.len();
-    state.cursors.retain(|_, cursor| cursor.handle != handle);
-    before.saturating_sub(state.cursors.len())
 }
 
 impl StartReservation {
@@ -1488,12 +1361,29 @@ impl ProcessOutput {
     fn read(&self, start: u64, maximum: u64) -> Result<(Vec<u8>, OutputCapture), ProcessError> {
         let capture = self.snapshot();
         if start < capture.available_start || start > capture.available_end {
-            return Err(ProcessError::InvalidHandle);
+            return Err(ProcessError::RetentionGap {
+                available_start: capture.available_start,
+                available_end: capture.available_end,
+            });
         }
         match &self.sink {
-            OutputSink::Retained { output, .. } => output
-                .read_range(start, maximum)
-                .map_err(|_| ProcessError::InvalidHandle),
+            OutputSink::Retained { output, .. } => {
+                output
+                    .read_range(start, maximum)
+                    .map_err(|error| match error {
+                        RetentionError::Gap {
+                            available_start,
+                            available_end,
+                        } => ProcessError::RetentionGap {
+                            available_start,
+                            available_end,
+                        },
+                        RetentionError::Invalid => ProcessError::Invalid,
+                        RetentionError::Busy => ProcessError::Busy,
+                        RetentionError::OutputLimit => ProcessError::OutputLimit,
+                        RetentionError::Internal => ProcessError::Internal,
+                    })
+            }
             OutputSink::Bounded { state, .. } => {
                 let state = state.lock().unwrap_or_else(PoisonError::into_inner);
                 let end = start.saturating_add(maximum).min(state.data.len() as u64);
@@ -1804,6 +1694,16 @@ fn apply_terminal_status(
     }
 }
 
+fn read_start_has_data(capture: &OutputCapture, start: u64) -> Result<bool, ProcessError> {
+    if start < capture.available_start || start > capture.available_end {
+        return Err(ProcessError::RetentionGap {
+            available_start: capture.available_start,
+            available_end: capture.available_end,
+        });
+    }
+    Ok(start < capture.available_end)
+}
+
 fn bounded_snapshot(state: &BoundedCapture) -> OutputCapture {
     let captured = state.data.len() as u64;
     if state.produced == 0 {
@@ -1817,7 +1717,6 @@ fn bounded_snapshot(state: &BoundedCapture) -> OutputCapture {
             inline: None,
             preview: None,
             reference: None,
-            cursor: None,
             available_start: 0,
             available_end: 0,
             expires_at: None,
@@ -1834,7 +1733,6 @@ fn bounded_snapshot(state: &BoundedCapture) -> OutputCapture {
             inline: Some(encoded(&state.data)),
             preview: None,
             reference: None,
-            cursor: None,
             available_start: 0,
             available_end: captured,
             expires_at: None,
@@ -1860,7 +1758,6 @@ fn bounded_snapshot(state: &BoundedCapture) -> OutputCapture {
                 represented_bytes: captured,
             }),
             reference: None,
-            cursor: None,
             available_start: 0,
             available_end: captured,
             expires_at: None,
@@ -1977,6 +1874,14 @@ fn validate_arguments(
     Ok(())
 }
 
+fn valid_bare_executable_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "." | "..")
+        && !name
+            .chars()
+            .any(|character| matches!(character, '\0' | '/' | '\\' | ':'))
+}
+
 fn resolve_bare_executable(name: &str, roots: &[PathBuf]) -> Result<PathBuf, ProcessError> {
     for root in roots {
         let candidate = root.join(name);
@@ -2002,10 +1907,6 @@ fn resolve_bare_executable(name: &str, roots: &[PathBuf]) -> Result<PathBuf, Pro
         return Ok(canonical);
     }
     Err(ProcessError::Denied)
-}
-
-fn is_bare_executable(value: &str) -> bool {
-    !value.contains('/') && !value.contains('\\') && Path::new(value).components().count() == 1
 }
 
 fn path_string(path: &Path) -> Result<String, ProcessError> {
@@ -2054,5 +1955,30 @@ fn map_mount_error(error: MountPathError) -> ProcessError {
             ProcessError::Internal
         }
         MountPathError::Invalid | MountPathError::AlreadyExists => ProcessError::Invalid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_bare_executable_name;
+
+    #[test]
+    fn executable_names_are_single_portable_path_components() {
+        assert!(valid_bare_executable_name("python3"));
+        assert!(valid_bare_executable_name("tool-name.exe"));
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "subdir/tool",
+            "subdir\\tool",
+            "../tool",
+            "C:tool.exe",
+            "C:\\tool.exe",
+            "/bin/tool",
+            "tool\0suffix",
+        ] {
+            assert!(!valid_bare_executable_name(invalid), "accepted {invalid:?}");
+        }
     }
 }

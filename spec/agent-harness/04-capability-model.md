@@ -4,7 +4,7 @@
 
 Reusable behavior inside the Pydantic Agent loop uses native `AbstractCapability[AgentContext]`. Capability is the only top-level feature-behavior composition plane in `AgentDefinition`: each feature Capability owns its callable tools, private Toolsets, instructions, settings, hooks, and native ordering as one coherent unit. The Harness does not define a second Capability base, lifecycle, or ordering graph. Fresh run attachment Capabilities enter `RunBindings` under a separate source policy.
 
-Environment itself is not a Capability. It is a Harness-entered run lifecycle resource exposed through the fixed `AgentContext.environment` field. The optional `EnvironmentToolsCapability` consumes that field to contribute model tools, stable guidance, dynamic context, and notices; its presence cannot create, activate, replace, authorize, or close an Environment binding.
+Environment itself is not a Capability. It is a Harness-entered run lifecycle resource exposed through the fixed `AgentContext.environment` field. The optional `DynamicEnvironmentCapability` consumes that field to contribute model tools, stable guidance, dynamic context, and notices; its presence cannot create, activate, replace, authorize, or close an Environment binding.
 
 Harness plugins govern only the outer semantic-input-to-complete-result boundary and may contribute ordinary Pydantic Capabilities.
 
@@ -84,12 +84,22 @@ class AgentContext:
     environment: BoundEnvironment
     model_binding: ModelRunBinding | None
     events: HarnessEventEmitter
+    usage_attribution: RunUsageLedger
     plugins: BoundPluginContext
     subagents: SubagentCollection
     metadata: Mapping[str, JsonValue]
 
     @property
     def identity(self) -> AgentIdentityRef: ...
+
+    async def record_provider_usage(
+        self,
+        usage: ProviderUsage,
+        *,
+        source: str,
+        tool_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ProviderUsageRecord: ...
 
     async def export_state(
         self,
@@ -104,6 +114,7 @@ One fresh context is created for every logical Harness run and reused by that ru
 - `environment` is the entered Harness lifecycle facade, independent of Capability composition;
 - `model_binding` is the optional fresh logical-model resolver;
 - `events` emits bounded Harness-owned observations into the one canonical run stream;
+- `usage_attribution` retains mixed-source immutable records and reports them at model-request boundaries;
 - `plugins` indexes the complete fresh run-bound plugin graph after binding;
 - `subagents` is the immutable collection owned by the executable;
 - `metadata` is immutable non-authoritative correlation.
@@ -119,6 +130,7 @@ One fresh context is created for every logical Harness run and reused by that ru
 | Bind a fresh Agent-loop feature       | Capability `for_run()`                                  |
 | Contribute instructions or tools      | Native Capability/Toolset                               |
 | Observe model, node, or tool behavior | Native hooks plus `AgentContext.events`                 |
+| Attribute provider usage              | `AgentContext.record_provider_usage()`                  |
 | Resolve a logical Model               | Thin `ResolveModelId` over `AgentContext.model_binding` |
 | Store Capability continuation data    | `AgentContextState` namespace                           |
 | Operate on or observe Environment     | Fixed `AgentContext.environment` resource               |
@@ -164,7 +176,7 @@ The coordinator intentionally has no active-Capability registry. Imported entrie
 
 Trusted Python can intentionally read, replace, migrate, or transfer complete state. Namespace ownership is a composition contract, not a sandbox or cryptographic provenance mechanism.
 
-Pydantic messages and portable Environment state live in separate `HarnessState` fields. Desired topology, Environment provider lifecycle or launch state, readiness, usage, clients, credentials, policy decisions, queues, locks, Host execution state, plugin objects, and provider sessions are not Capability state. A Capability cannot obtain lifecycle authority by copying an Environment selector or observation into its namespace.
+Pydantic messages and portable Environment state live in separate `HarnessState` fields. Desired topology, Environment provider lifecycle or launch state, readiness, usage accumulators and attribution records, clients, credentials, policy decisions, queues, locks, Host execution state, plugin objects, and provider sessions are not Capability state. A Capability cannot obtain lifecycle authority by copying an Environment selector or observation into its namespace.
 
 ## State Export
 
@@ -176,12 +188,12 @@ The normal inner run exports aligned messages and state. Trusted result middlewa
 
 The categories describe ownership, not subclasses:
 
-| Category             | Examples                                                  |
-| -------------------- | --------------------------------------------------------- |
-| Agent feature        | Guidance, compaction, memory, working state               |
-| Provider integration | `EnvironmentToolsCapability`, model behavior, MCP, skills |
-| Host integration     | Policy, credentials, checkpoint observation, telemetry    |
-| Tool behavior        | Managed invocation, external tools, discovery             |
+| Category             | Examples                                                    |
+| -------------------- | ----------------------------------------------------------- |
+| Agent feature        | Guidance, compaction, memory, working state                 |
+| Provider integration | `DynamicEnvironmentCapability`, model behavior, MCP, skills |
+| Host integration     | Policy, credentials, checkpoint observation, telemetry      |
+| Tool behavior        | Managed invocation, external tools, discovery               |
 
 Each feature retains its own narrow collaborators and security checks. The Harness does not collect them into a generic map.
 

@@ -50,7 +50,7 @@ npx -y npm@11.19.0 trust github @converge.ai/foundation-sdk \
 npx -y npm@11.19.0 trust list @converge.ai/foundation-sdk
 ```
 
-Subsequent versions are published from `.github/workflows/release-sdk-typescript.yml` with npm Trusted Publishing. Push a matching `release/sdk/typescript/X.Y.Z` tag only after updating both `package.json` and `package-lock.json`.
+Subsequent versions are published from `.github/workflows/release-sdk-typescript.yml` with npm Trusted Publishing. Push `release/sdk/typescript/<version>`, where `<version>` is stable `X.Y.Z` or RC `X.Y.Z-rc.N`; the workflow injects that version into `package.json` and `package-lock.json` in its ephemeral checkout. RCs publish under the npm `rc` dist-tag and never advance `latest`.
 
 ## License
 

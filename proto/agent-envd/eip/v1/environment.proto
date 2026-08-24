@@ -12,19 +12,14 @@ message EIPClientInfo {
   string version = 2;
 }
 
-enum ResourceAuthority {
-  RESOURCE_AUTHORITY_UNSPECIFIED = 0;
-  RESOURCE_AUTHORITY_SCOPED = 1 [(eip_enum_value).json_name = "scoped"];
-  RESOURCE_AUTHORITY_SERVER = 2 [(eip_enum_value).json_name = "server"];
-}
-
 message InitializeParams {
+  reserved 4, 5, 6;
+  reserved "required_capabilities", "optional_capabilities", "resource_authority";
+
   repeated string supported_protocol_versions = 1 [(eip_field).min_length = 1];
   EIPClientInfo client = 2;
   string expected_environment_id = 3 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
-  repeated string required_capabilities = 4;
-  repeated string optional_capabilities = 5;
-  optional ResourceAuthority resource_authority = 6 [(eip_field).default_string = "scoped"];
+  repeated string required_methods = 7;
 }
 
 message EIPServerInfo {
@@ -33,6 +28,9 @@ message EIPServerInfo {
 }
 
 message EIPLimits {
+  reserved 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24;
+  reserved "max_retained_bytes", "max_retained_objects", "max_retention_ttl_ms", "receipt_ttl_ms", "max_operation_records", "operation_record_ttl_ms", "session_idle_ttl_ms", "max_process_records", "terminal_process_record_ttl_ms", "max_file_transfer_records", "file_transfer_record_ttl_ms", "max_staged_file_bytes", "max_staged_file_objects", "file_transfer_idle_ttl_ms", "max_file_transfer_duration_ms";
+
   uint64 max_request_bytes = 1 [(eip_field).minimum = 1];
   uint64 max_response_bytes = 2 [(eip_field).minimum = 1];
   uint64 max_concurrent_operations = 3 [(eip_field).minimum = 1];
@@ -40,24 +38,9 @@ message EIPLimits {
   uint64 max_operation_duration_ms = 5 [(eip_field).minimum = 1];
   uint64 max_inline_output_bytes = 6 [(eip_field).minimum = 1];
   uint64 max_output_bytes = 7 [(eip_field).minimum = 1];
-  uint64 max_retained_bytes = 8 [(eip_field).minimum = 1];
-  uint64 max_retained_objects = 9 [(eip_field).minimum = 1];
-  uint64 max_retention_ttl_ms = 10 [(eip_field).minimum = 1];
-  reserved 11;
-  reserved "receipt_ttl_ms";
-  uint64 max_operation_records = 12 [(eip_field).minimum = 1];
-  uint64 operation_record_ttl_ms = 13 [(eip_field).minimum = 1];
-  uint64 session_idle_ttl_ms = 14 [(eip_field).minimum = 1];
-  uint64 max_process_records = 15 [(eip_field).minimum = 1];
-  uint64 terminal_process_record_ttl_ms = 16 [(eip_field).minimum = 1];
   uint64 max_transfer_frame_bytes = 17 [(eip_field).minimum = 25];
   uint64 max_concurrent_file_transfers = 18 [(eip_field).minimum = 1];
-  uint64 max_file_transfer_records = 19 [(eip_field).minimum = 1];
-  uint64 file_transfer_record_ttl_ms = 20 [(eip_field).minimum = 1];
-  uint64 max_staged_file_bytes = 21 [(eip_field).minimum = 1];
-  uint64 max_staged_file_objects = 22 [(eip_field).minimum = 1];
-  uint64 file_transfer_idle_ttl_ms = 23 [(eip_field).minimum = 1];
-  uint64 max_file_transfer_duration_ms = 24 [(eip_field).minimum = 1];
+  uint64 max_file_transfer_bytes = 25 [(eip_field).minimum = 1];
 }
 
 enum IsolationMode {
@@ -71,6 +54,7 @@ enum IsolationBackend {
   ISOLATION_BACKEND_LINUX_BUBBLEWRAP = 1 [(eip_enum_value).json_name = "linux_bubblewrap"];
   ISOLATION_BACKEND_MACOS_SEATBELT = 2 [(eip_enum_value).json_name = "macos_seatbelt"];
   ISOLATION_BACKEND_OUTER_HOST = 3 [(eip_enum_value).json_name = "outer_host"];
+  ISOLATION_BACKEND_WINDOWS_APPCONTAINER = 4 [(eip_enum_value).json_name = "windows_appcontainer"];
 }
 
 enum IsolationNetworkPolicy {
@@ -84,6 +68,7 @@ enum IsolationCleanupGuarantee {
   ISOLATION_CLEANUP_GUARANTEE_NAMESPACE_COMPLETE = 1 [(eip_enum_value).json_name = "namespace_complete"];
   ISOLATION_CLEANUP_GUARANTEE_RESIDUAL_CONFINED_POSSIBLE = 2 [(eip_enum_value).json_name = "residual_confined_possible"];
   ISOLATION_CLEANUP_GUARANTEE_OUTER_HOST = 3 [(eip_enum_value).json_name = "outer_host"];
+  ISOLATION_CLEANUP_GUARANTEE_JOB_COMPLETE = 4 [(eip_enum_value).json_name = "job_complete"];
 }
 
 message IsolationPosture {
@@ -96,20 +81,28 @@ message IsolationPosture {
   IsolationCleanupGuarantee cleanup_guarantee = 7;
 }
 
-message ResourceAuthorityDescriptor {
-  ResourceAuthority mode = 1;
-  optional string root_mount_id = 2 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+message ExecutionFeatures {
+  bool process_count_limit = 1;
+  bool memory_bytes_limit = 2;
+  bool cpu_time_limit = 3;
+  bool per_command_network_deny = 4;
+  bool signal_interrupt = 5;
+  bool signal_terminate = 6;
 }
 
 message EnvironmentDescriptor {
+  reserved 3, 8;
+  reserved "capabilities", "resource_authority";
+
   string environment_id = 1 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
   uint64 generation = 2 [(eip_field).minimum = 1];
-  repeated string capabilities = 3;
   repeated MountDescriptor mounts = 4;
   repeated ShellProfileDescriptor shell_profiles = 5;
   EIPLimits limits = 6;
   IsolationPosture isolation = 7;
-  ResourceAuthorityDescriptor resource_authority = 8;
+  optional string root_mount_id = 9 [(eip_field).string_format = EIP_STRING_FORMAT_IDENTIFIER];
+  repeated string available_methods = 10;
+  ExecutionFeatures execution_features = 11;
 }
 
 message InitializeResult {

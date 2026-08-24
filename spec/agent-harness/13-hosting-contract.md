@@ -138,7 +138,7 @@ A Host rejects an incompatible revision or adapter before building process-local
 1. Hosted and embedded callers use the same `AgentDefinition`, builder, bindings, stream, result, and state contracts.
 2. Durable Agent schemas and dependency locks belong to the Host; the optional plugin document schema belongs to the Harness even when the Host persists it.
 3. Python objects are reconstructed in-process and never stored in Host records.
-4. Fresh authority enters every logical run through typed bindings and narrowly owned run Capabilities; Environment authority never enters through `EnvironmentToolsCapability`.
+4. Fresh authority enters every logical run through typed bindings and narrowly owned run Capabilities; Environment authority never enters through `DynamicEnvironmentCapability`.
 5. Internal model attempts do not create additional Host Attempt generations.
 6. New durable recovery uses a fresh Harness run and fresh bindings.
 7. Process-local completion is only a candidate for Host durable completion.

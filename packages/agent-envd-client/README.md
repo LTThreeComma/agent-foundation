@@ -9,10 +9,10 @@ The package currently provides:
 - generated EIP 1.0 Pydantic wire models, canonical codecs, method metadata, and typed `EIPClient` methods for the complete protocol surface;
 - `RequestCoordinator` for bounded request IDs, concurrent response correlation, data-frame routing, typed errors, and no automatic ambiguous retry;
 - `StdioTransport` for multiplexed content-length control and binary data frames over trusted parent-supplied asyncio process pipes;
-- `EIPSession` for initialization, capability and generation validation, descriptor refresh, and session close;
+- `EIPSession` for initialization, exact required-method/generation/descriptor validation, monotonic method-and-limit refresh that rejects topology/posture/feature changes or widening, and session close;
 - high-level `EIPFileReader` and `EIPFileWriter` async context managers, exposed by `EIPSession.open_reader()` and `EIPSession.open_writer()`, for bounded streaming file transfer.
 
-Configured daemons can expose resource reads, atomic mutations, find, search, receipts, and port observation through the generated client. HTTP and WebSocket transports are not implemented yet. Provider process creation and lifecycle policy remain outside this package; a Host adapter or test fixture launches `agent-envd` and supplies its private pipes.
+Configured daemons can expose resource reads, atomic mutations, find, search, receipts, and port observation through the generated client. Trusted stdio is the currently implemented carrier; the accepted outbound reverse-WebSocket profile is not implemented yet, and inbound HTTP/WebSocket transports are not part of the target contract. Provider process creation and lifecycle policy remain outside this package; a Host adapter or test fixture launches `agent-envd` and supplies its private pipes.
 
 ## Example
 
@@ -41,7 +41,7 @@ async def main() -> None:
     session = await EIPSession.initialize(
         StdioTransport.from_process(process),
         expected_environment_id="env-provider-owned-id",
-        required_capabilities=("environment.describe", "session.close"),
+        required_methods=("environment.describe", "session.close"),
     )
     descriptor = await session.describe()
     print(descriptor.generation)
@@ -52,11 +52,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-An `EIPMethodError` contains the generated typed `EIPError`. Transport timeouts and cancellation never claim that an already sent operation failed or was absent; the client does not retry a possibly dispatched mutation automatically. Mutation callers can use operation receipts and idempotency keys to reconcile an ambiguous outcome explicitly.
+An `EIPMethodError` contains the generated typed `EIPError`. Carrier timeouts and cancellation never claim that an already sent operation failed or was absent; the client does not retry a possibly dispatched mutation automatically. Mutation callers reconcile by reusing the same operation ID and semantic request while evidence remains, querying its receipt, or observing native state before starting another operation.
 
 ## Versioning
 
-The Python package and daemon artifacts share one `X.Y.Z` agent-envd release identity. The negotiated EIP major and minor version remains an independent wire-compatibility identity.
+The Python package and daemon artifacts share one stable `X.Y.Z` or RC `X.Y.Z-rc.N` agent-envd release identity. Python package metadata represents the RC as the equivalent PEP 440 version `X.Y.ZrcN`; Cargo, binary archives, and container tags retain the canonical SemVer spelling. The negotiated EIP major and minor version remains an independent wire-compatibility identity.
 
 The accepted protocol, generation, ownership, and compatibility design is documented in the [agent-envd specification](https://github.com/converge-ai-labs/agent-foundation/blob/main/spec/agent-envd/08-protocol-source-client-and-generation.md).
 

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from types import TracebackType
 from typing import Never
 
 from converge_agent_envd_client.eip.v1 import (
     EIP_PROTOCOL_VERSION,
+    METHODS,
     EIPCallContext,
     EIPClient,
     EIPClientInfo,
@@ -18,7 +18,6 @@ from converge_agent_envd_client.eip.v1 import (
     FileByteRange,
     FileWriteMode,
     InitializeParams,
-    ResourceAuthority,
     SessionCloseParams,
 )
 from converge_agent_envd_client.errors import EIPProtocolError, EIPSessionStateError
@@ -47,9 +46,7 @@ class EIPSession:
         transport: EIPTransport,
         *,
         expected_environment_id: str,
-        required_capabilities: tuple[str, ...] = (),
-        optional_capabilities: tuple[str, ...] = (),
-        resource_authority: ResourceAuthority | str = ResourceAuthority.SCOPED,
+        required_methods: tuple[str, ...] = (),
         client_name: str = "converge-agent-envd-client",
         client_version: str | None = None,
         initialization_timeout: float = 10.0,
@@ -60,11 +57,6 @@ class EIPSession:
             raise ValueError("initialization_timeout must be positive")
         if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight < 1:
             raise ValueError("max_in_flight must be a positive integer")
-        resolved_authority = (
-            resource_authority
-            if isinstance(resource_authority, ResourceAuthority)
-            else ResourceAuthority(resource_authority)
-        )
         requester = RequestCoordinator(
             transport,
             max_in_flight=1,
@@ -78,9 +70,7 @@ class EIPSession:
                 version=client_version or _distribution_version(),
             ),
             expected_environment_id=expected_environment_id,
-            required_capabilities=required_capabilities,
-            optional_capabilities=optional_capabilities,
-            resource_authority=resolved_authority,
+            required_methods=required_methods,
         )
         try:
             async with asyncio.timeout(initialization_timeout):
@@ -88,16 +78,12 @@ class EIPSession:
             if result.protocol_version != EIP_PROTOCOL_VERSION:
                 raise EIPProtocolError("server selected an unoffered EIP protocol version")
             descriptor = result.descriptor
+            _validate_descriptor_structure(descriptor)
             if descriptor.environment_id != expected_environment_id:
                 raise EIPProtocolError("server returned a different Environment identity")
-            missing = sorted(set(required_capabilities) - set(descriptor.capabilities))
+            missing = sorted(set(required_methods) - set(descriptor.available_methods))
             if missing:
-                raise EIPProtocolError(f"server omitted required capability: {missing[0]}")
-            if descriptor.resource_authority.mode is not resolved_authority:
-                raise EIPProtocolError("server selected a different resource authority")
-            root_mount_id = descriptor.resource_authority.root_mount_id
-            if root_mount_id is not None and root_mount_id not in {mount.mount_id for mount in descriptor.mounts}:
-                raise EIPProtocolError("server returned an unknown root mount")
+                raise EIPProtocolError(f"server omitted required method: {missing[0]}")
             requester.configure_limits(
                 max_in_flight=min(max_in_flight, descriptor.limits.max_concurrent_operations),
                 max_request_bytes=descriptor.limits.max_request_bytes,
@@ -129,16 +115,16 @@ class EIPSession:
         path: EIPPath,
         *,
         byte_range: FileByteRange | None = None,
-        transfer_deadline: datetime | None = None,
+        transfer_timeout_ms: int | None = None,
     ) -> EIPFileReader:
         self._ensure_open()
-        self._require_capability("file.read")
+        self._require_method("file.open_reader")
         return EIPFileReader(
             self._requester,
             self._client,
             path,
             byte_range=byte_range,
-            transfer_deadline=transfer_deadline,
+            transfer_timeout_ms=transfer_timeout_ms,
         )
 
     def open_writer(
@@ -147,10 +133,10 @@ class EIPSession:
         *,
         mode: FileWriteMode | str,
         executable: bool | None = None,
-        transfer_deadline: datetime | None = None,
+        transfer_timeout_ms: int | None = None,
     ) -> EIPFileWriter:
         self._ensure_open()
-        self._require_capability("file.write")
+        self._require_method("file.open_writer")
         resolved_mode = mode if isinstance(mode, FileWriteMode) else FileWriteMode(mode)
         return EIPFileWriter(
             self._requester,
@@ -158,7 +144,7 @@ class EIPSession:
             path,
             resolved_mode,
             executable=executable,
-            transfer_deadline=transfer_deadline,
+            transfer_timeout_ms=transfer_timeout_ms,
             max_transfer_frame_bytes=self._descriptor.limits.max_transfer_frame_bytes,
         )
 
@@ -170,18 +156,10 @@ class EIPSession:
                 EnvironmentDescribeParams(context=EIPCallContext(operation_id=_operation_id()))
             )
             descriptor = result.descriptor
-            if descriptor.environment_id != self._descriptor.environment_id:
-                await self._terminate_protocol_error(
-                    EIPProtocolError("Environment identity changed within an EIP session")
-                )
-            if descriptor.generation != self._descriptor.generation:
-                await self._terminate_protocol_error(
-                    EIPProtocolError("Environment generation changed within an EIP session")
-                )
-            if descriptor.resource_authority != self._descriptor.resource_authority:
-                await self._terminate_protocol_error(
-                    EIPProtocolError("resource authority changed within an EIP session")
-                )
+            try:
+                _validate_descriptor_refresh(self._descriptor, descriptor)
+            except EIPProtocolError as error:
+                await self._terminate_protocol_error(error)
             self._requester.narrow_limits(
                 max_in_flight=descriptor.limits.max_concurrent_operations,
                 max_request_bytes=descriptor.limits.max_request_bytes,
@@ -235,9 +213,74 @@ class EIPSession:
         if self._closed:
             raise EIPSessionStateError("EIP session is closed")
 
-    def _require_capability(self, capability: str) -> None:
-        if capability not in self._descriptor.capabilities:
-            raise EIPSessionStateError(f"EIP capability is not available: {capability}")
+    def _require_method(self, method: str) -> None:
+        if method not in self._descriptor.available_methods:
+            raise EIPSessionStateError(f"EIP method is not available: {method}")
+
+
+def _validate_descriptor_structure(descriptor: EnvironmentDescriptor) -> None:
+    methods = set(descriptor.available_methods)
+    if len(methods) != len(descriptor.available_methods):
+        raise EIPProtocolError("descriptor contains duplicate available methods")
+    unknown_methods = methods - METHODS.keys()
+    if unknown_methods:
+        raise EIPProtocolError(f"descriptor contains unknown method: {min(unknown_methods)}")
+    mount_ids = {mount.mount_id for mount in descriptor.mounts}
+    if len(mount_ids) != len(descriptor.mounts):
+        raise EIPProtocolError("descriptor contains duplicate mount IDs")
+    if descriptor.root_mount_id is not None and descriptor.root_mount_id not in mount_ids:
+        raise EIPProtocolError("server returned an unknown root mount")
+    profile_ids = {profile.profile_id for profile in descriptor.shell_profiles}
+    if len(profile_ids) != len(descriptor.shell_profiles):
+        raise EIPProtocolError("descriptor contains duplicate shell profile IDs")
+    features = descriptor.execution_features
+    signals_available = features.signal_interrupt or features.signal_terminate
+    if signals_available != ("process.signal" in methods):
+        raise EIPProtocolError("descriptor process signal method and features disagree")
+    command_features = (
+        features.process_count_limit
+        or features.memory_bytes_limit
+        or features.cpu_time_limit
+        or features.per_command_network_deny
+    )
+    if command_features and not ({"shell.exec", "process.start"} & methods):
+        raise EIPProtocolError("descriptor advertises command features without a command method")
+
+
+def _validate_descriptor_refresh(
+    previous: EnvironmentDescriptor,
+    observed: EnvironmentDescriptor,
+) -> None:
+    _validate_descriptor_structure(observed)
+    if observed.environment_id != previous.environment_id:
+        raise EIPProtocolError("Environment identity changed within an EIP session")
+    if observed.generation != previous.generation:
+        raise EIPProtocolError("Environment generation changed within an EIP session")
+    if observed.root_mount_id != previous.root_mount_id or observed.mounts != previous.mounts:
+        raise EIPProtocolError("mount topology changed within an EIP session")
+    if observed.shell_profiles != previous.shell_profiles:
+        raise EIPProtocolError("shell profiles changed within an EIP session")
+    if observed.isolation != previous.isolation:
+        raise EIPProtocolError("isolation posture changed within an EIP session")
+    if observed.execution_features != previous.execution_features:
+        raise EIPProtocolError("execution features changed within an EIP session")
+    if not set(observed.available_methods).issubset(previous.available_methods):
+        raise EIPProtocolError("available methods widened within an EIP session")
+    current = previous.limits
+    refreshed = observed.limits
+    if (
+        refreshed.max_request_bytes > current.max_request_bytes
+        or refreshed.max_response_bytes > current.max_response_bytes
+        or refreshed.max_concurrent_operations > current.max_concurrent_operations
+        or refreshed.max_processes > current.max_processes
+        or refreshed.max_operation_duration_ms > current.max_operation_duration_ms
+        or refreshed.max_inline_output_bytes > current.max_inline_output_bytes
+        or refreshed.max_output_bytes > current.max_output_bytes
+        or refreshed.max_transfer_frame_bytes > current.max_transfer_frame_bytes
+        or refreshed.max_concurrent_file_transfers > current.max_concurrent_file_transfers
+        or refreshed.max_file_transfer_bytes > current.max_file_transfer_bytes
+    ):
+        raise EIPProtocolError("descriptor limits widened within an EIP session")
 
 
 def _operation_id() -> str:

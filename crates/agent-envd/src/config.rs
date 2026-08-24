@@ -9,7 +9,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::eip::{EIPLimits, ResourceAuthority};
+use crate::eip::EIPLimits;
 
 const DEFAULT_MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -31,7 +31,6 @@ const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
     "AGENT_ENVD_WEBSOCKET_ENABLED",
     "AGENT_ENVD_ENVIRONMENT_ID",
     "AGENT_ENVD_RUNTIME_DIR",
-    "AGENT_ENVD_RESOURCE_AUTHORITY",
     "AGENT_ENVD_EXECUTION_ISOLATION",
     "AGENT_ENVD_EXECUTION_NETWORK",
     "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS",
@@ -102,12 +101,54 @@ struct FileConfig {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct DaemonLimits {
+    pub(crate) max_request_bytes: u64,
+    pub(crate) max_response_bytes: u64,
+    pub(crate) max_concurrent_operations: u64,
+    pub(crate) max_processes: u64,
+    pub(crate) max_operation_duration_ms: u64,
+    pub(crate) max_inline_output_bytes: u64,
+    pub(crate) max_output_bytes: u64,
+    pub(crate) max_retained_bytes: u64,
+    pub(crate) max_retained_objects: u64,
+    pub(crate) max_retention_ttl_ms: u64,
+    pub(crate) max_operation_records: u64,
+    pub(crate) operation_record_ttl_ms: u64,
+    pub(crate) max_process_records: u64,
+    pub(crate) terminal_process_record_ttl_ms: u64,
+    pub(crate) max_transfer_frame_bytes: u64,
+    pub(crate) max_concurrent_file_transfers: u64,
+    pub(crate) max_file_transfer_records: u64,
+    pub(crate) file_transfer_record_ttl_ms: u64,
+    pub(crate) max_staged_file_bytes: u64,
+    pub(crate) max_staged_file_objects: u64,
+    pub(crate) file_transfer_idle_ttl_ms: u64,
+    pub(crate) max_file_transfer_duration_ms: u64,
+}
+
+impl DaemonLimits {
+    pub(crate) fn descriptor(&self) -> EIPLimits {
+        EIPLimits {
+            max_request_bytes: self.max_request_bytes,
+            max_response_bytes: self.max_response_bytes,
+            max_concurrent_operations: self.max_concurrent_operations,
+            max_processes: self.max_processes,
+            max_operation_duration_ms: self.max_operation_duration_ms,
+            max_inline_output_bytes: self.max_inline_output_bytes,
+            max_output_bytes: self.max_output_bytes,
+            max_transfer_frame_bytes: self.max_transfer_frame_bytes,
+            max_concurrent_file_transfers: self.max_concurrent_file_transfers,
+            max_file_transfer_bytes: self.max_staged_file_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) environment_id: String,
-    pub(crate) limits: EIPLimits,
+    pub(crate) limits: DaemonLimits,
     pub(crate) initialization_timeout: Duration,
     pub(crate) session_idle_timeout: Duration,
-    pub(crate) resource_authority: ResourceAuthority,
     pub(crate) root_mount_id: Option<String>,
     pub(crate) mounts: Vec<TrustedMountConfig>,
     pub(crate) command: Option<CommandConfig>,
@@ -183,19 +224,6 @@ impl Config {
             ));
         }
 
-        let resource_authority = match optional_unicode("AGENT_ENVD_RESOURCE_AUTHORITY")?
-            .as_deref()
-            .unwrap_or("scoped")
-        {
-            "scoped" => ResourceAuthority::Scoped,
-            "server" => ResourceAuthority::Server,
-            _ => {
-                return Err(ConfigError::new(
-                    "AGENT_ENVD_RESOURCE_AUTHORITY must be scoped or server",
-                ));
-            }
-        };
-
         let environment_id = required_unicode("AGENT_ENVD_ENVIRONMENT_ID")?;
         if environment_id.trim() != environment_id
             || environment_id.is_empty()
@@ -217,7 +245,6 @@ impl Config {
             environment_id,
             initialization_timeout: INITIALIZATION_TIMEOUT,
             session_idle_timeout: Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS),
-            resource_authority,
             root_mount_id: file.root_mount_id,
             mounts: file.mounts,
             command,
@@ -232,7 +259,6 @@ impl Config {
             limits: default_limits(),
             initialization_timeout: Duration::from_millis(20),
             session_idle_timeout: Duration::from_secs(1),
-            resource_authority: ResourceAuthority::Scoped,
             root_mount_id: None,
             mounts: Vec::new(),
             command: None,
@@ -527,8 +553,8 @@ fn load_file_config(path: Option<PathBuf>) -> Result<FileConfig, ConfigError> {
         .map_err(|error| ConfigError::new(format!("invalid config file JSON: {error}")))
 }
 
-fn default_limits() -> EIPLimits {
-    EIPLimits {
+fn default_limits() -> DaemonLimits {
+    DaemonLimits {
         max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         max_concurrent_operations: DEFAULT_MAX_CONCURRENT_OPERATIONS,
@@ -541,7 +567,6 @@ fn default_limits() -> EIPLimits {
         max_retention_ttl_ms: 24 * 60 * 60 * 1000,
         max_operation_records: 16_384,
         operation_record_ttl_ms: 24 * 60 * 60 * 1000,
-        session_idle_ttl_ms: DEFAULT_SESSION_IDLE_TTL_MS,
         max_process_records: 1024,
         terminal_process_record_ttl_ms: 24 * 60 * 60 * 1000,
         max_transfer_frame_bytes: DEFAULT_MAX_TRANSFER_FRAME_BYTES,
@@ -617,7 +642,11 @@ mod tests {
     fn test_configuration_has_finite_valid_limits() {
         let config = Config::for_test("env-test");
 
-        config.limits.validate().expect("limits are valid");
+        config
+            .limits
+            .descriptor()
+            .validate()
+            .expect("limits are valid");
         assert_eq!(config.environment_id, "env-test");
         assert_eq!(config.limits.max_request_bytes, 16 * 1024 * 1024);
         assert_eq!(config.limits.max_response_bytes, 16 * 1024 * 1024);

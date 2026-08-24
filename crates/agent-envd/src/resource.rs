@@ -164,6 +164,7 @@ impl ResourceRegistry {
             entries,
             offset: params.offset,
             has_more,
+            omitted_unrepresentable_entries: 0,
         })
     }
 
@@ -203,6 +204,7 @@ impl ResourceRegistry {
             entries,
             offset: params.offset,
             has_more,
+            omitted_unrepresentable_entries: 0,
         })
     }
 
@@ -263,6 +265,7 @@ impl ResourceRegistry {
             matches,
             offset: params.offset,
             has_more,
+            omitted_unrepresentable_entries: 0,
         })
     }
 
@@ -1524,8 +1527,7 @@ mod tests {
     fn context(operation_id: &str) -> EIPCallContext {
         EIPCallContext {
             operation_id: operation_id.to_owned(),
-            deadline: None,
-            idempotency_key: None,
+            timeout_ms: None,
         }
     }
 
@@ -1900,10 +1902,7 @@ mod tests {
             .write_text(
                 &fixture.mounts,
                 &FileWriteTextParams {
-                    context: EIPCallContext {
-                        idempotency_key: Some("append-key".to_owned()),
-                        ..context("append")
-                    },
+                    context: context("append"),
                     path: path("/work/nested/source.txt"),
                     mode: FileWriteMode::Append,
                     text: "tail\n".to_owned(),

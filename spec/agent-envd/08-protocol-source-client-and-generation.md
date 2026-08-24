@@ -2,7 +2,7 @@
 
 ## Design Position
 
-EIP has one language-neutral protocol source that generates the daemon wire surface and the Python client surface. The canonical source uses Protobuf service and message IDL with EIP-specific method options. JSON-RPC 2.0 remains the observable control envelope over stdio, HTTP, and WebSocket, while raw file bytes use the correlated transfer carrier defined by the transport profile. Protobuf is an IDL and generation input; EIP does not use gRPC as a mandatory transport, put binary protobuf messages inside JSON-RPC, or serialize native file content as protobuf.
+EIP has one language-neutral protocol source that generates the daemon wire surface and the Python client surface. The canonical source uses Protobuf service and message IDL with EIP-specific method options. JSON-RPC 2.0 remains the observable control envelope over trusted stdio and outbound reverse WebSocket, while raw file bytes use the correlated transfer carrier defined by the carrier profile. Protobuf is an IDL and generation input; EIP does not use gRPC as a mandatory transport, put binary protobuf messages inside JSON-RPC, or serialize native file content as protobuf.
 
 The dedicated `converge-agent-envd-client` Python package contains the generated EIP models, method and transfer metadata, control/data codecs, typed request stubs, high-level async file readers and writers, and a small handwritten transport/session runtime. It has no Harness, provider, product, or daemon-process authority. The Harness directly owns the adapter from its provider-neutral Environment protocols to this client; there is no separate EIP Environment adapter package.
 
@@ -49,8 +49,7 @@ Every canonical IDL file uses the Protobuf package `converge.agent_envd.eip.v1`.
 
 - exact JSON-RPC method name;
 - whether the method opens, closes, commits, or aborts a typed file transfer and the permitted direction;
-- capability key;
-- idempotency class and whether an idempotency key is allowed or required;
+- operation replay class under the single operation-ID identity;
 - correlated request-response behavior;
 - protocol major and first minor in which the method exists;
 - owning error set or error family when narrower than the common EIP set.
@@ -119,17 +118,16 @@ The handwritten client runtime owns behavior that IDL cannot safely decide:
 - JSON-RPC ID allocation, response correlation, bounded in-flight multiplexing, and cancellation plumbing;
 - transfer attachment, bounded per-transfer queues, fair scheduling, backpressure, offset state, terminal acknowledgement, and deterministic teardown over generated frame codecs;
 - stdio content-length framing for both JSON control and EIP binary data frames;
-- HTTP `Authorization`, `EIP-Session`, `EIP-Transfer`, and streaming GET/PUT body handling;
-- WebSocket upgrade configuration, required subprotocol, first-message initialization, text control, binary transfer frames, ping/pong, and close mapping;
-- transport and message size enforcement before generated payload decode;
-- initialization state, requested and effective resource authority, selected protocol minor, descriptor refresh, logical-session idle expiry, and prior-generation selector fencing;
-- deadline-to-transport timeout narrowing without treating a transport timeout as operation failure;
-- receipt/idempotency reconciliation surfaces without automatic ambiguous mutation retry;
+- requester-side accepted reverse-WebSocket carrier integration, required subprotocol, first-message initialization, text control, binary transfer frames, ping/pong, and close mapping;
+- carrier and message size enforcement before generated payload decode;
+- initialization state, exact required/available methods, configured mounts/root mount, selected protocol minor, descriptor refresh, and prior-generation selector fencing;
+- relative call/transfer timeout narrowing without treating a carrier timeout as operation failure;
+- operation-ID replay and receipt reconciliation without automatic ambiguous mutation retry;
 - secret redaction and lifecycle cleanup.
 
-A common async transport protocol presents correlated control requests plus typed transfer attachments to the generated client core. Stdio, HTTP, and WebSocket implementations satisfy that protocol without changing generated control signatures, high-level reader/writer behavior, or EIP result/error meaning. The client never falls back to another transport and repeats a possibly dispatched mutation.
+A common async carrier protocol presents correlated control requests plus typed transfer attachments to the generated client core. Trusted stdio and a reverse-WebSocket connection accepted by the requester/control-service boundary satisfy that protocol without changing generated signatures, reader/writer behavior, or EIP results. The client never falls back to another carrier or repeats a possibly dispatched mutation.
 
-The public low-level convenience surface creates fresh operation IDs and session-scoped idempotency keys for opens, always uses an idempotency key for commit, and hides transfer handles, attachment frames, offsets, and digest bookkeeping:
+The public low-level convenience surface creates one fresh operation ID per logical operation and hides transfer handles, attachment frames, offsets, reset retirement, and digest bookkeeping:
 
 ```python
 async with client.open_reader(path, byte_range=byte_range) as reader:
@@ -143,7 +141,7 @@ async with client.open_writer(path, mode="replace") as writer:
     result = await writer.commit()
 ```
 
-Normal reader iteration maintains a local count and SHA-256, withholds framed `END_ACK` until the public consumer drains all chunks, and ends only after clean carrier termination plus `file.close_reader(accept_complete=true)` delivered-byte count/digest verification. Early framed context exit atomically retires the local channel before sending `RESET`, consumes envd's terminal `RESET` acknowledgement through a bounded tombstone, and calls `file.close_reader(accept_complete=false)`; an envd-initiated reset is already terminal and is not echoed. Once the coordinator accepts that peer reset into the bounded local channel, cleanup observes it as terminal even if the public iterator has not dequeued it. It never reports a prefetched stream as consumed. Writer `commit()` seals and receives terminal acknowledgement before `file.commit_writer`; context exit without successful commit uses the same bounded reset retirement and calls `file.abort_writer`. Helpers can also iterate text/list/search cursors, retained output, and explicit receipt reconciliation. They preserve every bound, expiry, revision, integrity, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unsupported capability, turn transport loss into EOF, or materialize an unbounded value.
+Normal reader iteration maintains a local count and SHA-256 and calls `file.close_reader` only after the public consumer drains all chunks following clean `END`. Readers never send `END_ACK`; successful close count/digest verification is the sole acceptance. The helper publishes completion state only after local verification; mismatched completion evidence is a terminal peer protocol violation that leaves completion unavailable and closes the carrier. Early context exit atomically retires the local channel, sends `RESET` when possible, consumes at most one envd reset acknowledgement through a bounded tombstone, and never calls successful close. An envd-initiated reset is already terminal and is not echoed. A missing reset acknowledgement cannot wait forever: bounded retirement either completes or closes the carrier. Writer `commit()` seals through `END`/`END_ACK` before `file.commit_writer`; context exit without successful commit resets and calls `file.abort_writer`. Helpers iterate text/list/search pages and retained/process output through explicit offsets and reconcile receipts by operation ID. They preserve every bound, expiry observation, integrity, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unavailable method, turn carrier loss into EOF, or materialize an unbounded value.
 
 ## Harness Integration
 
@@ -153,14 +151,14 @@ The Harness package directly provides its EIP Environment backend beside its dir
 flowchart LR
     Bound[BoundEnvironment] --> Adapter[Harness EIP Environment adapter]
     Adapter --> Client[converge-agent-envd-client]
-    Client --> Transport[stdio HTTP or WebSocket]
+    Client --> Transport[trusted stdio or accepted reverse WebSocket]
     Transport --> Envd[converge-agent-envd]
 ```
 
 The adapter owns:
 
 - conversion from trusted Host endpoint/bootstrap configuration into a client session factory;
-- initialization during binding entry with an explicit `scoped` or operator-authorized `server` request and mapping of the effective EIP descriptor into the provider-neutral Harness descriptor;
+- initialization during binding entry with exact required methods and mapping of configured mounts, root mount, available methods, limits, generation, and isolation posture into the provider-neutral Harness descriptor;
 - conversion of Harness virtual paths into binding-local paths and then `EIPPath(root_mount_id, path)` at this low-level boundary; generated EIP path types never enter Harness core or model-facing tools;
 - bounded text, async file reader/writer, command, process, port, receipt, selector, and error translation;
 - omitting `OutputPolicy` for the advertised generous envd default or mapping an explicitly narrower Harness `ToolOutputPolicy` decision into EIP `OutputPolicy`;
@@ -168,22 +166,22 @@ The adapter owns:
 - provider-neutral readiness, cancellation, generation-stale handling, and binding cleanup behavior;
 - preserving dispatch certainty and unknown outcome while normalizing safe Harness error categories.
 
-It does not reimplement JSON-RPC, API-key handling, HTTP session/transfer headers, WebSocket handshake, stdio control/data framing, transfer attachment, generated payload validation, or method constants. Conversely, the client package does not know Harness virtual paths, Agent Identity, topology, model-facing references, managed redaction, or Tool metadata.
+It does not reimplement JSON-RPC, reverse-WebSocket attachment authentication/handshake, stdio framing, transfer attachment, generated payload validation, or method constants. Conversely, the client package does not know Harness virtual paths, Agent Identity, topology, model-facing references, managed redaction, or Tool metadata.
 
 A Host provider adapter still owns Docker, E2B, remote, or local-daemon provisioning and supplies a fresh trusted connection configuration through `EnvironmentRunBinding`. Putting the EIP adapter in Harness does not move provider lifecycle or credentials into Harness and does not make envd mandatory for direct-local Environments.
 
 ## Compatibility and Release
 
-EIP compatibility is negotiated by protocol major/minor and capability, not inferred from Python or Rust package versions. The generated client can communicate with any daemon whose negotiated protocol and required capabilities are compatible, subject to explicit package-supported version ranges.
+EIP compatibility is negotiated by protocol major/minor and exact required/available methods, not inferred from Python or Rust package versions. The generated client can communicate with any daemon whose selected protocol and required methods are compatible, subject to explicit package-supported ranges.
 
-The agent-envd release workflow uses one canonical `X.Y.Z` release identity to:
+The agent-envd release workflow uses one canonical stable `X.Y.Z` or RC `X.Y.Z-rc.N` release identity to:
 
 1. regenerate and verify all protocol artifacts from the canonical descriptor;
 2. run Python/Rust golden, negative, cross-language, and transport conformance tests;
 3. build `converge-agent-envd-client`, the `converge-agent-envd` crate/binaries, and the sandbox image from the same source and descriptor digest;
 4. publish only artifacts whose embedded package version, supported protocol range, and descriptor digest match the release inputs.
 
-All reversible builds and validations complete before any registry publication. Package registries are not transactionally atomic, so a retried release verifies an existing artifact against the exact source-built bytes and identity before skipping it; a mismatch fails closed. A client-package publish failure never causes the workflow to publish an unverified daemon image as if the release set were complete.
+All reversible builds and validations complete before any registry publication. Package registries are not transactionally atomic, so a retried release verifies an existing artifact against the exact source-built bytes and identity before skipping it; a mismatch fails closed. A client-package publish failure never causes the workflow to publish an unverified daemon image as if the release set were complete. Python package metadata uses the PEP 440-normalized `X.Y.ZrcN` spelling for the same canonical RC identity. The shared [repository release contract](../repository-model.md#release-automation) governs GitHub prerelease status and ensures an RC sandbox image does not advance `latest`.
 
 A protocol-only compatible addition can ship in a later package release without changing EIP major. Breaking wire meaning requires a new EIP major even if package semantic-version policy also uses a major release. The package version and EIP version never substitute for each other.
 
@@ -198,11 +196,11 @@ The protocol gate includes:
 - shared Python/Rust binary-frame golden fixtures for every frame kind plus malformed magic/version/length, wrong direction, duplicate attach, offset gap, terminal, reset, and oversize cases;
 - strict invalid fixtures for unknown authority fields, duplicate fields, malformed selectors, bounds, unions, and forbidden batches;
 - shared canonical values independently decoded and encoded to byte-identical sorted-key JSON by both Python and Rust, including explicit schema defaults and empty collections that must be omitted identically;
-- generated Python client against the actual Rust daemon over stdio, HTTP, and WebSocket;
-- authentication, HTTP session, WebSocket initialization, control/data fairness, transfer backpressure, reconnect invalidation, interruption cleanup, cancellation, idempotency, receipt, cursor, and unknown-outcome cases;
+- generated Python client against the actual Rust daemon over trusted stdio and outbound reverse WebSocket;
+- attachment authentication/refresh, TLS/subprotocol failure, fresh-session reconnect, control/data fairness, transfer backpressure, reset retirement, interruption cleanup, cancellation, operation-ID replay/conflict, receipt lookup, explicit offsets, and unknown-outcome cases;
 - regeneration in a clean checkout with no diff.
 
-Transport conformance extends the same method fixtures; it does not fork payload expectations. A generated model round trip alone is insufficient because it can reproduce the same generator bug on both sides without proving the intended JSON wire bytes.
+Carrier conformance extends the same method fixtures; it does not fork payload expectations. A generated model round trip alone is insufficient because it can reproduce the same generator bug on both sides without proving the intended JSON wire bytes.
 
 ## Trade-offs
 
@@ -221,11 +219,11 @@ One release group makes source, generated descriptor, conformance fixtures, and 
 ## Invariants
 
 01. One canonical Protobuf descriptor defines every generated EIP method and payload surface; no language keeps a second editable method list.
-02. EIP control remains JSON-RPC JSON over stdio, HTTP, and WebSocket; raw file content uses the correlated bounded data carrier, and Protobuf is IDL rather than a mandatory transport or content wrapper.
+02. EIP control remains JSON-RPC JSON over trusted stdio and outbound reverse WebSocket; raw file content uses the correlated bounded carrier, and Protobuf is IDL rather than a mandatory transport or content wrapper.
 03. Generated codecs implement the accepted EIP JSON profile exactly and never inherit a language runtime's incompatible defaults silently. Sender canonicalization recursively omits absent values, schema-default values, and empty non-presence-sensitive collections even when a caller explicitly constructed them.
 04. Request decoding fails closed for unknown authority-bearing input; response evolution follows the negotiated EIP minor compatibility rules.
 05. Python typed method stubs, transfer metadata/codecs, and Rust dispatch entries are generated from one descriptor/profile bound to the negotiated EIP major and fail drift checks together.
-06. Transport, authentication, attachment, backpressure, fair multiplexing, session, retry, and cleanup behavior remains handwritten, bounded, and shared beneath generated surfaces.
+06. Carrier, attachment authentication, correlation, backpressure, fair multiplexing, session, retry, and cleanup behavior remains handwritten, bounded, and shared beneath generated surfaces.
 07. Compiler and generator tools are locked build dependencies rather than accidental client runtime dependencies.
 08. `converge-agent-envd-client` imports no Harness or Host lifecycle type and grants no provider authority.
 09. The Harness directly owns EIP-to-Environment adaptation and does not reimplement wire models, method constants, or transport handshakes.

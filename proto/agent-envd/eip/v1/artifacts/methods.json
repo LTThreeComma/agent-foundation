@@ -3,10 +3,8 @@
   "method_count": 35,
   "methods": [
     {
-      "capability": "environment.describe",
       "error_family": "common",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "environment.describe",
       "kind": "request_response",
@@ -17,10 +15,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "file.abort_writer",
       "kind": "request_response",
@@ -31,10 +27,8 @@
       "transfer_direction": "client_to_server"
     },
     {
-      "capability": "file.read",
       "error_family": "resource",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "file.close_reader",
       "kind": "request_response",
@@ -45,10 +39,8 @@
       "transfer_direction": "server_to_client"
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.commit_writer",
       "kind": "request_response",
@@ -59,10 +51,8 @@
       "transfer_direction": "client_to_server"
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.copy",
       "kind": "request_response",
@@ -73,10 +63,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.find",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "file.find",
       "kind": "request_response",
@@ -87,10 +75,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.read",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "file.list",
       "kind": "request_response",
@@ -101,10 +87,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.mkdir",
       "kind": "request_response",
@@ -115,10 +99,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.move",
       "kind": "request_response",
@@ -129,10 +111,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.read",
       "error_family": "resource",
-      "idempotency": "session_resource_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.open_reader",
       "kind": "request_response",
@@ -143,10 +123,8 @@
       "transfer_direction": "server_to_client"
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "session_resource_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.open_writer",
       "kind": "request_response",
@@ -157,10 +135,8 @@
       "transfer_direction": "client_to_server"
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.patch_text",
       "kind": "request_response",
@@ -171,10 +147,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.read",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "file.read_text",
       "kind": "request_response",
@@ -185,10 +159,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.remove",
       "kind": "request_response",
@@ -199,10 +171,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.search",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "file.search",
       "kind": "request_response",
@@ -213,10 +183,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.read",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "file.stat",
       "kind": "request_response",
@@ -227,10 +195,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "file.write",
       "error_family": "resource",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "file.write_text",
       "kind": "request_response",
@@ -241,10 +207,8 @@
       "transfer_direction": null
     },
     {
-      "capability": null,
       "error_family": "initialization",
       "idempotency": "initialization",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "initialize",
       "kind": "request_response",
@@ -255,10 +219,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "operation.cancel",
       "error_family": "common",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "operation.cancel",
       "kind": "request_response",
@@ -269,10 +231,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "output.read",
       "error_family": "output",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "output.read",
       "kind": "request_response",
@@ -283,10 +243,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "output.read",
       "error_family": "output",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "output.release",
       "kind": "request_response",
@@ -297,10 +255,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "port.observe",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "port.inspect",
       "kind": "request_response",
@@ -311,10 +267,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "port.observe",
       "error_family": "resource",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "port.wait",
       "kind": "request_response",
@@ -325,10 +279,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "process.close_stdin",
       "kind": "request_response",
@@ -339,10 +291,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "process.inspect",
       "kind": "request_response",
@@ -353,10 +303,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "process.kill",
       "kind": "request_response",
@@ -367,10 +315,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "process.read_output",
       "kind": "request_response",
@@ -381,10 +327,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "state_idempotent_control",
-      "idempotency_key": "optional",
       "introduced": "1.0",
       "jsonrpc_method": "process.release",
       "kind": "request_response",
@@ -395,10 +339,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "process.signal",
       "kind": "request_response",
@@ -409,10 +351,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "process.start",
       "kind": "request_response",
@@ -423,10 +363,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "process.wait",
       "kind": "request_response",
@@ -437,10 +375,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "process.manage",
       "error_family": "process",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "process.write_stdin",
       "kind": "request_response",
@@ -451,10 +387,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "receipt.read",
       "error_family": "common",
       "idempotency": "read_only_retry",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "receipt.get",
       "kind": "request_response",
@@ -465,10 +399,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "session.close",
       "error_family": "session",
       "idempotency": "session_terminal",
-      "idempotency_key": "disallowed",
       "introduced": "1.0",
       "jsonrpc_method": "session.close",
       "kind": "request_response",
@@ -479,10 +411,8 @@
       "transfer_direction": null
     },
     {
-      "capability": "shell.exec",
       "error_family": "command",
-      "idempotency": "provider_key_replay",
-      "idempotency_key": "optional",
+      "idempotency": "operation_replay",
       "introduced": "1.0",
       "jsonrpc_method": "shell.exec",
       "kind": "request_response",

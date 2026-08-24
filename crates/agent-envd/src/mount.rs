@@ -18,7 +18,7 @@ use cap_std::{ambient_authority, fs::Dir};
 
 use crate::{
     config::{Config, TrustedMountConfig},
-    eip::{EIPPath, MountDescriptor, ResourceAuthority},
+    eip::{EIPPath, MountDescriptor},
 };
 
 const READ_OPERATIONS: &[&str] = &["stat", "read_text", "open_reader", "list"];
@@ -60,8 +60,6 @@ pub(crate) struct OpenedFile {
 
 #[derive(Clone)]
 pub(crate) struct CommandCwd {
-    mount: Arc<Mount>,
-    relative: PathBuf,
     pub(crate) native_path: PathBuf,
 }
 
@@ -114,37 +112,8 @@ impl MountRegistry {
             .map(PreparedMount::new)
             .collect::<Result<Vec<_>, _>>()?;
         validate_topology(&prepared)?;
+        validate_private_runtime_separation(config, &prepared)?;
         Self::from_prepared(config, prepared, config.root_mount_id.as_deref())
-    }
-
-    pub(crate) fn initialize_server(config: &Config) -> Result<Option<Self>, MountInitError> {
-        if config.resource_authority != ResourceAuthority::Server {
-            return Ok(None);
-        }
-        #[cfg(unix)]
-        {
-            let configured = TrustedMountConfig {
-                mount_id: "server-root".to_owned(),
-                native_root: PathBuf::from("/"),
-                writable: true,
-                allow_command_execution: true,
-                max_file_bytes: config.limits.max_staged_file_bytes,
-                allowed_operations: READ_OPERATIONS
-                    .iter()
-                    .chain(WRITE_OPERATIONS)
-                    .chain(OPTIONAL_OPERATIONS)
-                    .map(|value| (*value).to_owned())
-                    .collect(),
-            };
-            let prepared = vec![PreparedMount::new(&configured)?];
-            Self::from_prepared(config, prepared, Some("server-root")).map(Some)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(MountInitError::new(
-                "server resource authority is unsupported on this platform",
-            ))
-        }
     }
 
     fn from_prepared(
@@ -211,19 +180,6 @@ impl MountRegistry {
             .collect()
     }
 
-    pub(crate) fn has_complete_read_family(&self) -> bool {
-        self.mounts
-            .values()
-            .any(|mount| READ_OPERATIONS.iter().all(|name| mount.allows(name)))
-    }
-
-    pub(crate) fn has_complete_write_family(&self) -> bool {
-        cfg!(any(target_os = "linux", target_os = "macos"))
-            && self.mounts.values().any(|mount| {
-                mount.writable && WRITE_OPERATIONS.iter().all(|name| mount.allows(name))
-            })
-    }
-
     pub(crate) fn supports_anywhere(&self, operation: &str) -> bool {
         self.mounts.values().any(|mount| mount.allows(operation))
     }
@@ -254,37 +210,21 @@ impl MountRegistry {
         validate_canonical_relative(&canonical)?;
         Ok(CommandCwd {
             native_path: mount.native_root.join(&canonical),
-            mount,
-            relative: canonical,
         })
     }
-}
 
-impl CommandCwd {
-    pub(crate) fn resolve_relative_executable(
-        &self,
-        executable: &str,
-    ) -> Result<PathBuf, MountPathError> {
-        if !self.mount.allows("executable_source") {
+    pub(crate) fn resolve_executable(&self, path: &EIPPath) -> Result<PathBuf, MountPathError> {
+        let mount = self.get(&path.mount_id).ok_or(MountPathError::Denied)?;
+        if !mount.allow_command_execution || !mount.allows("executable_source") {
             return Err(MountPathError::Denied);
         }
-        let requested = Path::new(executable);
-        if requested.is_absolute()
-            || requested
-                .components()
-                .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
-        {
-            return Err(MountPathError::Denied);
-        }
-        let candidate = self.relative.join(requested);
-        let canonical = self
-            .mount
+        let relative = mount.relative_path(path)?;
+        let canonical = mount
             .root
-            .canonicalize(candidate)
+            .canonicalize(relative)
             .map_err(MountPathError::from_io)?;
         validate_canonical_relative(&canonical)?;
-        let metadata = self
-            .mount
+        let metadata = mount
             .root
             .metadata(&canonical)
             .map_err(MountPathError::from_io)?;
@@ -298,7 +238,7 @@ impl CommandCwd {
                 return Err(MountPathError::Denied);
             }
         }
-        Ok(self.mount.native_root.join(canonical))
+        Ok(mount.native_root.join(canonical))
     }
 }
 
@@ -776,6 +716,25 @@ fn validate_topology(mounts: &[PreparedMount]) -> Result<(), MountInitError> {
 
 fn overlaps(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn validate_private_runtime_separation(
+    config: &Config,
+    mounts: &[PreparedMount],
+) -> Result<(), MountInitError> {
+    let Some(command) = &config.command else {
+        return Ok(());
+    };
+    for mount in mounts {
+        if overlaps(&mount.native_root, &command.private_home)
+            || overlaps(&mount.native_root, &command.private_temp)
+        {
+            return Err(MountInitError::new(
+                "native mount roots must not overlap protected command runtime directories",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn logical_to_relative(path: &str) -> Result<PathBuf, MountPathError> {

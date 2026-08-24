@@ -6,9 +6,12 @@ import re
 import stat
 import tempfile
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 COMPONENTS = (
+    "harness",
+    "agent-ui",
     "foundation",
     "agent-envd",
     "sdk-python",
@@ -16,15 +19,26 @@ COMPONENTS = (
     "sdk-rust",
     "sdk-typescript",
 )
+HARNESS_MANIFESTS = (
+    Path("packages/agent-harness/pyproject.toml"),
+    Path("packages/agent-stream-protocol/pyproject.toml"),
+)
+HARNESS_PACKAGES = (
+    "converge-agent-harness",
+    "converge-agent-stream-protocol",
+)
+HARNESS_PACKAGE = "converge-agent-harness"
+STREAM_PROTOCOL_MANIFEST = Path("packages/agent-stream-protocol/pyproject.toml")
+AGENT_UI_MANIFEST = Path("packages/agent-ui/pyproject.toml")
+AGENT_UI_PACKAGE = "converge-agent-ui"
+AGENT_UI_RELEASE_TOOL = "tool.converge.agent-ui-release"
 FOUNDATION_MANIFESTS = (
     Path("pyproject.toml"),
-    Path("packages/agent-harness/pyproject.toml"),
     Path("packages/logging/pyproject.toml"),
     Path("packages/foundation-service/pyproject.toml"),
 )
 FOUNDATION_PACKAGES = (
     "converge-agent-foundation",
-    "converge-agent-harness",
     "converge-logging",
     "converge-foundation-service",
 )
@@ -40,17 +54,70 @@ SDK_RUST_MANIFEST = Path("sdk/rust/Cargo.toml")
 SDK_RUST_LOCK = Path("sdk/rust/Cargo.lock")
 SDK_TYPESCRIPT_MANIFEST = Path("sdk/typescript/package.json")
 SDK_TYPESCRIPT_LOCK = Path("sdk/typescript/package-lock.json")
-RELEASE_VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+RELEASE_VERSION_PATTERN = re.compile(
+    r"(?P<major>0|[1-9][0-9]*)\."
+    r"(?P<minor>0|[1-9][0-9]*)\."
+    r"(?P<patch>0|[1-9][0-9]*)"
+    r"(?:-rc\.(?P<rc>[1-9][0-9]*))?"
+)
 _VERSION_LINE_PATTERN = re.compile(r'^(\s*version\s*=\s*")[^"]*(".*?)(\r?\n)?$')
+_DEPENDENCY_LINE_PATTERN = re.compile(r'^(?P<prefix>\s*")(?P<requirement>[^"]+)(?P<suffix>".*?)(?P<newline>\r?\n)?$')
 
 
 class ReleaseVersionError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class ReleaseVersion:
+    major: int
+    minor: int
+    patch: int
+    rc: int | None
+
+    @property
+    def canonical(self) -> str:
+        base = f"{self.major}.{self.minor}.{self.patch}"
+        if self.rc is None:
+            return base
+        return f"{base}-rc.{self.rc}"
+
+    @property
+    def python_package(self) -> str:
+        if self.rc is None:
+            return self.canonical
+        return f"{self.major}.{self.minor}.{self.patch}rc{self.rc}"
+
+    @property
+    def is_prerelease(self) -> bool:
+        return self.rc is not None
+
+    @property
+    def precedence_key(self) -> tuple[int, int, int, int, int]:
+        if self.rc is None:
+            return self.major, self.minor, self.patch, 1, 0
+        return self.major, self.minor, self.patch, 0, self.rc
+
+
+def parse_release_version(version: str) -> ReleaseVersion:
+    match = RELEASE_VERSION_PATTERN.fullmatch(version)
+    if match is None:
+        raise ReleaseVersionError(f"Release version must use X.Y.Z or X.Y.Z-rc.N syntax: {version}")
+    rc = match.group("rc")
+    return ReleaseVersion(
+        major=int(match.group("major")),
+        minor=int(match.group("minor")),
+        patch=int(match.group("patch")),
+        rc=int(rc) if rc is not None else None,
+    )
+
+
 def validate_version_syntax(version: str) -> None:
-    if RELEASE_VERSION_PATTERN.fullmatch(version) is None:
-        raise ReleaseVersionError(f"Release version must use X.Y.Z syntax: {version}")
+    parse_release_version(version)
+
+
+def python_package_version(version: str) -> str:
+    return parse_release_version(version).python_package
 
 
 def _load_toml(root: Path, relative_path: Path) -> dict[str, object]:
@@ -89,6 +156,40 @@ def _string(value: object, label: str) -> str:
 def _project_version(root: Path, relative_path: Path) -> str:
     project = _mapping(_load_toml(root, relative_path).get("project"), f"project.version in {relative_path}")
     return _string(project.get("version"), f"project.version in {relative_path}")
+
+
+def _project_dependency_requirement(root: Path, relative_path: Path, package_name: str) -> str:
+    project = _mapping(_load_toml(root, relative_path).get("project"), f"project.dependencies in {relative_path}")
+    dependencies = project.get("dependencies")
+    if not isinstance(dependencies, list):
+        raise ReleaseVersionError(f"Missing project.dependencies in {relative_path}")
+    pattern = re.compile(rf"^{re.escape(package_name)}(?=$|\s|[<>=!~;@\[])")
+    matches = [value for value in dependencies if isinstance(value, str) and pattern.match(value)]
+    if len(matches) != 1:
+        raise ReleaseVersionError(
+            f"Expected exactly one {package_name} dependency in {relative_path}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _agent_ui_harness_release(root: Path) -> ReleaseVersion:
+    data = _load_toml(root, AGENT_UI_MANIFEST)
+    tool = _mapping(data.get("tool"), f"{AGENT_UI_RELEASE_TOOL}.harness-version in {AGENT_UI_MANIFEST}")
+    converge = _mapping(tool.get("converge"), f"{AGENT_UI_RELEASE_TOOL}.harness-version in {AGENT_UI_MANIFEST}")
+    release = _mapping(
+        converge.get("agent-ui-release"),
+        f"{AGENT_UI_RELEASE_TOOL}.harness-version in {AGENT_UI_MANIFEST}",
+    )
+    version = _string(
+        release.get("harness-version"),
+        f"{AGENT_UI_RELEASE_TOOL}.harness-version in {AGENT_UI_MANIFEST}",
+    )
+    selected = parse_release_version(version)
+    if selected.canonical == "0.0.0":
+        raise ReleaseVersionError(
+            f"Select a published Harness release in {AGENT_UI_MANIFEST} before releasing Agent UI"
+        )
+    return selected
 
 
 def _cargo_package_version(root: Path, relative_path: Path) -> str:
@@ -154,6 +255,28 @@ def component_versions(root: Path, component: str) -> dict[str, str]:
     if component not in COMPONENTS:
         raise ReleaseVersionError(f"Unknown release component: {component}")
 
+    if component == "harness":
+        versions = {str(path): _project_version(root, path) for path in HARNESS_MANIFESTS}
+        versions.update(
+            {
+                f"{ROOT_UV_LOCK} package {package_name}": _lock_package_version(
+                    root,
+                    ROOT_UV_LOCK,
+                    package_name,
+                )
+                for package_name in HARNESS_PACKAGES
+            }
+        )
+        return versions
+    if component == "agent-ui":
+        return {
+            str(AGENT_UI_MANIFEST): _project_version(root, AGENT_UI_MANIFEST),
+            f"{ROOT_UV_LOCK} package {AGENT_UI_PACKAGE}": _lock_package_version(
+                root,
+                ROOT_UV_LOCK,
+                AGENT_UI_PACKAGE,
+            ),
+        }
     if component == "foundation":
         versions = {str(path): _project_version(root, path) for path in FOUNDATION_MANIFESTS}
         versions.update(
@@ -211,13 +334,54 @@ def component_versions(root: Path, component: str) -> dict[str, str]:
     return {}
 
 
+def _expected_component_versions(
+    component: str,
+    release_version: ReleaseVersion,
+    labels: tuple[str, ...],
+) -> dict[str, str]:
+    if component in {"harness", "agent-ui", "foundation", "sdk-python"}:
+        return {label: release_version.python_package for label in labels}
+    if component == "agent-envd":
+        python_labels = {
+            str(AGENT_ENVD_CLIENT_MANIFEST),
+            f"{ROOT_UV_LOCK} package {AGENT_ENVD_CLIENT_PACKAGE}",
+        }
+        return {
+            label: release_version.python_package if label in python_labels else release_version.canonical
+            for label in labels
+        }
+    return {label: release_version.canonical for label in labels}
+
+
 def validate_component_version(root: Path, component: str, version: str) -> None:
-    validate_version_syntax(version)
+    release_version = parse_release_version(version)
     versions = component_versions(root, component)
-    mismatches = {label: actual for label, actual in versions.items() if actual != version}
+    expected_versions = _expected_component_versions(component, release_version, tuple(versions))
+    mismatches = {
+        label: (actual, expected_versions[label])
+        for label, actual in versions.items()
+        if actual != expected_versions[label]
+    }
     if mismatches:
-        details = "\n".join(f"- {label}: {actual}" for label, actual in mismatches.items())
+        details = "\n".join(
+            f"- {label}: {actual} (expected {expected})" for label, (actual, expected) in mismatches.items()
+        )
         raise ReleaseVersionError(f"Expected {component} version {version}:\n{details}")
+
+    if release_version.canonical == "0.0.0":
+        return
+    if component == "harness":
+        expected = f"{HARNESS_PACKAGE}=={release_version.python_package}"
+        actual = _project_dependency_requirement(root, STREAM_PROTOCOL_MANIFEST, HARNESS_PACKAGE)
+        if actual != expected:
+            raise ReleaseVersionError(f"Expected {STREAM_PROTOCOL_MANIFEST} dependency {expected}, found {actual}")
+    elif component == "agent-ui":
+        selected = _agent_ui_harness_release(root).python_package
+        for package_name in HARNESS_PACKAGES:
+            expected = f"{package_name}=={selected}"
+            actual = _project_dependency_requirement(root, AGENT_UI_MANIFEST, package_name)
+            if actual != expected:
+                raise ReleaseVersionError(f"Expected {AGENT_UI_MANIFEST} dependency {expected}, found {actual}")
 
 
 def _replace_table_version(content: str, table_name: str, version: str, path: Path) -> str:
@@ -241,6 +405,31 @@ def _replace_table_version(content: str, table_name: str, version: str, path: Pa
         raise ReleaseVersionError(
             f"Expected exactly one {table_name}.version assignment in {path}, found {replacements}"
         )
+    return "".join(lines)
+
+
+def _replace_project_dependency(
+    content: str,
+    package_name: str,
+    requirement: str,
+    path: Path,
+) -> str:
+    package_pattern = re.compile(rf"^{re.escape(package_name)}(?=$|\s|[<>=!~;@\[])")
+    lines = content.splitlines(keepends=True)
+    matching_indexes: list[int] = []
+    for index, line in enumerate(lines):
+        match = _DEPENDENCY_LINE_PATTERN.fullmatch(line)
+        if match is not None and package_pattern.match(match.group("requirement")):
+            matching_indexes.append(index)
+    if len(matching_indexes) != 1:
+        raise ReleaseVersionError(
+            f"Expected exactly one {package_name} dependency in {path}, found {len(matching_indexes)}"
+        )
+    index = matching_indexes[0]
+    match = _DEPENDENCY_LINE_PATTERN.fullmatch(lines[index])
+    if match is None:
+        raise AssertionError("dependency line disappeared")
+    lines[index] = f"{match.group('prefix')}{requirement}{match.group('suffix')}{match.group('newline') or ''}"
     return "".join(lines)
 
 
@@ -340,16 +529,63 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def prepare_component_version(root: Path, component: str, version: str) -> tuple[Path, ...]:
-    validate_version_syntax(version)
+    release_version = parse_release_version(version)
+    canonical_version = release_version.canonical
+    python_version = release_version.python_package
     component_versions(root, component)
     planned: dict[Path, str] = {}
 
-    if component == "foundation":
+    if component == "harness":
+        for path in HARNESS_MANIFESTS:
+            planned[path] = _replace_table_version(
+                _read_text(root, path),
+                "project",
+                python_version,
+                path,
+            )
+        planned[STREAM_PROTOCOL_MANIFEST] = _replace_project_dependency(
+            planned[STREAM_PROTOCOL_MANIFEST],
+            HARNESS_PACKAGE,
+            f"{HARNESS_PACKAGE}=={python_version}",
+            STREAM_PROTOCOL_MANIFEST,
+        )
+        lock_content = _read_text(root, ROOT_UV_LOCK)
+        for package_name in HARNESS_PACKAGES:
+            lock_content = _replace_lock_package_version(
+                lock_content,
+                package_name,
+                python_version,
+                ROOT_UV_LOCK,
+            )
+        planned[ROOT_UV_LOCK] = lock_content
+    elif component == "agent-ui":
+        selected_harness_version = _agent_ui_harness_release(root).python_package
+        ui_content = _replace_table_version(
+            _read_text(root, AGENT_UI_MANIFEST),
+            "project",
+            python_version,
+            AGENT_UI_MANIFEST,
+        )
+        for package_name in HARNESS_PACKAGES:
+            ui_content = _replace_project_dependency(
+                ui_content,
+                package_name,
+                f"{package_name}=={selected_harness_version}",
+                AGENT_UI_MANIFEST,
+            )
+        planned[AGENT_UI_MANIFEST] = ui_content
+        planned[ROOT_UV_LOCK] = _replace_lock_package_version(
+            _read_text(root, ROOT_UV_LOCK),
+            AGENT_UI_PACKAGE,
+            python_version,
+            ROOT_UV_LOCK,
+        )
+    elif component == "foundation":
         for path in FOUNDATION_MANIFESTS:
             planned[path] = _replace_table_version(
                 _read_text(root, path),
                 "project",
-                version,
+                python_version,
                 path,
             )
         lock_content = _read_text(root, ROOT_UV_LOCK)
@@ -357,7 +593,7 @@ def prepare_component_version(root: Path, component: str, version: str) -> tuple
             lock_content = _replace_lock_package_version(
                 lock_content,
                 package_name,
-                version,
+                python_version,
                 ROOT_UV_LOCK,
             )
         planned[ROOT_UV_LOCK] = lock_content
@@ -365,63 +601,63 @@ def prepare_component_version(root: Path, component: str, version: str) -> tuple
         planned[AGENT_ENVD_WORKSPACE_MANIFEST] = _replace_table_version(
             _read_text(root, AGENT_ENVD_WORKSPACE_MANIFEST),
             "workspace.package",
-            version,
+            canonical_version,
             AGENT_ENVD_WORKSPACE_MANIFEST,
         )
         planned[AGENT_ENVD_LOCK] = _replace_lock_package_version(
             _read_text(root, AGENT_ENVD_LOCK),
             "converge-agent-envd",
-            version,
+            canonical_version,
             AGENT_ENVD_LOCK,
         )
         planned[AGENT_ENVD_CLIENT_MANIFEST] = _replace_table_version(
             _read_text(root, AGENT_ENVD_CLIENT_MANIFEST),
             "project",
-            version,
+            python_version,
             AGENT_ENVD_CLIENT_MANIFEST,
         )
         planned[ROOT_UV_LOCK] = _replace_lock_package_version(
             _read_text(root, ROOT_UV_LOCK),
             AGENT_ENVD_CLIENT_PACKAGE,
-            version,
+            python_version,
             ROOT_UV_LOCK,
         )
     elif component == "sdk-python":
         planned[SDK_PYTHON_MANIFEST] = _replace_table_version(
             _read_text(root, SDK_PYTHON_MANIFEST),
             "project",
-            version,
+            python_version,
             SDK_PYTHON_MANIFEST,
         )
         planned[SDK_PYTHON_LOCK] = _replace_lock_package_version(
             _read_text(root, SDK_PYTHON_LOCK),
             "converge-foundation-sdk",
-            version,
+            python_version,
             SDK_PYTHON_LOCK,
         )
     elif component == "sdk-rust":
         planned[SDK_RUST_MANIFEST] = _replace_table_version(
             _read_text(root, SDK_RUST_MANIFEST),
             "package",
-            version,
+            canonical_version,
             SDK_RUST_MANIFEST,
         )
         planned[SDK_RUST_LOCK] = _replace_lock_package_version(
             _read_text(root, SDK_RUST_LOCK),
             "converge-foundation-sdk",
-            version,
+            canonical_version,
             SDK_RUST_LOCK,
         )
     elif component == "sdk-typescript":
         planned[SDK_TYPESCRIPT_MANIFEST] = _replace_json_versions(
             _read_text(root, SDK_TYPESCRIPT_MANIFEST),
-            version,
+            canonical_version,
             SDK_TYPESCRIPT_MANIFEST,
             include_lock_root=False,
         )
         planned[SDK_TYPESCRIPT_LOCK] = _replace_json_versions(
             _read_text(root, SDK_TYPESCRIPT_LOCK),
-            version,
+            canonical_version,
             SDK_TYPESCRIPT_LOCK,
             include_lock_root=True,
         )

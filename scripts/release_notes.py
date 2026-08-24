@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from release_version import COMPONENTS, validate_version_syntax
+from release_version import COMPONENTS, parse_release_version, validate_version_syntax
 
 TAG_PREFIXES = {
+    "harness": "release/harness-v",
+    "agent-ui": "release/agent-ui-v",
     "foundation": "release/foundation-v",
     "agent-envd": "release/agent-envd-v",
     "sdk-python": "release/sdk/python/",
@@ -14,6 +16,8 @@ TAG_PREFIXES = {
     "sdk-typescript": "release/sdk/typescript/",
 }
 INITIAL_NOTES = {
+    "harness": "Initial release for Converge Agent Harness libraries.",
+    "agent-ui": "Initial release for Converge Agent UI.",
     "foundation": "Initial release for Agent Foundation.",
     "agent-envd": "Initial release for agent-envd.",
     "sdk-python": "Initial release for the Foundation SDK for Python.",
@@ -39,29 +43,33 @@ def release_tag(component: str, version: str) -> str:
     return f"{_tag_prefix(component)}{version}"
 
 
-def _version_key(version: str) -> tuple[int, int, int]:
-    validate_version_syntax(version)
-    major, minor, patch = version.split(".")
-    return int(major), int(minor), int(patch)
-
-
 def previous_release_tag(component: str, version: str, tags: Iterable[str]) -> str | None:
     prefix = _tag_prefix(component)
-    current_key = _version_key(version)
-    candidates: list[tuple[tuple[int, int, int], str]] = []
+    current_version = parse_release_version(version)
+    current_target = current_version.major, current_version.minor, current_version.patch
+    same_target_rcs: list[tuple[tuple[int, int, int, int, int], str]] = []
+    stable_candidates: list[tuple[tuple[int, int, int, int, int], str]] = []
     for tag in tags:
         if not tag.startswith(prefix):
             continue
-        candidate_version = tag.removeprefix(prefix)
+        candidate_text = tag.removeprefix(prefix)
         try:
-            candidate_key = _version_key(candidate_version)
+            candidate_version = parse_release_version(candidate_text)
         except ValueError:
             continue
-        if candidate_key < current_key:
-            candidates.append((candidate_key, tag))
-    if not candidates:
-        return None
-    return max(candidates)[1]
+        if candidate_version.precedence_key >= current_version.precedence_key:
+            continue
+        if candidate_version.is_prerelease:
+            candidate_target = candidate_version.major, candidate_version.minor, candidate_version.patch
+            if current_version.is_prerelease and candidate_target == current_target:
+                same_target_rcs.append((candidate_version.precedence_key, tag))
+            continue
+        stable_candidates.append((candidate_version.precedence_key, tag))
+    if same_target_rcs:
+        return max(same_target_rcs)[1]
+    if stable_candidates:
+        return max(stable_candidates)[1]
+    return None
 
 
 def release_notes_path(component: str, version: str) -> Path:
@@ -106,6 +114,8 @@ def build_release_command(
         "--title",
         title,
     ]
+    if parse_release_version(version).is_prerelease:
+        command.append("--prerelease")
     if previous_tag is None:
         command.extend(("--notes", manual_notes or INITIAL_NOTES[component]))
     else:

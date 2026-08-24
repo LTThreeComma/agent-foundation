@@ -2,77 +2,94 @@
 
 ## Design Position
 
-`agent-envd` is one authority-bearing daemon for one user, one Environment identity, and one process generation. It validates all trusted bootstrap configuration, prepares volatile resource stores and command execution, binds its own network listener when selected, and reports readiness only after every required enforcement component is usable.
+`agent-envd` is one authority-bearing daemon for one user, one Environment identity, and one process generation. It validates trusted bootstrap configuration, creates fresh generation-private runtime state, initializes resource owners and command isolation, and admits EIP only after every required enforcement component is usable.
 
-Bootstrap configuration is operator or provider-adapter input. Ordinary EIP requests can select only resources and behavior already permitted by that immutable configuration; they cannot change mount roots, transport authentication, isolation mode, protected paths, hard quotas, or Environment identity.
+A daemon uses either trusted stdio or outbound reverse WebSocket. In the network profile envd is a dialer: it actively connects to a trusted control-service listener and never binds an inbound EIP, HTTP, health, or readiness endpoint.
+
+Bootstrap configuration is operator or provider-adapter input. EIP requests can use only configured mounts, methods, profiles, limits, and isolation posture. They cannot change Environment identity, native roots, carrier endpoint/credentials, hard quotas, isolation mode, protected paths, or daemon generation.
 
 ## Boundaries
 
-| Concern                                                                                       | Owner                                                    | Relationship                                           |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
-| Provider resource creation and lifecycle credential                                           | Host provider adapter                                    | Completes before envd data-plane admission             |
-| Envd executable, trusted configuration, process environment, and endpoint exposure            | Operator or provider adapter                             | Launches envd inside the selected Environment boundary |
-| Configuration validation, native stores, listener bind, readiness, drain, and command cleanup | `agent-envd`                                             | One daemon lifecycle                                   |
-| EIP initialization and logical sessions                                                       | [Transports and Sessions](03-transports-and-sessions.md) | Begin only after daemon readiness                      |
-| Harness run and durable execution lifecycle                                                   | Harness and Host                                         | Independent of daemon process lifecycle                |
+| Concern                                                                                                                | Owner                                                    | Relationship                                  |
+| ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| Provider resource creation, lifecycle credential, endpoint routing, and envd attachment credential issuance            | Host provider adapter                                    | Completes trusted bootstrap and refresh       |
+| Envd executable, configuration, private bootstrap channel, and process lifecycle                                       | Operator or provider adapter                             | Launches envd inside the selected Environment |
+| Configuration validation, generation, resource owners, isolation probe, local readiness, connector, drain, and cleanup | `agent-envd`                                             | One daemon lifecycle                          |
+| Carrier framing, reverse-WebSocket handshake/reconnect, and EIP session                                                | [Transports and Sessions](03-transports-and-sessions.md) | Begins only after local readiness             |
+| Harness run and durable execution lifecycle                                                                            | Harness and Host                                         | Independent of daemon process lifetime        |
 
-A daemon process is not a Host execution attempt. One ready daemon can serve multiple sequential or concurrent authenticated EIP sessions for the same configured user within daemon-global ceilings. A session is a protocol carrier, not a tenant, principal, or run. It owns only the ephemeral lifetime of its file readers, pre-handoff writers, and data attachments; it does not own generation-scoped processes, operations, receipts, or retained output. Another user or mutually untrusted workload requires another daemon instance, API key, runtime root, and provider binding.
+One ready daemon can serve sequential stdio work or a sequence of reconnecting reverse-WebSocket sessions and can own concurrent generation resources within daemon-global ceilings. A session is a protocol carrier, not a tenant, principal, or run. Another user or mutually untrusted workload requires another daemon instance, runtime root, bootstrap binding, and provider resource boundary.
 
 ## Trusted Configuration
 
-The following conceptual schema defines the stable configuration classes. It is not the CLI parser or a serialized EIP schema.
+The following conceptual schema defines stable configuration classes. It is not the CLI parser or EIP wire shape.
 
 ```python
-type EndpointMode = Literal["stdio", "network"]
+type TransportMode = Literal["stdio", "reverse_websocket"]
 type ExecutionIsolationMode = Literal["required", "disabled"]
 type ExecutionNetworkMode = Literal["host", "deny"]
-type ResourceAuthorityCeiling = Literal["scoped", "server"]
 
 
-class NetworkEndpointConfig(BaseModel):
-    listen_address: str
-    http_enabled: bool = True
-    websocket_enabled: bool = True
-    api_key: SecretStr
-    allowed_origins: tuple[str, ...] = ()
-    tls_terminated_by_trusted_peer: bool = False
+class AttachmentCredentialProvider(BaseModel):
+    bootstrap_channel: SecretBootstrapChannel
+    refresh_before_expiry_ms: int
+
+
+class ReverseWebSocketConfig(BaseModel):
+    endpoint: str
+    subprotocol_major_versions: tuple[int, ...] = (1,)
+    credential_provider: AttachmentCredentialProvider
+    connect_timeout_ms: int
+    initialize_timeout_ms: int
+    ping_interval_ms: int
+    pong_timeout_ms: int
+    reconnect_base_ms: int
+    reconnect_cap_ms: int
+    stable_reset_ms: int
+    tls_trust_roots: tuple[str, ...] = ()
 
 
 class DaemonLimits(BaseModel):
+    # Client-actionable wire ceilings.
     max_request_bytes: int
     max_response_bytes: int
     max_transfer_frame_bytes: int
     max_concurrent_operations: int
     max_concurrent_file_transfers: int
+    max_file_transfer_bytes: int
+    max_processes: int
+    max_operation_duration_ms: int
+    max_inline_output_bytes: int
+    max_output_bytes: int
+
+    # Internal bounded ownership and reclamation policy.
+    max_sessions: int
+    max_pending_requests: int
+    max_operation_records: int
+    operation_record_ttl_ms: int
+    max_process_records: int
+    terminal_process_record_ttl_ms: int
     max_file_transfer_records: int
     file_transfer_record_ttl_ms: int
     max_staged_file_bytes: int
     max_staged_file_objects: int
-    file_transfer_idle_ttl_ms: int
-    max_file_transfer_duration_ms: int
-    max_pending_operations: int
-    max_sessions: int
-    session_idle_ttl_ms: int
-    max_processes: int
-    max_process_records: int
-    terminal_process_record_ttl_ms: int
-    max_operation_duration_ms: int
-    max_inline_output_bytes: int
-    max_output_bytes: int
+    transfer_idle_ttl_ms: int
+    max_transfer_duration_ms: int
     max_retained_bytes: int
     max_retained_objects: int
     default_retention_ttl_ms: int
     max_retention_ttl_ms: int
-    max_operation_records: int
-    operation_record_ttl_ms: int
+    max_retired_transfer_records: int
+    cleanup_retry_limit: int
+    cleanup_orphan_threshold: int
+    shutdown_timeout_ms: int
 
 
 class DaemonConfig(BaseModel):
     environment_id: str
-    runtime_directory: str | None
-    endpoint_mode: EndpointMode
-    network: NetworkEndpointConfig | None
-    resource_authority: ResourceAuthorityCeiling = "scoped"
+    runtime_directory: str
+    transport: TransportMode
+    reverse_websocket: ReverseWebSocketConfig | None
     root_mount_id: str | None
     mounts: tuple[TrustedMountConfig, ...]
     executable_search_roots: tuple[str, ...]
@@ -85,53 +102,54 @@ class DaemonConfig(BaseModel):
     payload_gid: int | None = None
 ```
 
-All numeric limits are positive and finite. `max_processes` does not exceed `max_process_records`, `max_concurrent_operations` does not exceed `max_operation_records`, `max_concurrent_file_transfers` does not exceed `max_file_transfer_records`, and `max_inline_output_bytes` does not exceed `max_output_bytes`. `max_transfer_frame_bytes` leaves room for the fixed header and maximum permitted handle and cannot exceed the fixed header field widths. Daemon-global retained-byte, retained-object, request-size, response-size, transfer-frame, active-transfer, transfer-record/TTL, staged-file byte/object, transfer-duration/idle, active-process, process-record, operation-duration, operation-record, session, and admission ceilings cannot be disabled. An EIP request can only narrow them.
+All numeric limits are positive and finite. Active counts do not exceed their owning record counts. Inline output does not exceed total per-output capture. Transfer-frame configuration leaves room for the fixed frame header and maximum handle. Request/response, operation, transfer, staging, process, retained-output, queue, tombstone, retry, and shutdown bounds cannot be disabled.
 
-Sessions receive no independent budget for generation-scoped operations, processes, receipts, or retained output. They do own finite active file-transfer records and uncommitted staged writers. Those records still count against daemon-global transfer and staging ceilings, so opening many sessions cannot multiply capacity. Staged usage remains charged while envd still owns a physical candidate; quota is never returned merely because an in-memory handle was discarded.
+Only the client-actionable subset in `EIPLimits` is wire-visible. Internal record capacity, TTL, tombstone, spool, staging, cleanup, and scheduler policy is not a compatibility promise. Runtime exhaustion is reported by typed `busy`, `quota_exceeded`, expiry, retention-gap, or cleanup outcomes.
 
-`TrustedMountConfig` is operator-owned configuration described by [Resource Operations](04-resource-operations.md). In `scoped` mode, `root_mount_id` identifies the configured mount used for Environment-relative paths; it can be omitted with zero mounts or exactly one mount, but multiple mounts require an explicit valid choice. `TrustedShellProfile` is described by [Command and Process Execution](05-command-and-process-execution.md). `executable_search_roots` is the ordered operator-owned search list for bare `argv` executables. Configured native roots and executables are canonicalized, opened or resolved under trusted configuration, and validated against protected paths before readiness. The launching provider owns stability of each configured root's containing directory during this bootstrap window; envd opens the selected root's final component without following a link and then uses that opened capability. A model or ordinary tool argument cannot add another native root or executable.
+Sessions receive no independent quota for generation-owned operations, processes, receipts, or retained output. Session-owned transfers still count against daemon-global record, active-transfer, and staging ceilings, so reconnects cannot multiply capacity.
 
-`resource_authority="scoped"` is the default ceiling and permits only configured mounts. `resource_authority="server"` additionally allows an authenticated client to request a session view over every native filesystem root that envd can represent and access. Envd synthesizes logical server-root mounts and never publishes their native spellings. A server ceiling is valid only when the platform implementation can enumerate the complete native root namespace honestly; otherwise startup fails. It does not make `server` the session default and does not bypass method capabilities, file and transfer limits, command policy, or execution isolation.
+## Configured Mounts and Executables
 
-### Configuration sources and conflicts
+`TrustedMountConfig` is owned by [Resource Operations](04-resource-operations.md). Every native root is operator-provided, canonicalized, checked against protected paths, and opened or fixed through the strongest platform-relative authority before local readiness. The provider keeps the containing directory stable during bootstrap. Envd never synthesizes a server-filesystem view and never accepts a root from EIP.
 
-The executable accepts trusted configuration from an operator-selected config file, explicit non-secret CLI flags, and documented process environment variables. One effective immutable value is computed before subsystem initialization. Duplicate sources with different values fail startup rather than depending on source order for authority-bearing settings.
+`root_mount_id` is optional with zero mounts, can be inferred only when exactly one mount exists, and is required with multiple mounts when Environment-relative routing needs a default. It must identify exactly one configured mount.
 
-Secret material is never accepted through CLI arguments because process listings and service definitions can expose argv. The network API key has exactly one bootstrap source:
+A deliberate whole-filesystem configuration uses ordinary mounts, for example `/` on POSIX or explicit Windows volume roots. Such a root can physically contain the generation runtime, so startup admits it only when the EIP resource resolver can subtract every protected runtime root with capability-relative, no-follow enforcement. Required command isolation independently subtracts the same roots from payload authority and proves that projection in its production probe. Failure of either layer fails startup rather than exposing daemon state or silently narrowing the configured mount.
 
-| Variable                                                | Requirement                                        | Meaning                                                                              |
-| ------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `AGENT_ENVD_API_KEY`                                    | Required for `network`; must be absent for `stdio` | High-entropy bearer secret used to authenticate HTTP requests and WebSocket upgrades |
-| `AGENT_ENVD_TRANSPORT`                                  | `stdio` or `network`; default `stdio`              | Selects process-pipe framing or an envd-owned listener                               |
-| `AGENT_ENVD_LISTEN_ADDRESS`                             | Network mode; default `127.0.0.1:0`                | Address passed to envd's own bind and listen operation                               |
-| `AGENT_ENVD_HTTP_ENABLED`                               | Boolean; default `true` in network mode            | Enables JSON-RPC `POST /rpc` and file-data `GET/PUT /rpc/data`                       |
-| `AGENT_ENVD_WEBSOCKET_ENABLED`                          | Boolean; default `true` in network mode            | Enables `GET /rpc/ws` upgrade                                                        |
-| `AGENT_ENVD_ENVIRONMENT_ID`                             | Required                                           | Stable Environment identity expected by the launching provider                       |
-| `AGENT_ENVD_RUNTIME_DIR`                                | Optional absolute path                             | Private generation-local spool root; never a scoped command filesystem grant         |
-| `AGENT_ENVD_RESOURCE_AUTHORITY`                         | `scoped` or `server`; default `scoped`             | Maximum filesystem authority an initialized session may request                      |
-| `AGENT_ENVD_EXECUTION_ISOLATION`                        | `required` or `disabled`; default `required`       | Selects envd's inner command-isolation posture                                       |
-| `AGENT_ENVD_EXECUTION_NETWORK`                          | `host` or `deny`; default `host`                   | Selects command-tree IP networking when inner isolation is required                  |
-| `AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS`            | JSON array of absolute path strings; default `[]`  | Adds explicit operator-trusted command runtime roots in required mode                |
-| `AGENT_ENVD_EXECUTION_UID` / `AGENT_ENVD_EXECUTION_GID` | Optional paired positive Linux IDs                 | Selects a trusted final payload identity; both must be present together              |
+Executable search roots and shell profiles are trusted canonical configuration defined by [Command and Process Execution](05-command-and-process-execution.md). Typed executable paths resolve through configured mounts. Models and ordinary request fields cannot add search roots, native paths, shell helpers, or platform capabilities.
 
-Network mode requires at least one of `AGENT_ENVD_HTTP_ENABLED` or `AGENT_ENVD_WEBSOCKET_ENABLED` to be true. Stdio mode rejects listener, route-enable, API-key, origin, and trusted-TLS settings rather than accepting ineffective network policy.
+## Configuration Sources and Secrets
 
-An API key is at least 32 bytes after UTF-8 encoding, contains no surrounding whitespace or control character, and is compared in constant time. Envd cannot prove entropy from a string, so deployment tooling generates a uniformly random value rather than using a human password. Empty or malformed keys fail startup. The key is immutable for one daemon process; rotation restarts envd, creates a fresh generation, and invalidates every prior volatile selector.
+The executable accepts trusted configuration from an operator-selected file, explicit non-secret CLI values, documented process environment, and a provider-created private bootstrap channel. One effective immutable value is computed before owner initialization. Conflicting duplicate authority-bearing values fail startup.
 
-`AGENT_ENVD_*` names are reserved daemon configuration. EIP command-environment input cannot override them. Child commands receive only the finite ordinary compatibility values selected by daemon policy rather than wholesale daemon-environment inheritance. `AGENT_ENVD_API_KEY`, transport state, ambient credentials, dynamic-loader values, and internal control names are always removed before any supervisor, sandbox helper, or payload starts.
+Stable non-secret environment configuration includes:
 
-The endpoint can bind port `0`. In that case envd discovers the assigned port from its bound listener before reporting readiness. A provider adapter never guesses the selected port and never interprets a log line as readiness.
+| Variable                                                | Values/requirement                              | Meaning                                           |
+| ------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------- |
+| `AGENT_ENVD_ENVIRONMENT_ID`                             | Required                                        | Stable provider Environment identity              |
+| `AGENT_ENVD_TRANSPORT`                                  | `stdio` or `reverse_websocket`; default `stdio` | Selects the carrier profile                       |
+| `AGENT_ENVD_REVERSE_WS_URL`                             | Required only for reverse WebSocket             | Normalized outbound `wss://` endpoint             |
+| `AGENT_ENVD_RUNTIME_DIR`                                | Required absolute path                          | Parent for fresh generation-private runtime state |
+| `AGENT_ENVD_EXECUTION_ISOLATION`                        | `required` or `disabled`; default `required`    | Selects envd inner command isolation              |
+| `AGENT_ENVD_EXECUTION_NETWORK`                          | `host` or `deny`; default `host`                | Selects required-backend network ceiling          |
+| `AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS`            | JSON array; default `[]`                        | Adds trusted command runtime roots                |
+| `AGENT_ENVD_EXECUTION_UID` / `AGENT_ENVD_EXECUTION_GID` | Optional paired positive Linux IDs              | Selects trusted final Linux payload identity      |
 
-### Network exposure and TLS
+The runtime parent is required on every platform and carrier profile because generation-private spool, control, probe, and connector state is unconditional. Envd does not derive an authority-bearing parent from the ambient current directory, user home, or platform temporary-directory environment. The provider creates and protects the parent before launch; envd creates a fresh unpredictable generation child and validates ownership, permissions or ACLs, and no-link/reparse shape before use.
 
-The built-in network endpoint speaks HTTP/1.1 and WebSocket over that listener. TLS can terminate in a trusted sidecar, sandbox gateway, loopback tunnel, or provider fabric; envd does not treat a caller-controlled forwarding header as proof of TLS or identity.
+Reverse WebSocket requires a provider-owned short-lived attachment credential source on a protected bootstrap channel. The channel can be an inherited private descriptor/handle, service-manager secret facility with refresh IPC, or equivalent provider mechanism. Its platform representation is not EIP and is never caller-selectable. A one-shot secret source is valid only when the provider explicitly treats expiry/authentication failure as generation-fatal and restarts envd with a fresh generation.
 
-A non-loopback listen address requires either:
+Secrets are not accepted through CLI arguments or endpoint URLs. Attachment credentials, lifecycle credentials, bootstrap-channel identities, and their digests are absent from EIP, descriptors, readiness, argv, normal process environment, command environment, logs, metrics, traces, and errors. Envd keeps only the current and, during atomic refresh, next credential in protected memory and discards expired values.
 
-- a listener protected end to end by a trusted private provider network or tunnel; or
-- trusted TLS termination that preserves the `Authorization` header only to envd and prevents untrusted plaintext access on the terminating hop.
+`AGENT_ENVD_*` names are reserved and cannot be set or unset by a command request. Child environments are rebuilt rather than inheriting the daemon environment wholesale.
 
-The API key remains mandatory in both cases. Enabling a public plaintext listener is invalid configuration. Loopback does not replace the key because other processes inside the same host or sandbox may be untrusted.
+## Reverse-WebSocket Endpoint Policy
+
+The configured URL must be `wss://`, contain no user information, fragment, or secret query component, and normalize to one fixed endpoint. Envd performs ordinary certificate-chain and hostname validation against platform roots plus optional explicit operator trust roots. It never follows redirects, disables verification, downgrades to plaintext, or accepts caller-controlled forwarding metadata as identity.
+
+The connector presents the short-lived attachment credential as an `Authorization: Bearer` upgrade header and offers supported `eip.v<major>` subprotocols. The control service must select exactly one offered protocol. Authentication binds the attachment to the provider's expected Environment before the EIP requester sends `initialize`.
+
+Invalid TLS, hostname, endpoint policy, redirect, or subprotocol is non-recoverable for the generation. Authentication failure requests credential refresh when available; a provider-classified nonrefreshable failure is generation-fatal. Transient DNS, connect, remote-unavailable, and liveness failures use capped exponential backoff with full jitter as owned by [Transports and Sessions](03-transports-and-sessions.md).
 
 ## Environment Identity and Generation
 
@@ -141,171 +159,176 @@ class EnvironmentIdentity(BaseModel):
     generation: int
 ```
 
-`environment_id` identifies the logical provider Environment and is mandatory trusted bootstrap input. The provider adapter obtains it from its own lifecycle state and supplies the same expected value to the EIP client. In stdio mode the parent must know the value before launch; envd never invents an identity and asks the parent to trust it afterward.
+`environment_id` is mandatory trusted provider input. The provider supplies the same expected value to its control service/requester. Envd never invents an identity and asks the peer to trust it afterward.
 
-At every daemon start, envd generates a fresh unpredictable nonzero unsigned 64-bit `generation` with a cryptographically secure random source. It is an equality fence for volatile runtime state, not a monotonic counter, restart-recovery marker, credential, or ordering signal. Generation collision with a previous daemon incarnation must be cryptographically negligible and envd never deliberately reuses one.
+Each daemon start creates a fresh unpredictable nonzero unsigned 64-bit `generation`. It is an equality fence for volatile runtime state, not a monotonic counter, recovery marker, credential, or ordering signal. Reconnect does not change generation; restart always does.
 
-A transport reconnect, logical session expiry, or new Harness run against the same daemon does not change generation. Daemon restart always creates another generation. Process handles, file transfers, operations, receipts, output references, cursors, private spool records, and idempotency records from the prior generation are invalid and are never restored or adopted. File reader/writer handles are additionally invalid after their owning session ends. A writer commit receipt can remain for generation-scoped reconciliation after the session-scoped staging handle disappears. Native files remain ordinary provider Environment state.
+Operation records and receipts, process handles, output references, file transfer handles, and private spool data never survive restart. Reader/writer handles also end with their exact session. Native files remain provider Environment state.
+
+## Generation-Private Runtime State
+
+Before accepting any carrier, envd creates one fresh unpredictable generation subtree beneath the trusted runtime parent. It never reuses fixed prior-generation command-home, command-temp, spool, control, or probe contents.
+
+The subtree contains only envd-owned classes:
+
+- private command home and temporary roots;
+- append-only retained-output spool files and metadata;
+- isolation control/probe state;
+- internal connector and supervisor state;
+- bounded cleanup evidence.
+
+It is outside EIP mount authority and required-isolation command grants except the exact command-home/temp projection intended for one command policy. This is an authorization property, not a claim that the native path is physically disjoint from a deliberately broad mount. Every EIP path resolution and traversal subtracts the opened protected runtime roots before access; list, find, search, and recursive mutation refuse a protected entry before descending or returning its contents. Required command isolation performs its own subtraction. Native permissions or ACLs are restrictive defense in depth. Runtime startup fails if freshness, ownership, non-link/reparse shape, capacity policy, or either protected-path boundary cannot be established.
+
+Destination-local mutation candidates remain beside their target because publication must stay on the destination filesystem. They are not private spool objects and can be visible to another actor that already controls that directory.
 
 ## Startup State Machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> Starting
-    Starting --> Ready: configuration, stores, probe, and endpoint succeed
-    Starting --> Failed: any required step fails
-    Ready --> Draining: shutdown requested or fatal runtime fault
-    Draining --> Stopped: sessions closed and owned command trees cleaned
-    Draining --> Failed: bounded cleanup cannot complete cleanly
+    Starting --> LocallyReady: config, owners, runtime, and required isolation probe succeed
+    Starting --> Failed: required startup step fails
+    LocallyReady --> CarrierConnecting: reverse WebSocket selected
+    LocallyReady --> Serving: trusted stdio initialize succeeds
+    CarrierConnecting --> Serving: WebSocket upgrade and initialize succeed
+    CarrierConnecting --> CarrierConnecting: recoverable reconnect
+    CarrierConnecting --> Draining: generation-fatal attachment failure
+    Serving --> CarrierConnecting: reverse-WebSocket carrier loss
+    Serving --> Draining: shutdown or fatal ownership fault
+    LocallyReady --> Draining: stdio parent loss
+    Draining --> Stopped: bounded cleanup succeeds
+    Draining --> Failed: cleanup remains uncertain
     Failed --> [*]
     Stopped --> [*]
 ```
 
-Startup follows this order:
+Startup order is:
 
-1. Parse all trusted sources and reject unknown, conflicting, malformed, or unsafe configuration.
-2. Validate the configured Environment identity and create a fresh generation.
-3. Canonicalize configured mounts, synthesize and validate server-root mounts when the ceiling allows them, and validate protected paths, shell executables, private runtime spool, output retention, execution home, and temporary roots.
-4. Create bounded in-memory admission, transfer/staging, operation, process, and retention stores; receipt and provider-idempotency evidence is attached to and charged by its owning operation record.
-5. Initialize the configured command execution backend.
-6. In `required` isolation mode, run the production backend probe against the effective filesystem and network policy.
-7. For network mode, bind and listen on the configured address; for stdio, reserve stdin and stdout for EIP framing.
-8. Publish one readiness record and begin session admission.
+1. Parse trusted sources and reject unknown, conflicting, malformed, or unsafe authority configuration.
+2. Validate Environment identity and create a fresh generation.
+3. Create and validate the generation-private runtime subtree.
+4. Canonicalize configured mounts, protected paths, executables, and shell profiles.
+5. Create bounded operation, transfer/staging, process, and retained-output owners.
+6. Initialize the selected execution backend.
+7. In `required` mode, run the native production probe for Linux, macOS, or Windows.
+8. Reserve stdio framing, or initialize the outbound connector and credential source.
+9. Publish local readiness to the trusted provider lifecycle boundary and begin carrier admission.
 
-No network socket is bound and no stdio EIP frame is accepted before a required isolation probe succeeds. An unsupported platform or failed probe in `required` mode is a startup failure, not a reason to use native execution.
+No stdio frame is accepted and no reverse-WebSocket attempt begins before the required isolation probe succeeds. Envd never binds a network socket for EIP.
 
-## Readiness and Health
+## Readiness
 
-### Startup readiness record
+Readiness has two distinct facts:
 
-A network-mode daemon writes exactly one newline-terminated JSON readiness record to stdout after the listener is bound and every startup gate has succeeded, then closes stdout. Stderr remains the structured log stream. A provider launcher treats only that typed record from the child it started as readiness; ordinary logs are never parsed for endpoint discovery.
+- **local readiness**: configuration, generation-private state, mounts, owners, and isolation probe are usable;
+- **carrier readiness**: one current trusted carrier has completed EIP initialization for the expected Environment and generation.
 
-```json
-{
-  "type": "agent-envd.ready",
-  "schema_version": 1,
-  "environment_id": "env_01...",
-  "generation": 7,
-  "listen_address": "127.0.0.1:43127",
-  "http_path": "/rpc",
-  "http_data_path": "/rpc/data",
-  "websocket_path": "/rpc/ws",
-  "protocol_major_versions": [1]
-}
-```
+In stdio mode, successful `initialize` is the usable readiness boundary. Stdout contains only framed EIP messages; startup diagnostics use stderr and process exit.
 
-Disabled routes are represented as `null`. The record contains no API key, session value, mount path, protected path, native helper location, provider credential, or process environment. The launcher validates schema, expected Environment identity, and actual child ownership before using the endpoint.
+In reverse-WebSocket mode, the provider observes local readiness through the same trusted launch/bootstrap control boundary that owns envd, while the control service observes carrier readiness from the initialized connection. There is no readiness JSON line to discover a listener and no `/healthz` or `/readyz` route. Consumers dispatch only after carrier readiness. Losing carrier readiness leaves local generation-owned resources intact while reconnect is recoverable.
 
-In stdio mode, stdout carries only content-length-framed EIP messages and no standalone readiness line. The parent establishes readiness by successfully completing `initialize`; startup errors go to stderr and process exit.
-
-### Network health routes
-
-A network endpoint exposes:
-
-- `GET /healthz`, which returns only process liveness;
-- `GET /readyz`, which returns success only in `Ready` and failure during `Starting` or `Draining`.
-
-These routes disclose no descriptor, identity, generation, version detail, policy, metrics, or failure cause and do not create an EIP session. They are suitable for a colocated supervisor but are not proof of EIP authentication or compatibility.
+Readiness never contains credentials, native roots, protected paths, helper locations, command content, or private runtime names.
 
 ## Admission and Runtime Ownership
 
-Admission is bounded at two levels:
+Admission is bounded at daemon-global request/operation/session level and at method-specific transfer, staging, process, output, payload, and platform resource level. Capacity is reserved before native allocation or dispatch.
 
-1. daemon-global active and pending operation counts plus logical-session count;
-2. method-specific process, output, file, transfer-frame, staging, and payload limits.
+One generation coordinator contains durable owners, not overlapping registries:
 
-Capacity is reserved before native dispatch. When no pending slot exists, envd returns a bounded `busy` error with retry guidance and performs no native work. Queue position is not durable, and a disconnected client does not retain a pending admission slot indefinitely.
+- session owner for initialization and session-scoped file transfers;
+- one operation owner for pending admission, active work, cancellation, method/digest replay, terminal result/failure, and receipt;
+- one transfer/staging owner with atomic provisional reservation before native reader/candidate allocation;
+- one command execution owner for all native trees and process records;
+- one retained-output owner backed by the private spool;
+- connector state and generation descriptor publication.
 
-One runtime coordinator owns:
+### Operation owner
 
-- lightweight initialized protocol sessions, their immutable effective resource authority and descriptor, and their idle expiry;
-- session-scoped file readers, staged writers, data attachments, transfer deadlines, `awaiting_close` readers, and bounded post-close transfer records/tombstones;
-- generation-unique accepted operation IDs, cancellation state, and operation-owned bounded idempotency/receipt evidence;
-- one atomic domain-admission handoff from a sealed session writer to a generation-scoped commit operation;
-- native command-tree ownership through the command execution manager;
-- retained outputs and cursors;
-- Environment generation and descriptor publication.
+Transport-to-domain admission creates one operation record before owner work can run. That record bridges ordering, so a later cancellation cannot overtake an earlier admitted operation. It owns the canonical method/digest and survives response-waiter loss. There is no separate pending-operation map, owned-task map, receipt store, or replay-key store.
 
-An accepted mutation's execution, operation lease, terminal result or failure, and receipt evidence remain generation-owned independently of its transport response waiter. Admission-to-owner registration participates in the session closing barrier; once generation drain begins, any registration that arrives after that barrier is reconciled before native dispatch. Losing or boundedly abandoning the response waiter cannot cancel the evidence owner. During daemon drain, the owner either records the native terminal result or atomically preserves `unknown_outcome` evidence before relinquishing a still-uninterruptible native wait; a late native result cannot overwrite that retained unknown evidence. Session teardown marks transfer admission closed before its bounded handoff wait, so an open that began earlier cannot publish a late reader or writer record. A handoff-complete writer commit additionally keeps its nonterminal transfer record, phase, and terminal finalization with the native commit owner rather than the response waiter or session cleanup.
+A repeated operation ID with the same method/digest reports in-progress or replays retained terminal evidence. Another method/digest conflicts. Nonterminal records are never reclaimed. Terminal records expire or are reclaimed oldest-first under internal bounds; missing evidence never proves non-dispatch.
 
-An active file-transfer record is never capacity-reclaimed; `max_concurrent_file_transfers <= max_file_transfer_records` guarantees one record for every admitted reader or writer. A reader remains active and non-reclaimable while open, streaming, or `awaiting_close`; a sealed writer and a staged candidate owned by a handoff-complete commit operation are also nonterminal. Only a post-close reader result, post-abort writer result, or tombstone is terminal and can be reclaimed at `file_transfer_record_ttl_ms` or oldest-terminal-first when capacity is needed. Session close can remove remaining session terminal records immediately because no later request can use them.
+### Transfer and candidate owner
 
-Every staged candidate created by inline resource mutation or binary writer participates in one daemon-global byte/object quota and owns its quota token through one linear lifecycle. A candidate is created with a bounded random name in the destination directory so publication remains on the destination filesystem; it is an implementation artifact, not a private namespace or concurrency lock. Confirmed commit or deletion returns the token exactly once. Entry disappearance, unlink failure, or other cleanup uncertainty keeps the usage charged and transitions the affected mount or daemon into cleanup fault and bounded drain; envd never advertises capacity for bytes it may still own.
+A file open first reserves one provisional transfer slot, staging object where applicable, queue budget, and native-allocation budget atomically. Native allocation then commits or rolls that reservation back. A check-then-insert race cannot over-admit concurrent opens.
 
-A session-resource open idempotency mapping is attached to its live transfer record and counts under `max_file_transfer_records`; it disappears with that record or session. A terminal operation record owns its canonical request digest, optional provider-idempotency mapping, bounded result, and receipt selector/evidence. All of those count as one `max_operation_records` entry and share `operation_record_ttl_ms` plus oldest-terminal-first capacity reclamation. There is no independent unbounded receipt or idempotency store and no guaranteed minimum retention under capacity pressure. Missing reclaimed evidence never proves that native dispatch or mutation did not occur.
+A sealed writer remains session-owned until commit admission atomically transfers candidate ownership to its operation record. Session close cannot delete an operation-owned candidate. Quota returns exactly once only after publication transfers ownership away or deletion is confirmed.
 
-An EIP-visible process or output record never independently owns the corresponding native resource. This single ownership rule prevents duplicate cleanup and conflicting status inside the active backend's advertised lifecycle boundary. Disabled `outer_host` mode does not claim containment of a descendant that deliberately escapes envd's managed process group.
+Candidate cleanup uses bounded retry with conservative charging. One transient unlink failure does not permanently disable a mount. Affected new allocation is blocked only when retry exhaustion, unresolved owned capacity, or an orphan threshold makes safe accounting impossible. Unresolved cleanup remains explicit during drain.
+
+Retired transfer reset acknowledgements use a separately bounded tombstone set and finite wait. A peer that never acknowledges reset cannot grow state or stall all future transfers indefinitely; the carrier is terminated when safe correlation cannot be preserved.
+
+### Retained-output owner
+
+Retained bytes append incrementally to private spool files after byte/object reservation. Only bounded previews remain in memory. Reads use explicit offsets. Release, expiry, process-record reclamation, failed creation, and drain return capacity exactly once; uncertain physical cleanup remains charged and enters bounded cleanup retry.
+
+Session close removes only session-owned transfers. Accepted operations, process records, receipts, and retained output remain generation-owned. Daemon shutdown is the lifecycle event that ends all volatile owners.
 
 ## Draining and Shutdown
 
-Shutdown begins from an operator signal, parent-process loss in stdio mode, explicit administrative lifecycle action outside ordinary EIP methods, or an unrecoverable daemon fault. EIP clients cannot request process-wide shutdown through the Environment method catalog.
+Shutdown begins from an operator signal, stdio parent loss, explicit provider lifecycle action outside EIP, generation-fatal reverse-WebSocket state, or unrecoverable ownership fault. EIP has no daemon-shutdown method.
 
-The daemon then:
+Envd then:
 
-01. enters `Draining` atomically and refuses new sessions and operations;
-02. permits already completed results to drain within response deadlines;
+01. enters `Draining` atomically and stops new carrier/session/operation admission;
+02. lets already completed responses drain within bounded carrier time;
 03. requests cancellation of accepted foreground operations;
-04. closes every file reader and aborts every writer whose candidate remains session-owned;
-05. lets a handoff-complete commit operation finish or preserve unknown-outcome evidence within the bounded drain budget;
-06. closes every daemon-owned process stdin and output writer;
-07. applies the strongest backend cleanup operation to every non-terminal managed command;
-08. waits within a finite daemon shutdown budget and records each cleanup outcome;
-09. deletes owned transfer candidates, generation-local output, and volatile registry state, retaining conservative fault evidence if physical cleanup cannot be proven;
-10. closes transports and exits.
+04. closes readers and aborts writers still session-owned;
+05. lets handoff-complete commits finish or preserve terminal unknown evidence within the drain budget;
+06. closes process stdin and output producers;
+07. applies strongest backend cleanup to every nonterminal command tree;
+08. waits for platform cleanup evidence within the shutdown timeout;
+09. removes generation-private spool/control/home/temp state and retries owned candidate/ACL cleanup boundedly;
+10. closes the carrier/bootstrap channel and exits.
 
-No process is contractually allowed to outlive envd shutdown. A provider that needs background work to survive a client disconnect or Harness run keeps the same envd generation alive. Provider adapter teardown remains a separate Host action after daemon cleanup or loss.
+No process is contractually allowed to outlive envd shutdown. Required Linux namespace and Windows Job cleanup normally prove complete tree teardown. macOS can report a residual only while inherited Seatbelt confinement remains proven. Disabled mode relies on outer-Host teardown for authority outside envd's native target.
 
-If cleanup cannot prove complete teardown, envd exits nonzero and exposes bounded diagnostics to its supervisor. On Linux required isolation, namespace teardown normally proves completeness. On macOS, a surviving descendant can be reported as `residual_confined` because Seatbelt remains inherited even when complete process-tree observation is unavailable. Native disabled mode cannot claim confinement and therefore treats unproven residuals as cleanup failure.
+If required cleanup cannot be proven, envd exits nonzero with safe supervisor diagnostics and never reports normal stopped completion. A provider can then destroy the outer Environment boundary.
 
 ## Observability
 
-Structured daemon logs and metrics describe control-plane facts without copying request or output content by default.
+Structured logs and metrics describe control-plane facts without copying request, file, or output content by default.
 
-Safe dimensions include:
+Safe dimensions include daemon version, EIP major, transport profile, lifecycle state, approved Environment correlation, connector/reconnect outcome class, isolation backend/probe class, method name, operation stage/outcome/duration, byte counts, active owner counts, quota denials, process termination, and cleanup outcome.
 
-- daemon version, protocol major, transport profile, and lifecycle state;
-- Environment identity hash or approved opaque correlation, never native roots;
-- isolation mode, backend class, network policy, and probe outcome class;
-- method family, operation outcome, dispatch stage, duration, and bounded byte counts;
-- active and pending operations, file transfers, staged bytes/objects, processes, retained bytes/objects, and quota denials;
-- process termination reason and cleanup outcome;
-- transport authentication, initialization, protocol, frame, and logical-session expiry outcome classes.
+Observability excludes attachment credentials, authorization headers, bootstrap-channel identifiers, operation IDs unless explicitly approved for secure diagnostics, transfer handles, full commands, request environments, native paths, ACL/profile source, file/output content, and provider lifecycle credentials.
 
-Logs and metrics exclude API keys, authorization headers, session values, transfer handles, full commands, request environments, file contents, output content, native private paths, generated isolation profiles, helper paths, and protected-path names. A content-enabled diagnostic policy is a separate trusted operator choice and still never includes credentials.
-
-The EIP descriptor exposes non-secret posture and limits required by clients. It reports whether envd inner isolation and network isolation are active, but it cannot infer or represent the strength of an outer container, VM, or provider sandbox.
+The EIP descriptor exposes only non-secret client-actionable limits, exact available methods, configured logical mounts, generation, and envd isolation posture. It never infers outer provider security.
 
 ## Failure Semantics
 
-| Failure                                                     | State and observable result                                                              |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Invalid or conflicting configuration                        | Exit nonzero before readiness; no listener admission                                     |
-| Missing or invalid network API key                          | Exit nonzero before bind                                                                 |
-| Required isolation backend or probe failure                 | Exit nonzero before bind or stdio initialization                                         |
-| Listen failure                                              | Exit nonzero; no ready record                                                            |
-| Ready-record delivery fails                                 | Treat startup as failed and drain the bound listener                                     |
-| Runtime admission exhausted                                 | Typed pre-dispatch `busy` error; no native work                                          |
-| Transfer or staging quota exhausted                         | Typed `busy` or `quota_exceeded`; no unbounded buffering or target mutation              |
-| Private runtime spool cannot be created                     | Exit before readiness; no generation-local objects are admitted                          |
-| Requested server authority cannot be represented completely | Initialization fails, or startup fails when the configured ceiling itself is unsupported |
-| Fatal runtime ownership inconsistency                       | Enter `Draining`, stop admission, clean owned trees, and exit nonzero                    |
-| Shutdown cleanup incomplete                                 | Exit nonzero with safe supervisor diagnostics; never report normal stopped completion    |
+| Failure                                               | State and observable result                                               |
+| ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| Invalid/conflicting configuration                     | Exit nonzero before local readiness                                       |
+| Runtime subtree cannot be created fresh and private   | Exit nonzero before admission                                             |
+| Required isolation backend/probe fails                | Exit nonzero; no carrier admission or fallback                            |
+| Stdio framing setup fails                             | Exit nonzero before initialization                                        |
+| Reverse-WebSocket endpoint/TLS/subprotocol is invalid | Generation-fatal drain and nonzero exit                                   |
+| Attachment credential expires or is rejected          | Refresh and reconnect, or generation-fatal when nonrefreshable            |
+| Transient DNS/connect/liveness failure                | Capped jittered reconnect; generation-owned state remains                 |
+| Runtime admission exhausted                           | Typed pre-dispatch `busy`; no native work                                 |
+| Transfer/staging/spool quota exhausted                | Typed `busy` or `quota_exceeded`; no unbounded allocation                 |
+| Candidate/spool cleanup is transiently uncertain      | Conservative charge plus bounded retry; safe unaffected work can continue |
+| Cleanup uncertainty crosses safety threshold          | Block affected admission or drain; never undercount ownership             |
+| Fatal owner inconsistency                             | Enter `Draining`, preserve strongest evidence, clean trees, exit nonzero  |
+| Shutdown cleanup remains incomplete                   | Exit nonzero; never report normal completion                              |
 
 ## Compatibility
 
-Readiness-record schema, configuration names, EIP protocol versions, and daemon package versions are independent compatibility axes. Additive optional readiness fields are compatible; changing a field meaning, stdout framing, route path, secret source, or ready timing requires a schema or package compatibility change.
+Configuration names, bootstrap-channel contract, EIP version, descriptor, and package version are independent axes. Unknown authority-bearing config fails closed. Adding an optional non-authority configuration field is compatible; changing a field's authority, transport role, credential location, local-ready timing, generation lifetime, or cleanup guarantee requires explicit compatibility review.
 
-A configuration parser rejects unknown authority-bearing fields by default. This prevents a misspelled security option from silently taking its default. A deployment migration explicitly updates the accepted config schema and restarts the daemon; live EIP requests never migrate daemon policy.
+Provider configuration changes restart envd and create a new generation. Live EIP requests never migrate mount, isolation, carrier, or quota policy.
 
 ## Invariants
 
-01. Envd reports ready only after trusted configuration, stores, required isolation probe, and endpoint setup all succeed.
-02. Network mode always uses an envd-bound listener and an API key obtained only from `AGENT_ENVD_API_KEY`.
-03. An envd API key never appears in argv, readiness, EIP payloads, descriptors, state, logs, metrics, or child environments.
-04. Authority-bearing daemon configuration is immutable for one generation; initialization can only select `scoped` or a configured `server` ceiling and fixes that selection for the session.
-05. Every daemon, request, data-frame, transfer, staging, and retained-output limit is finite; request input can only narrow an effective limit.
-06. One runtime coordinator owns sessions, their selected resource authority, file transfers, commit handoff, operation-owned receipt/idempotency evidence, retained objects, candidate cleanup, and command-tree lifecycle; only pre-handoff file transfers are session-owned.
-07. `required` isolation probes before transport admission; failed probing never selects `disabled`.
-08. Port `0` is resolved from the bound socket and communicated only through the typed readiness record.
-09. Shutdown stops admission before cleanup and leaves no command contractually allowed to survive the daemon.
-10. Health and readiness endpoints reveal no identity, version, policy, or secret and do not create protocol sessions.
+01. Envd becomes locally ready only after trusted configuration, fresh generation-private runtime state, bounded owners, and required platform isolation probe succeed.
+02. Envd supports trusted stdio or outbound reverse WebSocket and never binds an inbound EIP/HTTP/WebSocket/health listener.
+03. Reverse-WebSocket attachment uses a protected short-lived credential source with refresh or explicit generation-fatal expiry behavior; credentials never enter URLs, EIP, argv, child environments, or observability.
+04. Authority-bearing configuration is immutable for one generation; sessions observe only configured mounts and exact available methods.
+05. Every request, response, queue, operation, transfer, staging, process, retained-output, tombstone, retry, and shutdown resource is finitely bounded.
+06. One operation record owns admission through terminal replay/receipt evidence; response-waiter loss cannot erase accepted mutation evidence.
+07. Transfer admission reserves capacity before native allocation, and candidate/spool quota returns only after ownership transfer or confirmed cleanup.
+08. Required isolation probes Linux, macOS, or Windows before carrier admission and never selects disabled after failure.
+09. Local readiness and initialized-carrier readiness remain distinct; reconnect does not change generation or erase generation-owned resources.
+10. Each start creates fresh command-home, command-temp, spool, control, and probe state and never reuses fixed prior-generation contents.
+11. Shutdown stops admission before cleanup, terminates every owned command tree, removes volatile generation state, and reports uncertainty rather than false success.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ RELEASE_FILES = (
     Path("pyproject.toml"),
     Path("uv.lock"),
     Path("packages/agent-harness/pyproject.toml"),
+    Path("packages/agent-stream-protocol/pyproject.toml"),
+    Path("packages/agent-ui/pyproject.toml"),
     Path("packages/logging/pyproject.toml"),
     Path("packages/foundation-service/pyproject.toml"),
     Path("packages/agent-envd-client/pyproject.toml"),
@@ -35,6 +38,20 @@ def copy_release_files(destination: Path) -> None:
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPOSITORY_ROOT / relative_path, target)
+
+
+def select_agent_ui_harness_release(root: Path, version: str) -> None:
+    path = root / "packages/agent-ui/pyproject.toml"
+    content = path.read_text(encoding="utf-8")
+    updated, replacements = re.subn(
+        r'^harness-version = "[^"]*"$',
+        f'harness-version = "{version}"',
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    assert replacements == 1
+    path.write_text(updated, encoding="utf-8")
 
 
 def snapshot(root: Path) -> dict[Path, bytes]:
@@ -60,11 +77,25 @@ def run_script(
     ("component", "changed_paths"),
     [
         (
+            "harness",
+            {
+                Path("uv.lock"),
+                Path("packages/agent-harness/pyproject.toml"),
+                Path("packages/agent-stream-protocol/pyproject.toml"),
+            },
+        ),
+        (
+            "agent-ui",
+            {
+                Path("uv.lock"),
+                Path("packages/agent-ui/pyproject.toml"),
+            },
+        ),
+        (
             "foundation",
             {
                 Path("pyproject.toml"),
                 Path("uv.lock"),
-                Path("packages/agent-harness/pyproject.toml"),
                 Path("packages/logging/pyproject.toml"),
                 Path("packages/foundation-service/pyproject.toml"),
             },
@@ -102,6 +133,8 @@ def test_prepares_only_component_files_and_is_idempotent(
     changed_paths: set[Path],
 ) -> None:
     copy_release_files(tmp_path)
+    if component == "agent-ui":
+        select_agent_ui_harness_release(tmp_path, "3.2.1")
     before = snapshot(tmp_path)
 
     result = run_script(PREPARER, tmp_path, component, "9.8.7")
@@ -117,6 +150,87 @@ def test_prepares_only_component_files_and_is_idempotent(
     assert second_result.returncode == 0, second_result.stderr
     assert snapshot(tmp_path) == after
     assert "no files changed" in second_result.stdout
+
+
+def test_prepares_ecosystem_specific_rc_versions(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+    select_agent_ui_harness_release(tmp_path, "3.2.1-rc.4")
+
+    for component in (
+        "harness",
+        "agent-ui",
+        "foundation",
+        "agent-envd",
+        "sdk-python",
+        "sdk-go",
+        "sdk-rust",
+        "sdk-typescript",
+    ):
+        result = run_script(PREPARER, tmp_path, component, "9.8.7-rc.2")
+        assert result.returncode == 0, result.stderr
+        check_result = run_script(CHECKER, tmp_path, component, "9.8.7-rc.2")
+        assert check_result.returncode == 0, check_result.stderr
+
+    protocol_manifest = (tmp_path / "packages/agent-stream-protocol/pyproject.toml").read_text()
+    ui_manifest = (tmp_path / "packages/agent-ui/pyproject.toml").read_text()
+    assert 'version = "9.8.7rc2"' in (tmp_path / "packages/agent-harness/pyproject.toml").read_text()
+    assert '"converge-agent-harness==9.8.7rc2"' in protocol_manifest
+    assert 'version = "9.8.7rc2"' in ui_manifest
+    assert '"converge-agent-harness==3.2.1rc4"' in ui_manifest
+    assert '"converge-agent-stream-protocol==3.2.1rc4"' in ui_manifest
+    assert 'version = "9.8.7rc2"' in (tmp_path / "pyproject.toml").read_text()
+    assert 'version = "9.8.7-rc.2"' in (tmp_path / "Cargo.toml").read_text()
+    assert 'version = "9.8.7rc2"' in (tmp_path / "packages/agent-envd-client/pyproject.toml").read_text()
+    assert 'version = "9.8.7rc2"' in (tmp_path / "sdk/python/pyproject.toml").read_text()
+    assert 'version = "9.8.7-rc.2"' in (tmp_path / "sdk/rust/Cargo.toml").read_text()
+    assert json.loads((tmp_path / "sdk/typescript/package.json").read_text())["version"] == "9.8.7-rc.2"
+
+
+def test_harness_release_does_not_version_agent_ui_or_foundation(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "harness", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    ui_result = run_script(CHECKER, tmp_path, "agent-ui", "0.0.0")
+    assert ui_result.returncode == 0, ui_result.stderr
+    foundation_result = run_script(CHECKER, tmp_path, "foundation", "0.0.0")
+    assert foundation_result.returncode == 0, foundation_result.stderr
+
+
+def test_agent_ui_release_does_not_version_harness_or_foundation(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+    select_agent_ui_harness_release(tmp_path, "3.2.1")
+
+    result = run_script(PREPARER, tmp_path, "agent-ui", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    harness_result = run_script(CHECKER, tmp_path, "harness", "0.0.0")
+    assert harness_result.returncode == 0, harness_result.stderr
+    foundation_result = run_script(CHECKER, tmp_path, "foundation", "0.0.0")
+    assert foundation_result.returncode == 0, foundation_result.stderr
+
+
+def test_harness_release_does_not_version_agent_envd_packages(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "harness", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    check_result = run_script(CHECKER, tmp_path, "agent-envd", "0.0.0")
+    assert check_result.returncode == 0, check_result.stderr
+
+
+def test_foundation_release_does_not_version_harness_or_agent_ui(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "foundation", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    harness_result = run_script(CHECKER, tmp_path, "harness", "0.0.0")
+    assert harness_result.returncode == 0, harness_result.stderr
+    ui_result = run_script(CHECKER, tmp_path, "agent-ui", "0.0.0")
+    assert ui_result.returncode == 0, ui_result.stderr
 
 
 def test_foundation_release_does_not_version_agent_envd_client(tmp_path: Path) -> None:
@@ -139,6 +253,71 @@ def test_agent_envd_release_does_not_version_foundation_packages(tmp_path: Path)
     assert check_result.returncode == 0, check_result.stderr
 
 
+def test_agent_envd_release_does_not_version_harness_or_agent_ui(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "agent-envd", "9.8.7")
+
+    assert result.returncode == 0, result.stderr
+    harness_result = run_script(CHECKER, tmp_path, "harness", "0.0.0")
+    assert harness_result.returncode == 0, harness_result.stderr
+    ui_result = run_script(CHECKER, tmp_path, "agent-ui", "0.0.0")
+    assert ui_result.returncode == 0, ui_result.stderr
+
+
+def test_agent_ui_release_requires_selected_harness_release_without_writing(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+    select_agent_ui_harness_release(tmp_path, "0.0.0")
+    before = snapshot(tmp_path)
+
+    result = run_script(PREPARER, tmp_path, "agent-ui", "9.8.7")
+
+    assert result.returncode != 0
+    assert "Select a published Harness release" in result.stderr
+    assert snapshot(tmp_path) == before
+
+
+def test_checker_rejects_harness_dependency_drift(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+    prepare_result = run_script(PREPARER, tmp_path, "harness", "9.8.7")
+    assert prepare_result.returncode == 0, prepare_result.stderr
+
+    manifest = tmp_path / "packages/agent-stream-protocol/pyproject.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            '"converge-agent-harness==9.8.7"',
+            '"converge-agent-harness>=9.8.7"',
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_script(CHECKER, tmp_path, "harness", "9.8.7")
+
+    assert result.returncode != 0
+    assert "dependency converge-agent-harness==9.8.7" in result.stderr
+
+
+def test_checker_rejects_agent_ui_dependency_drift(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+    select_agent_ui_harness_release(tmp_path, "3.2.1")
+    prepare_result = run_script(PREPARER, tmp_path, "agent-ui", "9.8.7")
+    assert prepare_result.returncode == 0, prepare_result.stderr
+
+    manifest = tmp_path / "packages/agent-ui/pyproject.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            '"converge-agent-stream-protocol==3.2.1"',
+            '"converge-agent-stream-protocol==3.2.2"',
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_script(CHECKER, tmp_path, "agent-ui", "9.8.7")
+
+    assert result.returncode != 0
+    assert "dependency converge-agent-stream-protocol==3.2.1" in result.stderr
+
+
 def test_rejects_invalid_version_without_writing(tmp_path: Path) -> None:
     copy_release_files(tmp_path)
     before = snapshot(tmp_path)
@@ -146,7 +325,7 @@ def test_rejects_invalid_version_without_writing(tmp_path: Path) -> None:
     result = run_script(PREPARER, tmp_path, "foundation", "v1.2.3")
 
     assert result.returncode != 0
-    assert "Release version must use X.Y.Z syntax" in result.stderr
+    assert "Release version must use X.Y.Z or X.Y.Z-rc.N syntax" in result.stderr
     assert snapshot(tmp_path) == before
 
 

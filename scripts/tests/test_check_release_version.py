@@ -30,7 +30,11 @@ def run_checker(component: str, version: str) -> subprocess.CompletedProcess[str
         "1.2",
         "1.2.3.4",
         "v1.2.3",
-        "1.2.3-rc.1",
+        "1.2.3rc1",
+        "1.2.3-rc1",
+        "1.2.3-rc.0",
+        "1.2.3-rc.01",
+        "1.2.3-beta.1",
         "+1.2.3",
     ],
 )
@@ -38,14 +42,15 @@ def test_rejects_noncanonical_release_versions(version: str) -> None:
     result = run_checker("sdk-go", version)
 
     assert result.returncode != 0
-    assert "Release version must use X.Y.Z syntax" in result.stderr
+    assert "Release version must use X.Y.Z or X.Y.Z-rc.N syntax" in result.stderr
 
 
-def test_accepts_canonical_release_version() -> None:
-    result = run_checker("sdk-go", "0.0.0")
+@pytest.mark.parametrize("version", ["0.0.0", "1.2.3-rc.1", "10.20.30-rc.42"])
+def test_accepts_canonical_release_versions(version: str) -> None:
+    result = run_checker("sdk-go", version)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "Validated sdk-go version 0.0.0\n"
+    assert result.stdout == f"Validated sdk-go version {version}\n"
 
 
 def test_rejects_manifest_version_mismatch() -> None:

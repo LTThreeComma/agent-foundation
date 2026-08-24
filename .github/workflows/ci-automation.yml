@@ -1,0 +1,98 @@
+name: Automation CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".github/**"
+      - "Makefile"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/check-release-version.py"
+      - "scripts/create-github-release.py"
+      - "scripts/prepare-release-version.py"
+      - "scripts/release_notes.py"
+      - "scripts/release_version.py"
+      - "scripts/tests/test_check_release_version.py"
+      - "scripts/tests/test_prepare_release_version.py"
+      - "scripts/tests/test_release_notes.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/**"
+      - "Makefile"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/check-release-version.py"
+      - "scripts/create-github-release.py"
+      - "scripts/prepare-release-version.py"
+      - "scripts/release_notes.py"
+      - "scripts/release_version.py"
+      - "scripts/tests/test_check_release_version.py"
+      - "scripts/tests/test_prepare_release_version.py"
+      - "scripts/tests/test_release_notes.py"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: GitHub Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate workflows
+        # actionlint 1.7.12 predates GitHub's concurrency queue syntax.
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+          -ignore 'unexpected key "queue" for "concurrency" section'
+
+  release-tooling:
+    name: Release tooling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Synchronize tooling dependencies
+        run: uv sync --locked
+
+      - name: Type-check release tooling
+        run: >-
+          uv run --locked pyright
+          scripts/check-release-version.py
+          scripts/create-github-release.py
+          scripts/prepare-release-version.py
+          scripts/release_notes.py
+          scripts/release_version.py
+
+      - name: Test release tooling
+        run: >-
+          uv run --locked python -m pytest
+          scripts/tests/test_check_release_version.py
+          scripts/tests/test_prepare_release_version.py
+          scripts/tests/test_release_notes.py

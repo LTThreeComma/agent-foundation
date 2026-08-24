@@ -2,28 +2,28 @@
 
 ## Design Position
 
-The Environment Interaction Protocol (EIP) is the transport-neutral wire contract between an authenticated Environment client and `agent-envd`. The initial protocol version is EIP `1.0`. EIP uses JSON-RPC 2.0 for bounded control operations and a correlated raw-binary data plane for file transfer. One versioned contract owns method names, transfer lifecycles, typed errors, opaque handles, limits, and explicit side-effect evidence across every transport.
+The Environment Interaction Protocol (EIP) is the transport-neutral wire contract between a trusted requester and `agent-envd`. EIP 1.0 uses JSON-RPC 2.0 for bounded control operations and a correlated raw-binary data plane for file transfer. One versioned contract owns method names, payloads, transfer lifecycles, operation replay, typed errors, selectors, limits, and side-effect evidence across trusted stdio and outbound reverse WebSocket.
 
-EIP is a semantic Environment protocol, not a remote syscall interface. Operations such as canonical path resolution, bounded search, patch validation, command-tree control, retained-output reads, and local-port observation execute beside the native resources. Client-side validation improves errors but never replaces envd enforcement.
+EIP is a semantic Environment protocol rather than a remote syscall interface. Canonical path resolution, bounded search, complete-candidate publication, command-tree control, retained-output reads, and local-port observation execute beside the native resources. Client validation improves errors but never replaces envd enforcement.
 
 ## Boundaries
 
-| Concern                                                                                         | Owner                                                                                  | Relationship                                             |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| JSON-RPC control methods, transfer lifecycles, params, results, errors, and version negotiation | EIP                                                                                    | Identical semantics across every transport               |
-| Canonical IDL and generated Rust/Python realization                                             | [Protocol Source, Client, and Generation](08-protocol-source-client-and-generation.md) | Must encode this protocol without semantic drift         |
-| Framing, API-key verification, connection liveness, and session carrier                         | [Transports and Sessions](03-transports-and-sessions.md)                               | Establishes authenticated context before method dispatch |
-| Multi-Environment routing and Harness tool policy                                               | Harness                                                                                | Selects a binding and maps provider-neutral calls to EIP |
-| Native canonicalization, process control, receipts, and resource evidence                       | `agent-envd`                                                                           | Executes an accepted EIP operation                       |
-| Provider provisioning and durable Agent completion                                              | Host                                                                                   | Outside EIP                                              |
+| Concern                                                                                 | Owner                                                                                  | Relationship                                  |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------- |
+| JSON-RPC methods, params/results, operation identity, transfers, errors, and versioning | This document                                                                          | Identical on every carrier                    |
+| Canonical IDL and generated Rust/Python realization                                     | [Protocol Source, Client, and Generation](08-protocol-source-client-and-generation.md) | Encodes this contract without semantic drift  |
+| Framing, attachment authentication, carrier direction, sessions, and liveness           | [Transports and Sessions](03-transports-and-sessions.md)                               | Establishes a trusted session before dispatch |
+| Multi-Environment routing and Harness policy                                            | Harness and Host                                                                       | Selects one trusted binding before EIP        |
+| Native filesystem, process, isolation, output, and receipt evidence                     | `agent-envd` resource owners                                                           | Executes accepted operations                  |
+| Provider provisioning and durable Agent completion                                      | Host                                                                                   | Outside EIP                                   |
 
-Transport headers, WebSocket upgrade fields, stdio pipes, and HTTP session selectors never appear in ordinary EIP params. Conversely, changing transport cannot change a method name, successful result, side-effect classification, or retry rule.
+Carrier headers, stdio pipes, attachment credentials, and WebSocket upgrade fields never appear in ordinary EIP params. Carrier direction cannot change a method, result, retry rule, or side-effect classification.
 
 ## Control Envelope
 
-Every EIP control message is one UTF-8 JSON object conforming to JSON-RPC 2.0. EIP 1.0 control operations use correlated request/response only and do not support batch arrays or application notifications. A request has a string or signed 64-bit integer `id`; booleans and wider integers are invalid IDs. A response carries the same nullable `id` member and exactly one of `result` or `error`.
+Every control message is one UTF-8 JSON object conforming to JSON-RPC 2.0. EIP 1.0 supports correlated request/response only, not batch arrays or application notifications. Request IDs are strings or signed 64-bit integers; booleans and wider integers are invalid. A response carries the same nullable ID and exactly one of `result` or `error`.
 
-Raw file bytes are not control messages. They use the bounded data carrier defined by [Transports and Sessions](03-transports-and-sessions.md) after a correlated `file.open_reader` or `file.open_writer` response has established a typed transfer handle. Data frames cannot name a path, create authority, commit a mutation, or carry an unrelated EIP method.
+Raw file bytes are not control messages. They use the bounded data-frame profile after a correlated `file.open_reader` or `file.open_writer` establishes a typed transfer. A binary frame cannot name a path, create authority, commit a mutation, or invoke another method.
 
 ```json
 {
@@ -33,12 +33,12 @@ Raw file bytes are not control messages. They use the bounded data carrier defin
   "params": {
     "context": {
       "operation_id": "op-01J...",
-      "deadline": "2026-08-20T10:40:00Z"
+      "timeout_ms": 30000
     },
     "request": {
       "command": {
         "kind": "argv",
-        "executable": "git",
+        "executable_spec": {"kind": "name", "name": "git"},
         "arguments": ["status", "--short"]
       },
       "cwd": {"mount_id": "workspace", "path": "/repo"}
@@ -47,15 +47,15 @@ Raw file bytes are not control messages. They use the bounded data carrier defin
 }
 ```
 
-JSON text, nesting depth, collection lengths, identifiers, paths, argument arrays, environment maps, and every encoded byte field are bounded before domain validation. Small control payloads that inherently belong to a JSON method, such as initial process stdin, use unpadded base64 in a typed byte field. Native file content never uses that representation; binary readers and writers carry raw bytes without base64 or JSON copies. Numbers that represent byte counts, offsets, generations, or durations are non-negative integers within the documented range.
+JSON bytes, nesting, strings, collections, paths, arguments, environment maps, identifiers, and encoded-byte values are bounded before domain validation. Small binary values inherent to a control method, such as one stdin chunk, use unpadded base64 in typed `EncodedBytes`. Native file content never uses JSON/base64.
 
-Unknown top-level JSON-RPC fields are ignored only when JSON-RPC permits that behavior and they do not use a reserved `eip_` prefix. Unknown fields inside typed EIP params or results fail validation unless the selected protocol revision explicitly marks that object as additive. This keeps authority-bearing requests fail closed.
+Unknown JSON-RPC envelope fields are handled only as JSON-RPC permits and cannot use reserved `eip_` names. Unknown fields in typed EIP requests fail closed unless a negotiated minor explicitly permits them. Numeric byte counts, offsets, generations, ports, and durations are non-negative bounded integers.
 
 ## Initialization
 
-`initialize` is the first EIP request on a stdio or WebSocket connection and the request that creates an HTTP logical session. No other method is accepted before it.
+`initialize` is the requester's first EIP request on every stdio or reverse-WebSocket session. No other method or binary frame is admitted first.
 
-The following schema is serialized EIP JSON:
+The serialized wire shape is:
 
 ```python
 class EIPClientInfo(BaseModel):
@@ -63,16 +63,11 @@ class EIPClientInfo(BaseModel):
     version: str
 
 
-type ResourceAuthority = Literal["scoped", "server"]
-
-
 class InitializeParams(BaseModel):
     supported_protocol_versions: tuple[str, ...]
     client: EIPClientInfo
     expected_environment_id: str
-    required_capabilities: tuple[str, ...] = ()
-    optional_capabilities: tuple[str, ...] = ()
-    resource_authority: ResourceAuthority = "scoped"
+    required_methods: tuple[str, ...] = ()
 
 
 class EIPServerInfo(BaseModel):
@@ -83,43 +78,35 @@ class EIPServerInfo(BaseModel):
 class EIPLimits(BaseModel):
     max_request_bytes: int
     max_response_bytes: int
-    max_transfer_frame_bytes: int
     max_concurrent_operations: int
-    max_concurrent_file_transfers: int
-    max_file_transfer_records: int
-    file_transfer_record_ttl_ms: int
-    max_staged_file_bytes: int
-    max_staged_file_objects: int
-    file_transfer_idle_ttl_ms: int
-    max_file_transfer_duration_ms: int
     max_processes: int
-    max_process_records: int
-    terminal_process_record_ttl_ms: int
     max_operation_duration_ms: int
     max_inline_output_bytes: int
     max_output_bytes: int
-    max_retained_bytes: int
-    max_retained_objects: int
-    max_retention_ttl_ms: int
-    max_operation_records: int
-    operation_record_ttl_ms: int
-    session_idle_ttl_ms: int
+    max_transfer_frame_bytes: int
+    max_concurrent_file_transfers: int
+    max_file_transfer_bytes: int
 
 
-class ResourceAuthorityDescriptor(BaseModel):
-    mode: ResourceAuthority
-    root_mount_id: str | None
+class ExecutionFeatures(BaseModel):
+    process_count_limit: bool
+    memory_bytes_limit: bool
+    cpu_time_limit: bool
+    per_command_network_deny: bool
+    signal_interrupt: bool
+    signal_terminate: bool
 
 
 class EnvironmentDescriptor(BaseModel):
     environment_id: str
     generation: int
-    capabilities: tuple[str, ...]
     mounts: tuple[MountDescriptor, ...]
     shell_profiles: tuple[ShellProfileDescriptor, ...]
     limits: EIPLimits
     isolation: IsolationPosture
-    resource_authority: ResourceAuthorityDescriptor
+    root_mount_id: str | None
+    available_methods: tuple[str, ...]
+    execution_features: ExecutionFeatures
 
 
 class InitializeResult(BaseModel):
@@ -128,79 +115,81 @@ class InitializeResult(BaseModel):
     descriptor: EnvironmentDescriptor
 ```
 
-Protocol versions use `<major>.<minor>`. The server selects the highest mutually supported minor within a mutually supported major. For EIP major 1, that successful selection also fixes stdio/WebSocket binary data-frame profile version 1; no binary attachment is legal before initialization, and an incompatible frame layout requires another EIP major rather than an unnegotiated profile bump. `expected_environment_id` is mandatory and is compared before a session becomes initialized; a mismatch fails without publishing a usable descriptor. A directly launched adapter learns the value from trusted provider lifecycle state or the validated readiness record, not from model input.
+Versions use `<major>.<minor>`. The server selects the highest mutually supported minor in a mutually supported major. Selecting EIP major 1 also selects binary data-frame profile version 1. No binary attachment is legal before initialization.
 
-A required capability absent from the effective descriptor fails initialization. Optional capabilities are negotiation hints; the result's descriptor is authoritative observed support. Neither list grants capability or widens daemon policy.
+`expected_environment_id` is mandatory trusted binding input. A mismatch fails initialization without publishing a usable descriptor. `required_methods` contains exact JSON-RPC names. Initialization fails if any required name is absent from `available_methods`. The list does not grant a method; it asserts compatibility with the daemon's configured policy and truthful platform support.
 
-`resource_authority` is a deliberate session request, not a capability hint. `scoped` selects only operator-configured logical mounts and is the default when the field is omitted. `server` requests every native filesystem root that the envd process can represent and access, subject to the daemon's immutable `server` authority ceiling. A daemon configured with the default `scoped` ceiling rejects a `server` request during initialization. The selected mode and its effective mount set are immutable for the session; another choice requires a new session. Because one daemon and transport credential represent one trusted daemon user rather than mutually untrusted tenants, this negotiation narrows or selects that user's configured authority and never delegates authority to another principal.
+The descriptor contains configured logical mounts only. `root_mount_id`, when present, identifies exactly one descriptor mount and is never inferred from ordering. A provider requiring broad native access configures ordinary trusted roots explicitly. There is no session-selectable resource-authority mode or synthesized server filesystem.
 
-`resource_authority.root_mount_id` identifies the mount used for an Environment-relative root. It is present whenever the effective descriptor has a default file root and always references exactly one entry in `mounts`; clients never infer a root from mount ordering or a conventional ID. In `server` mode, `mounts` contains daemon-defined logical roots for the complete representable native filesystem namespace. On a single-root POSIX namespace this is one root mount. A platform with multiple independent native roots exposes one logical mount per root and chooses one as `root_mount_id`; if envd cannot enumerate and represent all roots honestly, it does not offer `server` authority on that platform.
+`available_methods` is the sole callable-method availability surface. It permits independent platform truth: omission of one unsupported mutation or process control does not hide unrelated operations. A method absent from the negotiated protocol returns `method_not_found`; a method defined by the protocol but absent from the descriptor returns `unsupported` without native dispatch.
 
-The descriptor contains no API key, transport session value, native path, provider lifecycle credential, helper location, or additional authority beyond the selected mode. Mount and shell descriptors use logical IDs, and `EIPPath.path` remains a portable `/`-separated mount-local path rather than a native host path. Limits are hard observed ceilings that a request can only narrow. `server` authority does not remove path-shape validation, protocol capability checks, operation and transfer bounds, output retention, process ownership, environment filtering, command isolation, receipts, or unknown-outcome handling.
+`execution_features` qualifies only concrete optional values already present in `CommandRequest` and `ProcessSignalParams`; it is not a method catalog, authority grant, or capability family. The three limit booleans state whether `process_count`, `memory_bytes`, and `cpu_time_ms` are enforceable for every available method carrying `CommandRequest`. `per_command_network_deny` states whether `network="deny"` is accepted and enforced for this generation. Signal booleans are the accepted `process.signal` action set: the method is present exactly when at least one is true, and an action whose boolean is false returns `unsupported` before backend control dispatch. `process.kill` remains a separate exact method. Baseline wall-time and stdin/output bounds are mandatory semantics and need no optional support flag.
 
-Initialization itself has no `EIPCallContext`, cannot cause a native resource mutation, and is never retried inside an existing connection or HTTP logical session. Reinitialization requires a new transport session.
+Only limits a client needs before constructing or dispatching work are serialized. Record capacity, terminal-record retention, tombstones, staging aggregate quotas, transfer idle policy, spool capacity, scheduler queues, and cleanup thresholds remain bounded daemon configuration and produce typed runtime outcomes. An absolute `expires_at` in a result is an observation, not a compatibility lease.
 
-## Common Operation Context
+Initialization has no `EIPCallContext`, performs no native resource mutation, and cannot repeat within a live session.
 
-Every method other than `initialize` and transport health carries this serialized context:
+## Common Operation Context and Replay
+
+Every method other than `initialize` carries:
 
 ```python
 class EIPCallContext(BaseModel):
     operation_id: str
-    deadline: datetime | None = None
-    idempotency_key: str | None = None
+    timeout_ms: int | None = None
 ```
 
-`operation_id` is a client-generated, unpredictable correlation value of 1–128 Unicode scalar values, and therefore at most 512 UTF-8 bytes, that the client never reuses within one daemon generation. The same bound applies wherever EIP serializes an operation ID as a selector, receipt field, or error field. At acceptance, the daemon atomically rejects collision with a live operation or retained operation record or tombstone, including a collision from another protocol session. Once bounded record retention expires, continued generation-wide uniqueness remains the client's responsibility rather than requiring an unbounded daemon ID set. The value lets cancellation and receipt lookup target an accepted operation before or after its original response arrives. It is not a replay key, process handle, receipt, or credential.
+`operation_id` is the one replay, cancellation, and receipt identity for an EIP operation. It is a client-generated unpredictable value of at most 128 Unicode scalar values and 512 UTF-8 bytes. The client does not intentionally assign one ID to different logical operations within a daemon generation.
 
-`deadline` is an absolute UTC deadline. Envd narrows it with method and daemon hard ceilings. Expiry before dispatch returns a pre-dispatch timeout. Expiry after dispatch triggers method-specific cancellation and reconciliation; it does not prove the side effect absent.
+At operation admission, envd computes a canonical semantic request digest from:
 
-`idempotency_key` is allowed only on methods whose catalog declares idempotency-key support. It is scoped to the daemon user, Environment identity and generation, method, and canonical semantic request digest. For session-resource opens it is additionally scoped to the exact initialized session and expires with that session; it can recover a lost open response but cannot revive a handle after reconnect. Reusing a key with different params returns `idempotency_conflict`. A matching completed record replays the same bounded success result or typed terminal failure with its original receipt, including `unknown_outcome`; it never replaces retained evidence with a generic conflict. A matching in-progress record attaches only when the method declares safe coalescing; otherwise it returns `operation_in_progress`.
+- the selected EIP protocol version;
+- the exact JSON-RPC method name;
+- generated canonical JSON for typed params after excluding `context.operation_id` and `context.timeout_ms`.
 
-The semantic digest is SHA-256 over the selected protocol version, exact JSON-RPC method name, and generated canonical JSON encoding of the method params after removing `context.operation_id`, `context.deadline`, and `context.idempotency_key`. Canonical encoding sorts object keys, emits UTF-8 without insignificant whitespace, uses the EIP integer/timestamp/base64 profile, and omits absent values, schema defaults, and empty non-presence-sensitive collections. The digest never depends on transport headers, JSON-RPC request ID, session selector, or original object-key order. Idempotency and receipts use this one generated canonicalization path rather than handler-local hashing.
+Canonical JSON sorts object keys, emits UTF-8 without insignificant whitespace, uses EIP timestamp/integer/base64 rules, and omits absent values, schema defaults, and empty non-presence-sensitive collections. It never depends on JSON-RPC request ID, carrier data, object-key order, or a caller clock.
 
-### Method idempotency classes
+The operation owner applies these rules atomically:
 
-| Class                    | Methods                                                                                                                                                                               | Contract                                                                                                                                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Read-only retry          | `environment.describe`, `file.stat`, `file.read_text`, file listing/search, `process.inspect`, `process.read_output`, `process.wait`, port observations, `output.read`, `receipt.get` | No native mutation or persistent resource allocation; retries still obey generation, deadline, and any method-specific output-cursor semantics                                                                 |
-| Session-resource replay  | `file.open_reader`, `file.open_writer`                                                                                                                                                | Allocate no target mutation but accept an optional session-scoped idempotency key that replays the same live handle for the same request; session loss destroys the resource and a new session opens a new one |
-| Provider-key replay      | `file.write_text`, `file.commit_writer`, other file mutations, `shell.exec`, `process.start`, `process.write_stdin`, `process.signal`                                                 | Accept an optional idempotency key whose mapping, request/result, and receipt evidence are owned by one bounded generation-local operation record                                                              |
-| State-idempotent control | `file.close_reader`, `file.abort_writer`, `operation.cancel`, `process.close_stdin`, `process.kill`, `process.release`, `output.release`                                              | Repeating the same target action converges while the owning record or bounded tombstone remains; a conflicting reader-close acceptance choice is not the same action, and a key never widens lifetime          |
-| Session terminal         | `session.close`                                                                                                                                                                       | Applying close again cannot reopen the session; closing protocol metadata aborts only session-scoped file transfers and does not transition daemon-generation processes or retained output                     |
+| Existing operation ID | Method and digest | Result                                                                        |
+| --------------------- | ----------------- | ----------------------------------------------------------------------------- |
+| None                  | Any valid request | Reserve the ID and admit one operation                                        |
+| Active                | Same              | `operation_in_progress`; no duplicate dispatch                                |
+| Terminal and retained | Same              | Replay the same bounded result or typed terminal failure and receipt evidence |
+| Any retained state    | Different         | `conflict`; no dispatch                                                       |
 
-Session-resource and provider-key methods can execute without a key unless their owning method requires one, but then a lost response has no automatic replay guarantee. A session-resource open mapping is attached to the same live transfer record, counts against `max_file_transfer_records`, and disappears with that record or session. A provider-key mapping and its bounded result/receipt evidence are attached to one generation-scoped operation record and share its accounting and reclamation. A client includes a key before the first dispatch whenever it may need safe mutation retry. Envd never retrofits a key after an ambiguous attempt.
+A handler whose work has ended but whose typed result or failure is being published remains active for replay purposes. The owner exposes `operation_in_progress` during that publication boundary and changes to terminal only in the same critical section that stores replayable evidence; a terminal record with no result or failure is never observable.
 
-## Capability and Method Catalog
+This single identity replaces a separate idempotency key. There is no provider-key mapping, late key attachment, or receipt selector. If terminal evidence has expired or been capacity-reclaimed, absence never proves non-dispatch; a client must reconcile native state or accept ambiguity rather than reassign the same uncertain mutation blindly.
 
-A method is callable only when its capability appears in the initialized descriptor and current daemon policy permits it. The initial catalog is:
+The same replay rules apply according to each method's semantics. Replaying a retained read returns its original observation, not a fresh read. A caller wanting a new current-state observation uses a new operation ID. State-idempotent controls converge while their target record or bounded tombstone remains.
 
-| Capability             | Methods                                                                                                                                                                      | Owning semantics                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `environment.describe` | `environment.describe`                                                                                                                                                       | Refresh descriptor, generation, limits, and posture                                                     |
-| `file.read`            | `file.stat`, `file.read_text`, `file.open_reader`, `file.close_reader`, `file.list`                                                                                          | Text convenience and raw readers in [Resource Operations](04-resource-operations.md)                    |
-| `file.find`            | `file.find`                                                                                                                                                                  | Path-name discovery in [Resource Operations](04-resource-operations.md)                                 |
-| `file.search`          | `file.search`                                                                                                                                                                | File-content search in [Resource Operations](04-resource-operations.md)                                 |
-| `file.write`           | `file.write_text`, `file.open_writer`, `file.commit_writer`, `file.abort_writer`, `file.mkdir`, `file.patch_text`, `file.copy`, `file.move`, `file.remove`                   | Text convenience, staged raw writers, and mutations in [Resource Operations](04-resource-operations.md) |
-| `shell.exec`           | `shell.exec`                                                                                                                                                                 | [Command and Process Execution](05-command-and-process-execution.md)                                    |
-| `process.manage`       | `process.start`, `process.inspect`, `process.read_output`, `process.write_stdin`, `process.close_stdin`, `process.signal`, `process.wait`, `process.kill`, `process.release` | [Command and Process Execution](05-command-and-process-execution.md)                                    |
-| `port.observe`         | `port.inspect`, `port.wait`                                                                                                                                                  | [Resource Operations](04-resource-operations.md)                                                        |
-| `output.read`          | `output.read`, `output.release`                                                                                                                                              | [Output Retention](06-output-retention.md)                                                              |
-| `operation.cancel`     | `operation.cancel`                                                                                                                                                           | This document                                                                                           |
-| `receipt.read`         | `receipt.get`                                                                                                                                                                | This document                                                                                           |
-| `session.close`        | `session.close`                                                                                                                                                              | [Transports and Sessions](03-transports-and-sessions.md)                                                |
+`timeout_ms`, when present, is a positive relative budget. Envd derives a monotonic deadline after admission and narrows it with the method and daemon ceiling. A retry of the same operation ID can supply another local wait budget without changing the semantic digest or extending already accepted native work. Expiry before dispatch is pre-dispatch timeout. Expiry after dispatch requests method-specific cancellation/reconciliation and does not prove a side effect absent.
 
-Advertising a capability means the daemon implements every method listed for that capability with the common EIP semantics; partial family support is invalid. Optional or computationally heavier features such as path discovery, content search, and enforceable execution limits use independent capability keys so a daemon can omit them honestly. Methods not listed in the selected protocol version return standard JSON-RPC `method_not_found`. A known method whose capability is absent returns EIP `unsupported`; this distinction lets a client detect protocol incompatibility separately from current provider posture.
+## Method Availability and Catalog
 
-The method catalog contains no provider provisioning, container lifecycle, daemon shutdown, API-key rotation, arbitrary host networking, native PID lookup, unrestricted path open, or shell-evaluated administrative method.
+The canonical IDL defines the EIP 1.0 method set:
 
-## Descriptor Refresh
+| Domain              | Methods                                                                                                                                                                      | Owning contract                                                      |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Environment/session | `environment.describe`, `session.close`                                                                                                                                      | This document and [Transports](03-transports-and-sessions.md)        |
+| Operation evidence  | `operation.cancel`, `receipt.get`                                                                                                                                            | This document                                                        |
+| File reads          | `file.stat`, `file.read_text`, `file.open_reader`, `file.close_reader`, `file.list`, `file.find`, `file.search`                                                              | [Resource Operations](04-resource-operations.md)                     |
+| File writes         | `file.write_text`, `file.open_writer`, `file.commit_writer`, `file.abort_writer`, `file.mkdir`, `file.patch_text`, `file.copy`, `file.move`, `file.remove`                   | [Resource Operations](04-resource-operations.md)                     |
+| Foreground command  | `shell.exec`                                                                                                                                                                 | [Command and Process Execution](05-command-and-process-execution.md) |
+| Background process  | `process.start`, `process.inspect`, `process.read_output`, `process.write_stdin`, `process.close_stdin`, `process.signal`, `process.wait`, `process.kill`, `process.release` | [Command and Process Execution](05-command-and-process-execution.md) |
+| Port observation    | `port.inspect`, `port.wait`                                                                                                                                                  | [Resource Operations](04-resource-operations.md)                     |
+| Retained output     | `output.read`, `output.release`                                                                                                                                              | [Output Retention](06-output-retention.md)                           |
 
-`environment.describe` returns the current session's `EnvironmentDescriptor`. It can report a narrower capability set or unavailable posture, but it never changes the session's selected resource-authority mode or retargets `root_mount_id`. The generation remains immutable for the daemon process lifetime. Envd never rotates generation underneath an initialized session; a fault requiring a new generation drains or terminates the daemon and therefore destroys its sessions.
+The descriptor lists each available method exactly. No capability family asserts all-or-nothing support. Optional behavior inside one method is accepted only when the method's request contract and descriptor posture report it truthfully; unsupported options fail before dispatch.
 
-After a daemon restart, a newly initialized session observes the new generation and the client treats every operation ID, receipt, resource handle, output reference, and cursor from the prior daemon incarnation as gone. When an old selector carries enough structure to identify its prior generation, envd returns `stale_generation`; otherwise it returns the selector family's non-disclosing invalid-handle or not-found error. EIP never restores, migrates, or rewrites prior-generation selectors.
+The catalog contains no provider provisioning, container lifecycle, daemon shutdown, credential rotation, arbitrary native PID/path access, URL fetching, product-user authorization, or shell-evaluated administration.
 
-The core utility method shapes are serialized EIP JSON:
+## Descriptor Refresh and Generation
+
+`environment.describe` returns the current session's descriptor. Within one initialized session, runtime policy can only remove `available_methods` and lower numeric `EIPLimits`. Environment identity, generation, mount descriptors and ordering, root mount, shell profiles, isolation posture, and execution-feature support are immutable. A refresh that re-adds a removed method, raises a prior limit, changes topology/posture/features, or contains an unknown method is a terminal protocol violation; a client never replaces its effective descriptor with that observation. A fault that changes those generation-fixed facts drains or terminates the daemon and destroys its sessions.
+
+A daemon restart creates a new unpredictable nonzero generation. Operation records, process handles, transfer handles, output references, receipts, and private spool data from the old generation are invalid and never restored or adopted. A selector that safely identifies another generation returns `stale_generation`; otherwise it returns its non-disclosing invalid/not-found error.
 
 ```python
 class EnvironmentDescribeParams(BaseModel):
@@ -227,84 +216,79 @@ class OperationCancelResult(BaseModel):
 
 ## Opaque Selectors
 
-The following wire values are bounded opaque strings:
+The base protocol has four opaque selector families:
 
 ```python
 class ProcessHandle(RootModel[str]): ...
 class FileReaderHandle(RootModel[str]): ...
 class FileWriterHandle(RootModel[str]): ...
 class OutputReference(RootModel[str]): ...
-class OutputCursor(RootModel[str]): ...
-class ReceiptRef(RootModel[str]): ...
 ```
 
-Their private records bind at least:
+Private records bind Environment identity, generation, daemon user, object kind, creating operation, lifecycle, and facts required for safe follow-up. File transfer handles additionally bind the exact initialized session, direction, attachment, next offset, and expiry.
 
-- Environment identity and generation;
-- authenticated daemon user;
-- object kind and creating operation;
-- current lifecycle state and expiry;
-- any mount, process, output, or request-shape facts required for safe follow-up.
+Selectors expose no native PID, path, descriptor, storage key, package SID, or credential. Possession is insufficient: every use repeats carrier trust, method availability, generation, kind, state, and policy checks. Server-created values use concise kind-prefixed generation-local identities where entropy is not a security property. Operation IDs remain unpredictable because they identify replay across reconnects.
 
-A selector reveals no native PID, path, file descriptor, provider ID, storage key, or secret. Possessing it is insufficient: every use repeats transport authentication, capability, kind, lifecycle, and current-generation checks. Server-created selectors that can reach a model or user-facing trace use concise kind-prefixed, generation-local values such as `process-1`, `output-1`, or `receipt-1`; uniqueness and lifecycle state live in the owning bounded registry rather than in a long encoded identifier. Client-created operation IDs remain unpredictable as required by their replay and collision contract. No selector survives daemon restart. A malformed, expired, released, or foreign selector returns `not_found_or_denied` or the narrower typed stale/gap error without revealing native internals.
-
-Process handles, receipts, and retained-output selectors are generation-scoped under their owning contracts. File reader and writer handles are narrower: they bind the exact initialized session, direction, one data-carrier attachment, next expected offset, idle/absolute expiry, and lifecycle state. They are invalid from another session even when the authenticated user and generation match. Commit receipts and idempotency records remain generation-scoped after the writer disappears so an ambiguous commit can be reconciled without reviving its byte stream.
+Receipts are addressed by operation ID. Retained and process output use client-owned explicit byte offsets against an output reference or process handle; neither read path creates another server selector.
 
 ## Binary File-Transfer Control
 
-[Resource Operations](04-resource-operations.md) owns file-reader and staged-writer semantics. EIP control establishes and completes them:
+[Resource Operations](04-resource-operations.md) owns file semantics. EIP control and the binary data plane establish these lifecycles:
 
-1. `file.open_reader` authorizes a path and optional byte range and returns one reader handle plus observed metadata before raw delivery.
-2. The transport binds one server-to-client data attachment. Exact offsets, bounded raw frames, terminal EOF, backpressure, and carrier failure are transport facts governed by the same transfer state.
-3. The first `file.close_reader` chooses complete acceptance or incomplete abandonment. Complete acceptance requires clean terminal consumer acknowledgement and returns count and SHA-256 digest evidence for delivered bytes; abandonment returns honest producer progress with no digest. A high-level iterator treats successful complete close validation as part of normal EOF.
-4. `file.open_writer` authorizes and reserves one bounded staged candidate without changing the target.
-5. One client-to-server attachment sends exact contiguous raw bytes and a terminal marker. Envd counts and hashes while reserving storage incrementally.
-6. `file.commit_writer` compares the required count and transfer digest, revalidates destination preconditions, and performs the only target mutation. `file.abort_writer` or any pre-commit transfer teardown deletes the candidate.
+### Reader
 
-A data frame is not a JSON-RPC notification or an independently retryable operation. It is valid only for the already opened handle and direction and cannot be replayed after interruption. A reader can open another explicit range as a new observation, but EIP does not claim it resumes the same file version. A writer restarts with a new candidate. Only a possibly dispatched writer commit has mutation ambiguity; its `operation_id`, idempotency key, and receipt follow the ordinary generation-scoped reconciliation rules.
+1. `file.open_reader` authorizes a path and optional byte range and returns a session-owned reader plus observed metadata.
+2. The carrier attaches one server-to-client binary stream with exact contiguous offsets and finite bounds.
+3. Envd sends `END` after clean producer termination. Readers do not use `END_ACK`.
+4. After the public consumer drains all chunks, `file.close_reader` is the sole successful acceptance action. It returns produced-byte count and SHA-256 digest.
+5. Early exit, cancellation, reset, expiry, or carrier loss closes the reader without acceptance.
 
-## Operation Acceptance, Cancellation, and Completion
+`file.close_reader` has no boolean acceptance choice. It succeeds only for a clean, fully consumed reader. A successful high-level reader compares envd count and digest with locally observed bytes. This proves transfer integrity for the held stream, not an immutable pathname or file snapshot.
+
+### Writer
+
+1. `file.open_writer` authorizes a destination and reserves one bounded destination-local candidate without mutating the target.
+2. The carrier attaches one client-to-server stream. Envd writes exact contiguous chunks while counting, hashing, and reserving staging capacity.
+3. Client `END` plus envd `END_ACK` seals the uploaded stream but does not publish it.
+4. `file.commit_writer` verifies count and digest, atomically hands candidate ownership to the operation, revalidates publication intent, and performs the only destination mutation.
+5. `file.abort_writer` or pre-handoff session teardown deletes the candidate when cleanup can be proven.
+
+A data frame is not independently retryable. Interrupted readers open a new explicit observation. Interrupted writers use a new candidate. Only a possibly dispatched commit has mutation ambiguity, reconciled by its operation ID and receipt evidence.
+
+## Operation Ownership and Cancellation
 
 ```mermaid
 stateDiagram-v2
     [*] --> Validating
-    Validating --> Rejected: envelope, policy, capability, or deadline fails
-    Validating --> Accepted: admission, operation_id, and required ownership handoff linearize
+    Validating --> Rejected: envelope, method, policy, timeout, or capacity fails
+    Validating --> Accepted: operation ID, digest, admission, and domain handoff linearize
     Accepted --> Dispatching
     Dispatching --> Running: native dispatch confirmed
-    Dispatching --> Completed: operation completes synchronously
+    Dispatching --> Completed: synchronous terminal result
     Dispatching --> Unknown: dispatch evidence lost
     Running --> Completed
-    Running --> Cancelling: cancellation or deadline
-    Cancelling --> Completed: provider proves terminal outcome
+    Running --> Cancelling: cancellation or timeout
+    Cancelling --> Completed: terminal provider evidence
     Cancelling --> Unknown: terminal evidence unavailable
     Rejected --> [*]
     Completed --> [*]
     Unknown --> [*]
 ```
 
-Acceptance reserves `operation_id` and admission capacity in the daemon-generation operation registry and completes any method-declared domain ownership handoff. For `file.commit_writer`, sealed-writer validation, operation-record reservation, and session-to-operation candidate handoff are one coordinator linearization; a session already marked closing rejects it pre-dispatch, while a winning handoff removes the candidate from session cleanup. A live nonterminal record is never evicted; `max_concurrent_operations <= max_operation_records` guarantees registry capacity for every admitted operation.
+One bounded generation operation record owns pending admission, active owner state, cancellation, canonical method/digest, terminal result or failure, and receipt. Native execution remains owned after response-waiter loss. A nonterminal record is never capacity-reclaimed; terminal records expire or are reclaimed oldest-first under internal bounded policy.
 
-One operation record owns its canonical request digest, optional provider-idempotency mapping, bounded result, and receipt selector/evidence. Those attachments do not form separate unbounded stores. After terminal completion the complete record remains visible across fresh authenticated sessions until `operation_record_ttl_ms` or, when a new acceptance needs capacity, oldest-terminal-first reclamation. The TTL is an upper bound, not a minimum reservation under capacity pressure. It is never persisted across daemon restart. Missing or reclaimed operation, idempotency, or receipt evidence never proves non-dispatch or mutation failure. JSON-RPC response delivery is independent of native completion evidence.
+A domain handoff that changes cleanup ownership participates in the same admission transaction. For writer commit, sealed-writer validation, operation reservation, and session-to-operation candidate handoff linearize together. Session closing either wins before handoff or cannot delete an operation-owned candidate.
 
-`operation.cancel` has params `{context, target_operation_id}`. It requests cancellation of an accepted operation in the same daemon generation. The result reports one of:
+`operation.cancel` targets an operation ID in the same generation. An accepted cancellation request is not terminal proof. The target operation or later `receipt.get` reports completed, cancelled, timed out, or unknown evidence. Carrier close never requests cancellation automatically.
 
-- `not_found`: no matching accepted operation is visible;
-- `already_terminal`: terminal provider evidence already exists;
-- `cancellation_requested`: the owning resource manager accepted the request;
-- `not_cancellable`: the method or current stage cannot be safely interrupted.
+Because operation admission creates the one record before owner work runs, cancellation cannot overtake an earlier admitted target request and incorrectly report it absent. Both requests remain bounded by their own session and local wait budgets.
 
-A transport that has already accepted an earlier target control frame into its ordered request handoff must not let a later `operation.cancel` overtake that frame and report `not_found` merely because the target has not yet entered the operation registry. The cancel waits only for that earlier handoff to admit or reject the target; its own effective operation deadline and transport/session closure bound the wait. This ordering bridge owns no operation result and disappears when the target handoff admits or terminates.
+## Receipts and Side-Effect Evidence
 
-A successful cancellation request is not terminal proof. The original operation or later receipt reconciliation reports `cancelled`, `completed`, `timed_out`, or `unknown_outcome`. Closing a connection or logical session does not request cancellation and is never evidence of cancellation.
-
-## Receipts and Side-effect Evidence
-
-A mutating operation can return a bounded receipt alongside its method result:
+A mutating operation can return:
 
 ```python
 class OperationReceipt(BaseModel):
-    receipt_ref: ReceiptRef
     operation_id: str
     method: str
     environment_id: str
@@ -329,21 +313,20 @@ class OperationReceipt(BaseModel):
 
 class ReceiptGetParams(BaseModel):
     context: EIPCallContext
-    receipt_ref: ReceiptRef | None = None
-    operation_id: str | None = None
+    operation_id: str
 
 
 class ReceiptGetResult(BaseModel):
     receipt: OperationReceipt
 ```
 
-A receipt records only facts directly observed by envd. `accepted` proves no native dispatch. `dispatched` proves the receiver crossed its native dispatch boundary but not whether the mutation completed. `exec_confirmed` is specific to a command whose requested executable passed the exec handshake. `completed` has a terminal outcome. `unknown` preserves ambiguity.
+A receipt states only facts envd directly observed. `accepted` proves no native dispatch. `dispatched` proves the native boundary was crossed, not completion. `exec_confirmed` proves the requested executable passed the exec handshake. `completed` has a terminal outcome. `unknown` preserves lost certainty.
 
-Exactly one of `receipt_ref` or `operation_id` is present. `receipt.get` re-reads receipt evidence attached to an operation record visible to the daemon user in the current generation; lookup by `operation_id` supports reconciliation after a transport or logical-session reconnect. The receipt selector, provider-idempotency mapping, semantic request/result, and receipt evidence share that record's `max_operation_records` accounting, `operation_record_ttl_ms`, and oldest-terminal-first reclamation. Missing or expired evidence is not converted into operation failure or proof of non-dispatch, and no evidence survives daemon restart. Receipts are observations, not Host durable completion, business transaction commits, provider billing records, or credentials.
+Receipt evidence is attached to the operation record and shares its bounded lifetime and reclamation. It has no independent selector or quota. Missing evidence never becomes proof of non-dispatch, mutation failure, Host durability, provider billing, or Agent completion.
 
 ## Error Contract
 
-A JSON-RPC method error has this bounded `error.data` schema:
+A method error has bounded `error.data`:
 
 ```python
 type RetryHint = Literal[
@@ -351,9 +334,9 @@ type RetryHint = Literal[
     "same_request",
     "after_refresh",
     "after_capacity",
-    "after_authority_change",
     "reconcile_first",
 ]
+
 
 type DispatchStage = Literal[
     "pre_dispatch",
@@ -371,7 +354,6 @@ class EIPErrorData(BaseModel):
     operation_id: str | None = None
     environment_id: str | None = None
     generation: int | None = None
-    capability: str | None = None
     field: str | None = None
     handle_kind: str | None = None
     produced_bytes: int | None = None
@@ -386,89 +368,86 @@ class EIPErrorData(BaseModel):
     safe_detail: str | None = None
 ```
 
-Stable error codes are:
+Stable code/type pairs are:
 
-| JSON-RPC code | `error_type`                 | Meaning                                                                                        |
-| ------------: | ---------------------------- | ---------------------------------------------------------------------------------------------- |
-|      `-32700` | `parse_error`                | Invalid JSON before an EIP envelope exists                                                     |
-|      `-32600` | `invalid_request`            | Invalid JSON-RPC envelope or forbidden batch                                                   |
-|      `-32601` | `method_not_found`           | Method is absent from the selected protocol version                                            |
-|      `-32602` | `invalid_params`             | Typed params fail validation                                                                   |
-|      `-32603` | `internal_error`             | Bounded unexpected server fault with no safe narrower class                                    |
-|      `-32001` | `not_initialized`            | Method used before successful initialization                                                   |
-|      `-32002` | `already_initialized`        | Initialization repeated in one session                                                         |
-|      `-32003` | `protocol_incompatible`      | No version or required-capability agreement                                                    |
-|      `-32010` | `denied`                     | Authenticated daemon-user policy denies the action                                             |
-|      `-32011` | `not_found_or_denied`        | Object is absent or intentionally not distinguishable under current policy                     |
-|      `-32012` | `unsupported`                | Known method or option is unavailable under current capability or policy                       |
-|      `-32020` | `stale_generation`           | Request or selector belongs to another generation                                              |
-|      `-32021` | `invalid_handle`             | Handle kind, state, or request shape is invalid                                                |
-|      `-32022` | `retention_gap`              | Requested output interval is no longer available; data includes the current available bounds   |
-|      `-32030` | `busy`                       | Bounded admission has no capacity                                                              |
-|      `-32031` | `quota_exceeded`             | A finite resource quota cannot reserve capacity                                                |
-|      `-32032` | `output_limit_exceeded`      | Effective `OutputPolicy` selected fail-on-overflow                                             |
-|      `-32040` | `timeout`                    | Deadline expired with a known timeout outcome                                                  |
-|      `-32041` | `cancelled`                  | Provider proves cancellation before successful completion                                      |
-|      `-32042` | `unknown_outcome`            | A possible side effect cannot be classified safely                                             |
-|      `-32043` | `operation_in_progress`      | Matching operation or idempotency record is still active and cannot coalesce                   |
-|      `-32044` | `idempotency_conflict`       | Key was reused for another semantic request                                                    |
-|      `-32050` | `provider_unavailable`       | Native or provider resource is not currently usable                                            |
-|      `-32051` | `execution_isolation_failed` | Required per-command containment or pre-exec identity policy could not be established          |
-|      `-32052` | `cleanup_failed`             | Native resource reached a terminal command state but required cleanup could not be established |
-|      `-32053` | `command_start_failed`       | The selected executable could not be executed after transactional preparation                  |
-|      `-32060` | `conflict`                   | Topology, publication intent, or resource-state precondition failed                            |
-|      `-32061` | `integrity_mismatch`         | A completed data attachment does not match its required byte count or SHA-256 digest           |
+|     Code | `error_type`                 | Meaning                                                                    |
+| -------: | ---------------------------- | -------------------------------------------------------------------------- |
+| `-32700` | `parse_error`                | Invalid JSON before an EIP envelope                                        |
+| `-32600` | `invalid_request`            | Invalid JSON-RPC envelope, batch, or notification                          |
+| `-32601` | `method_not_found`           | Method absent from selected protocol version                               |
+| `-32602` | `invalid_params`             | Typed params fail validation                                               |
+| `-32603` | `internal_error`             | Bounded unexpected fault with no narrower class                            |
+| `-32001` | `not_initialized`            | Method used before initialization                                          |
+| `-32002` | `already_initialized`        | Initialization repeated in one session                                     |
+| `-32003` | `protocol_incompatible`      | Version or required-method agreement fails                                 |
+| `-32010` | `denied`                     | Configured policy denies the action                                        |
+| `-32011` | `not_found_or_denied`        | Object absent or intentionally indistinguishable                           |
+| `-32012` | `unsupported`                | Protocol method/option unavailable in current descriptor/posture           |
+| `-32020` | `stale_generation`           | Selector belongs to another generation                                     |
+| `-32021` | `invalid_handle`             | Handle kind, state, or use is invalid                                      |
+| `-32022` | `retention_gap`              | Requested output interval is unavailable                                   |
+| `-32030` | `busy`                       | Bounded admission capacity unavailable                                     |
+| `-32031` | `quota_exceeded`             | Finite resource quota cannot reserve capacity                              |
+| `-32032` | `output_limit_exceeded`      | Selected output fail policy overflowed                                     |
+| `-32040` | `timeout`                    | Relative deadline expired with known timeout result                        |
+| `-32041` | `cancelled`                  | Provider proves cancellation                                               |
+| `-32042` | `unknown_outcome`            | Possible effect cannot be classified safely                                |
+| `-32043` | `operation_in_progress`      | Same operation ID and digest is active                                     |
+| `-32050` | `provider_unavailable`       | Native/provider resource unavailable                                       |
+| `-32051` | `execution_isolation_failed` | Required isolation or pre-exec identity failed                             |
+| `-32052` | `cleanup_failed`             | Required native cleanup cannot be proven                                   |
+| `-32053` | `command_start_failed`       | Selected executable did not execute after preparation                      |
+| `-32060` | `conflict`                   | Operation-ID digest, topology, publication, or state precondition conflict |
+| `-32061` | `integrity_mismatch`         | Transfer count or SHA-256 evidence differs                                 |
 
-Transport authentication failures occur before JSON-RPC dispatch and therefore use transport-native status or connection close rather than fabricating an EIP error. Once a valid request is parsed in an initialized session, a method failure uses JSON-RPC even on HTTP.
+Carrier authentication and upgrade failures happen before JSON-RPC dispatch. Once a valid request is admitted in an initialized session, method failure uses this contract.
 
-The code and `error_type` pair is fixed and generated validation rejects a mismatched pair before an outbound error is serialized. For `retention_gap`, `available_start` and `available_end` are both present and identify the currently readable half-open interval when the object still exists.
-
-The optional byte/item counts and `process_status` carry only bounded producer and command-state evidence for failures such as output overflow; they never carry output content or a native process identifier. `safe_detail` is optional, bounded, and stable only for human diagnosis. Clients branch on code and `error_type`, not message text. Errors exclude credentials, authorization headers, command environments, full command text, native private paths, file content, output content, isolation profiles, and unrelated native identifiers.
+The generated codec validates every code/type pair. For `retention_gap`, `available_start` and `available_end` identify the current readable half-open interval where the object remains. Counts and status contain bounded evidence, never output content or native identities. Clients branch on code and `error_type`, not message text.
 
 ## Retry and Unknown Outcomes
 
-Read-only methods can be retried, but a repeated current-state file observation need not equal the earlier result when native state changed. Retained-output reads additionally obey their output-cursor and retention-gap semantics. Mutations can be retried when one of these is true:
+A new read-only observation uses a new operation ID. Repeating a retained operation ID with the same method/digest asks for replay of the original result. Mutations can repeat safely only when:
 
-- the error proves `dispatch_stage="pre_dispatch"`;
-- the same idempotency key and semantic request are supported and retained;
-- a receipt or resource read reconciles the prior operation to a terminal fact that makes retry safe.
+- failure proves `dispatch_stage="pre_dispatch"` and the caller deliberately starts a new operation; or
+- the same operation ID, method, and digest still has retained replay evidence; or
+- receipt/resource reconciliation proves a terminal fact that makes a new operation safe.
 
-A timeout, cancellation race, dropped HTTP response, WebSocket close, or stdio EOF after possible dispatch produces `unknown_outcome` unless envd has stronger evidence. A client never automatically switches transport or provider and repeats an ambiguous mutation.
+A timeout, cancellation race, carrier close, or response loss after possible dispatch yields `unknown_outcome` unless stronger evidence exists. The client never switches carrier, reconnects, or assigns a new operation ID to repeat an ambiguous mutation automatically.
 
 ## Observation Without Push
 
-EIP 1.0 defines no JSON-RPC application notifications. Clients observe changing process and retained-output state through bounded `process.inspect`, `process.read_output`, `process.wait`, and `output.read` requests; `wait_ms` and operation deadlines provide bounded long polling where the method supports it. An incoming JSON-RPC object without an `id` is not dispatched as an EIP method.
+EIP 1.0 has no application notifications. Clients observe process and output changes through bounded `process.inspect`, `process.read_output`, `process.wait`, and `output.read`. Explicit offsets and `next_offset` support non-draining reads; each call remains an independently bounded request. `wait_ms` and `timeout_ms` provide bounded long polling where supported.
 
-Binary file data is not state notification. It exists only while a correlated reader or writer is active, carries exact sequential bytes plus a terminal marker, and has no subscription, replay, fan-out, or independent authority. HTTP, WebSocket, and stdio expose the same transfer lifecycle even though their byte-carrier framing differs.
+Binary file data is not state notification. It exists only for one session-owned reader or writer and has no subscription, replay, fan-out, or independent authority.
 
 ## Compatibility and Versioning
 
-EIP protocol version is independent of daemon package, provider profile, readiness schema, and Harness package version. Before the repository publishes its first externally supported EIP release, the checked `0.0.0` daemon, client, descriptor, and fixtures form one atomic pre-release schema snapshot and make no compatibility promise across repository commits; a schema reset still reserves every removed field number and name. After that first supported release, all changes obey the versioning rules below.
+EIP version is independent of package version, readiness state, and provider profile. Before the first externally supported release, the checked `0.0.0` IDL remains an atomic pre-release snapshot, but every removed field number and name is reserved so stale generated values cannot be reinterpreted accidentally.
 
-Within one protocol major version:
+Within one supported major:
 
-- adding an optional result field is compatible when old clients can ignore it safely;
-- adding a capability-gated method or enum value is compatible only when receivers do not treat unknown values as an existing behavior;
-- adding an optional request field is compatible only in a negotiated newer minor, with an explicit non-widening default; `resource_authority` therefore defaults to `scoped`, and a client that negotiated an older minor omits the field rather than relying on that server to ignore it;
-- method names, existing field meaning, error meaning, default side-effect behavior, idempotency scope, output-cursor semantics, and generation fencing remain stable.
+- additive result fields are compatible when older clients can ignore them safely;
+- a new method is compatible only in a negotiated minor and appears explicitly in `available_methods`;
+- an optional request field requires a negotiated minor and a non-widening default;
+- method names, operation-ID replay scope, timeout meaning, error meaning, selector scope, explicit output offsets, transfer integrity, and writer publication boundary remain stable.
 
-Removing a field, changing an existing default, widening authority, making an incomplete result appear complete, changing retry or cancellation meaning, changing a selector's scope, changing transfer offset/terminal/integrity semantics, or moving the writer mutation boundary away from commit requires a new major version. Clients fail explicitly when no compatible major exists or a required capability is absent.
+Removing or repurposing a field, changing a method's side-effect boundary, making a selector authoritative, changing replay digest semantics, resuming transfers across sessions, reintroducing reader `END_ACK`, or turning an absolute observation timestamp into a lease requires an incompatible revision.
 
-Common conformance fixtures run the generated Python client against the Rust daemon with identical request/result/error cases over stdio, HTTP, and WebSocket. Descriptor, generated-code, and golden-wire drift gates are owned by [Protocol Source, Client, and Generation](08-protocol-source-client-and-generation.md). Transport tests add framing, authentication, reconnect, concurrency, liveness, and size cases but cannot redefine protocol behavior.
+Common fixtures exercise generated Python against the Rust daemon over stdio and reverse WebSocket. Carrier tests add framing, attachment authentication, reconnect, liveness, concurrency, and size cases without redefining protocol results.
 
 ## Invariants
 
-01. Every control message contains exactly one JSON-RPC envelope; EIP batch requests and JSON-RPC notifications are invalid, while raw file data uses only the correlated bounded data carrier.
-02. `initialize` is the first and only initialization request in a session, verifies expected Environment identity, and fixes effective resource authority before method or data-plane admission.
-03. Transport identity never comes from EIP params; the initialization authority request can only select a mode allowed by immutable daemon configuration.
-04. Every non-initialization method carries one bounded `EIPCallContext` with a daemon-generation-unique operation ID.
-05. A method executes only when present in the selected protocol and enabled by the observed capability and current policy.
-06. Opaque selectors grant no authority and are revalidated against the daemon user, Environment identity, current generation, kind, state, and expiry; none survives daemon restart.
-07. Cancellation is a request; only provider evidence establishes a terminal cancellation outcome.
-08. A receipt states only the envd stage and outcome it directly observed and never implies Host durable completion.
-09. Errors preserve pre-dispatch, dispatched, completed, and unknown distinctions and never expose secrets or native object existence beyond current policy.
-10. Automatic mutation retry requires proven non-dispatch, retained idempotency, or reconciliation evidence.
-11. File bytes never enter JSON/base64; a reader or writer has one direction, one session, one attachment, exact contiguous offsets, finite limits, and an explicit terminal consumer-acceptance boundary before complete digest evidence.
-12. Writer open and data delivery never mutate the destination; only an integrity-checked commit can do so, and an ambiguous commit is reconciled without resuming the expired writer.
-13. Every EIP 1.0 control operation uses a correlated request and response; changing process and output state remains observable through bounded reads and waits.
-14. Transport choice cannot change method, transfer lifecycle, error, output, side-effect, idempotency, or compatibility semantics.
+01. Every control message contains one correlated JSON-RPC envelope; batches and notifications are invalid, and native file bytes use only the typed binary carrier.
+02. `initialize` is the first request, verifies Environment identity and exact required methods, and publishes configured mounts, root mount, actionable limits, method availability, generation, and isolation posture.
+03. Every later method carries one operation ID; operation ID is the sole replay, cancellation, and receipt identity.
+04. Same operation ID plus same method/digest replays terminal evidence or reports active progress; another method/digest conflicts without dispatch.
+05. `timeout_ms` is a relative bounded wait/operation budget converted to a monotonic daemon deadline; caller wall-clock timestamps do not govern execution.
+06. Exact `available_methods`, not capability families, determines callable support.
+07. Opaque selectors grant no authority and none survives daemon restart; file transfer handles are additionally session-scoped.
+08. Receipts are addressed only by operation ID and state only envd-observed evidence.
+09. Cancellation is a request; only owner evidence establishes terminal cancellation.
+10. Reader success requires `file.close_reader` after full consumption and digest verification; readers do not use `END_ACK`.
+11. Writer open and upload do not mutate the destination; only integrity-checked commit can publish, and ambiguous commit is reconciled by operation ID.
+12. Retained/process output uses explicit client-owned offsets and next offsets; there are no output cursor objects.
+13. Errors preserve pre-dispatch, dispatched, completed, and unknown distinctions without exposing secrets or native internals.
+14. Carrier choice and reconnect cannot change method, replay, transfer, output, receipt, or compatibility semantics.

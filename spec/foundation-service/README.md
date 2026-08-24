@@ -17,7 +17,7 @@ It does not redefine the code-first Harness `AgentDefinition`, plugin lifecycle,
 | [02-client-side-tools.md](02-client-side-tools.md)                         | Frozen external tool surfaces, durable pending batches, authenticated delivery, idempotent feedback, and continuation           |
 | [03-execution-lifecycle.md](03-execution-lifecycle.md)                     | Durable Execution and Attempt identity, fencing, checkpoints, recovery, completion, and child delivery                          |
 | [04-execution-api-and-events.md](04-execution-api-and-events.md)           | Foundation Client resources, HTTP boundary, child/task operations, acceptance, commands, durable events, replay, and connectors |
-| [05-usage-accounting.md](05-usage-accounting.md)                           | Per-response observation identity, pricing coverage, deduplication, projections, and accounting boundary                        |
+| [05-usage-accounting.md](05-usage-accounting.md)                           | Mixed-source usage identity, per-model-request reporting, pricing, deduplication, projections, and accounting boundary          |
 | [06-environment-providers.md](06-environment-providers.md)                 | Provider registry and locks, desired topology, launch-envelope custody, Attempt materialization, and active-run reconciliation  |
 
 ## Reading Paths

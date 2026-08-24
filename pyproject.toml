@@ -34,6 +34,8 @@ default-groups = ["dev", "docs"]
 package = false
 
 [tool.uv.sources]
+converge-agent-harness = { workspace = true }
+converge-agent-stream-protocol = { workspace = true }
 converge-logging = { workspace = true }
 
 [tool.ruff]
@@ -43,17 +45,25 @@ fix = true
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "RUF", "UP"]
+ignore = ["E501"]
 
 [tool.pyright]
 include = [
     "packages/agent-envd-client/converge_agent_envd_client",
     "packages/agent-harness/converge_agent_harness",
+    "packages/agent-stream-protocol/converge_agent_stream_protocol",
+    "packages/agent-ui/converge_agent_ui",
     "packages/logging/converge_logging",
     "packages/foundation-service/converge_foundation_service",
+    "scripts/check-agent-distributions.py",
+    "scripts/check-agent-ui-distribution.py",
+    "scripts/check_agent_ui_distribution.py",
     "scripts/check-release-version.py",
     "scripts/create-github-release.py",
     "scripts/eip_codegen",
+    "scripts/prepare-agent-ui-assets.py",
     "scripts/prepare-release-version.py",
+    "scripts/prepare_agent_ui_assets.py",
     "scripts/release_notes.py",
     "scripts/release_version.py",
 ]
@@ -67,6 +77,8 @@ addopts = ["--import-mode=importlib"]
 testpaths = [
     "packages/agent-envd-client/tests",
     "packages/agent-harness/tests",
+    "packages/agent-stream-protocol/tests",
+    "packages/agent-ui/tests",
     "packages/logging/tests",
     "packages/foundation-service/tests",
     "scripts/tests",

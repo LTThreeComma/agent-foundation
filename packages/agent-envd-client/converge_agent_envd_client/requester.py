@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -188,15 +187,16 @@ class RequestCoordinator(EIPRequester):
         if not isinstance(params, method.params_type):
             raise TypeError(f"{method.name} params must be {method.params_type.__name__}")
 
-        request_timeout = _effective_timeout(params, self._request_timeout)
-        if request_timeout is not None and request_timeout <= 0:
-            raise EIPRequestTimeoutError("EIP request deadline expired before dispatch", dispatched=False)
         loop = asyncio.get_running_loop()
-        timeout_at = loop.time() + request_timeout if request_timeout is not None else None
-
+        started_at = loop.time()
         params_payload = json.loads(encode_model(cast(BaseModel, params)))
         if not isinstance(params_payload, dict):
             raise EIPProtocolError("generated EIP params did not encode as an object")
+
+        request_timeout = _effective_timeout(params_payload, self._request_timeout)
+        if request_timeout is not None and request_timeout <= 0:
+            raise EIPRequestTimeoutError("EIP request timeout expired before dispatch", dispatched=False)
+        timeout_at = started_at + request_timeout if request_timeout is not None else None
 
         try:
             await _wait_until(self._admission.acquire(), timeout_at)
@@ -364,6 +364,10 @@ class RequestCoordinator(EIPRequester):
             await self._transport.close()
             raise transport_error from error
 
+    async def close_for_protocol_error(self, error: EIPProtocolError) -> None:
+        self._terminate(error)
+        await self.close()
+
     async def close(self) -> None:
         if self._close_task is None:
             self._closed = True
@@ -519,11 +523,12 @@ def _deadline_expired(timeout_at: float | None) -> bool:
     return timeout_at is not None and asyncio.get_running_loop().time() >= timeout_at
 
 
-def _effective_timeout(params: object, configured_timeout: float | None) -> float | None:
-    context = getattr(params, "context", None)
-    deadline = getattr(context, "deadline", None)
-    if deadline is None:
+def _effective_timeout(params: dict[str, Any], configured_timeout: float | None) -> float | None:
+    context = params.get("context")
+    if not isinstance(context, dict):
         return configured_timeout
-    parsed_deadline = datetime.fromisoformat(deadline.removesuffix("Z") + "+00:00")
-    remaining = (parsed_deadline - datetime.now(UTC)).total_seconds()
-    return remaining if configured_timeout is None else min(configured_timeout, remaining)
+    timeout_ms = context.get("timeout_ms")
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool):
+        return configured_timeout
+    requested_timeout = timeout_ms / 1000
+    return requested_timeout if configured_timeout is None else min(configured_timeout, requested_timeout)

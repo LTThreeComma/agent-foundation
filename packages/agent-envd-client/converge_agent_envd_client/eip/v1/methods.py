@@ -82,10 +82,8 @@ from .models import (
 @dataclass(frozen=True, slots=True)
 class MethodSpec[P, R]:
     name: str
-    capability: str | None
     kind: Literal["request_response"]
     idempotency: str
-    idempotency_key: Literal["disallowed", "optional", "required"]
     introduced: str
     error_family: str
     params_type: type[P]
@@ -96,10 +94,8 @@ class MethodSpec[P, R]:
 
 ENVIRONMENT_DESCRIBE = MethodSpec(
     name="environment.describe",
-    capability="environment.describe",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="common",
     transfer_action=None,
@@ -110,10 +106,8 @@ ENVIRONMENT_DESCRIBE = MethodSpec(
 
 FILE_ABORT_WRITER = MethodSpec(
     name="file.abort_writer",
-    capability="file.write",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
     transfer_action="abort",
@@ -124,10 +118,8 @@ FILE_ABORT_WRITER = MethodSpec(
 
 FILE_CLOSE_READER = MethodSpec(
     name="file.close_reader",
-    capability="file.read",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="resource",
     transfer_action="close",
@@ -138,10 +130,8 @@ FILE_CLOSE_READER = MethodSpec(
 
 FILE_COMMIT_WRITER = MethodSpec(
     name="file.commit_writer",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action="commit",
@@ -152,10 +142,8 @@ FILE_COMMIT_WRITER = MethodSpec(
 
 FILE_COPY = MethodSpec(
     name="file.copy",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -166,10 +154,8 @@ FILE_COPY = MethodSpec(
 
 FILE_FIND = MethodSpec(
     name="file.find",
-    capability="file.find",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -180,10 +166,8 @@ FILE_FIND = MethodSpec(
 
 FILE_LIST = MethodSpec(
     name="file.list",
-    capability="file.read",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -194,10 +178,8 @@ FILE_LIST = MethodSpec(
 
 FILE_MKDIR = MethodSpec(
     name="file.mkdir",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -208,10 +190,8 @@ FILE_MKDIR = MethodSpec(
 
 FILE_MOVE = MethodSpec(
     name="file.move",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -222,10 +202,8 @@ FILE_MOVE = MethodSpec(
 
 FILE_OPEN_READER = MethodSpec(
     name="file.open_reader",
-    capability="file.read",
     kind="request_response",
-    idempotency="session_resource_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action="open",
@@ -236,10 +214,8 @@ FILE_OPEN_READER = MethodSpec(
 
 FILE_OPEN_WRITER = MethodSpec(
     name="file.open_writer",
-    capability="file.write",
     kind="request_response",
-    idempotency="session_resource_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action="open",
@@ -250,10 +226,8 @@ FILE_OPEN_WRITER = MethodSpec(
 
 FILE_PATCH_TEXT = MethodSpec(
     name="file.patch_text",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -264,10 +238,8 @@ FILE_PATCH_TEXT = MethodSpec(
 
 FILE_READ_TEXT = MethodSpec(
     name="file.read_text",
-    capability="file.read",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -278,10 +250,8 @@ FILE_READ_TEXT = MethodSpec(
 
 FILE_REMOVE = MethodSpec(
     name="file.remove",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -292,10 +262,8 @@ FILE_REMOVE = MethodSpec(
 
 FILE_SEARCH = MethodSpec(
     name="file.search",
-    capability="file.search",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -306,10 +274,8 @@ FILE_SEARCH = MethodSpec(
 
 FILE_STAT = MethodSpec(
     name="file.stat",
-    capability="file.read",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -320,10 +286,8 @@ FILE_STAT = MethodSpec(
 
 FILE_WRITE_TEXT = MethodSpec(
     name="file.write_text",
-    capability="file.write",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -334,10 +298,8 @@ FILE_WRITE_TEXT = MethodSpec(
 
 INITIALIZE = MethodSpec(
     name="initialize",
-    capability=None,
     kind="request_response",
     idempotency="initialization",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="initialization",
     transfer_action=None,
@@ -348,10 +310,8 @@ INITIALIZE = MethodSpec(
 
 OPERATION_CANCEL = MethodSpec(
     name="operation.cancel",
-    capability="operation.cancel",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="common",
     transfer_action=None,
@@ -362,10 +322,8 @@ OPERATION_CANCEL = MethodSpec(
 
 OUTPUT_READ = MethodSpec(
     name="output.read",
-    capability="output.read",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="output",
     transfer_action=None,
@@ -376,10 +334,8 @@ OUTPUT_READ = MethodSpec(
 
 OUTPUT_RELEASE = MethodSpec(
     name="output.release",
-    capability="output.read",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="output",
     transfer_action=None,
@@ -390,10 +346,8 @@ OUTPUT_RELEASE = MethodSpec(
 
 PORT_INSPECT = MethodSpec(
     name="port.inspect",
-    capability="port.observe",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -404,10 +358,8 @@ PORT_INSPECT = MethodSpec(
 
 PORT_WAIT = MethodSpec(
     name="port.wait",
-    capability="port.observe",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="resource",
     transfer_action=None,
@@ -418,10 +370,8 @@ PORT_WAIT = MethodSpec(
 
 PROCESS_CLOSE_STDIN = MethodSpec(
     name="process.close_stdin",
-    capability="process.manage",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -432,10 +382,8 @@ PROCESS_CLOSE_STDIN = MethodSpec(
 
 PROCESS_INSPECT = MethodSpec(
     name="process.inspect",
-    capability="process.manage",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -446,10 +394,8 @@ PROCESS_INSPECT = MethodSpec(
 
 PROCESS_KILL = MethodSpec(
     name="process.kill",
-    capability="process.manage",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -460,10 +406,8 @@ PROCESS_KILL = MethodSpec(
 
 PROCESS_READ_OUTPUT = MethodSpec(
     name="process.read_output",
-    capability="process.manage",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -474,10 +418,8 @@ PROCESS_READ_OUTPUT = MethodSpec(
 
 PROCESS_RELEASE = MethodSpec(
     name="process.release",
-    capability="process.manage",
     kind="request_response",
     idempotency="state_idempotent_control",
-    idempotency_key="optional",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -488,10 +430,8 @@ PROCESS_RELEASE = MethodSpec(
 
 PROCESS_SIGNAL = MethodSpec(
     name="process.signal",
-    capability="process.manage",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -502,10 +442,8 @@ PROCESS_SIGNAL = MethodSpec(
 
 PROCESS_START = MethodSpec(
     name="process.start",
-    capability="process.manage",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -516,10 +454,8 @@ PROCESS_START = MethodSpec(
 
 PROCESS_WAIT = MethodSpec(
     name="process.wait",
-    capability="process.manage",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -530,10 +466,8 @@ PROCESS_WAIT = MethodSpec(
 
 PROCESS_WRITE_STDIN = MethodSpec(
     name="process.write_stdin",
-    capability="process.manage",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="process",
     transfer_action=None,
@@ -544,10 +478,8 @@ PROCESS_WRITE_STDIN = MethodSpec(
 
 RECEIPT_GET = MethodSpec(
     name="receipt.get",
-    capability="receipt.read",
     kind="request_response",
     idempotency="read_only_retry",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="common",
     transfer_action=None,
@@ -558,10 +490,8 @@ RECEIPT_GET = MethodSpec(
 
 SESSION_CLOSE = MethodSpec(
     name="session.close",
-    capability="session.close",
     kind="request_response",
     idempotency="session_terminal",
-    idempotency_key="disallowed",
     introduced="1.0",
     error_family="session",
     transfer_action=None,
@@ -572,10 +502,8 @@ SESSION_CLOSE = MethodSpec(
 
 SHELL_EXEC = MethodSpec(
     name="shell.exec",
-    capability="shell.exec",
     kind="request_response",
-    idempotency="provider_key_replay",
-    idempotency_key="optional",
+    idempotency="operation_replay",
     introduced="1.0",
     error_family="command",
     transfer_action=None,

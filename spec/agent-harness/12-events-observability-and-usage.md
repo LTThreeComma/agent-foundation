@@ -4,7 +4,7 @@
 
 `HarnessEvent` and `HarnessRunResultEvent` are stable process-local output seams. `AbstractCapability[AgentContext]` adapters produce Harness-owned observations, ordered Harness plugin middleware can transform or suppress non-terminal events and replace the complete result candidate, and one single-consumer `HarnessRunStream` preserves ordering and produces a terminal result event only after final validation and complete run-scoped teardown succeed.
 
-Pydantic AI public events remain the source for model and tool execution, and `RunCancelled` is the source terminal signal for native cancellation. The Harness adds only correlation, state, recovery, managed-invocation, delegation, usage-observation, and diagnostic events that Pydantic AI does not own. Pydantic AI `RequestUsage`, `RunUsage`, and `UsageLimits` remain authoritative for model-request usage, accumulation, and supported limits. When semantic recovery starts another inner attempt, events already delivered by the earlier attempt remain observations in the same logical Harness stream and cannot be retracted.
+Pydantic AI public events remain the source for model and tool execution, and `RunCancelled` is the source terminal signal for native cancellation. The Harness adds only correlation, state, recovery, managed-invocation, delegation, usage-attribution, and diagnostic events that Pydantic AI does not own. Pydantic AI `RequestUsage`, `RunUsage`, and `UsageLimits` remain authoritative for model-request usage, accumulation, and supported limits. When semantic recovery starts another inner attempt, events already delivered by the earlier attempt remain observations in the same logical Harness stream and cannot be retracted.
 
 OpenTelemetry uses Pydantic AI's `Instrumentation` Capability plus spans for Harness-owned operations. Durable event delivery, cross-run usage aggregation, valuation, billing, and lifecycle facts belong to the host.
 
@@ -12,7 +12,7 @@ Event and observability behavior inside model, node, or tool execution uses Pyda
 
 ## Boundary
 
-The harness does not define host lifecycle events, a broker, SSE, webhook, durable replay, cross-process delivery guarantee, observability backend, generalized resource meter, usage sink, price catalog, invoice, or payment system.
+The Harness does not define Host lifecycle events, a broker, SSE, webhook, durable replay, cross-process delivery guarantees, an observability backend, a universal resource taxonomy, a durable usage sink, a price catalog, invoices, or payment.
 
 ## Event Model
 
@@ -64,7 +64,7 @@ sequenceDiagram
     Plugins-->>Stream: transformed observations and candidate
     Stream-->>Host: HarnessEvent values with backpressure
     Stream->>Stream: validate candidate and finish teardown
-    Stream-->>Host: final HarnessRunResultEvent with RunUsage snapshot
+    Stream-->>Host: final HarnessRunResultEvent with usage snapshots
 ```
 
 Model and tool events preserve their public Pydantic AI types. This includes native `DeferredToolRequestsEvent` and `DeferredToolResultsEvent` observations for approval and external execution. The Harness does not recreate model-request, response-delta, tool, or client-call lifecycle state machines and does not add a second `DEFERRED_TOOLS` control event. A transport can project a convenience client-tools payload, but only the terminal `HarnessRunResult.deferred` and a Host's accepted durable pending record have continuation meaning. High-frequency Pydantic deltas may be coalesced by a consumer without changing complete messages or `HarnessState`.
@@ -80,7 +80,7 @@ The run-local Environment adapter reads an independent cursor from the bounded n
 | `recovery`   | Bounded inner-attempt interruption, backoff, restart, exhaustion, or normalized cancellation observation; never a durable Host retry fact   |
 | `invocation` | Managed-tool preparation, authorization, approval, dispatch, retry, result-safety, or unknown-outcome observation; never a grant or receipt |
 | `delegation` | Inline child or Host-managed asynchronous submission observation                                                                            |
-| `usage`      | One bounded, attributed `ModelUsageObservation` for a newly committed response; not provider billing proof                                  |
+| `usage`      | One bounded mixed-source `usage_report` emitted at a model-request or terminal reporting boundary; not durable billing proof                |
 | `diagnostic` | Safe implementation/provider detail without lifecycle authority                                                                             |
 
 ## Run Stream and Content
@@ -134,101 +134,32 @@ Exporter failure follows OpenTelemetry policy and does not change run outcome. A
 
 ## Run Usage
 
-Pydantic AI `RunUsage` is the sole process-local usage accumulator. The Harness defines no parallel token accumulator, contribution ledger, sink, or meter taxonomy. It adds one narrow pricing hook and one attributed observation per newly committed response because aggregate usage cannot preserve model, provider, timestamp, lineage, pricing coverage, or stable response identity.
+Pydantic AI `RunUsage` remains the sole process-local accumulator for model requests, tokens, best-effort model cost, tool-call count, and native `UsageLimits`. The Harness adds a run-local append-only attribution ledger, not a second accumulator. Its immutable `UsageRecord` union preserves where independently produced usage came from:
 
-A top-level `run()` or `stream()` call normally omits `usage` and receives a fresh accumulator. A caller can instead supply `usage: RunUsage` to share an explicit in-process aggregate, matching Pydantic AI's public run API. `HarnessRunStream.usage` exposes that live accumulator. Every terminal `HarnessRunResult.usage` is a copy taken at the terminal boundary, so an already returned result never changes when a shared accumulator receives later increments.
+- `ModelUsageRecord` captures one model response proven to have entered native `RunUsage`, including bounded request usage, model/provider attribution, response state, lineage, and pricing coverage;
+- `ProviderUsageRecord` captures a stable provider receipt contributed by a managed tool or Capability, with provider-neutral measures and optional currency-denominated cost.
 
-Pydantic AI adds each model response's `RequestUsage`, including its best-effort USD `cost`, to the accumulator. Finalized `ModelResponse` values in Pydantic message history retain per-request usage, provider, model, timestamp, and cost attribution; Pydantic instrumentation can project the same request-level facts to telemetry. The Harness emits a narrow `usage` extension only to preserve that existing request fact with stable run-local identity and pricing coverage. It does not count usage again or create another accumulator. Aggregate token counts cannot reconstruct per-model pricing after attribution is discarded, and an aggregate cost can be partial when some responses cannot be priced.
+Provider records do not modify model token totals or native limits. Capability-owned paths record them through `AgentContext.record_provider_usage()`; raw provider metadata, credentials, content, and private provider enums are not part of the contract. Reusing the same provider/product/usage ID is idempotent, while conflicting semantic usage or attribution fails closed.
+
+### Reporting Boundary
+
+Every committed model request is a reporting boundary. After recording that request, the mandatory Usage Capability emits bounded `usage_report` extensions containing every record not included in an earlier report, including mixed provider usage produced since the previous boundary. Large batches may be split into deterministic chunks. A terminal flush reports provider records produced after the final model request, and `HarnessRunResult.usage_records` contains a detached complete run-local snapshot.
+
+Report and record identities are stable for delivery retry and deduplication. Model identity is run-and-ordinal based; provider receipt identity is stable across Harness runs. Reports are process-local observations, not proof of durable ingestion or financial settlement. A Host consumes the canonical stream once and owns persistence, retry, cross-run aggregation, reconciliation, and billing.
+
+The model commit observer uses public Pydantic node, message, and usage boundaries. Normal responses, handled interrupted partial responses, retry-producing requests, and requests that commit before a usage-limit failure remain attributable. Imported history, enqueued or synthetic responses, and history-only processing are not attributed merely because a `ModelResponse` is present.
 
 ### Cost Calculation
 
-```python
-@dataclass(frozen=True)
-class ModelCostInput:
-    model_name: str | None
-    provider_name: str | None
-    provider_url: str | None
-    timestamp: datetime
-    usage: RequestUsage
+A fresh optional `ModelCostRunCapability` carries one synchronous deterministic Host calculator. On the normal model-response path, a finite non-negative USD result replaces provider-populated cost before native accumulation; decline, invalid output, or failure falls back without failing the Agent run. The resulting model record names the selected pricing revision, actual cost source, and whether custom pricing was applied, declined, failed, absent, or not reached.
 
+Pricing input contains only model/provider identity, safe provider URL when available, timestamp, and a copy of request usage with cost cleared. Prompt and response content, credentials, and arbitrary provider payloads are excluded. Catalog storage, refresh, currency conversion, discounts, invoices, and settlement remain Host concerns. Interrupted or short-circuited paths that bypass the calculator retain the cost actually available and are not retroactively rewritten.
 
-class ModelCostCalculator(Protocol):
-    @property
-    def revision(self) -> str: ...
+### Delegation, Resume, and Limits
 
-    def calculate(self, value: ModelCostInput) -> Decimal | None: ...
+Inline children share the parent's live `RunUsage` and calculator selection but retain child-correlated attribution records. Their effective limits are narrowed by delegation policy; native checks do not promise an atomic tree-wide budget across concurrent children. Host-managed asynchronous children and later or resumed root runs normally use fresh accumulators and ledgers.
 
-
-@dataclass(frozen=True)
-class ModelCostRunCapability(AbstractCapability[AgentContext]):
-    calculator: ModelCostCalculator
-```
-
-`ModelCostRunCapability` optionally carries one Host-owned calculator in `RunBindings.capabilities`. It contributes no independent model-facing behavior or authority. The definition-selected usage-pricing Capability resolves exactly zero or one value by stable Capability ID and expected public type; a duplicate, incompatible type, blank revision, or mutable invalid collaborator fails run setup. The calculator's non-empty immutable `revision` identifies its complete custom-and-fallback policy. The core usage-pricing Capability occupies the final normal `after_model_request` position after declared response transforms and before native cost fill and `RunUsage` accumulation. It passes only pricing inputs; `usage` is a copy whose existing `cost` is cleared, and prompt, response content, credentials, and arbitrary provider payloads are absent.
-
-A returned finite non-negative `Decimal` is the estimated USD cost for that complete logical response and replaces any provider-populated value. Returning `None` declines the response: an existing provider cost remains, otherwise Pydantic AI performs its normal `genai-prices` lookup and leaves the cost unknown when no price exists. Invalid numbers and calculator exceptions emit bounded diagnostics and follow the same decline path. This custom-first normal path lets a Foundation Service catalog override selected models while retaining broad built-in coverage. Timestamp-aware calculators can implement peak/off-peak rates without putting a pricing-table schema in the Harness.
-
-This hook is not misrepresented as a universal response-commit seam. An earlier sibling hook can reject with `ModelRetry`, a later incompatible hook can supersede the priced object, and Pydantic can finalize an interrupted partial stream without running `after_model_request`. Those responses retain provider or `genai-prices` pricing and their usage observation reports `custom_pricing_status="not_reached"`; the Harness does not rewrite an already accumulated cost after the fact. Provider continuation segments can also receive native pricing before Pydantic merges them; the custom calculator sees and can override only the final logical response. Segment-specific or cross-time-window valuation therefore requires provider receipts or a separate Host reconciliation record and is outside this Harness hook.
-
-The calculator is synchronous, deterministic for its immutable selected catalog revision, and performs no network or storage I/O on the model path. A Host refreshes or resolves catalog data before the run and injects a ready calculator. The Harness validates but does not interpret the revision; a durable Host retains it with its usage records. Optional price estimation never fails model execution. Currency conversion, discounts, credits, invoices, and financially authoritative settlement stay outside this USD estimate.
-
-The Harness does not serialize the calculator or catalog revision into `HarnessState`. `RunUsage.cost` remains the public live and terminal estimate and participates in native Pydantic `UsageLimits.cost_limit` for costs available on the path Pydantic is checking; there is no second `CostEstimate` accumulator. A response observation makes custom coverage explicit rather than implying that the selected revision priced every request.
-
-### Per-response Observation
-
-```python
-type CostSource = Literal[
-    "custom",
-    "provider",
-    "genai_prices",
-    "provider_or_genai_prices",
-    "unknown",
-]
-type CustomPricingStatus = Literal[
-    "applied", "declined", "failed", "not_configured", "not_reached"
-]
-
-
-class ModelUsageObservation(BaseModel):
-    schema_version: str
-    harness_run_id: str
-    response_ordinal: int
-    lineage_ref: str | None
-    response_state: str | None
-    model_name: str | None
-    provider_name: str | None
-    response_timestamp: datetime
-    request_usage: RequestUsage
-    pricing_revision: str | None
-    cost_source: CostSource
-    custom_pricing_status: CustomPricingStatus
-```
-
-The core usage Capability assigns `response_ordinal` monotonically from zero only when a response is proven to be a model-node commit that entered Pydantic `RunUsage`, or the exact interrupted response committed by Pydantic's handled partial-response path. It uses public model-node hooks to capture the message boundary before that node and the exact node result or post-node delta after it; handled outcome normalization uses the same captured boundary for the exact partial response. A private run-local provenance set prevents a response from receiving another ordinal after history processing, replacement, or repeated boundary inspection.
-
-`run_id` and message position alone are explicitly insufficient evidence. A synthetic `ModelResponse` supplied through `RunContext.enqueue()`, imported history, or a history processor is excluded unless it independently traverses the native model commit path and increments usage. A `SkipModelRequest` response that does traverse that path remains eligible even when its model name is absent. The compatibility suite pins these distinctions against the supported Pydantic minor.
-
-The Capability emits exactly one bounded `usage` extension for each eligible committed response with reported usage. The observation copies the supported final `RequestUsage` fields under fixed detail-count, key-length, numeric, and encoded-size bounds; unsupported provider detail is omitted with a diagnostic rather than copied as arbitrary metadata. It does not increment `RunUsage`. Its run ID and ordinal remain stable after compaction and across event redelivery.
-
-A missing `model_name` remains `None`; the Harness never attributes a skipped or synthetic response to the currently selected model. A calculator may explicitly price such input or return `None`, while `genai-prices` fallback normally remains unavailable without a model name.
-
-The Capability tracks whether the exact committed response passed its pricing hook. `applied`, `declined`, and `failed` report the calculator outcome. `not_configured` means no Host calculator was selected. `not_reached` covers an interrupted partial response, an earlier hook short-circuit, or a priced response later superseded before commit. `cost_source` says which value actually remains: custom, provider-reported, `genai-prices`, an indistinguishable provider-or-`genai-prices` value, or no known cost. On a bypassed path, Pydantic AI may have run its `genai-prices` fill before the Harness can observe whether the provider had already set cost, so a present value is honestly reported as `provider_or_genai_prices` rather than guessed. A selected `pricing_revision` therefore records policy context without falsely claiming custom coverage or source.
-
-Inline child observations retain the child's run ID, sequence, ordinal, and lineage when `forward_child()` projects them into the parent stream. This is the narrow public evidence a Host needs even though `DelegationCapability` consumes the child terminal result and the parent's message history does not contain the child's model history. If another hook, the stream consumer, or the worker fails before an observation is delivered or durably accepted, usage can remain missing; the Harness does not claim a provider-grade accounting guarantee.
-
-### Inline Delegation
-
-`DelegationCapability` passes the parent's live `RunContext.usage` to every inline child. A nested inline tree therefore accumulates into one object, and the root result includes the root run plus all inline descendants. The internally consumed child result contains a cumulative snapshot at the child's terminal boundary, not a child-only delta; per-child durable attribution comes from forwarded child `ModelUsageObservation` values rather than subtraction from the shared total, while Pydantic messages and telemetry remain diagnostic observations.
-
-Because inline descendants share `RunUsage`, their fresh child bindings carry a `ModelCostRunCapability` with the same calculator selection as the root; mixing catalog policies inside one shared accumulator is rejected. Host-managed asynchronous children have independent runs and can select another catalog revision. The child receives the fieldwise stricter intersection of the parent's effective `UsageLimits`, any explicit `SubagentDefinition.usage_limits`, and current delegation policy. Pydantic AI checks cumulative limit fields against the shared aggregate visible at that run's own request and tool boundaries; `per_request_input_tokens_limit` remains local to each request. The limits are not a fresh allowance measured from child entry, but the checks are also not atomic across independent inline runs. Parallel children can race before usage updates, and enclosing delegation tool calls can be counted after child work. Native enforcement therefore constrains each run from current shared usage without promising a hard tree-wide budget. Strict aggregate admission requires separate host serialization or reservation policy.
-
-### Host-Managed Asynchronous Children and Resume
-
-A Host-managed asynchronous child, resumed run, retry, or later programmatic run executes with a fresh accumulator unless an in-process caller explicitly shares one. An asynchronous child with no declared `UsageLimits` starts from Pydantic AI's effective defaults; an explicit object preserves explicit field values, including `None`, before Host policy narrows it for that child run. No `RunUsage` enters `HarnessState` or `AgentContextState`, and a host does not inject its durable cumulative total as the next run's starting usage.
-
-The Host derives durable records only from `ModelUsageObservation` values emitted by each root or inline run; imported history is never reattributed to a resumed run. Root and inline terminal `RunUsage` copies are cumulative observations and are not additional records to sum. Host-managed asynchronous children, retries, and resumed Attempts have independent root scopes and fresh accumulators. Foundation Service's idempotent record, coverage, and pricing-revision semantics are defined by [Usage Recording and Cost Estimation](../foundation-service/05-usage-accounting.md).
-
-Pydantic `RunUsage` covers model usage, best-effort calculated model cost, and Pydantic's tool-call count. Environment CPU, storage, provider-specific non-model resources, invoices, credits, and financial reconciliation are outside the Harness usage contract and can be metered by their owning Host or provider.
+Neither `RunUsage`, the attribution ledger, provider receipts, nor a calculator enters `HarnessState`. Imported messages remain historical, so a resumed run reports only newly committed usage. Terminal cumulative `RunUsage` snapshots and child snapshots can overlap and are never summed as independent contributions; durable projections use immutable usage records instead.
 
 ## Failure Boundary
 
@@ -245,7 +176,7 @@ The event envelope and extension-event schemas evolve independently. Pydantic ev
 - Passing through Pydantic events avoids a second model/tool vocabulary, while consumers must understand the supported public event union.
 - A single-consumer stream gives bounded lifecycle and backpressure semantics, while hosts perform any replay or fan-out.
 - Minimal harness extensions preserve cohesion but leave durable lifecycle projection to the host.
-- Native `RunUsage` keeps upstream accumulation and limit semantics, while durable cross-run totals and non-model metering remain host concerns.
+- Native `RunUsage` keeps upstream accumulation and limit semantics, while the attribution ledger preserves mixed-source facts for Host-owned persistence and reconciliation.
 
 ## Invariants
 
@@ -257,7 +188,8 @@ The event envelope and extension-event schemas evolve independently. Pydantic ev
 06. Harness events and OTel are not host lifecycle authority.
 07. `RunUsage` is the only process-local usage accumulator; the Harness result stores a terminal copy.
 08. A Host calculator overrides a normally committed response only when it returns a finite non-negative cost; decline and failure fall back without failing the run, while bypassed paths are reported as `not_reached` rather than falsely attributed.
-09. Each proven native model or handled-partial commit with reported usage emits one stable run-local `ModelUsageObservation`; enqueue, imported history, and history processing cannot create usage records merely by placing a response in messages.
-10. Inline descendants share the root accumulator and calculator selection, but retain child-correlated response observations; Host-managed asynchronous children and later runs use fresh accumulators.
-11. Imported message history never becomes new usage for a resumed run, and no usage accumulator or calculator enters `HarnessState` or `AgentContextState`.
-12. Sensitive and transient content is absent from pricing input, usage observations, default events, and telemetry.
+09. Each proven native model or handled-partial commit creates one stable model record and flushes all pending mixed records in bounded reports; enqueue, imported history, and history processing cannot create model records merely by placing a response in messages.
+10. Provider receipt identity is stable and idempotent; provider usage does not alter native model totals or limits, and conflicting receipt reuse fails closed.
+11. Inline descendants share the root accumulator and calculator selection but retain child-correlated records; Host-managed asynchronous children and later runs use fresh accumulators and ledgers.
+12. Imported message history never becomes new usage for a resumed run, and no usage accumulator, ledger, provider receipt, or calculator enters `HarnessState` or `AgentContextState`.
+13. Sensitive and transient content is absent from pricing input, usage records, default events, and telemetry.

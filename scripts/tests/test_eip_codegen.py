@@ -51,17 +51,24 @@ def test_checked_inspection_artifacts_follow_eip_json_profile() -> None:
     generation = schema["EnvironmentDescriptor"]["properties"]["generation"]
     assert generation["minimum"] == 1
     assert generation["maximum"] == 2**64 - 1
+    assert "execution_features" in schema["EnvironmentDescriptor"]["required"]
+    assert set(schema["ExecutionFeatures"]["required"]) == {
+        "process_count_limit",
+        "memory_bytes_limit",
+        "cpu_time_limit",
+        "per_command_network_deny",
+        "signal_interrupt",
+        "signal_terminate",
+    }
+    assert "digest" in schema["FileReadCompletion"]["required"]
     assert schema["EIPError"]["properties"]["code"]["minimum"] == -(2**31)
-    for model_name, selector_names in {
-        "OutputReadParams": {"cursor", "start_offset"},
-        "OutputReleaseParams": {"reference", "cursor"},
-        "ReceiptGetParams": {"receipt_ref", "operation_id"},
-    }.items():
-        one_of = schema[model_name]["allOf"][0]["oneOf"]
-        assert {entry["required"][0] for entry in one_of} == selector_names
-        for entry in one_of:
-            selector = entry["required"][0]
-            assert entry["properties"][selector] == {"not": {"type": "null"}}
+    for model_name, selector_name, removed_selector in [
+        ("OutputReadParams", "start_offset", "cursor"),
+        ("OutputReleaseParams", "reference", "cursor"),
+        ("ReceiptGetParams", "operation_id", "receipt_ref"),
+    ]:
+        assert selector_name in schema[model_name]["required"]
+        assert removed_selector not in schema[model_name]["properties"]
 
     openrpc = json.loads(OPENRPC_PATH.read_text(encoding="utf-8"))
     shell_exec = next(method for method in openrpc["methods"] if method["name"] == "shell.exec")

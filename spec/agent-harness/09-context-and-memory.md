@@ -1,10 +1,10 @@
-# Context, Working State, Compaction, and Memory
+# Context, Working State, Resource Acquisition, and Memory
 
 ## Design Position
 
 Model context is assembled by Pydantic AI from Agent instructions, Capability instructions, Toolset instructions, prior messages, ordinary user content, native enqueue input, and public Capability history/model-request hooks. The Harness defines no parallel prompt language or custom user-content part. Dynamic first-party context uses the public `before_model_request(ctx, ModelRequestContext)` boundary or `RunContext.enqueue()` according to whether it augments an eligible request or creates trusted follow-up input.
 
-Working state, compaction, skills, media normalization, and behavior inside the Pydantic Agent loop are ordinary `AbstractCapability[AgentContext]` implementations. `EnvironmentToolsCapability` is the optional model projection of the fixed Harness Environment resource; it is not the resource owner. Query-dependent context retrieval that must inspect and modify the complete semantic run input can instead be a first-class Harness plugin, which may contribute Capabilities. Each plugin or Capability owns its typed configuration, ordering, and failure behavior; portable Environment state remains core-owned, ordinary feature state remains Capability-owned, and durable provider launch state remains Host-owned.
+Working state, compaction, skills, media normalization, and behavior inside the Pydantic Agent loop are ordinary `AbstractCapability[AgentContext]` implementations. `DynamicEnvironmentCapability` is the optional model projection of the fixed Harness Environment resource; it is not the resource owner. Query-dependent context retrieval that must inspect and modify the complete semantic run input can instead be a first-class Harness plugin, which may contribute Capabilities. Each plugin or Capability owns its typed configuration, ordering, and failure behavior; portable Environment state remains core-owned, ordinary feature state remains Capability-owned, and durable provider launch state remains Host-owned.
 
 ## Context Layers
 
@@ -57,13 +57,13 @@ A run-frozen Capability returns a replacement whose `get_instructions()` and too
 
 Request-dynamic data never mutates instructions or tool schemas. A Capability that intentionally supports hot reload observes an explicit dynamic revision and injects a bounded notice; it does not silently rescan and alter a cacheable prefix. Ordinary operation readiness stays inside the selected Environment operation and does not force unrelated model-surface preparation.
 
-For an eligible request containing ordinary user content, `EnvironmentToolsCapability.before_model_request()` appends bounded current topology through `ModelRequestContext` after the caller's content without changing the stable instruction/tool prefix. When topology changes while an inner run can accept input, the Capability uses native `RunContext.enqueue()` for one coalesced trusted notice. Working state, file references, and similar Capabilities can use the same public request hook when their data belongs to a user turn; content that transforms history for correctness remains in an owning Pydantic history Capability.
+For an eligible request containing ordinary user content, `DynamicEnvironmentCapability.before_model_request()` appends bounded current topology through `ModelRequestContext` after the caller's content without changing the stable instruction/tool prefix. When topology changes while an inner run can accept input, the Capability uses native `RunContext.enqueue()` for one coalesced trusted notice. Working state, file references, and similar Capabilities can use the same public request hook when their data belongs to a user turn; content that transforms history for correctness remains in an owning Pydantic history Capability.
 
 Context injection runs only on a request containing ordinary user content or a trusted semantic notice. It does not append the full Environment snapshot to tool-return-only or output-retry requests, which would destabilize provider caching and repeat unchanged content. The Environment core exposes the successfully imported value only as `BoundEnvironment.restored_state_topology_version`; the optional projection reads that non-authoritative observation without owning an Environment state namespace.
 
 Every new logical Harness run contributes one fresh bounded Environment snapshot at its first eligible ordinary model boundary, even when the restored and live topology version numbers match. A replacement Attempt can materialize different effective descriptors, permissions, availability, or provider generations under the same durable desired version, so cross-run version equality never suppresses current context. A fresh no-input run can create one trusted startup boundary for this snapshot. Within that entered run, unchanged same-version boundaries do not repeat it, and later topology changes produce bounded notices. Provider-suspended history is the exception: it resumes without inserting a request ahead of the suspended provider continuation. The first later ordinary turn receives the latest fresh live snapshot rather than persisted rendered instructions from `HarnessState`.
 
-`EnvironmentToolsCapability` can be omitted or configured by its Host. Environment lifecycle, programmatic operations, and dynamic topology remain available without it; only model tools, rendered routing context, and notices disappear. With no model-visible binding its stable tool surface can report typed unavailability and later become usable after a Host mount. There is no global boolean that mutates unrelated Toolset instructions and no callback list for arbitrary prompt rewriting.
+`DynamicEnvironmentCapability` can be omitted or configured by its Host. Environment lifecycle, programmatic operations, and dynamic topology remain available without it; only model tools, rendered routing context, and notices disappear. With no model-visible binding its stable tool surface can report typed unavailability and later become usable after a Host mount. There is no global boolean that mutates unrelated Toolset instructions and no callback list for arbitrary prompt rewriting.
 
 ## Active Messages
 
@@ -73,112 +73,69 @@ Messages are appended only at complete semantic boundaries. Tool calls and resul
 
 `HarnessState.message_history` uses the public Pydantic message codec. Imported metadata never restores Identity, approval, provider ownership, or Capability state.
 
+## Runtime Context, File References, and Handoff
+
+Runtime context and file context are optional definition-selected Capability contributions. Authored guidance remains in stable instructions, while values that can change between logical runs enter as bounded request context. File context reads only explicitly selected files through an authorized source such as the current `BoundEnvironment`; package installation or the process working directory does not grant ambient discovery authority.
+
+An explicit file reference carries only a model-facing logical path and a bounded inspection reminder. It carries no file bytes, revision, digest, native path, provider handle, or claim that the file still exists. Pending references can use one versioned Capability namespace so replacement runs can remind the Agent to inspect them through the fresh Environment. Inspection never restores access that the new binding does not authorize.
+
+Compaction and explicit `summarize` requests use the same validated history-replacement path. A handoff preserves current user intent, relevant file references, and enough provenance to distinguish summarized history from new input. A pending `DeferredToolRequests` boundary is not part of the replaceable prefix: its exact suspended message tail, call IDs, categories, and message identity remain unchanged through authoritative resume validation until matching results are incorporated. Provider-suspended continuation receives the same protection. Only after those exact continuations advance can a validated replacement become ordinary active messages and reintroduce pending handoff guidance once.
+
+Context-window estimates guide compaction but never replace provider enforcement. A configured recent-turn tail is protected continuation context, not an optional trimming pool. If validated compaction cannot produce a provider-valid request within the configured budget while retaining that tail, the request fails explicitly rather than silently dropping current intent or unresolved work.
+
 ## Working State Capability
 
-Tasks and notes form one optional Working State Capability because they share tool presentation, bounded dynamic guidance, and persistence ownership while retaining distinct child-sharing rules.
+Tasks and notes form one optional Working State Capability. It owns their model tools, bounded request-time presentation, and one versioned `AgentContextState` namespace; it is coordination context rather than execution authority, a scheduler, or a durable business workflow.
 
-```python
-class TaskState(BaseModel):
-    model_config = ConfigDict(frozen=True)
+Task references use concise scope-local `task-{N}` values allocated monotonically by the authoritative task store. Creation, claims, dependencies, and updates share one internal revision boundary so concurrent Agents cannot reuse an ID or silently overwrite newer state. Ordinary model tools expose intent-level create, start, update, and complete operations without requiring the Agent to orchestrate claims or compare-and-swap revisions. Completed tasks remain available through explicit task reads but leave bounded request-time context. Notes remain private to one Agent instance.
 
-    revision: int = 0
-    next_task_sequence: int = 1
-    tasks: Mapping[str, Task] = Field(default_factory=dict)
+The definition fixes one task mode:
 
+- `embedded` stores the complete immutable task snapshot in Capability state and is the default;
+- `provider` requires a fresh typed `TaskStateRunCapability` whose identity-bound cell owns reads and linearizable mutations. Only bounded non-authoritative cursor metadata may enter Harness State; provider clients, credentials, scopes, and fences do not.
 
-type TaskStateMode = Literal["local", "provider"]
+Inline children receive either an explicit identity-bound shared task view or an isolated task scope according to delegation policy. A borrowed child view never copies the parent's task state or broader `AgentContext` into the child snapshot. Process-local Hosts may deliberately retain an embedded cell for background children; distributed Hosts use a provider with equivalent compare-and-swap, idempotency, and stale-owner reconciliation semantics.
 
+Missing, duplicate, source-incompatible, or mode-incompatible run collaborators fail before task tools are exposed. Restored state cannot select a provider, scope, or current authority.
 
-class ProviderTaskCursor(BaseModel):
-    model_config = ConfigDict(frozen=True)
+## Structured User Interaction
 
-    provider_type: str
-    state_version: str
-    observed_revision: int | None = None
-
-
-class WorkingState(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    task_mode: TaskStateMode = "local"
-    tasks: TaskState | None = None
-    provider_cursor: ProviderTaskCursor | None = None
-    notes: Mapping[str, str] = Field(default_factory=dict)
-
-
-class TaskStateCell(Protocol):
-    """Task view already bound to one trusted Agent instance."""
-
-    async def snapshot(self) -> TaskState: ...
-    async def create(self, request: CreateTask) -> Task: ...
-    async def claim(
-        self,
-        task_id: str,
-        expected_revision: int | None = None,
-    ) -> Task: ...
-    async def update(
-        self,
-        task_id: str,
-        mutation: TaskMutation,
-        expected_revision: int,
-    ) -> Task: ...
-
-
-type TaskStateRunCapabilitySource = Literal[
-    "local_borrowed", "provider"
-]
-
-
-@dataclass(frozen=True)
-class TaskStateRunCapability(AbstractCapability[AgentContext]):
-    source: TaskStateRunCapabilitySource
-    cell: TaskStateCell
-```
-
-`TaskState`, `ProviderTaskCursor`, and `WorkingState` are replacement values. Their owners defensively copy and recursively normalize task, note, dependency, and status data into immutable values and read-only mappings before publication or state entry replacement; `frozen=True` alone is not treated as deep immutability. A cell never returns a mutable view that can bypass its revision boundary.
-
-The first-party model-facing task reference is `task-{N}`, where `N` is a positive base-10 sequence allocated atomically inside one task scope. The create tool does not accept a model-supplied ID. Local mode commits `next_task_sequence` with the new task in the same cell mutation and retains it as the allocator high-water mark; imported state requires a positive next value greater than every present canonical task sequence and never derives a lower value from the remaining map. Provider mode keeps the equivalent monotonic allocator in the authoritative Host scope transaction; its value never enters `ProviderTaskCursor` or Harness State. Shared children use the same allocator, while an isolated child uses its own scope. A reference is never reused after completion, removal, compaction, or stale-owner reconciliation.
-
-`task-1` is therefore concise and stable within its task scope, not globally unique and not an authority token. Task dependencies and every model-facing claim or mutation use these same scope-local references. The identity-bound cell already selects the hidden local or provider scope before resolving one. Unknown or non-canonical references fail without scanning another scope, and public Host APIs that require global resource identity use their own opaque IDs rather than treating the model reference as one. Model context renders the root owner as a fixed safe label and a known child through that child's compact reference when available; it never exposes `AgentInstanceRef`, provider scope, operation ID, or receipt as owner presentation or mutation input.
-
-The Capability:
-
-- contributes task and note Toolsets selected by configuration;
-- contributes bounded dynamic user context describing relevant state;
-- stores its owned `WorkingState` in one `AgentContextState` namespace;
-- exposes a typed `TaskStateCell` for linearizable local or provider-backed task mutations;
-- defines the explicit child task projection without sharing a whole context or State map.
-
-The Working State Capability configuration fixes `task_mode` for the definition. `TaskStateRunCapability` is trusted fresh run input carried in `RunBindings.capabilities`; it is never built from model-authored configuration or restored from State. It contributes no independent model behavior. The definition-selected Working State Capability resolves exactly zero or one instance by stable Capability ID and expected public type before exposing provider-backed task tools. Its cell is already bound to the trusted Agent instance, so model tools call `claim()` and `update()` without supplying an owner or actor. The source distinguishes a Harness-borrowed local view from a Host provider view only so the owner can reject a mode mismatch.
-
-`local` is the default. A root or parent Working State Capability owns complete `TaskState` and a process-local cell without requiring a run attachment. For a shared inline child, the parent Capability creates a child-identity-bound view over that same local cell and the Delegation Capability places a `TaskStateRunCapability(source="local_borrowed", cell=...)` in the child's final `RunBindings.capabilities`. An isolated local child receives no task attachment and owns its own local cell. A `local_borrowed` attachment is valid only for a child instance with explicit parent lineage: the Delegation Capability creates it for inline execution, while a process-local Host can create it for a Host-owned background child under that Host's lifetime and State rules. An independent root cannot select it.
-
-In `provider` mode, `tasks` must be absent and every run requires one fresh Host-supplied `TaskStateRunCapability(source="provider")` whose API-backed cell is bound to that run's stable Agent instance. The trusted Host selects the provider scope according to the authored shared or isolated child policy, and that selection is authoritative for the run. A missing, duplicate, incompatible, source-mismatched, or mode-mismatched Capability, an imported local task map, or a cell that cannot serve the selected policy fails before task tools become available. The scope, provider client, credentials, Attempt fence, and authority stay behind the fresh cell and never enter `HarnessState`.
-
-`provider_cursor` is optional bounded non-authoritative continuation metadata. It can identify the provider codec and last observed revision for diagnostics or compatibility, but it cannot select a scope, seed or overwrite provider data, establish task ownership, or satisfy a provider read. On resume, the fresh provider binding is authoritative and every task operation reads its current state. The owning Capability validates or discards a compatible cursor without treating it as a task snapshot.
-
-Inline children use `DelegationContextPolicy.task_state="shared"` by default and receive an identity-bound view over the same local or provider-backed task store. A child view can list, create, claim, update, and complete tasks subject to current tool and Host policy. `claim(task_id)` resolves the compact reference only inside that bound task scope, derives the claimant from a stable non-authoritative `AgentInstanceRef` captured when the cell is bound, verifies dependencies and eligibility, advances a monotonic revision under the cell's linearization boundary, is idempotent for the same owner, and conflicts for another owner. General update and dependency mutation require the expected revision; task creation allocates the next compact reference under the same boundary, so concurrent children cannot duplicate IDs or silently overwrite one another.
-
-The child does not serialize a second copy of borrowed task state into its private nested `HarnessState`. In `local` mode, the parent Working State entry remains the sole snapshot owner: before each successful cell mutation returns, the parent Capability replaces `WorkingState.tasks` with that mutation's immutable revised `TaskState` under the Agent Context state lock. In `provider` mode, the Host provider is the sole task-data authority and the parent entry keeps `tasks=None`; after a successful provider mutation it may replace only the bounded observed cursor. A later parent export copies the applicable local snapshot or non-authoritative cursor together with the Delegation Capability's child-private continuation snapshots without a generic export callback or second state registry. Notes remain private to one Agent instance. No non-task Capability state, mutable whole `WorkingState`, `AgentContextState`, or `AgentContext` object crosses the inline child boundary.
-
-A process-local Host can deliberately retain a local task cell for background children. A distributed Host selects `provider` mode and uses a durable task provider or service API with equivalent claim, mutation-idempotency, compare-and-swap, and stale-owner reconciliation semantics rather than sharing Python memory. If a provider mutation from an inline child outlives the enclosing parent checkpoint, the Host uses the mutation's trusted run provenance to reconcile that owner before replacement work proceeds; the Harness neither rolls it back nor lets a new child silently override it. Provider task data and lifecycle are not smuggled into a parent or child Harness snapshot.
-
-Working state assists Agent coordination. Task owner and status values are not execution authority, a Host workflow, scheduler, durable business task, or policy grant.
+Structured questions use the native client-side deferred-tool boundary owned by [Tool Execution](07-tool-execution.md#structured-user-questions). This document adds no second interaction lifecycle or answer representation.
 
 ## Operational Context Capabilities
 
 Small operational behaviors remain separate when their state and lifecycle differ:
 
-| Capability         | Behavior                                                              | State                                                                                                   |
-| ------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Enqueue/messaging  | Uses Pydantic enqueue to deliver accepted steering or follow-up input | Delivery acceptance stays with host; incorporated IDs only when needed for duplicate suppression        |
-| Background process | Adds completed Environment process output at the next request         | Provider-defined portable reference only when supported; Host launch state still establishes attachment |
-| File reference     | Tells the Agent which explicit files require inspection               | Bounded pending path list                                                                               |
-| Environment tools  | Adds stable tools, current topology context, and live change notices  | Recomputed from `BoundEnvironment`; owns no continuation namespace                                      |
-| Skill              | Supplies selected skill instructions and resources                    | Loaded skill IDs when needed for continuation                                                           |
-| Media              | Normalizes media count, size, format, and provider representation     | No raw provider URL credential state                                                                    |
+| Capability          | Behavior                                                                 | State                                                                                            |
+| ------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| Enqueue/messaging   | Uses Pydantic enqueue to deliver accepted steering or follow-up input    | Delivery acceptance stays with Host; incorporated IDs only when needed for duplicate suppression |
+| Monitored process   | Starts through `BoundEnvironment` and injects a bounded completion       | Live observation and completion routing stay with a fresh Host collaborator                      |
+| File reference      | Tells the Agent which explicit files require inspection                  | Bounded pending logical paths only                                                               |
+| Dynamic Environment | Composes File/Shell tools with current topology context and live notices | Recomputed from `BoundEnvironment`; owns no continuation namespace                               |
+| Skill               | Supplies selected skill instructions and resources                       | Loaded skill IDs only when needed for continuation                                               |
+| Media               | Normalizes media count, size, format, and provider representation        | No raw provider URL credential state                                                             |
 
-These Capabilities use native instructions, history/request hooks, native enqueue, or Toolsets. A global context-injection switch is unnecessary; a host enables, disables, or configures the owning Capability without rewriting other instruction sources.
+These Capabilities use native instructions, history/request hooks, native enqueue, or Toolsets. A global context-injection switch is unnecessary; a Host enables, disables, or configures the owning Capability without rewriting other instruction sources.
+
+A monitored-process Capability requires the finalized `DynamicEnvironmentCapability`, shares its single run-local compact-reference domain, and starts work only through the live `BoundEnvironment`. One fresh `MonitoredProcessRunCapability` supplies the typed Host collaborator; a missing or incompatible projection or collaborator fails before model exposure. The model Capability gives the exact bound process value to that collaborator, which owns waiting, wake-up, bounded completion retention, duplicate suppression, and accepted delivery. The model Capability owns only its tool and injection of accepted completions. Process status exposes only processes already started or observed in that scoped model surface and is not provider-wide or operating-system process discovery.
+
+Live observation cannot outlive the entered Environment. Run termination cancels and drains process-local monitoring before Environment close. A Host can deliver an already completed bounded record to a later Harness run, but it cannot restore or reattach a run-local compact reference from `HarnessState`. A durable Host that deliberately owns work beyond one run must also own a separate provider attachment and completion ledger outside the Harness.
+
+## Skills and Discovery
+
+A Skills Capability receives an explicit ordered set of trusted sources selected by embedding code. Sources can be in-memory, package-backed, or Environment-backed, but installed packages and workspace contents are never scanned implicitly. The Capability resolves one bounded deterministic catalog after any required Environment readiness and freezes the model-facing catalog for that logical run.
+
+Each skill has stable identity, source provenance, instructions, and bounded resources. Conflicting identities fail preparation unless the authored source composition selects an explicit precedence. Activation and resource loading remain inside the selected source boundary, preserve provenance, and do not mutate the built Agent or grant tools, credentials, Environment access, or package authority. Skill text is untrusted context under the authority of its selected source.
+
+Loaded skill identities enter versioned Capability state only when continuation needs to avoid losing an accepted activation. On every resumed run, each restored identity must resolve against the fresh run-frozen selected catalog with the same stable provenance; state never triggers ambient package/workspace discovery or mounts a source. A missing, provenance-changed, ambiguous, or newly unauthorized activation fails before model exposure by default. An explicitly configured permissive policy may deactivate it with a bounded diagnostic instead, but never resolves outside the selected catalog. Resource contents, provider clients, filesystem revisions, and discovery handles do not enter portable state. Optional tool discovery or proxying uses the native Tool Manager path described in [Tool Execution](07-tool-execution.md) and does not create a second dispatch or authorization path.
+
+## Media, Documents, and Web Resources
+
+Media, document conversion, and web acquisition are separate optional Capabilities that can share narrow bounded content values without becoming a catch-all Toolset. Media inputs preserve supported native Pydantic content where possible. Document conversion produces bounded text and explicitly owned extracted assets. Unavoidable blocking parsers run outside the event loop, and every temporary asset has one cleanup owner.
+
+Web search is backed by an explicitly selected provider. Fetch, scrape, and download use an explicitly selected async network client and policy with finite redirects, deadlines, and byte limits. Every redirect is re-evaluated under current policy, and credentials remain audience-bound. A download reaches the workspace only through `BoundEnvironment` streaming operations and current Environment authorization; a URL never becomes Environment authority.
+
+Remote content, converted text, metadata, and skill resources retain provenance and remain untrusted model context. Raw credentials, provider clients, temporary native paths, and live response objects never enter model results or `HarnessState`. Optional providers and conversion dependencies are inert until a Host selects the corresponding Capability.
 
 ## Compaction Capability
 
@@ -251,16 +208,19 @@ Provider writes can be inline when required for consistency or emitted as host w
 
 ## State Ownership
 
-| State                                       | Owner                                                                                             |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Active Pydantic messages                    | `HarnessState.message_history`                                                                    |
-| Local task snapshot and notes               | Working State Capability; inline children can receive an explicit task view                       |
-| Provider-backed task data and scope         | Host task provider; Working State exports only an optional observed cursor                        |
-| Loaded skills or discovered tools           | Owning discovery Capability                                                                       |
-| Compaction-only metadata                    | Compaction Capability                                                                             |
-| Long-term memory records                    | Memory provider; plugin instances own no durable namespace                                        |
-| Portable multi-Environment backend state    | Explicit `HarnessState.environment_state`; launch and native resources remain Host/provider-owned |
-| Host delivery, counters, and scheduler work | Host                                                                                              |
+| State                                        | Owner                                                                                             |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Active Pydantic messages                     | `HarnessState.message_history`                                                                    |
+| Embedded task snapshot and notes             | Working State Capability; inline children can receive an explicit task view                       |
+| Provider-backed task data and scope          | Host task provider; Working State exports only an optional observed cursor                        |
+| Pending handoff and logical file references  | Owning context Capabilities                                                                       |
+| Loaded skills or discovered tools            | Owning discovery Capability                                                                       |
+| Compaction-only metadata                     | Compaction Capability                                                                             |
+| Monitored-process tasks and completion route | Host collaborator; Capability state can retain only incorporated completion IDs                   |
+| Temporary media/document/web content         | Owning Capability or selected provider until bounded projection and cleanup                       |
+| Long-term memory records                     | Memory provider; plugin instances own no durable namespace                                        |
+| Portable multi-Environment backend state     | Explicit `HarnessState.environment_state`; launch and native resources remain Host/provider-owned |
+| Host delivery, counters, and scheduler work  | Host                                                                                              |
 
 ## Resume and Delegation
 
@@ -270,16 +230,20 @@ A child run receives an explicit context seed and a fresh `AgentContext`. Parent
 
 ## Failure Semantics
 
-| Failure                                         | Result                                                                 |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| Imported messages are invalid                   | Run creation fails before provider work                                |
-| Optional dynamic guidance is unavailable        | Owning Capability omits it and emits a diagnostic                      |
-| Required guidance or memory fails               | Model step fails                                                       |
-| Shared task binding is missing or incompatible  | Inline child dispatch fails before child model/tool work               |
-| Task claim conflicts or uses a stale revision   | Typed conflict; the existing task owner and state remain unchanged     |
-| Compaction output is invalid                    | Original history remains active                                        |
-| Context exceeds the provider limit after policy | Model step fails with a bounded context error                          |
-| Memory observation fails                        | Owning policy chooses run failure or host retry; history remains valid |
+| Failure                                               | Result                                                                                       |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Imported messages are invalid                         | Run creation fails before provider work                                                      |
+| Optional dynamic guidance is unavailable              | Owning Capability omits it and emits a diagnostic                                            |
+| Required guidance or memory fails                     | Model step fails                                                                             |
+| Shared task binding is missing or incompatible        | Inline child dispatch fails before child model/tool work                                     |
+| Task claim conflicts or uses a stale revision         | Typed conflict; the existing task owner and state remain unchanged                           |
+| Structured question cannot be correlated or validated | Deferred resume fails under [Tool Execution](07-tool-execution.md#structured-user-questions) |
+| Skill catalog is invalid or ambiguous                 | Run preparation fails before model exposure                                                  |
+| Monitor binding is missing or no longer live          | Process start or completion attachment fails explicitly                                      |
+| Resource exceeds policy or conversion fails           | Owning tool returns a bounded typed failure and cleans its partial assets                    |
+| Compaction output is invalid                          | Original history remains active                                                              |
+| Context exceeds the provider limit after policy       | Model step fails with a bounded context error                                                |
+| Memory observation fails                              | Owning policy chooses run failure or Host retry; history remains valid                       |
 
 ## Boundaries
 

@@ -141,14 +141,14 @@ These facts are independent. A result candidate retained by `RunCleanupError` is
 
 ## Extension Taxonomy
 
-| Extension                    | Selection                                                                                | Trust boundary                          |
-| ---------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------- |
-| Harness plugin               | Direct concrete object, or builder-local configured factory result appended during build | Trusted in-process Python               |
-| Pydantic Capability          | `AgentSpec`, definition, plugin, or run contribution                                     | Pydantic lifecycle plus caller trust    |
-| Native Model/tool/Toolset    | Concrete `AgentDefinition` field                                                         | Trusted in-process object               |
-| Run-scoped model resolver    | Fresh `ModelRunBinding`                                                                  | Host/provider policy                    |
-| Environment provider binding | Fresh process-local `EnvironmentRunBinding` inputs                                       | Host selection and provider enforcement |
-| Environment tools Capability | Optional Agent-loop model projection                                                     | No lifecycle or topology authority      |
+| Extension                      | Selection                                                                                | Trust boundary                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------- |
+| Harness plugin                 | Direct concrete object, or builder-local configured factory result appended during build | Trusted in-process Python                   |
+| Pydantic Capability            | `AgentSpec`, definition, plugin, or run contribution                                     | Pydantic lifecycle plus caller trust        |
+| Native Model/tool/Toolset      | Concrete `AgentDefinition` field                                                         | Trusted in-process object                   |
+| Run-scoped model resolver      | Fresh `ModelRunBinding`                                                                  | Host/provider policy                        |
+| Environment provider binding   | Fresh process-local `EnvironmentRunBinding` inputs                                       | Host selection and provider enforcement     |
+| Dynamic Environment Capability | Optional Agent-loop context and Toolset composition                                      | No provider lifecycle or topology authority |
 
 A hosted system can persist the Harness-owned plugin document and maintain artifact locks without implementing plugin reconstruction itself. Artifact trust, durable revisions, and Environment configuration remain Host contracts. Installed Harness plugin and Environment entry-point metadata represent availability only, and importing the Harness activates no extension.
 

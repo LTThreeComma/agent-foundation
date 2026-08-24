@@ -22,10 +22,8 @@
           "$ref": "schema.json#/$defs/EnvironmentDescribeResult"
         }
       },
-      "x-eip-capability": "environment.describe",
       "x-eip-error-family": "common",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -59,10 +57,8 @@
           "$ref": "schema.json#/$defs/FileWriterAbortResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -88,13 +84,6 @@
           "schema": {
             "$ref": "schema.json#/$defs/FileReaderCloseParams/properties/reader"
           }
-        },
-        {
-          "name": "accept_complete",
-          "required": true,
-          "schema": {
-            "$ref": "schema.json#/$defs/FileReaderCloseParams/properties/accept_complete"
-          }
         }
       ],
       "result": {
@@ -103,10 +92,8 @@
           "$ref": "schema.json#/$defs/FileReaderCloseResult"
         }
       },
-      "x-eip-capability": "file.read",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -154,10 +141,8 @@
           "$ref": "schema.json#/$defs/FileWriterCommitResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -205,10 +190,8 @@
           "$ref": "schema.json#/$defs/FileCopyResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -284,10 +267,8 @@
           "$ref": "schema.json#/$defs/FileFindResult"
         }
       },
-      "x-eip-capability": "file.find",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -342,10 +323,8 @@
           "$ref": "schema.json#/$defs/FileListResult"
         }
       },
-      "x-eip-capability": "file.read",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -393,10 +372,8 @@
           "$ref": "schema.json#/$defs/FileMkdirResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -444,10 +421,8 @@
           "$ref": "schema.json#/$defs/FileMoveResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -482,10 +457,10 @@
           }
         },
         {
-          "name": "transfer_deadline",
+          "name": "transfer_timeout_ms",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/transfer_deadline"
+            "$ref": "schema.json#/$defs/FileReaderOpenParams/properties/transfer_timeout_ms"
           }
         }
       ],
@@ -495,10 +470,8 @@
           "$ref": "schema.json#/$defs/FileReaderOpenResult"
         }
       },
-      "x-eip-capability": "file.read",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "session_resource_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -540,10 +513,10 @@
           }
         },
         {
-          "name": "transfer_deadline",
+          "name": "transfer_timeout_ms",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/transfer_deadline"
+            "$ref": "schema.json#/$defs/FileWriterOpenParams/properties/transfer_timeout_ms"
           }
         }
       ],
@@ -553,10 +526,8 @@
           "$ref": "schema.json#/$defs/FileWriterOpenResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "session_resource_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -604,10 +575,8 @@
           "$ref": "schema.json#/$defs/FilePatchTextResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -662,10 +631,8 @@
           "$ref": "schema.json#/$defs/FileReadTextResult"
         }
       },
-      "x-eip-capability": "file.read",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -720,10 +687,8 @@
           "$ref": "schema.json#/$defs/FileRemoveResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -806,10 +771,8 @@
           "$ref": "schema.json#/$defs/FileSearchResult"
         }
       },
-      "x-eip-capability": "file.search",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -850,10 +813,8 @@
           "$ref": "schema.json#/$defs/FileStatResult"
         }
       },
-      "x-eip-capability": "file.read",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -908,10 +869,8 @@
           "$ref": "schema.json#/$defs/FileWriteTextResult"
         }
       },
-      "x-eip-capability": "file.write",
       "x-eip-error-family": "resource",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -946,24 +905,10 @@
           }
         },
         {
-          "name": "required_capabilities",
+          "name": "required_methods",
           "required": false,
           "schema": {
-            "$ref": "schema.json#/$defs/InitializeParams/properties/required_capabilities"
-          }
-        },
-        {
-          "name": "optional_capabilities",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/InitializeParams/properties/optional_capabilities"
-          }
-        },
-        {
-          "name": "resource_authority",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/InitializeParams/properties/resource_authority"
+            "$ref": "schema.json#/$defs/InitializeParams/properties/required_methods"
           }
         }
       ],
@@ -973,10 +918,8 @@
           "$ref": "schema.json#/$defs/InitializeResult"
         }
       },
-      "x-eip-capability": null,
       "x-eip-error-family": "initialization",
       "x-eip-idempotency": "initialization",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1010,10 +953,8 @@
           "$ref": "schema.json#/$defs/OperationCancelResult"
         }
       },
-      "x-eip-capability": "operation.cancel",
       "x-eip-error-family": "common",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1041,15 +982,8 @@
           }
         },
         {
-          "name": "cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputReadParams/properties/cursor"
-          }
-        },
-        {
           "name": "start_offset",
-          "required": false,
+          "required": true,
           "schema": {
             "$ref": "schema.json#/$defs/OutputReadParams/properties/start_offset"
           }
@@ -1068,10 +1002,8 @@
           "$ref": "schema.json#/$defs/OutputReadResult"
         }
       },
-      "x-eip-capability": "output.read",
       "x-eip-error-family": "output",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1093,16 +1025,9 @@
         },
         {
           "name": "reference",
-          "required": false,
+          "required": true,
           "schema": {
             "$ref": "schema.json#/$defs/OutputReleaseParams/properties/reference"
-          }
-        },
-        {
-          "name": "cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/OutputReleaseParams/properties/cursor"
           }
         }
       ],
@@ -1112,10 +1037,8 @@
           "$ref": "schema.json#/$defs/OutputReleaseResult"
         }
       },
-      "x-eip-capability": "output.read",
       "x-eip-error-family": "output",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1149,10 +1072,8 @@
           "$ref": "schema.json#/$defs/PortInspectResult"
         }
       },
-      "x-eip-capability": "port.observe",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1193,10 +1114,8 @@
           "$ref": "schema.json#/$defs/PortWaitResult"
         }
       },
-      "x-eip-capability": "port.observe",
       "x-eip-error-family": "resource",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1230,10 +1149,8 @@
           "$ref": "schema.json#/$defs/ProcessCloseStdinResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1267,10 +1184,8 @@
           "$ref": "schema.json#/$defs/ProcessInspectResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1304,10 +1219,8 @@
           "$ref": "schema.json#/$defs/ProcessKillResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1335,20 +1248,6 @@
           }
         },
         {
-          "name": "stdout_cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/stdout_cursor"
-          }
-        },
-        {
-          "name": "stderr_cursor",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/stderr_cursor"
-          }
-        },
-        {
           "name": "wait_ms",
           "required": false,
           "schema": {
@@ -1361,6 +1260,20 @@
           "schema": {
             "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/output_policy"
           }
+        },
+        {
+          "name": "stdout_offset",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/stdout_offset"
+          }
+        },
+        {
+          "name": "stderr_offset",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/$defs/ProcessReadOutputParams/properties/stderr_offset"
+          }
         }
       ],
       "result": {
@@ -1369,10 +1282,8 @@
           "$ref": "schema.json#/$defs/ProcessReadOutputResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1406,10 +1317,8 @@
           "$ref": "schema.json#/$defs/ProcessReleaseResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "state_idempotent_control",
-      "x-eip-idempotency-key": "optional",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1450,10 +1359,8 @@
           "$ref": "schema.json#/$defs/ProcessSignalResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1487,10 +1394,8 @@
           "$ref": "schema.json#/$defs/ProcessStartResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1531,10 +1436,8 @@
           "$ref": "schema.json#/$defs/ProcessWaitResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1582,10 +1485,8 @@
           "$ref": "schema.json#/$defs/ProcessWriteStdinResult"
         }
       },
-      "x-eip-capability": "process.manage",
       "x-eip-error-family": "process",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1606,15 +1507,8 @@
           }
         },
         {
-          "name": "receipt_ref",
-          "required": false,
-          "schema": {
-            "$ref": "schema.json#/$defs/ReceiptGetParams/properties/receipt_ref"
-          }
-        },
-        {
           "name": "operation_id",
-          "required": false,
+          "required": true,
           "schema": {
             "$ref": "schema.json#/$defs/ReceiptGetParams/properties/operation_id"
           }
@@ -1626,10 +1520,8 @@
           "$ref": "schema.json#/$defs/ReceiptGetResult"
         }
       },
-      "x-eip-capability": "receipt.read",
       "x-eip-error-family": "common",
       "x-eip-idempotency": "read_only_retry",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1656,10 +1548,8 @@
           "$ref": "schema.json#/$defs/SessionCloseResult"
         }
       },
-      "x-eip-capability": "session.close",
       "x-eip-error-family": "session",
       "x-eip-idempotency": "session_terminal",
-      "x-eip-idempotency-key": "disallowed",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {
@@ -1693,10 +1583,8 @@
           "$ref": "schema.json#/$defs/ShellExecResult"
         }
       },
-      "x-eip-capability": "shell.exec",
       "x-eip-error-family": "command",
-      "x-eip-idempotency": "provider_key_replay",
-      "x-eip-idempotency-key": "optional",
+      "x-eip-idempotency": "operation_replay",
       "x-eip-introduced": "1.0",
       "x-eip-kind": "request_response",
       "x-eip-params-schema": {

@@ -1,0 +1,63 @@
+name: Container CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/ci-containers.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "Dockerfile.sandbox"
+      - "LICENSE"
+      - "Makefile"
+      - "apps/foundation-web/**"
+      - "crates/agent-envd/**"
+      - "packages/**"
+      - "pyproject.toml"
+      - "scripts/docker-entrypoint.sh"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/ci-containers.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "Dockerfile.sandbox"
+      - "LICENSE"
+      - "Makefile"
+      - "apps/foundation-web/**"
+      - "crates/agent-envd/**"
+      - "packages/**"
+      - "pyproject.toml"
+      - "scripts/docker-entrypoint.sh"
+      - "uv.lock"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  containers:
+    name: Container images
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build and smoke-check images
+        run: make image-check

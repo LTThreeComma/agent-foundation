@@ -15,6 +15,7 @@ from converge_agent_envd_client.eip.v1 import (
     EIPLimits,
     EIPPath,
     EnvironmentDescriptor,
+    ExecutionFeatures,
     FileByteRange,
     FileInfo,
     FileKind,
@@ -40,14 +41,11 @@ from converge_agent_envd_client.eip.v1 import (
     JsonRpcSuccessResponse,
     OperationReceipt,
     ReceiptOutcome,
-    ReceiptRef,
     ReceiptStage,
-    ResourceAuthority,
-    ResourceAuthorityDescriptor,
     decode_model,
     encode_model,
 )
-from converge_agent_envd_client.errors import EIPProtocolError
+from converge_agent_envd_client.errors import EIPProtocolError, EIPSessionStateError
 from pydantic import BaseModel
 
 
@@ -110,7 +108,13 @@ def descriptor() -> EnvironmentDescriptor:
     return EnvironmentDescriptor(
         environment_id="env-transfer",
         generation=1,
-        capabilities=("file.read", "file.write"),
+        available_methods=(
+            "file.open_reader",
+            "file.close_reader",
+            "file.open_writer",
+            "file.commit_writer",
+            "file.abort_writer",
+        ),
         limits=EIPLimits(
             max_request_bytes=1024 * 1024,
             max_response_bytes=1024 * 1024,
@@ -119,24 +123,10 @@ def descriptor() -> EnvironmentDescriptor:
             max_operation_duration_ms=1000,
             max_inline_output_bytes=1,
             max_output_bytes=1,
-            max_retained_bytes=1,
-            max_retained_objects=1,
-            max_retention_ttl_ms=1,
-            max_operation_records=8,
-            operation_record_ttl_ms=1,
-            session_idle_ttl_ms=1000,
-            max_process_records=1,
-            terminal_process_record_ttl_ms=1,
             max_transfer_frame_bytes=128,
             max_concurrent_file_transfers=2,
-            max_file_transfer_records=2,
-            file_transfer_record_ttl_ms=1,
-            max_staged_file_bytes=1024,
-            max_staged_file_objects=2,
-            file_transfer_idle_ttl_ms=1000,
-            max_file_transfer_duration_ms=1000,
+            max_file_transfer_bytes=1024,
         ),
-        resource_authority=ResourceAuthorityDescriptor(mode=ResourceAuthority.SCOPED),
         isolation=IsolationPosture(
             mode=IsolationMode.DISABLED,
             backend=IsolationBackend.OUTER_HOST,
@@ -145,6 +135,14 @@ def descriptor() -> EnvironmentDescriptor:
             network_containment=False,
             network_policy=IsolationNetworkPolicy.HOST,
             cleanup_guarantee=IsolationCleanupGuarantee.OUTER_HOST,
+        ),
+        execution_features=ExecutionFeatures(
+            process_count_limit=False,
+            memory_bytes_limit=False,
+            cpu_time_limit=False,
+            per_command_network_deny=False,
+            signal_interrupt=False,
+            signal_terminate=False,
         ),
     )
 
@@ -160,7 +158,6 @@ def info(path: EIPPath, size: int) -> FileInfo:
 
 def receipt(operation_id: str) -> OperationReceipt:
     return OperationReceipt(
-        receipt_ref=ReceiptRef("receipt-transfer"),
         operation_id=operation_id,
         method="file.commit_writer",
         environment_id="env-transfer",
@@ -206,12 +203,9 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
                 DataFrame(kind=DataFrameKind.CHUNK, handle="reader-one", offset=6, payload=b"second")
             )
             await transport.inbound.put(DataFrame(kind=DataFrameKind.END, handle="reader-one", offset=len(content)))
-            ack = await transport.outbound.get()
-            assert isinstance(ack, DataFrame)
-            assert ack.kind is DataFrameKind.END_ACK and ack.offset == len(content)
             closed = await next_control(transport, "file.close_reader")
             close_params = decode_params(closed, FileReaderCloseParams)
-            assert isinstance(close_params, FileReaderCloseParams) and close_params.accept_complete
+            assert isinstance(close_params, FileReaderCloseParams)
             await respond(
                 transport,
                 closed,
@@ -222,7 +216,6 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
                             algorithm="sha256",
                             value=hashlib.sha256(content).hexdigest(),
                         ),
-                        complete=True,
                     )
                 ),
             )
@@ -231,9 +224,77 @@ def test_high_level_reader_withholds_ack_until_iteration_drains_and_verifies() -
         async with session.open_reader(path) as reader:
             chunks = [chunk async for chunk in reader]
             assert b"".join(chunks) == content
-            assert reader.completion.complete
+            assert reader.completion.digest.algorithm == "sha256"
         await peer_task
         await session.abort()
+
+    asyncio.run(scenario())
+
+
+def test_high_level_reader_rejects_unverified_completion_and_closes_carrier() -> None:
+    async def scenario() -> None:
+        transport = FakeTypedTransport()
+        requester = RequestCoordinator(transport, request_timeout=1)
+        requester.configure_limits(
+            max_in_flight=4,
+            max_request_bytes=1024 * 1024,
+            max_response_bytes=1024 * 1024,
+            max_transfer_frame_bytes=128,
+            max_concurrent_file_transfers=2,
+        )
+        session = EIPSession(requester, descriptor())
+        path = EIPPath(mount_id="workspace", path="/source.bin")
+        content = b"content"
+
+        async def peer() -> None:
+            opened = await next_control(transport, "file.open_reader")
+            await respond(
+                transport,
+                opened,
+                FileReaderOpenResult(
+                    reader=FileReaderHandle("reader-invalid-completion"),
+                    info=info(path, len(content)),
+                    expires_at="2026-08-21T01:00:00Z",
+                ),
+            )
+            attach = await transport.outbound.get()
+            assert isinstance(attach, DataFrame) and attach.kind is DataFrameKind.ATTACH
+            await transport.inbound.put(DataFrame(kind=DataFrameKind.ATTACHED, handle="reader-invalid-completion"))
+            await transport.inbound.put(
+                DataFrame(
+                    kind=DataFrameKind.CHUNK,
+                    handle="reader-invalid-completion",
+                    payload=content,
+                )
+            )
+            await transport.inbound.put(
+                DataFrame(
+                    kind=DataFrameKind.END,
+                    handle="reader-invalid-completion",
+                    offset=len(content),
+                )
+            )
+            closed = await next_control(transport, "file.close_reader")
+            await respond(
+                transport,
+                closed,
+                FileReaderCloseResult(
+                    completion=FileReadCompletion(
+                        produced_bytes=len(content),
+                        digest=ContentDigest(algorithm="sha256", value="0" * 64),
+                    )
+                ),
+            )
+
+        reader = session.open_reader(path)
+        peer_task = asyncio.create_task(peer())
+        with pytest.raises(EIPProtocolError, match="digest differs"):
+            async with reader:
+                _ = [chunk async for chunk in reader]
+        await peer_task
+        with pytest.raises(EIPSessionStateError, match="not completed successfully"):
+            _ = reader.completion
+        assert transport.closed is True
 
     asyncio.run(scenario())
 
@@ -287,20 +348,13 @@ def test_high_level_reader_rejects_bytes_beyond_requested_maximum(
             cancellation_reset = await transport.outbound.get()
             assert isinstance(cancellation_reset, DataFrame)
             assert cancellation_reset.kind is DataFrameKind.RESET
-            closed = await next_control(transport, "file.close_reader")
-            close_params = decode_params(closed, FileReaderCloseParams)
-            assert isinstance(close_params, FileReaderCloseParams)
-            assert not close_params.accept_complete
-            await respond(
-                transport,
-                closed,
-                FileReaderCloseResult(
-                    completion=FileReadCompletion(
-                        produced_bytes=0,
-                        digest=None,
-                        complete=False,
-                    )
-                ),
+            await transport.inbound.put(
+                DataFrame(
+                    kind=DataFrameKind.RESET,
+                    handle="reader-excess",
+                    offset=cancellation_reset.offset,
+                    reset_status=cancellation_reset.reset_status,
+                )
             )
 
         peer_task = asyncio.create_task(peer())
@@ -414,22 +468,6 @@ def test_queued_peer_reader_reset_does_not_consume_retired_capacity() -> None:
                 while not requester._transfers[handle].peer_reset_received:
                     await asyncio.sleep(0)
                 delivered.set()
-
-                closed = await next_control(transport, "file.close_reader")
-                close_params = decode_params(closed, FileReaderCloseParams)
-                assert isinstance(close_params, FileReaderCloseParams)
-                assert not close_params.accept_complete
-                await respond(
-                    transport,
-                    closed,
-                    FileReaderCloseResult(
-                        completion=FileReadCompletion(
-                            produced_bytes=0,
-                            digest=None,
-                            complete=False,
-                        )
-                    ),
-                )
 
         peer_task = asyncio.create_task(peer())
         for delivered in reset_delivered:

@@ -1,0 +1,76 @@
+name: Agent Harness CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".github/workflows/ci-agent-harness.yml"
+      - ".github/workflows/release-harness.yml"
+      - "Makefile"
+      - "packages/agent-harness/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci-agent-harness.yml"
+      - ".github/workflows/release-harness.yml"
+      - "Makefile"
+      - "packages/agent-harness/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    name: Agent Harness (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: Windows
+            runner: windows-2025
+          - name: macOS
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Synchronize Python workspace
+        run: uv sync --locked --all-packages
+
+      - name: Type-check Agent Harness
+        if: matrix.name == 'Linux'
+        run: uv run --locked pyright packages/agent-harness/converge_agent_harness
+
+      - name: Test Agent Harness
+        run: uv run --locked python -m pytest packages/agent-harness/tests
+
+      - name: Build Agent Harness distribution
+        run: uv build --package converge-agent-harness --out-dir dist/harness

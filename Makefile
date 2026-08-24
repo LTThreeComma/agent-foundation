@@ -16,6 +16,8 @@ install: ## Install locked dependencies and Git hooks
 	@uv sync --project sdk/python --locked
 	@echo "Installing Foundation Web dependencies"
 	@npm --prefix apps/foundation-web ci
+	@echo "Installing Harness UI dependencies"
+	@npm --prefix apps/harness-ui ci
 	@echo "Installing TypeScript SDK dependencies"
 	@npm --prefix sdk/typescript ci
 	@echo "Installing pre-commit hooks"
@@ -77,8 +79,15 @@ dev: setup foundation-web-sync ## Upgrade the schema and run Foundation Service 
 dev-down: ## Stop local infrastructure and remove its data volumes
 	@docker compose -f dev/compose.yaml down --volumes --remove-orphans
 
+.PHONY: agent-ui tui
+agent-ui: sync ## Run Agent UI (default WebUI; append `tui` for terminal UI)
+	@uv run --locked converge-agent-ui $(filter-out agent-ui,$(MAKECMDGOALS))
+
+tui: agent-ui
+	@:
+
 .PHONY: format
-format: sync foundation-web-sync sdk-python-sync sdk-typescript-sync ## Format repository and standalone SDK sources
+format: sync foundation-web-sync harness-ui-sync sdk-python-sync sdk-typescript-sync ## Format repository and standalone SDK sources
 	@for hook in end-of-file-fixer trailing-whitespace mdformat ruff-format; do \
 		git ls-files --cached --others --exclude-standard -z | \
 			xargs -0 uv run --locked pre-commit run "$$hook" --files || true; \
@@ -91,12 +100,15 @@ format: sync foundation-web-sync sdk-python-sync sdk-typescript-sync ## Format r
 	@cargo fmt --all
 	@(cd sdk/rust && cargo fmt)
 	@npm --prefix apps/foundation-web run format
+	@npm --prefix apps/harness-ui run format
 	@npm --prefix sdk/typescript run format
 
 .PHONY: deps-check
 deps-check: sync ## Check Python package dependency declarations
 	@(cd packages/agent-envd-client && uv run --locked deptry converge_agent_envd_client)
 	@(cd packages/agent-harness && uv run --locked deptry converge_agent_harness)
+	@(cd packages/agent-stream-protocol && uv run --locked deptry converge_agent_stream_protocol)
+	@(cd packages/agent-ui && uv run --locked deptry converge_agent_ui)
 	@(cd packages/logging && uv run --locked deptry converge_logging)
 	@(cd packages/foundation-service && uv run --locked deptry converge_foundation_service)
 
@@ -151,14 +163,41 @@ eip-test: sync ## Run EIP generation, runtime, cross-language, and wire-model te
 eip-check: eip-verify eip-test ## Run the complete EIP protocol gate
 
 .PHONY: python-build
-python-build: sync ## Build all Python workspace distributions
+python-build: sync agent-ui-assets ## Build all Python workspace distributions
 	@rm -rf dist
 	@uv build --all-packages
+
+.PHONY: harness-python-build
+harness-python-build: ## Build the prepared Harness release-group distributions
+	@rm -rf dist
+	@for package in converge-agent-harness converge-agent-stream-protocol; do \
+		uv build --package "$$package" --out-dir dist || exit $$?; \
+	done
+
+.PHONY: harness-dist-check
+harness-dist-check: ## Verify isolated same-version Harness wheels
+	@uv run --no-project python scripts/check-agent-distributions.py dist
+
+.PHONY: harness-release-build
+harness-release-build: harness-python-build ## Build and verify the prepared Harness release group
+	@uv run --no-project python scripts/check-agent-distributions.py dist --require-exact-internal-version
+
+.PHONY: agent-ui-build
+agent-ui-build: sync agent-ui-assets ## Build Agent UI for repository development
+	@rm -rf dist
+	@uv build --package converge-agent-ui --out-dir dist
+	@uv run --locked python scripts/check-agent-ui-distribution.py dist --rebuild-wheel
+
+.PHONY: agent-ui-release-build
+agent-ui-release-build: ## Build and verify Agent UI from prepared assets and release metadata
+	@rm -rf dist
+	@uv build --package converge-agent-ui --out-dir dist
+	@uv run --no-project python scripts/check-agent-ui-distribution.py dist --rebuild-wheel --require-exact-internal-version
 
 .PHONY: foundation-python-build
 foundation-python-build: sync ## Build only Foundation release-group Python distributions
 	@rm -rf dist
-	@for package in converge-agent-harness converge-logging converge-foundation-service; do \
+	@for package in converge-logging converge-foundation-service; do \
 		uv build --package "$$package" --out-dir dist || exit $$?; \
 	done
 
@@ -278,6 +317,30 @@ sdk-rust-check: sdk-rust-isolation-check sdk-rust-format-check sdk-rust-lint ## 
 .PHONY: sdk-rust-check-all
 sdk-rust-check-all: sdk-rust-check sdk-rust-test sdk-rust-build sdk-rust-package ## Run the complete Rust SDK gate
 
+.PHONY: harness-ui-sync
+harness-ui-sync: ## Install locked Harness UI dependencies
+	@npm --prefix apps/harness-ui ci
+
+.PHONY: harness-ui-format
+harness-ui-format: harness-ui-sync ## Format Harness UI sources
+	@npm --prefix apps/harness-ui run format
+
+.PHONY: harness-ui-build
+harness-ui-build: harness-ui-sync ## Build Harness UI production assets
+	@npm --prefix apps/harness-ui run build
+
+.PHONY: harness-ui-check
+harness-ui-check: harness-ui-sync ## Run Harness UI formatting and type checks
+	@npm --prefix apps/harness-ui run check
+
+.PHONY: harness-ui-check-all
+harness-ui-check-all: harness-ui-sync ## Run the complete Harness UI gate
+	@npm --prefix apps/harness-ui run check:all
+
+.PHONY: agent-ui-assets
+agent-ui-assets: sync harness-ui-build ## Prepare generated Harness UI files for Python packaging
+	@uv run --locked python scripts/prepare-agent-ui-assets.py
+
 .PHONY: foundation-web-sync
 foundation-web-sync: ## Install locked Foundation Web dependencies
 	@npm --prefix apps/foundation-web ci
@@ -351,7 +414,7 @@ db-history: sync ## Show foundation-service migration history
 	@uv run --locked foundation-service db history
 
 .PHONY: release-check
-release-check: ## Validate a component version (component=foundation|agent-envd|sdk-<language> version=X.Y.Z)
+release-check: ## Validate a component version (component=harness|agent-ui|foundation|agent-envd|sdk-<language> version=X.Y.Z or X.Y.Z-rc.N)
 	@test -n "$(component)" || { echo "component is required"; exit 2; }
 	@test -n "$(version)" || { echo "version is required"; exit 2; }
 	@uv run --locked python scripts/check-release-version.py "$(component)" "$(version)"
@@ -386,35 +449,38 @@ python-check-all: python-check test python-build docs-build ## Run the complete 
 
 .PHONY: check
 check: ## Format, lint, and type-check the repository
-	@printf '\n==> [1/10] Format repository\n'
+	@printf '\n==> [1/11] Format repository\n'
 	@$(MAKE) --no-print-directory format
-	@printf '\n==> [2/10] Lint repository and Python workspace\n'
+	@printf '\n==> [2/11] Lint repository and Python workspace\n'
 	@$(MAKE) --no-print-directory lint
-	@printf '\n==> [3/10] Type-check Python workspace with Pyright\n'
+	@printf '\n==> [3/11] Type-check Python workspace with Pyright\n'
 	@$(MAKE) --no-print-directory typecheck
-	@printf '\n==> [4/10] Check examples with Ruff and Pyright\n'
+	@printf '\n==> [4/11] Check examples with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory examples-check
-	@printf '\n==> [5/10] Check Foundation Web with Prettier and TypeScript\n'
+	@printf '\n==> [5/11] Check Foundation Web with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory foundation-web-check
-	@printf '\n==> [6/10] Check Rust workspace with rustfmt and Clippy\n'
+	@printf '\n==> [6/11] Check Harness UI with Prettier and TypeScript\n'
+	@$(MAKE) --no-print-directory harness-ui-check
+	@printf '\n==> [7/11] Check Rust workspace with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory rust-check
-	@printf '\n==> [7/10] Check Python SDK with Ruff and Pyright\n'
+	@printf '\n==> [8/11] Check Python SDK with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory sdk-python-check
-	@printf '\n==> [8/10] Check Go SDK with gofmt and vet\n'
+	@printf '\n==> [9/11] Check Go SDK with gofmt and vet\n'
 	@$(MAKE) --no-print-directory sdk-go-check
-	@printf '\n==> [9/10] Check Rust SDK with rustfmt and Clippy\n'
+	@printf '\n==> [10/11] Check Rust SDK with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory sdk-rust-check
-	@printf '\n==> [10/10] Check TypeScript SDK with Prettier and TypeScript\n'
+	@printf '\n==> [11/11] Check TypeScript SDK with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory sdk-typescript-check
 	@printf '\n==> Check completed\n'
 
 .PHONY: check-all
-check-all: eip-check examples-check-all foundation-web-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
+check-all: eip-check examples-check-all foundation-web-check-all harness-ui-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
-	@rm -rf .pytest_cache .ruff_cache dist examples/plugins/dist site target sdk/python/dist sdk/rust/target
+	@rm -rf .pytest_cache .ruff_cache dist examples/plugins/dist site target sdk/python/dist sdk/rust/target packages/agent-ui/converge_agent_ui/static
 	@npm --prefix apps/foundation-web run clean
+	@npm --prefix apps/harness-ui run clean
 	@npm --prefix sdk/typescript run clean
 
 .PHONY: help

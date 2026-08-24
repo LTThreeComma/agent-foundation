@@ -33,7 +33,9 @@ Read [spec/repository-model.md](spec/repository-model.md) before changing reposi
 
 Do not work from this summary alone. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for the Issue-to-PR workflow and [DEVELOPMENT.md](DEVELOPMENT.md) for implementation standards throughout design, development, and review.
 
-The Python 3.13 environment and `packages/*` workspace are managed with `uv`. All project package names use the `converge-` prefix. Rust crates live under `crates/`. Foundation Service SDKs live independently under `sdk/{python,go,rust,typescript}` and do not join the root Python or Rust workspaces.
+The Python 3.13 environment and `packages/*` workspace are managed with `uv`. Workspace directories omit the project prefix, Python distribution names use the `converge-` prefix, and import packages normalize it as `converge_` (for example, `packages/agent-stream-protocol`, `converge-agent-stream-protocol`, and `converge_agent_stream_protocol`). Rust crates live under `crates/`. Foundation Service SDKs live independently under `sdk/{python,go,rust,typescript}` and do not join the root Python or Rust workspaces.
+
+`converge-agent-harness` and `converge-agent-stream-protocol` form the Harness release group. A `release/harness-v<version>` tag assigns and publishes exactly the same version for both, and published Stream Protocol metadata pins that exact Harness version. `converge-agent-ui` releases independently through `release/agent-ui-v<version>`; reviewed source metadata selects one Harness release, and published UI metadata pins both Harness and Protocol to that version. Source manifests keep workspace dependencies unversioned for local development. `<version>` is stable `X.Y.Z` or RC `X.Y.Z-rc.N`; Python metadata normalizes an RC to `X.Y.ZrcN`. `apps/harness-ui` is private build input to `converge-agent-ui`; its compiled files are not committed or released independently, but both the Agent UI sdist and wheel must contain them and an sdist-to-wheel build must not require Node.js. RC releases never advance Docker or npm `latest`.
 
 Follow these service invariants; the complete contract and rationale live in [DEVELOPMENT.md](DEVELOPMENT.md):
 
@@ -50,6 +52,8 @@ Follow these service invariants; the complete contract and rationale live in [DE
 make install
 make setup
 make dev
+make agent-ui
+make agent-ui tui
 make db-migrate msg="description"
 make format
 make lint

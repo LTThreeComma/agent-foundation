@@ -5,7 +5,6 @@ import base64
 import json
 import os
 import sys
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -28,6 +27,8 @@ from converge_agent_envd_client.eip.v1 import (
     EncodedBytes,
     EnvironmentDescribeParams,
     EnvironmentDescribeResult,
+    ErrorType,
+    ExecutableName,
     FileFindParams,
     FileKind,
     FileListParams,
@@ -61,7 +62,6 @@ from converge_agent_envd_client.eip.v1 import (
     ProcessWriteStdinParams,
     ReceiptGetParams,
     RequestedProcessSignal,
-    ResourceAuthority,
     SearchMode,
     SessionCloseParams,
     ShellExecParams,
@@ -87,14 +87,12 @@ async def start_daemon(
     environment_id: str = "env-e2e",
     config_path: Path | None = None,
     runtime_dir: Path | None = None,
-    resource_authority: ResourceAuthority = ResourceAuthority.SCOPED,
 ) -> asyncio.subprocess.Process:
     arguments = [str(binary)]
     if config_path is not None:
         arguments.extend(("--config", str(config_path)))
     environment = {
         "AGENT_ENVD_ENVIRONMENT_ID": environment_id,
-        "AGENT_ENVD_RESOURCE_AUTHORITY": resource_authority.value,
         "AGENT_ENVD_EXECUTION_ISOLATION": "disabled",
         "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS": "[ ]",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
@@ -152,17 +150,17 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
         session = await EIPSession.initialize(
             transport,
             expected_environment_id="env-e2e",
-            required_capabilities=("environment.describe", "session.close"),
+            required_methods=("environment.describe", "session.close"),
         )
         descriptor = await session.describe()
         assert descriptor.environment_id == "env-e2e"
-        assert descriptor.resource_authority.mode is ResourceAuthority.SCOPED
-        assert descriptor.resource_authority.root_mount_id is None
-        assert descriptor.capabilities == (
+        assert descriptor.root_mount_id is None
+        assert descriptor.available_methods == (
             "environment.describe",
             "operation.cancel",
-            "port.observe",
-            "receipt.read",
+            "port.inspect",
+            "port.wait",
+            "receipt.get",
             "session.close",
         )
 
@@ -185,7 +183,7 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
             PortWaitParams(
                 context=EIPCallContext(
                     operation_id="port-wait-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=2),
+                    timeout_ms=2_000,
                 ),
                 target=target,
                 desired_status=DesiredPortStatus.NOT_LISTENING,
@@ -198,7 +196,7 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
                 PortWaitParams(
                     context=EIPCallContext(
                         operation_id="port-cancel-target-e2e",
-                        deadline=datetime.now(UTC) + timedelta(seconds=5),
+                        timeout_ms=5_000,
                     ),
                     target=target,
                     desired_status=DesiredPortStatus.LISTENING,
@@ -228,48 +226,61 @@ def test_real_daemon_session_round_trip_and_fresh_generations() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.skipif(os.name != "posix", reason="server authority currently requires a POSIX root namespace")
-def test_resource_authority_ceiling_and_server_file_command_surface(tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name != "posix", reason="command execution test requires POSIX")
+def test_configured_mount_defines_file_and_command_surface(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
+    workspace = tmp_path / "workspace"
     runtime.mkdir()
-    source = tmp_path / "server-source.txt"
+    workspace.mkdir()
+    source = workspace / "server-source.txt"
     source.write_text("server-visible\n")
     python = Path(sys.executable).resolve()
     config_path = tmp_path / "agent-envd.json"
-    config_path.write_text(json.dumps({"trusted_executable_roots": [str(python.parent)]}))
+    config_path.write_text(
+        json.dumps(
+            {
+                "root_mount_id": "workspace",
+                "mounts": [
+                    {
+                        "mount_id": "workspace",
+                        "native_root": str(workspace),
+                        "writable": False,
+                        "allow_command_execution": True,
+                        "max_file_bytes": 1024 * 1024,
+                        "allowed_operations": [
+                            "stat",
+                            "read_text",
+                            "open_reader",
+                            "list",
+                            "command_cwd",
+                            "executable_source",
+                        ],
+                    }
+                ],
+                "trusted_executable_roots": [str(python.parent)],
+            }
+        )
+    )
 
     async def scenario() -> None:
-        scoped_daemon = await start_daemon(agent_envd_binary())
-        with pytest.raises(EIPMethodError) as rejected:
-            await EIPSession.initialize(
-                StdioTransport.from_process(scoped_daemon),
-                expected_environment_id="env-e2e",
-                resource_authority=ResourceAuthority.SERVER,
-            )
-        assert rejected.value.error.data.error_type.value == "protocol_incompatible"
-        assert_disabled_isolation_warning(await wait_for_exit(scoped_daemon))
-
-        server_daemon = await start_daemon(
+        daemon = await start_daemon(
             agent_envd_binary(),
             config_path=config_path,
             runtime_dir=runtime,
-            resource_authority=ResourceAuthority.SERVER,
         )
         session = await EIPSession.initialize(
-            StdioTransport.from_process(server_daemon),
+            StdioTransport.from_process(daemon),
             expected_environment_id="env-e2e",
-            resource_authority=ResourceAuthority.SERVER,
-            required_capabilities=("file.read", "process.manage", "shell.exec"),
+            required_methods=("file.read_text", "shell.exec"),
         )
         descriptor = session.descriptor
-        assert descriptor.resource_authority.mode is ResourceAuthority.SERVER
-        assert descriptor.resource_authority.root_mount_id == "server-root"
-        assert tuple(mount.mount_id for mount in descriptor.mounts) == ("server-root",)
+        assert descriptor.root_mount_id == "workspace"
+        assert tuple(mount.mount_id for mount in descriptor.mounts) == ("workspace",)
 
-        source_path = EIPPath(mount_id="server-root", path=str(source))
+        source_path = EIPPath(mount_id="workspace", path="/server-source.txt")
         observed = await session.client.file_read_text(
             FileReadTextParams(
-                context=EIPCallContext(operation_id="server-read-e2e"),
+                context=EIPCallContext(operation_id="configured-read-e2e"),
                 path=source_path,
                 line_offset=0,
                 line_limit=1,
@@ -277,27 +288,60 @@ def test_resource_authority_ceiling_and_server_file_command_surface(tmp_path: Pa
             )
         )
         assert observed.text == "server-visible\n"
-        assert observed.lines_read == 1
-        assert observed.has_more is False
 
         foreground = await session.client.shell_exec(
             ShellExecParams(
-                context=EIPCallContext(operation_id="server-shell-e2e"),
+                context=EIPCallContext(operation_id="configured-shell-e2e"),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
-                        arguments=("-c", "print('server-command')"),
+                        executable_spec=ExecutableName(kind="name", name=python.name),
+                        arguments=("-c", "print('configured-command')"),
                     ),
-                    cwd=EIPPath(mount_id="server-root", path=str(tmp_path)),
+                    cwd=EIPPath(mount_id="workspace", path="/"),
                 ),
             )
         )
         assert foreground.status.cleanup.value == "complete"
         assert foreground.output.stdout.capture.inline is not None
-        assert base64.b64decode(foreground.output.stdout.capture.inline.data + "===") == b"server-command\n"
+        assert base64.b64decode(foreground.output.stdout.capture.inline.data + "===") == b"configured-command\n"
         await session.close()
-        assert_disabled_isolation_warning(await wait_for_exit(server_daemon))
+        assert_disabled_isolation_warning(await wait_for_exit(daemon))
+
+    asyncio.run(scenario())
+
+
+def test_mount_ancestor_of_private_runtime_fails_closed(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    python = Path(sys.executable).resolve()
+    config_path = tmp_path / "agent-envd.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mounts": [
+                    {
+                        "mount_id": "broad",
+                        "native_root": str(tmp_path),
+                        "writable": False,
+                        "allow_command_execution": True,
+                        "max_file_bytes": 1024 * 1024,
+                    }
+                ],
+                "trusted_executable_roots": [str(python.parent)],
+            }
+        )
+    )
+
+    async def scenario() -> None:
+        process = await start_daemon(
+            agent_envd_binary(),
+            config_path=config_path,
+            runtime_dir=runtime,
+        )
+        stderr = await wait_for_exit(process, expected_code=1)
+        assert b"mount initialization failed" in stderr
+        assert b"overlap protected command runtime directories" in stderr
 
     asyncio.run(scenario())
 
@@ -332,7 +376,7 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
     request = CommandRequest(
         command=ArgvCommand(
             kind="argv",
-            executable=python.name,
+            executable_spec=ExecutableName(kind="name", name=python.name),
             arguments=("-c", "import time; time.sleep(30)"),
         ),
         cwd=EIPPath(mount_id="workspace", path="/"),
@@ -347,14 +391,13 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
         first_session = await EIPSession.initialize(
             StdioTransport.from_process(first_daemon),
             expected_environment_id="env-e2e",
-            required_capabilities=("process.manage",),
+            required_methods=("process.start",),
             request_timeout=5,
         )
         first = await first_session.client.process_start(
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="generation-one-start",
-                    idempotency_key="generation-one-start-key",
                 ),
                 request=request,
             )
@@ -371,14 +414,13 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
         second_session = await EIPSession.initialize(
             StdioTransport.from_process(second_daemon),
             expected_environment_id="env-e2e",
-            required_capabilities=("process.manage",),
+            required_methods=("process.start",),
             request_timeout=5,
         )
         second = await second_session.client.process_start(
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="generation-two-start",
-                    idempotency_key="generation-two-start-key",
                 ),
                 request=request,
             )
@@ -389,8 +431,7 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
                 ProcessKillParams(
                     context=EIPCallContext(
                         operation_id="stale-generation-kill",
-                        idempotency_key="stale-generation-kill-key",
-                        deadline=datetime.now(UTC) + timedelta(seconds=5),
+                        timeout_ms=5_000,
                     ),
                     handle=old_handle,
                 )
@@ -406,8 +447,7 @@ def test_process_handles_are_fenced_across_daemon_generations(tmp_path: Path) ->
             ProcessKillParams(
                 context=EIPCallContext(
                     operation_id="generation-two-kill",
-                    idempotency_key="generation-two-kill-key",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=second.process.handle,
             )
@@ -459,13 +499,13 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         session = await EIPSession.initialize(
             StdioTransport.from_process(process),
             expected_environment_id="env-e2e",
-            required_capabilities=("shell.exec", "process.manage", "output.read"),
+            required_methods=("shell.exec", "process.start", "output.read"),
             request_timeout=5,
         )
         request = CommandRequest(
             command=ArgvCommand(
                 kind="argv",
-                executable=python.name,
+                executable_spec=ExecutableName(kind="name", name=python.name),
                 arguments=(
                     "-c",
                     "import os,sys; data=sys.stdin.buffer.read(4); "
@@ -488,7 +528,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-start-e2e",
-                    idempotency_key="process-start-key-e2e",
                 ),
                 request=request,
             )
@@ -498,8 +537,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         replayed = await session.client.process_start(
             ProcessStartParams(
                 context=EIPCallContext(
-                    operation_id="process-start-replay-e2e",
-                    idempotency_key="process-start-key-e2e",
+                    operation_id="process-start-e2e",
                 ),
                 request=request,
             )
@@ -520,7 +558,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWriteStdinParams(
                 context=EIPCallContext(
                     operation_id="process-stdin-e2e",
-                    idempotency_key="process-stdin-key-e2e",
                 ),
                 handle=started.process.handle,
                 data=EncodedBytes(encoding="base64", data=encoded),
@@ -533,7 +570,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWaitParams(
                 context=EIPCallContext(
                     operation_id="process-wait-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=started.process.handle,
                 condition=ProcessWaitCondition.TREE_CLEANED,
@@ -547,6 +584,8 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReadOutputParams(
                 context=EIPCallContext(operation_id="process-output-e2e"),
                 handle=started.process.handle,
+                stdout_offset=0,
+                stderr_offset=0,
                 output_policy=OutputPolicy(
                     max_inline_bytes=128,
                     max_output_bytes=128,
@@ -556,6 +595,18 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         )
         stdout = b"".join(base64.b64decode(segment.data.data + "===") for segment in output.stdout.chunks)
         assert stdout.startswith(b"pre:ping:works:")
+        with pytest.raises(EIPMethodError) as output_gap:
+            await session.client.process_read_output(
+                ProcessReadOutputParams(
+                    context=EIPCallContext(operation_id="process-output-gap-e2e"),
+                    handle=started.process.handle,
+                    stdout_offset=output.stdout.capture.available_end + 1,
+                    stderr_offset=0,
+                )
+            )
+        assert output_gap.value.error.data.error_type is ErrorType.RETENTION_GAP
+        assert output_gap.value.error.data.available_start == output.stdout.capture.available_start
+        assert output_gap.value.error.data.available_end == output.stdout.capture.available_end
         reference = waited.process.output.stdout.capture.reference
         assert reference is not None
         generic = await session.client.output_read(
@@ -576,7 +627,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReleaseParams(
                 context=EIPCallContext(
                     operation_id="process-release-e2e",
-                    idempotency_key="process-release-key-e2e",
                 ),
                 handle=started.process.handle,
             )
@@ -585,8 +635,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         replayed_after_release = await session.client.process_start(
             ProcessStartParams(
                 context=EIPCallContext(
-                    operation_id="process-start-replay-after-release-e2e",
-                    idempotency_key="process-start-key-e2e",
+                    operation_id="process-start-e2e",
                 ),
                 request=request,
             )
@@ -599,7 +648,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=("-c", "print('foreground')"),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
@@ -617,7 +666,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=("-c", "print('retained-foreground')"),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
@@ -658,7 +707,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 OutputReleaseParams(
                     context=EIPCallContext(
                         operation_id=f"shell-retained-release-e2e-{index}",
-                        idempotency_key=f"shell-retained-release-key-e2e-{index}",
                     ),
                     reference=reference_to_release,
                 )
@@ -673,7 +721,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                         request=CommandRequest(
                             command=ArgvCommand(
                                 kind="argv",
-                                executable=python.name,
+                                executable_spec=ExecutableName(kind="name", name=python.name),
                                 arguments=("-c", "print('too-much-output')"),
                             ),
                             cwd=EIPPath(mount_id="workspace", path="/"),
@@ -693,42 +741,68 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-kill-start-e2e",
-                    idempotency_key="process-kill-start-key-e2e",
                 ),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
-                        arguments=("-c", "import time; time.sleep(30)"),
+                        executable_spec=ExecutableName(kind="name", name=python.name),
+                        arguments=(
+                            "-c",
+                            "import time; time.sleep(0.2); print('ready', flush=True); time.sleep(30)",
+                        ),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
                 ),
             )
         )
-        live_output = await session.client.process_read_output(
-            ProcessReadOutputParams(
-                context=EIPCallContext(operation_id="process-live-output-e2e"),
-                handle=sleeper.process.handle,
-            )
+        live_output = await asyncio.wait_for(
+            session.client.process_read_output(
+                ProcessReadOutputParams(
+                    context=EIPCallContext(operation_id="process-live-output-e2e"),
+                    handle=sleeper.process.handle,
+                    stdout_offset=0,
+                    stderr_offset=0,
+                    wait_ms=5_000,
+                )
+            ),
+            timeout=2,
         )
         assert live_output.stdout.capture.producer_complete is False
-        assert live_output.stdout.next_cursor is not None
-        cursor_released = await session.client.output_release(
-            OutputReleaseParams(
-                context=EIPCallContext(
-                    operation_id="process-live-cursor-release-e2e",
-                    idempotency_key="process-live-cursor-release-key-e2e",
-                ),
-                cursor=live_output.stdout.next_cursor,
-            )
+        assert live_output.stdout.next_offset > 0
+        repeated_live_output = await asyncio.wait_for(
+            session.client.process_read_output(
+                ProcessReadOutputParams(
+                    context=EIPCallContext(operation_id="process-live-output-repeat-e2e"),
+                    handle=sleeper.process.handle,
+                    stdout_offset=0,
+                    stderr_offset=0,
+                    wait_ms=5_000,
+                )
+            ),
+            timeout=1,
         )
-        assert cursor_released.released is True
+        assert repeated_live_output.stdout.chunks == live_output.stdout.chunks
+        with pytest.raises(EIPMethodError) as live_output_gap:
+            await asyncio.wait_for(
+                session.client.process_read_output(
+                    ProcessReadOutputParams(
+                        context=EIPCallContext(operation_id="process-live-output-gap-e2e"),
+                        handle=sleeper.process.handle,
+                        stdout_offset=live_output.stdout.capture.available_end + 1,
+                        stderr_offset=0,
+                        wait_ms=5_000,
+                    )
+                ),
+                timeout=1,
+            )
+        assert live_output_gap.value.error.data.error_type is ErrorType.RETENTION_GAP
+        assert live_output_gap.value.error.data.available_start == live_output.stdout.capture.available_start
+        assert live_output_gap.value.error.data.available_end == live_output.stdout.capture.available_end
         killed = await session.client.process_kill(
             ProcessKillParams(
                 context=EIPCallContext(
                     operation_id="process-kill-e2e",
-                    idempotency_key="process-kill-key-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=sleeper.process.handle,
             )
@@ -739,7 +813,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReleaseParams(
                 context=EIPCallContext(
                     operation_id="process-kill-release-e2e",
-                    idempotency_key="process-kill-release-key-e2e",
                 ),
                 handle=sleeper.process.handle,
             )
@@ -749,12 +822,11 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-close-start-e2e",
-                    idempotency_key="process-close-start-key-e2e",
                 ),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=(
                             "-c",
                             "import sys; sys.stdin.buffer.read(); print('closed')",
@@ -769,7 +841,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessCloseStdinParams(
                 context=EIPCallContext(
                     operation_id="process-close-e2e",
-                    idempotency_key="process-close-key-e2e",
                 ),
                 handle=stdin_waiter.process.handle,
             )
@@ -779,7 +850,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWaitParams(
                 context=EIPCallContext(
                     operation_id="process-close-wait-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=stdin_waiter.process.handle,
                 condition=ProcessWaitCondition.TREE_CLEANED,
@@ -789,7 +860,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReleaseParams(
                 context=EIPCallContext(
                     operation_id="process-close-release-e2e",
-                    idempotency_key="process-close-release-key-e2e",
                 ),
                 handle=stdin_waiter.process.handle,
             )
@@ -799,12 +869,11 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-partial-stdin-start-e2e",
-                    idempotency_key="process-partial-stdin-start-key-e2e",
                 ),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=(
                             "-c",
                             "import os,time; os.read(0,1); os.close(0); time.sleep(0.25)",
@@ -820,7 +889,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWriteStdinParams(
                 context=EIPCallContext(
                     operation_id="process-partial-stdin-write-e2e",
-                    idempotency_key="process-partial-stdin-write-key-e2e",
                 ),
                 handle=partial_reader.process.handle,
                 data=EncodedBytes(
@@ -835,7 +903,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWaitParams(
                 context=EIPCallContext(
                     operation_id="process-partial-stdin-wait-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=partial_reader.process.handle,
                 condition=ProcessWaitCondition.TREE_CLEANED,
@@ -845,7 +913,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReleaseParams(
                 context=EIPCallContext(
                     operation_id="process-partial-stdin-release-e2e",
-                    idempotency_key="process-partial-stdin-release-key-e2e",
                 ),
                 handle=partial_reader.process.handle,
             )
@@ -855,12 +922,11 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-signal-start-e2e",
-                    idempotency_key="process-signal-start-key-e2e",
                 ),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=("-c", "import time; time.sleep(30)"),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
@@ -871,7 +937,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessSignalParams(
                 context=EIPCallContext(
                     operation_id="process-signal-e2e",
-                    idempotency_key="process-signal-key-e2e",
                 ),
                 handle=signaled_process.process.handle,
                 signal=RequestedProcessSignal.TERMINATE,
@@ -882,7 +947,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessWaitParams(
                 context=EIPCallContext(
                     operation_id="process-signal-wait-e2e",
-                    deadline=datetime.now(UTC) + timedelta(seconds=5),
+                    timeout_ms=5_000,
                 ),
                 handle=signaled_process.process.handle,
                 condition=ProcessWaitCondition.TREE_CLEANED,
@@ -893,7 +958,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessReleaseParams(
                 context=EIPCallContext(
                     operation_id="process-signal-release-e2e",
-                    idempotency_key="process-signal-release-key-e2e",
                 ),
                 handle=signaled_process.process.handle,
             )
@@ -904,13 +968,12 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 ProcessStartParams(
                     context=EIPCallContext(
                         operation_id="process-blocked-initial-stdin-e2e",
-                        idempotency_key="process-blocked-initial-stdin-key-e2e",
-                        deadline=datetime.now(UTC) + timedelta(seconds=5),
+                        timeout_ms=5_000,
                     ),
                     request=CommandRequest(
                         command=ArgvCommand(
                             kind="argv",
-                            executable=python.name,
+                            executable_spec=ExecutableName(kind="name", name=python.name),
                             arguments=("-c", "import time; time.sleep(30)"),
                         ),
                         cwd=EIPPath(mount_id="workspace", path="/"),
@@ -939,12 +1002,12 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 ShellExecParams(
                     context=EIPCallContext(
                         operation_id="shell-cancel-target-e2e",
-                        deadline=datetime.now(UTC) + timedelta(seconds=5),
+                        timeout_ms=5_000,
                     ),
                     request=CommandRequest(
                         command=ArgvCommand(
                             kind="argv",
-                            executable=python.name,
+                            executable_spec=ExecutableName(kind="name", name=python.name),
                             arguments=("-c", "import time; time.sleep(30)"),
                         ),
                         cwd=EIPPath(mount_id="workspace", path="/"),
@@ -969,12 +1032,11 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             ProcessStartParams(
                 context=EIPCallContext(
                     operation_id="process-daemon-drain-e2e",
-                    idempotency_key="process-daemon-drain-key-e2e",
                 ),
                 request=CommandRequest(
                     command=ArgvCommand(
                         kind="argv",
-                        executable=python.name,
+                        executable_spec=ExecutableName(kind="name", name=python.name),
                         arguments=("-c", "import time; time.sleep(30)"),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
@@ -1012,12 +1074,18 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         session = await EIPSession.initialize(
             StdioTransport.from_process(process),
             expected_environment_id="env-e2e",
-            required_capabilities=(
-                "file.read",
-                "file.write",
+            required_methods=(
+                "file.open_reader",
+                "file.close_reader",
+                "file.open_writer",
+                "file.commit_writer",
+                "file.write_text",
+                "file.read_text",
+                "file.stat",
+                "file.list",
                 "file.find",
                 "file.search",
-                "receipt.read",
+                "receipt.get",
             ),
             request_timeout=5,
         )
@@ -1036,13 +1104,12 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
             async for chunk in reader:
                 downloaded.extend(chunk)
         assert bytes(downloaded) == payload
-        assert reader.completion.complete is True
+        assert reader.completion.digest.algorithm == "sha256"
 
         text_path = EIPPath(mount_id="workspace", path="/notes.txt")
         write_params = FileWriteTextParams(
             context=EIPCallContext(
                 operation_id="write-text-e2e",
-                idempotency_key="write-text-e2e-key",
             ),
             path=text_path,
             mode=FileWriteMode.CREATE,
@@ -1052,8 +1119,7 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         replayed = await session.client.file_write_text(
             FileWriteTextParams(
                 context=EIPCallContext(
-                    operation_id="write-text-replay-e2e",
-                    idempotency_key="write-text-e2e-key",
+                    operation_id="write-text-e2e",
                 ),
                 path=text_path,
                 mode=FileWriteMode.CREATE,
@@ -1082,6 +1148,26 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
             )
         )
         assert stat.info.path == text.info.path
+
+        missing_a = FileStatParams(
+            context=EIPCallContext(operation_id="stat-failure-e2e"),
+            path=EIPPath(mount_id="workspace", path="/missing-a"),
+        )
+        with pytest.raises(EIPMethodError) as first_failure:
+            await session.client.file_stat(missing_a)
+        assert first_failure.value.error.data.error_type is ErrorType.NOT_FOUND_OR_DENIED
+        with pytest.raises(EIPMethodError) as collision:
+            await session.client.file_stat(
+                FileStatParams(
+                    context=EIPCallContext(operation_id="stat-failure-e2e"),
+                    path=EIPPath(mount_id="workspace", path="/missing-b"),
+                )
+            )
+        assert collision.value.error.data.error_type is ErrorType.CONFLICT
+        with pytest.raises(EIPMethodError) as replayed_failure:
+            await session.client.file_stat(missing_a)
+        assert replayed_failure.value.error == first_failure.value.error
+
         listed = await session.client.file_list(
             FileListParams(
                 context=EIPCallContext(operation_id="list-e2e"),
@@ -1117,7 +1203,7 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         receipt = await session.client.receipt_get(
             ReceiptGetParams(
                 context=EIPCallContext(operation_id="receipt-e2e"),
-                receipt_ref=written.receipt.receipt_ref,
+                operation_id=written.receipt.operation_id,
             )
         )
         assert receipt.receipt.operation_id == written.receipt.operation_id
@@ -1128,15 +1214,15 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("expected_environment_id", "required_capabilities"),
+    ("expected_environment_id", "required_methods"),
     [
         ("wrong-environment", ()),
-        ("env-e2e", ("file.read",)),
+        ("env-e2e", ("file.stat",)),
     ],
 )
 def test_initialization_negotiation_failure_is_typed_and_terminal(
     expected_environment_id: str,
-    required_capabilities: tuple[str, ...],
+    required_methods: tuple[str, ...],
 ) -> None:
     async def scenario() -> None:
         process = await start_daemon(agent_envd_binary())
@@ -1145,7 +1231,7 @@ def test_initialization_negotiation_failure_is_typed_and_terminal(
             await EIPSession.initialize(
                 transport,
                 expected_environment_id=expected_environment_id,
-                required_capabilities=required_capabilities,
+                required_methods=required_methods,
             )
         assert captured.value.error.code == -32003
         assert_disabled_isolation_warning(await wait_for_exit(process))
@@ -1206,16 +1292,14 @@ def test_preinitialize_and_repeated_initialize_errors() -> None:
     asyncio.run(repeated())
 
 
-def test_unknown_method_returns_method_not_found() -> None:
+def test_unknown_method_is_rejected_as_unavailable() -> None:
     async def scenario() -> None:
         process = await start_daemon(agent_envd_binary())
         requester, client = await initialize_direct(process)
         unknown = MethodSpec(
             name="future.unknown",
-            capability=None,
             kind="request_response",
             idempotency="read_only_retry",
-            idempotency_key="disallowed",
             introduced="1.0",
             error_family="common",
             params_type=EnvironmentDescribeParams,
@@ -1227,6 +1311,7 @@ def test_unknown_method_returns_method_not_found() -> None:
                 EnvironmentDescribeParams(context=EIPCallContext(operation_id="unknown")),
             )
         assert captured.value.error.code == -32601
+        assert captured.value.error.data.error_type is ErrorType.METHOD_NOT_FOUND
         await client.session_close(SessionCloseParams(context=EIPCallContext(operation_id="close-after-unknown")))
         await requester.close()
         await wait_for_exit(process)
