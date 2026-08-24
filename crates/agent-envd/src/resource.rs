@@ -56,7 +56,15 @@ struct CapEntryIdentity {
     file_type: u64,
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CapEntryIdentity {
+    device: u64,
+    inode: u64,
+    file_type: u8,
+}
+
+#[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CapEntryIdentity;
 
@@ -876,7 +884,24 @@ fn cap_entry_identity(metadata: &cap_std::fs::Metadata) -> Result<CapEntryIdenti
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn cap_entry_identity(metadata: &cap_std::fs::Metadata) -> Result<CapEntryIdentity, ResourceError> {
+    use cap_fs_ext::MetadataExt;
+    let file_type = metadata.file_type();
+    Ok(CapEntryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        file_type: if file_type.is_dir() {
+            1
+        } else if file_type.is_symlink() {
+            2
+        } else {
+            0
+        },
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn cap_entry_identity(
     _metadata: &cap_std::fs::Metadata,
 ) -> Result<CapEntryIdentity, ResourceError> {

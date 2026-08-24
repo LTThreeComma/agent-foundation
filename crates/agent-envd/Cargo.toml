@@ -28,6 +28,9 @@ serde_json = "1.0.143"
 sha2 = "0.10.9"
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
+[target.'cfg(windows)'.dependencies]
+cap-fs-ext = "3.4.5"
+
 [build-dependencies]
 heck = "0.5.0"
 prost = "0.14.1"
