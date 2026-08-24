@@ -32,25 +32,16 @@ type ExecutionNetworkMode = Literal["host", "deny"]
 
 class AttachmentCredentialProvider(BaseModel):
     bootstrap_channel: SecretBootstrapChannel
-    refresh_before_expiry_ms: int
 
 
 class ReverseWebSocketConfig(BaseModel):
     endpoint: str
     subprotocol_major_versions: tuple[int, ...] = (1,)
     credential_provider: AttachmentCredentialProvider
-    connect_timeout_ms: int
-    initialize_timeout_ms: int
-    ping_interval_ms: int
-    pong_timeout_ms: int
-    reconnect_base_ms: int
-    reconnect_cap_ms: int
-    stable_reset_ms: int
     tls_trust_roots: tuple[str, ...] = ()
 
 
 class DaemonLimits(BaseModel):
-    # Client-actionable wire ceilings.
     max_request_bytes: int
     max_response_bytes: int
     max_transfer_frame_bytes: int
@@ -59,30 +50,9 @@ class DaemonLimits(BaseModel):
     max_file_transfer_bytes: int
     max_processes: int
     max_operation_duration_ms: int
-    max_inline_output_bytes: int
-    max_output_bytes: int
-
-    # Internal bounded ownership and reclamation policy.
-    max_sessions: int
-    max_pending_requests: int
-    max_operation_records: int
-    operation_record_ttl_ms: int
-    max_process_records: int
-    terminal_process_record_ttl_ms: int
-    max_file_transfer_records: int
-    file_transfer_record_ttl_ms: int
-    max_staged_file_bytes: int
-    max_staged_file_objects: int
-    transfer_idle_ttl_ms: int
-    max_transfer_duration_ms: int
-    max_retained_bytes: int
-    max_retained_objects: int
-    default_retention_ttl_ms: int
-    max_retention_ttl_ms: int
-    max_retired_transfer_records: int
-    cleanup_retry_limit: int
-    cleanup_orphan_threshold: int
-    shutdown_timeout_ms: int
+    max_output_preview_bytes: int
+    max_output_bytes_per_stream: int
+    max_spool_bytes: int
 
 
 class DaemonConfig(BaseModel):
@@ -102,11 +72,9 @@ class DaemonConfig(BaseModel):
     payload_gid: int | None = None
 ```
 
-All numeric limits are positive and finite. Active counts do not exceed their owning record counts. Inline output does not exceed total per-output capture. Transfer-frame configuration leaves room for the fixed frame header and maximum handle. Request/response, operation, transfer, staging, process, retained-output, queue, tombstone, retry, and shutdown bounds cannot be disabled.
+All numeric limits are positive and finite. Connection, initialization, liveness, reconnect, transfer, and shutdown timing is also finite internal policy owned by the relevant lifecycle or transport contract rather than a separate compatibility surface. `max_spool_bytes` is at least twice `max_output_bytes_per_stream`, so one command can reserve both streams. `max_response_bytes` leaves room for both base64-encoded stream previews and the largest valid command-result envelope at `max_output_preview_bytes`. The wire-visible `EIPLimits` contains only values a client needs to construct work and therefore omits the daemon-wide spool ceiling. Envd also bounds session, operation-record, process-record, transfer, staging, spool-record, queue, and shutdown resources internally; those implementation limits are not separate protocol features. Exhaustion returns `busy` or `quota_exceeded` before unsafe allocation.
 
-Only the client-actionable subset in `EIPLimits` is wire-visible. Internal record capacity, TTL, tombstone, spool, staging, cleanup, and scheduler policy is not a compatibility promise. Runtime exhaustion is reported by typed `busy`, `quota_exceeded`, expiry, retention-gap, or cleanup outcomes.
-
-Sessions receive no independent quota for generation-owned operations, processes, receipts, or retained output. Session-owned transfers still count against daemon-global record, active-transfer, and staging ceilings, so reconnects cannot multiply capacity.
+`max_output_bytes_per_stream` is reserved independently for stdout and stderr before one command starts, and `max_output_preview_bytes` bounds each stream preview. `max_spool_bytes` is the finite daemon-wide spool disk ceiling. Existing output and process records are not evicted to admit new work; callers reclaim them explicitly.
 
 ## Configured Mounts and Executables
 
@@ -167,12 +135,16 @@ Operation records and receipts, process handles, output references, file transfe
 
 ## Generation-Private Runtime State
 
-Before accepting any carrier, envd creates one fresh unpredictable generation subtree beneath the trusted runtime parent. It never reuses fixed prior-generation command-home, command-temp, spool, control, or probe contents.
+The trusted runtime parent is dedicated to one Environment's envd lifecycle and contains no provider or user data. Before inspecting or changing children, envd acquires one platform-native exclusive, non-inherited lifetime lock for that parent. Failure to acquire the lock means another generation may still own it and fails startup.
+
+While holding the lock and before creating a new generation, envd uses capability-relative, no-follow operations to enumerate the parent's immediate entries. Apart from the stable lock object, every entry must match envd's private generation-directory format, daemon identity, ownership, and non-link/reparse shape. Envd removes each validated crash-left generation tree recursively without following links. An unexpected entry, uncertain ownership or shape, traversal escape, or deletion that cannot be proven complete fails startup before local readiness. It never ignores or merely stops accounting for stale spool bytes.
+
+Only after stale-state cleanup succeeds does envd create one fresh unpredictable generation subtree beneath the trusted runtime parent. It never reuses fixed prior-generation command-home, command-temp, spool, control, or probe contents. A normal shutdown removes the current subtree while still holding the parent lock; process or Host failure releases the native lock so the next start can perform the same verified cleanup.
 
 The subtree contains only envd-owned classes:
 
 - private command home and temporary roots;
-- append-only retained-output spool files and metadata;
+- append-only command-output spool files and metadata;
 - isolation control/probe state;
 - internal connector and supervisor state;
 - bounded cleanup evidence.
@@ -208,13 +180,13 @@ Startup order is:
 2. Validate Environment identity and create a fresh generation.
 3. Create and validate the generation-private runtime subtree.
 4. Canonicalize configured mounts, protected paths, executables, and shell profiles.
-5. Create bounded operation, transfer/staging, process, and retained-output owners.
+5. Create the operation ledger, transfer/process records, and command-output spool.
 6. Initialize the selected execution backend.
 7. In `required` mode, run the native production probe for Linux, macOS, or Windows.
 8. Reserve stdio framing, or initialize the outbound connector and credential source.
 9. Publish local readiness to the trusted provider lifecycle boundary and begin carrier admission.
 
-No stdio frame is accepted and no reverse-WebSocket attempt begins before the required isolation probe succeeds. Envd never binds a network socket for EIP.
+No stdio frame is accepted and no reverse-WebSocket attempt begins before the required isolation probe succeeds. Envd never binds an inbound listening socket for EIP.
 
 ## Readiness
 
@@ -233,53 +205,26 @@ Readiness never contains credentials, native roots, protected paths, helper loca
 
 Admission is bounded at daemon-global request/operation/session level and at method-specific transfer, staging, process, output, payload, and platform resource level. Capacity is reserved before native allocation or dispatch.
 
-One generation coordinator contains durable owners, not overlapping registries:
+Generation state has four clear domains:
 
-- session owner for initialization and session-scoped file transfers;
-- one operation owner for pending admission, active work, cancellation, method/digest replay, terminal result/failure, and receipt;
-- one transfer/staging owner with atomic provisional reservation before native reader/candidate allocation;
-- one command execution owner for all native trees and process records;
-- one retained-output owner backed by the private spool;
-- connector state and generation descriptor publication.
+- a session contains initialization and session-scoped file transfers;
+- one operation ledger contains running requests and retained terminal evidence/receipts for effectful methods; completed observation entries are removed after response handoff;
+- the command manager contains owned process trees and process records;
+- the output spool contains stdout/stderr records and disk files.
 
-### Operation owner
+Filesystem candidates remain in the file-transfer or mutation domain. These domains can coordinate one handoff, such as a sealed writer becoming commit-owned, without introducing generic ownership tokens or overlapping registries.
 
-Transport-to-domain admission creates one operation record before owner work can run. That record bridges ordering, so a later cancellation cannot overtake an earlier admitted operation. It owns the canonical method/digest and survives response-waiter loss. There is no separate pending-operation map, owned-task map, receipt store, or replay-key store.
+Operation admission inserts its ledger entry synchronously before handler work can run. The ledger's observable replay and cancellation behavior is owned by [EIP Protocol](02-eip-protocol.md#operation-ledger-and-cancellation).
 
-A repeated operation ID with the same method/digest reports in-progress or replays retained terminal evidence. Another method/digest conflicts. Nonterminal records are never reclaimed. Terminal records expire or are reclaimed oldest-first under internal bounds; missing evidence never proves non-dispatch.
+A command reserves process and output capacity before payload release. Output appends to private files and keeps only bounded previews in memory. Process and output records remain until explicit release or generation end; finite capacity rejects later starts instead of silently reclaiming valid handles.
 
-### Transfer and candidate owner
-
-A file open first reserves one provisional transfer slot, staging object where applicable, queue budget, and native-allocation budget atomically. Native allocation then commits or rolls that reservation back. A check-then-insert race cannot over-admit concurrent opens.
-
-A sealed writer remains session-owned until commit admission atomically transfers candidate ownership to its operation record. Session close cannot delete an operation-owned candidate. Quota returns exactly once only after publication transfers ownership away or deletion is confirmed.
-
-Candidate cleanup uses bounded retry with conservative charging. One transient unlink failure does not permanently disable a mount. Affected new allocation is blocked only when retry exhaustion, unresolved owned capacity, or an orphan threshold makes safe accounting impossible. Unresolved cleanup remains explicit during drain.
-
-Retired transfer reset acknowledgements use a separately bounded tombstone set and finite wait. A peer that never acknowledges reset cannot grow state or stall all future transfers indefinitely; the carrier is terminated when safe correlation cannot be preserved.
-
-### Retained-output owner
-
-Retained bytes append incrementally to private spool files after byte/object reservation. Only bounded previews remain in memory. Reads use explicit offsets. Release, expiry, process-record reclamation, failed creation, and drain return capacity exactly once; uncertain physical cleanup remains charged and enters bounded cleanup retry.
-
-Session close removes only session-owned transfers. Accepted operations, process records, receipts, and retained output remain generation-owned. Daemon shutdown is the lifecycle event that ends all volatile owners.
+Session close removes only session-owned transfers. Accepted operations, processes, receipts, and output remain generation-owned. A peer that violates bounded transfer or correlation state loses the carrier rather than forcing unbounded bookkeeping.
 
 ## Draining and Shutdown
 
 Shutdown begins from an operator signal, stdio parent loss, explicit provider lifecycle action outside EIP, generation-fatal reverse-WebSocket state, or unrecoverable ownership fault. EIP has no daemon-shutdown method.
 
-Envd then:
-
-01. enters `Draining` atomically and stops new carrier/session/operation admission;
-02. lets already completed responses drain within bounded carrier time;
-03. requests cancellation of accepted foreground operations;
-04. closes readers and aborts writers still session-owned;
-05. lets handoff-complete commits finish or preserve terminal unknown evidence within the drain budget;
-06. closes process stdin and output producers;
-07. applies strongest backend cleanup to every nonterminal command tree;
-08. waits for platform cleanup evidence within the shutdown timeout;
-09. removes generation-private spool/control/home/temp state and retries owned candidate/ACL cleanup boundedly;
-10. closes the carrier/bootstrap channel and exits.
+Envd stops new admission, closes session transfers, asks accepted foreground work to cancel, and lets already owned mutations publish their strongest terminal evidence within a finite drain budget. It closes process stdin, applies the active backend's strongest cleanup to every command tree, waits for bounded cleanup evidence, removes generation-private state, closes carrier/bootstrap channels, and exits.
 
 No process is contractually allowed to outlive envd shutdown. Required Linux namespace and Windows Job cleanup normally prove complete tree teardown. macOS can report a residual only while inherited Seatbelt confinement remains proven. Disabled mode relies on outer-Host teardown for authority outside envd's native target.
 
@@ -297,21 +242,22 @@ The EIP descriptor exposes only non-secret client-actionable limits, exact avail
 
 ## Failure Semantics
 
-| Failure                                               | State and observable result                                               |
-| ----------------------------------------------------- | ------------------------------------------------------------------------- |
-| Invalid/conflicting configuration                     | Exit nonzero before local readiness                                       |
-| Runtime subtree cannot be created fresh and private   | Exit nonzero before admission                                             |
-| Required isolation backend/probe fails                | Exit nonzero; no carrier admission or fallback                            |
-| Stdio framing setup fails                             | Exit nonzero before initialization                                        |
-| Reverse-WebSocket endpoint/TLS/subprotocol is invalid | Generation-fatal drain and nonzero exit                                   |
-| Attachment credential expires or is rejected          | Refresh and reconnect, or generation-fatal when nonrefreshable            |
-| Transient DNS/connect/liveness failure                | Capped jittered reconnect; generation-owned state remains                 |
-| Runtime admission exhausted                           | Typed pre-dispatch `busy`; no native work                                 |
-| Transfer/staging/spool quota exhausted                | Typed `busy` or `quota_exceeded`; no unbounded allocation                 |
-| Candidate/spool cleanup is transiently uncertain      | Conservative charge plus bounded retry; safe unaffected work can continue |
-| Cleanup uncertainty crosses safety threshold          | Block affected admission or drain; never undercount ownership             |
-| Fatal owner inconsistency                             | Enter `Draining`, preserve strongest evidence, clean trees, exit nonzero  |
-| Shutdown cleanup remains incomplete                   | Exit nonzero; never report normal completion                              |
+| Failure                                                                  | State and observable result                                               |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Invalid/conflicting configuration                                        | Exit nonzero before local readiness                                       |
+| Runtime parent cannot be locked or stale generation cleanup is uncertain | Exit nonzero before local readiness                                       |
+| Runtime subtree cannot be created fresh and private                      | Exit nonzero before admission                                             |
+| Required isolation backend/probe fails                                   | Exit nonzero; no carrier admission or fallback                            |
+| Stdio framing setup fails                                                | Exit nonzero before initialization                                        |
+| Reverse-WebSocket endpoint/TLS/subprotocol is invalid                    | Generation-fatal drain and nonzero exit                                   |
+| Attachment credential expires or is rejected                             | Refresh and reconnect, or generation-fatal when nonrefreshable            |
+| Transient DNS/connect/liveness failure                                   | Capped jittered reconnect; generation-owned state remains                 |
+| Runtime admission exhausted                                              | Typed pre-dispatch `busy`; no native work                                 |
+| Transfer/staging/spool quota exhausted                                   | Typed `busy` or `quota_exceeded`; no unbounded allocation                 |
+| Candidate/spool cleanup is transiently uncertain                         | Conservative charge plus bounded retry; safe unaffected work can continue |
+| Cleanup uncertainty crosses safety threshold                             | Block affected admission or drain; never undercount ownership             |
+| Fatal owner inconsistency                                                | Enter `Draining`, preserve strongest evidence, clean trees, exit nonzero  |
+| Shutdown cleanup remains incomplete                                      | Exit nonzero; never report normal completion                              |
 
 ## Compatibility
 
@@ -325,10 +271,10 @@ Provider configuration changes restart envd and create a new generation. Live EI
 02. Envd supports trusted stdio or outbound reverse WebSocket and never binds an inbound EIP/HTTP/WebSocket/health listener.
 03. Reverse-WebSocket attachment uses a protected short-lived credential source with refresh or explicit generation-fatal expiry behavior; credentials never enter URLs, EIP, argv, child environments, or observability.
 04. Authority-bearing configuration is immutable for one generation; sessions observe only configured mounts and exact available methods.
-05. Every request, response, queue, operation, transfer, staging, process, retained-output, tombstone, retry, and shutdown resource is finitely bounded.
-06. One operation record owns admission through terminal replay/receipt evidence; response-waiter loss cannot erase accepted mutation evidence.
-07. Transfer admission reserves capacity before native allocation, and candidate/spool quota returns only after ownership transfer or confirmed cleanup.
+05. Every request, response, queue, operation, transfer, staging, process, spool, and shutdown resource is finitely bounded.
+06. One operation ledger owns running admission and retained terminal replay/receipt evidence for effectful methods; response-waiter loss cannot erase accepted mutation evidence.
+07. Command output capacity is reserved before payload release, and valid process/output records are reclaimed only explicitly or at generation end.
 08. Required isolation probes Linux, macOS, or Windows before carrier admission and never selects disabled after failure.
 09. Local readiness and initialized-carrier readiness remain distinct; reconnect does not change generation or erase generation-owned resources.
-10. Each start creates fresh command-home, command-temp, spool, control, and probe state and never reuses fixed prior-generation contents.
+10. Each start exclusively locks its dedicated runtime parent, proves removal of every validated crash-left generation tree, then creates fresh command-home, command-temp, spool, control, and probe state; stale spool bytes are never left outside current capacity accounting while service starts.
 11. Shutdown stops admission before cleanup, terminates every owned command tree, removes volatile generation state, and reports uncertainty rather than false success.

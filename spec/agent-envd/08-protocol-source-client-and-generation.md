@@ -41,7 +41,7 @@ The stable source and output ownership is:
 
 `converge-agent-envd-client` is a Python workspace member for repository development and validation, but it belongs to the agent-envd release group rather than the Foundation Python release group. A Foundation release can depend on a compatible published client range but does not version or republish that package.
 
-The client package is lower-level than the Harness and is reusable by product gateways, CLIs, IDEs, provider controllers, and trusted background jobs. It imports no Pydantic AI Agent type, `AgentContext`, `BoundEnvironment`, `ToolOutputPolicy`, browser principal, provider SDK, or Host lifecycle model. The Harness adapter imports the client and translates between generated EIP values and Harness-owned provider-neutral values such as Environment descriptors, logical references, errors, receipts, and effective output policy.
+The client package is lower-level than the Harness and is reusable by product gateways, CLIs, IDEs, provider controllers, and trusted background jobs. It imports no Pydantic AI Agent type, `AgentContext`, `BoundEnvironment`, `ToolOutputPolicy`, browser principal, provider SDK, or Host lifecycle model. The Harness adapter imports the client and translates between generated EIP values and Harness-owned provider-neutral descriptors, logical references, errors, and receipts.
 
 ## Canonical IDL Profile
 
@@ -49,7 +49,7 @@ Every canonical IDL file uses the Protobuf package `converge.agent_envd.eip.v1`.
 
 - exact JSON-RPC method name;
 - whether the method opens, closes, commits, or aborts a typed file transfer and the permitted direction;
-- operation replay class under the single operation-ID identity;
+- operation replay class (`terminal_evidence` or `active_only`) under the single operation-ID identity for every post-initialization method; `initialize` is explicitly ledger-external;
 - correlated request-response behavior;
 - protocol major and first minor in which the method exists;
 - owning error set or error family when narrower than the common EIP set.
@@ -101,7 +101,7 @@ The generator produces:
 
 Shared golden request, result, and error values are hand-curated wire evidence rather than generator output. Python and Rust consume the same checked fixture file so a renderer cannot redefine its own expected JSON independently.
 
-Generated validation owns wire structure: field types and bounds, presence, unions, canonical formats, and the small cross-field invariants required to interpret a value safely, such as a retained output having a reference. The daemon's domain-to-wire conversion owns lifecycle coherence across observations, such as whether a running process can already have an exit code or whether a receipt stage matches the operation registry. Codegen does not duplicate complete process, operation, filesystem, or isolation state machines as defensive model validators; runtime tests exercise those owners directly.
+Generated validation owns wire structure: field types and bounds, presence, unions, canonical formats, and the small cross-field invariants required to interpret a value safely, such as command output having a reference. The daemon's domain-to-wire conversion owns lifecycle coherence across observations, such as whether a running process can already have an exit code or whether terminal operation evidence is coherent. Codegen does not duplicate complete process, operation, filesystem, or isolation state machines as defensive model validators; runtime tests exercise those owners directly.
 
 JSON Schema and OpenRPC are inspection views, not alternate canonical validators. They preserve field shape, bounds, and expressible Protobuf unions, but a standard schema need not duplicate cross-property relationships enforced by generated Python and Rust validation. Consumers that send EIP values use a generated protocol model or implement the normative IDL and specification contract rather than treating the inspection artifact alone as proof of validity.
 
@@ -141,34 +141,15 @@ async with client.open_writer(path, mode="replace") as writer:
     result = await writer.commit()
 ```
 
-Normal reader iteration maintains a local count and SHA-256 and calls `file.close_reader` only after the public consumer drains all chunks following clean `END`. Readers never send `END_ACK`; successful close count/digest verification is the sole acceptance. The helper publishes completion state only after local verification; mismatched completion evidence is a terminal peer protocol violation that leaves completion unavailable and closes the carrier. Early context exit atomically retires the local channel, sends `RESET` when possible, consumes at most one envd reset acknowledgement through a bounded tombstone, and never calls successful close. An envd-initiated reset is already terminal and is not echoed. A missing reset acknowledgement cannot wait forever: bounded retirement either completes or closes the carrier. Writer `commit()` seals through `END`/`END_ACK` before `file.commit_writer`; context exit without successful commit resets and calls `file.abort_writer`. Helpers iterate text/list/search pages and retained/process output through explicit offsets and reconcile receipts by operation ID. They preserve every bound, expiry observation, integrity, gap, cancellation, truncation, and unknown-outcome fact and never emulate an unavailable method, turn carrier loss into EOF, or materialize an unbounded value.
+Normal reader iteration maintains a local count and SHA-256 and calls `file.close_reader` only after the public consumer drains all chunks following clean `END`. Readers never send `END_ACK`; successful close count/digest verification is the sole acceptance. The helper publishes completion state only after local verification; mismatched completion evidence is a terminal peer protocol violation that leaves completion unavailable and closes the carrier. Early context exit sends `RESET` when possible and never calls successful close. An envd-initiated reset is already terminal and is not echoed. Transfer teardown is finite; when safe correlation cannot be preserved, the client closes the carrier. Writer `commit()` seals through `END`/`END_ACK` before `file.commit_writer`; context exit without successful commit resets and calls `file.abort_writer`. Helpers iterate text/list/search pages and command output through explicit offsets and reconcile effects by operation ID. They preserve bounds, transfer expiry, integrity, cancellation, output completeness, and unknown outcomes; they never emulate an unavailable method, turn carrier loss into EOF, or materialize an unbounded value.
 
-## Harness Integration
+## Harness Boundary
 
-The Harness package directly provides its EIP Environment backend beside its direct-local backend:
+The Harness can implement an EIP-backed Environment beside Direct Local by importing `converge-agent-envd-client`. That adapter owns provider-neutral path, descriptor, command, process, output-reference, receipt, cancellation, and error translation. It wraps opaque provider selectors with the selected binding and generation before any model-facing projection.
 
-```mermaid
-flowchart LR
-    Bound[BoundEnvironment] --> Adapter[Harness EIP Environment adapter]
-    Adapter --> Client[converge-agent-envd-client]
-    Client --> Transport[trusted stdio or accepted reverse WebSocket]
-    Transport --> Envd[converge-agent-envd]
-```
+Harness model-output policy is not serialized as EIP command policy. Envd always captures bounded raw command output through its spool; the Harness decides how much to read, redact, inline, truncate, or expose through its own logical reference. The client package knows neither Harness virtual paths nor model/tool metadata.
 
-The adapter owns:
-
-- conversion from trusted Host endpoint/bootstrap configuration into a client session factory;
-- initialization during binding entry with exact required methods and mapping of configured mounts, root mount, available methods, limits, generation, and isolation posture into the provider-neutral Harness descriptor;
-- conversion of Harness virtual paths into binding-local paths and then `EIPPath(root_mount_id, path)` at this low-level boundary; generated EIP path types never enter Harness core or model-facing tools;
-- bounded text, async file reader/writer, command, process, port, receipt, selector, and error translation;
-- omitting `OutputPolicy` for the advertised generous envd default or mapping an explicitly narrower Harness `ToolOutputPolicy` decision into EIP `OutputPolicy`;
-- wrapping only eligible retained/process selectors as binding- and generation-scoped logical references before model exposure; file-transfer handles remain entirely inside the client;
-- provider-neutral readiness, cancellation, generation-stale handling, and binding cleanup behavior;
-- preserving dispatch certainty and unknown outcome while normalizing safe Harness error categories.
-
-It does not reimplement JSON-RPC, reverse-WebSocket attachment authentication/handshake, stdio framing, transfer attachment, generated payload validation, or method constants. Conversely, the client package does not know Harness virtual paths, Agent Identity, topology, model-facing references, managed redaction, or Tool metadata.
-
-A Host provider adapter still owns Docker, E2B, remote, or local-daemon provisioning and supplies a fresh trusted connection configuration through `EnvironmentRunBinding`. Putting the EIP adapter in Harness does not move provider lifecycle or credentials into Harness and does not make envd mandatory for direct-local Environments.
+A Host provider adapter still owns Docker, E2B, remote, or local-daemon provisioning and supplies fresh trusted connection/bootstrap configuration. Direct-local Environments do not depend on envd.
 
 ## Compatibility and Release
 
@@ -185,22 +166,11 @@ All reversible builds and validations complete before any registry publication. 
 
 A protocol-only compatible addition can ship in a later package release without changing EIP major. Breaking wire meaning requires a new EIP major even if package semantic-version policy also uses a major release. The package version and EIP version never substitute for each other.
 
-## Validation
+## Conformance
 
-The protocol gate includes:
+Validation proves deterministic generation with no diff, complete generated method coverage, strict request decoding, fixed code/error pairs, shared Python/Rust canonical JSON and binary-frame fixtures, and actual Python-client-to-Rust-daemon flows over stdio and reverse WebSocket. Transport tests add framing, authentication, reconnect, transfer, backpressure, and ambiguity cases without redefining method results.
 
-- deterministic descriptor and generated-output drift checks that do not rewrite the checked tree;
-- descriptor-profile checks for the fixed package, interpreted custom options, unique error code/type mapping, and valid union/selector shapes;
-- method-option uniqueness and complete generated registry/stub/dispatch coverage for every method;
-- hand-curated canonical JSON fixtures spanning request, result, error, selector, union, and bounded encoded-byte shapes;
-- shared Python/Rust binary-frame golden fixtures for every frame kind plus malformed magic/version/length, wrong direction, duplicate attach, offset gap, terminal, reset, and oversize cases;
-- strict invalid fixtures for unknown authority fields, duplicate fields, malformed selectors, bounds, unions, and forbidden batches;
-- shared canonical values independently decoded and encoded to byte-identical sorted-key JSON by both Python and Rust, including explicit schema defaults and empty collections that must be omitted identically;
-- generated Python client against the actual Rust daemon over trusted stdio and outbound reverse WebSocket;
-- attachment authentication/refresh, TLS/subprotocol failure, fresh-session reconnect, control/data fairness, transfer backpressure, reset retirement, interruption cleanup, cancellation, operation-ID replay/conflict, receipt lookup, explicit offsets, and unknown-outcome cases;
-- regeneration in a clean checkout with no diff.
-
-Carrier conformance extends the same method fixtures; it does not fork payload expectations. A generated model round trip alone is insufficient because it can reproduce the same generator bug on both sides without proving the intended JSON wire bytes.
+Generated-model round trips alone are insufficient because both languages can reproduce the same generator mistake. Hand-curated wire fixtures and end-to-end daemon/client tests remain independent evidence.
 
 ## Trade-offs
 

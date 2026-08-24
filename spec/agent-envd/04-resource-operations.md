@@ -150,7 +150,7 @@ A source line longer than `max_line_length` remains readable: the response retai
 
 ### Binary reader
 
-Raw file content uses a session-scoped transport reader. This is a low-level EIP mechanism; higher-level provider APIs expose ordinary byte reads and async byte streams rather than reader handles or completion objects.
+Raw file content uses a session-scoped transport reader. The reader is a low-level, session-scoped EIP mechanism.
 
 ```python
 class FileReaderHandle(RootModel[str]): ...
@@ -197,11 +197,11 @@ class FileReaderCloseResult(BaseModel):
 
 The call context timeout bounds opening only. `transfer_timeout_ms` is a positive relative duration narrowed by daemon transfer policy and converted to a monotonic deadline at open. `expires_at` reports the resulting current absolute observation for diagnostics; it is not caller-supplied time or a lease. Valid progress can refresh an internal idle timer without extending the transfer-duration ceiling.
 
-After open, the carrier attaches exactly one server-to-client stream. Attachment offsets start at zero regardless of native offset. Envd emits `END` after clean producer termination. Readers never use `END_ACK`; successful `file.close_reader` is the sole consumer-acceptance action and is legal only after the public consumer drained every chunk. A high-level reader computes count and SHA-256 while yielding, then compares its evidence with the close result. Early exit sends `RESET` when possible and performs no close acceptance.
+After open, the carrier attaches exactly one server-to-client stream. Attachment offsets start at zero regardless of native offset. Envd emits `END` after clean producer termination. Readers never use `END_ACK`; successful `file.close_reader` is the sole consumer-acceptance action and is legal only after the public consumer drained every chunk. A client computes count and SHA-256 while consuming, then compares its evidence with the close result. Early exit sends `RESET` when possible and performs no close acceptance.
 
 `produced_bytes` and the required SHA-256 digest describe bytes delivered by the accepted stream. They are transfer-integrity evidence only and do not prove immutable source content, source EOF position, pathname stability, or a filesystem snapshot.
 
-A reader awaiting close remains active and bounded by session and transfer lifetime. Reader handles cannot cross sessions, survive reconnect, become retained-output references, or enter Harness state.
+A reader awaiting close remains active and bounded by session and transfer lifetime. Reader handles cannot cross sessions, survive reconnect, or become command-output references.
 
 ### `file.list`
 
@@ -290,7 +290,7 @@ Search recursively considers regular files under `root`, omitting hidden path co
 
 Pattern size, incremental traversal work, bytes scanned per file and operation, result count, preview length, response bytes, and duration are finite. A source file can exceed the mutation candidate limit; search streams bounded chunks and applies its independent scan ceiling. `offset` skips ordered matching lines, `max_results` bounds the page, and `has_more` reports another match in that observation. Implementations page deterministically without retaining a complete traversal/result set merely to return the first page. Unrepresentable path entries are omitted and counted. A response ceiling can narrow result count; if the first selected item cannot fit, the method returns `output_limit_exceeded`. Cancellation and timeout return typed errors rather than partial success.
 
-Neither find nor search follows a symlink outside the selected mount or reads special files. Their result text remains untrusted content and is subject to later Harness output and redaction policy.
+Neither find nor search follows a symlink outside the selected mount or reads special files. Result text remains untrusted caller-visible content.
 
 ## Mutation Operations
 
@@ -376,21 +376,15 @@ class FileWriterAbortResult(BaseModel):
     ]
 ```
 
-`file.open_writer` authorizes the destination, reserves one writer and staging-object record, and creates and holds open a complete-file candidate with a bounded random name in the destination directory. The parent directory must already exist. For append, envd copies the currently observed existing file into the candidate before accepting uploaded bytes, and the copied prefix consumes staging quota. The candidate receives restrictive permissions but can be visible to any actor that already controls that directory. Open returns only after failure can still be rolled back without changing the destination. `max_transfer_bytes` is the current individual hard ceiling, including remaining final-file allowance for append; aggregate staging capacity is reserved incrementally and is not promised by that value. The call context timeout bounds opening only, while relative `transfer_timeout_ms`, internal idle expiry, and observed `expires_at` follow the reader rules.
+`file.open_writer` authorizes the destination, reserves finite transfer/staging capacity, and creates one complete-file candidate in the destination directory without changing the target. The parent must already exist. For append, the candidate begins with the currently observed existing bytes. A candidate can be visible to another actor that already controls that directory; it is not a confidentiality boundary or lock. `max_transfer_bytes` bounds newly uploaded bytes, while the final candidate also obeys the mount mutation ceiling.
 
-The transport then attaches exactly one client-to-server data stream. Payload offsets begin at zero and cover only bytes supplied by this transfer, including append bytes but not the copied prefix. Envd enforces exact contiguous offsets, frame and total limits, incremental staging quota, idle and duration ceilings, and SHA-256 while writing bounded chunks. Client `END` followed by envd `END_ACK` seals the attachment but does not mutate the target.
+The transport attaches one client-to-server stream. Offsets start at zero and cover only uploaded bytes. Envd writes bounded contiguous chunks while counting and hashing them. Client `END` followed by envd `END_ACK` seals the upload but does not publish it.
 
-`file.commit_writer` is eligible only after a clean terminal marker and data-plane acknowledgement has sealed the writer. Its domain admission is one coordinator linearization: while the session still admits work, envd validates the sealed writer and exact requested byte count/`transfer_digest` against attachment observations, reserves the generation-scoped operation record, and transfers candidate ownership from the session to that operation atomically. A request mismatch transitions the session-owned writer to cleanup and returns `integrity_mismatch` without handoff or target mutation. If session closing wins first, commit fails pre-dispatch and session cleanup owns deletion; if handoff wins first, every session cleanup path ignores the candidate and the operation proceeds independently.
+`file.commit_writer` first verifies the sealed upload's exact byte count and digest. Commit acceptance atomically decides candidate ownership: if session close wins first, the session deletes the candidate and no commit is dispatched; if commit wins, later session cleanup cannot delete it. Envd then verifies the complete held candidate and current destination policy before one native publication. Create uses no-replace publication; replace/upsert/append publish one complete candidate according to their stated intent. This prevents envd readers from observing envd's partial upload but does not provide compare-and-swap against independent native writers.
 
-After handoff, envd revalidates the held candidate's complete size and metadata and hashes the complete sealed candidate immediately before rename. For create, replace, and upsert that full hash must equal `transfer_digest`; for append envd revalidates the copied prefix bytes and hashes the staged suffix range against `transfer_digest`. Any held-candidate mismatch returns `integrity_mismatch`, deletes the candidate, and performs no target mutation unless another native actor independently mutates the shared directory. Envd then revalidates destination path shape, mode intent, size, metadata, and current policy; syncs the held file and, where the platform supplies a supported directory-sync primitive, the containing directory; and performs one native directory-entry publication without claiming portable identity binding or compare-and-swap. After ownership handoff the transfer timeout no longer owns cleanup; the commit call timeout and daemon operation-duration ceiling bound the accepted mutation. The result and receipt identify that mutation completion boundary. Atomic visibility and available `fsync` behavior do not imply Host durable Agent completion, exclusive control against another native writer, or a stronger universal power-loss guarantee than the selected filesystem and provider actually supply.
+`file.abort_writer`, transfer failure, expiry, or session loss removes a candidate only before commit accepts ownership. After acceptance, abort reports `commit_in_progress` or `already_committed`, and response loss is reconciled through the commit operation ID. Cleanup failure remains charged and returns an explicit cleanup error; retry algorithms and thresholds are implementation policy.
 
-`file.abort_writer`, early context exit, data-carrier failure, transfer expiry, session loss, and daemon drain delete the candidate and leave the destination unchanged only while the writer remains open, receiving, or sealed. Once commit owns the candidate, abort reports `commit_in_progress` or `already_committed` and cannot promise rollback; session cleanup never races deletion against that commit. Cancellation and connection loss during commit preserve the ordinary completed/cancelled/unknown distinction. Staged bytes and object quota are returned exactly once only after commit removes ownership or deletion is confirmed. A failed unlink or uncertain cleanup remains conservatively charged and enters a bounded cleanup-retry owner. One transient failure does not permanently fault an otherwise safe mount. New affected staging is blocked only when unproven owned bytes, retry exhaustion, or a configured orphan threshold makes further accounting unsafe; daemon drain preserves unresolved cleanup evidence.
-
-Commit retains generation-scoped result and receipt evidence under its operation ID. If the response is lost after possible commit, a fresh initialized session reconciles that operation ID before opening another writer. The old writer never becomes valid in the new session. A matching retained operation can replay its prior result without re-authorizing the expired writer; absent evidence cannot prove non-dispatch.
-
-For create, replace, and upsert, `transfer_digest` identifies the complete bytes envd received and verified in the held candidate; for append it identifies only the newly supplied suffix, while envd verifies the copied staged prefix. It is a transfer and held-candidate integrity fact, not a portable native file-version token or an assertion that a concurrently writable destination path still contains those bytes.
-
-A high-level writer hides the handle, attachment handshake, offsets, terminal marker and acknowledgement, digest, and abort path. `commit()` seals the data attachment, uses one fresh operation ID, verifies local count and digest against envd, and returns published metadata and receipt. Exiting without successful commit aborts.
+`transfer_digest` proves the bytes envd accepted and verified in the held candidate. For append it covers the uploaded suffix while envd separately verifies the staged prefix. It is not a file-version token or a claim that a concurrently writable pathname still contains those bytes.
 
 ### `file.mkdir`
 
@@ -446,7 +440,7 @@ class FileCopyResult(BaseModel):
 
 Copy reads and writes in bounded chunks and separately checks source-read and destination-write authority. It copies the bytes observed through one opened source object but makes no portable source-version or immutable-snapshot claim. Every successful copy publishes one complete destination-local candidate; publication strategy is an envd invariant, not a caller option or result flag. Failure before publication removes the candidate and leaves the destination unchanged. The destination never aliases the source through a symlink escape.
 
-Cross-Environment copy is not an EIP method. A trusted client pumps one provider byte stream into one independently authorized destination stream write under backpressure. Its EIP adapter still verifies transport count and digest internally, while the provider-neutral copy contract treats normal source iterator exhaustion as success and commits only then. Within one envd instance, copying between configured mounts remains one method only when both mounts permit it and no protected or isolation boundary is crossed.
+Cross-Environment copy is not an EIP method. A trusted client pumps one provider byte stream into one independently authorized destination stream write under backpressure. Its EIP adapter still verifies transport count and digest internally, while the provider-neutral copy contract treats normal source iterator exhaustion as success and commits only then. Within one envd instance, copying between configured mounts remains one method only when both mounts permit it and no protected boundary is crossed.
 
 ### `file.move`
 
@@ -534,12 +528,6 @@ A command under required `deny` networking has no usable IP path through the pla
 
 Provider adapters own the mapping from a successfully observed local port to a public, tunneled, or container-exposed endpoint. EIP never treats listening status as proof that an external route exists or is authorized.
 
-## Host-driven Ingestion and Delivery
-
-EIP 1.0 does not ask envd to fetch an arbitrary URL. An authenticated Host or product gateway applies its own network, redirect, credential, content, and egress policy, reads the external source incrementally, and writes it through a binary writer. This keeps SSRF-sensitive network authority outside the Environment daemon and gives URL downloads, browser uploads, generated artifacts, and cross-Environment copies the same staged commit path.
-
-A browser is not given the daemon API key or a raw EIP session. A product-facing file gateway authenticates the user, resolves an authorized Environment binding, re-authorizes the path and action, and proxies bytes with bounded memory and backpressure. Browser preview or download uses a binary reader even for `.txt`; an online text editor uses an explicit read followed by a write or patch and reconciles the resulting observation without assuming global compare-and-swap. A product HTTP Range request maps to one reader opened with the corresponding byte range.
-
 ## Resource Lifetime
 
 Native files and directories are provider Environment state and can remain after envd exits. EIP does not serialize a filesystem snapshot or daemon registry. Process handles, operation records, receipts, output references, and private spool data exist only in the current daemon generation. Because complete candidates are destination-local, a crash can leave a bounded-name candidate beside its intended destination. It is ordinary visible Environment state after daemon ownership is lost; envd does not scan an arbitrary filesystem tree at startup or claim it can distinguish every old candidate from a user-created file safely. A fresh authenticated protocol session in the current generation can continue using generation-owned records where their owning contract permits it; a daemon restart cannot.
@@ -561,7 +549,7 @@ File reader and writer handles are the deliberate exception to generation-wide r
 | Transport lost during or after writer commit   | Receipt or `unknown_outcome` according to commit evidence | Reconcile before retry                           |
 | Recursive removal partially completes          | Failed receipt with known progress                        | No rollback claim                                |
 | Port cannot be observed safely                 | `status="unknown"` or `unsupported`                       | No listener mutation                             |
-| Generation-local selector expired or stale     | `retention_gap`, `invalid_handle`, or `stale_generation`  | No fabricated continuation                       |
+| Generation-local selector expired or stale     | `invalid_handle` or `stale_generation`                    | No fabricated continuation                       |
 
 ## Compatibility
 
@@ -577,11 +565,11 @@ Providers can expose narrower limits and omit unsupported methods. A client neve
 04. Every text result, traversal, query, patch, data frame, file, staged candidate, transfer, result, and duration has a finite bound.
 05. Text convenience operations are strict UTF-8 and bounded; arbitrary complete content uses a raw binary reader or writer rather than JSON/base64.
 06. One binary reader carries one opened file interval sequentially; only terminal consumer acceptance reports a complete count and digest, while no file-version or snapshot-isolation claim is fabricated.
-07. One binary writer stages a bounded complete candidate in the destination directory; the candidate is not private or a lock, publication never exposes envd's partial bytes, and quota is released only after ownership transfer or confirmed deletion.
+07. One binary writer stages a bounded complete candidate in the destination directory; the candidate is not private or a lock, and publication never exposes envd's partial bytes.
 08. File transfer handles are single-attachment and session-scoped; generation-scoped commit operation records and attached receipt evidence, not transfer resumption, reconcile an ambiguous commit.
 09. Atomic publication is claimed only for one complete-candidate rename or native move primitive; it never implies global ordering or compare-and-swap, and cross-mount move never masquerades as atomic.
 10. Every mutating method returns bounded side-effect evidence and preserves unknown outcome after ambiguous commit response loss.
 11. Port methods observe only policy-authorized local TCP targets in `1..65535` and never create external exposure or scan remote hosts.
 12. `file.find` matches relative path names and never reads file content; `file.search` matches UTF-8 regular-file content and uses path globs only for file selection.
-13. Native files and crash-left destination-local candidates can outlive envd, while process, operation, receipt, retained-output, transfer, and spool records never outlive their owning session or daemon generation.
+13. Native files and crash-left destination-local candidates can outlive envd, while process, operation, receipt, command-output, transfer, and spool records never outlive their owning session or daemon generation.
 14. Provider lifecycle state, transport state, and Host durable execution state never enter an EIP state export because EIP defines no state export or restore method.

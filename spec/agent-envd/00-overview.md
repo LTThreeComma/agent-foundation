@@ -2,7 +2,7 @@
 
 ## Design Position
 
-`agent-envd` is a first-class, client-neutral Environment host and data-plane daemon. One daemon serves one user and one Environment for one process generation. It keeps native filesystem operations, file transfer, command/process ownership, port observation, retained output, and enforcement beside the governed resources and exposes them through the versioned Environment Interaction Protocol (EIP).
+`agent-envd` is a first-class, client-neutral Environment host and data-plane daemon. One daemon serves one user and one Environment for one process generation. It keeps native filesystem operations, file transfer, command/process ownership, port observation, command output, and enforcement beside the governed resources and exposes them through the versioned Environment Interaction Protocol (EIP).
 
 The Harness is one EIP requester, not the reason those resources exist. Product gateways, CLIs, IDEs, provider controllers, and trusted background services can use the same generated low-level client. Envd never needs to know whether output becomes model input, a browser preview, an artifact, or another backend operation.
 
@@ -30,7 +30,7 @@ flowchart LR
         Session[Session dispatcher]
         Operations[Operation owner]
         Resources[Mount and transfer owner]
-        Output[Private retained-output spool]
+        Output[Private command-output spool]
         Execution[Command execution owner]
         Isolation[Linux, macOS, Windows, or explicit outer host]
     end
@@ -66,7 +66,7 @@ Carrier direction and EIP role are separate. With reverse WebSocket, envd initia
 | Trusted config, generation, owners, readiness, and drain                                      | [Daemon Lifecycle](01-daemon-lifecycle-and-configuration.md)                           | One daemon lifecycle                                |
 | Configured paths, files, search, mutations, transfers, and ports                              | [Resource Operations](04-resource-operations.md)                                       | Native resource enforcement                         |
 | Foreground/background commands and process lifecycle                                          | [Command and Process Execution](05-command-and-process-execution.md)                   | One command-tree owner                              |
-| Output bounds, spool, references, offsets, release, and gaps                                  | [Output Retention](06-output-retention.md)                                             | Producer-side safety                                |
+| Command-output spool, references, offsets, limits, and release                                | [Command Output Spool](06-output-retention.md)                                         | Complete bounded post-command output                |
 | Required Linux/macOS/Windows command containment                                              | [Execution Isolation](07-execution-isolation.md)                                       | Fail-closed native isolation or explicit outer Host |
 | Durable Agent attempt/completion                                                              | Host                                                                                   | Never inferred from EIP evidence                    |
 
@@ -86,11 +86,11 @@ One canonical Protobuf descriptor generates Rust daemon models/dispatch and Pyth
 
 Every carrier creates a fresh session whose first request is `initialize`. Initialization verifies expected Environment identity, negotiates EIP version, checks exact `required_methods`, and returns configured mounts, optional root mount, exact `available_methods`, client-actionable limits, exact optional execution-feature support, generation, and isolation posture.
 
-A session owns only its reader/writer handles and attachments. Accepted operations, processes, receipts, and retained output belong to daemon generation owners and can survive reverse-WebSocket reconnect within that generation.
+A session owns only its reader/writer handles and attachments. Accepted operations, processes, receipts, and command output belong to daemon generation owners and can survive reverse-WebSocket reconnect within that generation.
 
 ### Operation owner
 
-One bounded operation record owns admission, cancellation, method and semantic digest, owner execution state, terminal result/failure, and receipt. Operation ID is the sole replay/cancellation/receipt identity. Repeating the same ID and method/digest reports in-progress or replays retained terminal evidence; a different request conflicts. Losing a response waiter cannot erase accepted mutation evidence.
+One generation-scoped operation ledger records running requests and the terminal evidence needed to reconcile side effects. Operation ID is the active-cancellation identity for every post-initialization method and the sole replay/receipt identity for effectful `terminal_evidence` methods; `initialize` is ledger-external. Read-only and session-ephemeral `active_only` responses are removed after delivery rather than copied into replay storage. A different request conflicts while an entry exists, and losing a response waiter cannot erase retained side-effect evidence. Processes, file transfers, candidates, and output remain owned by their domain records rather than by a generic operation framework.
 
 ### Resource and transfer owner
 
@@ -110,9 +110,9 @@ Required isolation is a supported product contract on all three OS families:
 
 A Job Object alone is never treated as a sandbox. Every backend passes a production probe before carrier admission. Explicit `disabled` mode delegates containment to an outer sandbox without disabling envd authorization, ownership, output, or cleanup controls.
 
-### Output retention
+### Command-output spool
 
-Every producer applies finite output policy while reading bytes. Retained output appends to generation-private spool files outside mounts and command grants; only bounded previews remain in memory. References are generation-scoped and reads use explicit caller-owned offsets with `next_offset`. There are no output cursor objects. Gaps, truncation, expiry, and dropped bytes remain explicit.
+Every command reserves one finite byte allowance for stdout and another for stderr before payload release, under a finite daemon-wide spool disk ceiling. Envd continuously drains the two pipes into separate generation-private append-only disk files; only bounded prefix previews and bookkeeping remain in memory. Results carry stable generation-scoped references. `output.read` uses explicit caller-owned offsets and `next_offset`; there are no output cursors, rotating rings, or duplicate process-output read methods. Each stream that stays within its per-stream ceiling remains byte-complete after command completion until explicit release or daemon-generation end.
 
 ## Provider Profiles
 
@@ -178,21 +178,21 @@ Carrier trust, EIP authorization, mount policy, process ownership, output bounds
 
 ## Failure Model
 
-| Boundary                                                         | Outcome                                                     |
-| ---------------------------------------------------------------- | ----------------------------------------------------------- |
-| Config, fresh runtime, or required isolation probe fails         | No local readiness or carrier admission                     |
-| TLS/subprotocol or nonrefreshable attachment authorization fails | Generation-fatal drain; no insecure retry                   |
-| Transient reverse-WebSocket connection fails                     | Capped jittered reconnect; generation state remains         |
-| Initialization identity/version/required-method check fails      | No initialized session or resource dispatch                 |
-| Validation, policy, path, timeout, or capacity fails             | Typed pre-dispatch error                                    |
-| Carrier fails before acceptance                                  | Retry only with proven non-dispatch                         |
-| Carrier fails after possible mutation acceptance                 | Reconcile the same operation ID before new mutation         |
-| Reader carrier ends before close acceptance                      | No successful read completion                               |
-| Writer carrier ends before commit handoff                        | Candidate abort/cleanup; destination unchanged by envd      |
-| Carrier fails during/after commit                                | Receipt or unknown outcome; never automatic retry           |
-| Output exceeds policy                                            | Bounded fail, truncate, or retained reference               |
-| Cleanup cannot be proven                                         | Conservative ownership and explicit cleanup failure         |
-| Daemon drains                                                    | Admission stops before process and generation-state cleanup |
+| Boundary                                                         | Outcome                                                             |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Config, fresh runtime, or required isolation probe fails         | No local readiness or carrier admission                             |
+| TLS/subprotocol or nonrefreshable attachment authorization fails | Generation-fatal drain; no insecure retry                           |
+| Transient reverse-WebSocket connection fails                     | Capped jittered reconnect; generation state remains                 |
+| Initialization identity/version/required-method check fails      | No initialized session or resource dispatch                         |
+| Validation, policy, path, timeout, or capacity fails             | Typed pre-dispatch error                                            |
+| Carrier fails before acceptance                                  | Retry only with proven non-dispatch                                 |
+| Carrier fails after possible mutation acceptance                 | Reconcile the same operation ID before new mutation                 |
+| Reader carrier ends before close acceptance                      | No successful read completion                                       |
+| Writer carrier ends before commit handoff                        | Candidate abort/cleanup; destination unchanged by envd              |
+| Carrier fails during/after commit                                | Receipt or unknown outcome; never automatic retry                   |
+| Command output exceeds its reserved ceiling                      | Tree termination, retained prefixes, and explicit incomplete status |
+| Cleanup cannot be proven                                         | Conservative ownership and explicit cleanup failure                 |
+| Daemon drains                                                    | Admission stops before process and generation-state cleanup         |
 
 ## Trade-offs
 
@@ -206,7 +206,7 @@ Linux, macOS, and Windows containment materially increase platform engineering a
 
 ### Compact operation and output identities
 
-One operation ID removes parallel idempotency and receipt-selector stores. Explicit output offsets remove cursor lifecycle. The daemon still retains bounded replay evidence and private spool state because disconnect-resilient mutation certainty and output are intrinsic to the daemon boundary.
+One operation ID removes parallel idempotency and receipt-selector stores. A running/terminal ledger removes duplicate pending/task registries. Explicit append-only output offsets remove cursor, ring, floor, and gap lifecycle. The daemon still keeps bounded replay evidence and disk spool state because disconnect-resilient mutation certainty and post-command output are intrinsic to the daemon boundary.
 
 ## Invariants
 
@@ -215,7 +215,7 @@ One operation ID removes parallel idempotency and receipt-selector stores. Expli
 03. Trusted stdio and outbound reverse WebSocket carry one EIP contract; envd remains the responder even when it dials the network carrier.
 04. Envd exposes no inbound EIP/HTTP/WebSocket/health listener.
 05. Initialization publishes configured mounts, exact methods, actionable limits, exact execution-feature support, generation, and truthful isolation posture without granting authority.
-06. Operation ID is the sole replay, cancellation, and receipt identity; response loss cannot erase accepted evidence.
+06. Operation ID is the active-cancellation identity for every post-initialization method and the sole replay/receipt identity for effectful methods; `initialize` is ledger-external, and response loss cannot erase retained side-effect evidence.
 07. One execution owner controls every command tree through cleanup, and required isolation fails closed on Linux, macOS, and Windows.
 08. Windows containment requires AppContainer/restricted capabilities plus ACL/network projection; Job Object ownership is necessary but not sufficient.
 09. Every producer, frame, queue, transfer, candidate, process, spool object, and record is bounded while created or consumed.

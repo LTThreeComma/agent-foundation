@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory defines `agent-envd`, the client-neutral Environment host and data-plane daemon for daemon-governed local, sandboxed, and remote resources. One daemon serves one user and one Environment for one process generation. It implements EIP with JSON-RPC control, correlated raw file transfer, bounded file/search/port operations, command/process ownership, retained output, and side-effect evidence.
+This directory defines `agent-envd`, the client-neutral Environment host and data-plane daemon for daemon-governed local, sandboxed, and remote resources. One daemon serves one user and one Environment for one process generation. It implements EIP with JSON-RPC control, correlated raw file transfer, bounded file/search/port operations, command/process ownership, command output, and side-effect evidence.
 
 The Harness is one requester through its provider-neutral [`Environment`](../agent-harness/08-environment-integration.md) abstraction. Docker, E2B, remote, and optional local-daemon adapters provision or attach native resources and bootstrap EIP. Direct Local remains equally first-class and does not require envd. Product gateways, CLIs, IDEs, controllers, and trusted background jobs can use the generated low-level client independently.
 
@@ -22,7 +22,7 @@ Filesystem authority consists only of trusted configured mounts after resource-l
 | [03-transports-and-sessions.md](03-transports-and-sessions.md)                             | Trusted stdio, outbound reverse WebSocket, binary frames, attachment authentication, reconnect, and session lifetime                                |
 | [04-resource-operations.md](04-resource-operations.md)                                     | Configured mounts, paths, bounded text/search, raw transfer, complete-candidate publication, mutations, and ports                                   |
 | [05-command-and-process-execution.md](05-command-and-process-execution.md)                 | Typed executable selection, transactional spawn, process records, signaling, foreground/background lifecycle, and cleanup                           |
-| [06-output-retention.md](06-output-retention.md)                                           | Output policy, generation-private spool, references, explicit offsets, expiry, release, quotas, and gaps                                            |
+| [06-output-retention.md](06-output-retention.md)                                           | Generation-private command-output spool, stdout/stderr references, explicit offsets, limits, and release                                            |
 | [07-execution-isolation.md](07-execution-isolation.md)                                     | Required/disabled posture, Linux bubblewrap, macOS Seatbelt, Windows AppContainer/ACL/Job, network policy, probes, and posture                      |
 | [08-protocol-source-client-and-generation.md](08-protocol-source-client-and-generation.md) | Canonical IDL, generated Rust/Python surfaces, client runtime boundary, conformance, and co-release contract                                        |
 
@@ -52,14 +52,14 @@ Read `01`, `02`, `03`, `04`, `06`, and `07` together with [Harness Security, Com
 
 - The Host owns provider selection, provisioning, lifecycle credentials, control-service routing, attachment credential issuance/refresh, and fresh `EnvironmentRunBinding` creation.
 - The Harness owns multi-Environment routing and provider-neutral adaptation. It does not own native resources, EIP sessions, or process trees.
-- EIP owns method payloads, operation-ID replay/cancellation/receipt identity, relative timeout semantics, transfers, exact method availability, selectors, errors, and output dispositions.
+- EIP owns method payloads, operation-ID replay/cancellation/receipt identity, relative timeout semantics, transfers, exact method availability, selectors, errors, and command-output reference/offset/completion semantics.
 - The carrier authenticates or establishes the trusted peer. Transport identity never comes from ordinary EIP params.
-- Envd owns configured mounts, path enforcement, candidate/transfer ownership, operation evidence, process trees, retained-output spool, quotas, expiry, and required native isolation.
+- Envd owns configured mounts, path enforcement, file transfers, operation evidence, process trees, command-output spool, finite capacity, and required native isolation.
 - An outer provider owns child containment only when envd isolation is explicitly disabled. Platform detection or failed probing never chooses that mode.
 - Configured mounts are the only EIP filesystem roots. A broad root remains trusted configuration and required isolation still protects envd control state.
 - Sessions own readers, pre-handoff writers, and binary attachments. Accepted operations, processes, receipts, and output references are daemon-generation-owned.
 - A descriptor, mount ID, handle, output reference, operation ID, or receipt grants no authority by possession. Every use repeats current generation, kind, exact-method, lifecycle, and policy checks.
-- Native files can outlive envd. Operation/process/output/transfer/spool state is volatile and never restored after restart. A crash-left destination-local candidate is ordinary native state, not a resumable writer.
+- Native files can outlive envd. Operation/process/output/transfer/spool state is volatile and never restored after restart. Valid process/output records remain until explicit release or generation end. A crash-left destination-local candidate is ordinary native state, not a resumable writer.
 
 ## Specification Conventions
 
@@ -68,8 +68,8 @@ Read `01`, `02`, `03`, `04`, `06`, and `07` together with [Harness Security, Com
 - Raw file content uses only the correlated binary data plane.
 - “Session” means one initialized EIP protocol session, distinct from a WebSocket carrier, Harness run, Host execution, or provider lifecycle session.
 - “Initial command” means the requested executable, never a sandbox helper or supervisor.
-- “Operation ID” is the sole replay, cancellation, and receipt identity for one semantic operation.
+- “Operation ID” identifies one semantic operation for active cancellation and, when its method retains terminal evidence, for replay and receipt lookup.
 - “Receipt” records envd-observed facts and never implies Host durable completion.
 - Identifiers, mounts, handles, and references are selectors, not bearer credentials.
-- `expires_at` is an observed server timestamp, not a caller deadline or minimum lease.
+- An `expires_at` on a session-scoped file transfer is an observed server timestamp, not a caller deadline or minimum lease; command-output references do not expire within a generation.
 - Provider provisioning, credential refresh APIs, and product-user policy stay outside EIP methods.

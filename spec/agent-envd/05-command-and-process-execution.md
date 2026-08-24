@@ -2,26 +2,23 @@
 
 ## Design Position
 
-`agent-envd` owns one command execution manager for both foreground `shell.exec` and background `process.start`. It is the sole native owner of every command tree, applies one structured command and environment contract, crosses one transactional start gate, and reports initial-command status separately from whole-tree cleanup.
+`agent-envd` owns every foreground and background command tree it starts. `shell.exec` waits for one owned command to finish; `process.start` returns an opaque handle to the same lifecycle. Native PIDs, wrappers, sandbox helpers, process groups, jobs, and descriptors are private implementation facts.
 
-A background process record is an EIP-visible projection over manager-owned native state. It does not create a second PID registry or lifecycle owner. Native PIDs, process groups, sandbox helpers, namespace supervisors, and file descriptors remain private implementation facts behind opaque handles.
+Every command is structured, runs under the configured isolation posture, and is registered with its output streams before the requested executable can execute. Initial-command status and whole-tree cleanup remain separate facts.
 
 ## Boundaries
 
-| Concern                                                                | Owner                                            | Relationship                                                 |
-| ---------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
-| Model-facing tool and Harness authorization                            | Harness                                          | Produces a selected binding and effective constraints        |
-| Command schema, process lifecycle, handle methods, status, and cleanup | This document                                    | Stable EIP behavior                                          |
-| Per-command filesystem and network containment                         | [Execution Isolation](07-execution-isolation.md) | Required native backend or explicit outer-sandbox delegation |
-| Output capture, references, explicit offsets, and quotas               | [Output Retention](06-output-retention.md)       | Applies while stdout and stderr are read                     |
-| Provider ingress for a listening process                               | Provider adapter                                 | Separate from starting or observing the process              |
-| Durable Agent attempt and completion                                   | Host                                             | Never owned by process exit or envd receipt                  |
+| Concern                                                         | Owner                                            | Contract                                                  |
+| --------------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------- |
+| Command request, process handle, status, controls, and lifetime | This document                                    | Stable EIP behavior                                       |
+| Filesystem/network containment                                  | [Execution Isolation](07-execution-isolation.md) | Required native backend or explicit outer-Host delegation |
+| stdout/stderr spool, references, reads, and release             | [Command Output Spool](06-output-retention.md)   | Separate append-only byte streams                         |
+| Provider ingress for a listening process                        | Provider adapter                                 | Outside command start and port observation                |
+| Model-facing policy and durable Agent completion                | Harness and Host                                 | Never inferred from process exit                          |
 
-Command permission is the intersection of trusted-session authority, configured mount/shell/executable policy, exact method availability, Environment generation, daemon safety limits, and execution-isolation posture. Configured mounts control which cwd and typed executable paths EIP can select; execution isolation independently controls what the started child can reach.
+## Command Request
 
-## Command Model
-
-The following schemas are serialized EIP JSON:
+The following shapes are serialized EIP JSON:
 
 ```python
 class ExecutableName(BaseModel):
@@ -39,8 +36,8 @@ type ExecutableSpec = ExecutableName | ExecutablePath
 
 class ArgvCommand(BaseModel):
     kind: Literal["argv"]
-    arguments: tuple[str, ...] = ()
     executable_spec: ExecutableSpec
+    arguments: tuple[str, ...] = ()
 
 
 class ShellCommand(BaseModel):
@@ -74,33 +71,32 @@ class CommandRequest(BaseModel):
     limits: CommandLimits = CommandLimits()
     initial_stdin: EncodedBytes | None = None
     keep_stdin_open: bool = False
-    output_policy: OutputPolicy | None = None
 ```
 
-Every string, argument count, script byte length, environment entry, initial stdin body, and requested limit is bounded. NUL is invalid in executable names, arguments, scripts, environment names/values, and paths.
+Every string, collection, script, environment entry, stdin body, and limit is finite. NUL is invalid in command, environment, and path values.
 
-### Structured argv
+### Executables and shells
 
-`kind="argv"` executes exactly one typed executable with the supplied argument vector. Envd never concatenates or reparses values through a shell.
+`kind="argv"` executes exactly one selected executable with the supplied arguments and never reparses them through a shell.
 
-`ExecutableName` contains one bare name with no native or `/` separator and resolves only through daemon-owned ordered executable search roots. `ExecutablePath` contains one `EIPPath`, resolves through its configured mount independently from `cwd`, and requires that mount's executable-source policy. It cannot encode a native absolute host path. Neither variant uses ambient daemon `PATH`, request-controlled search roots, or path-string heuristics to decide intent. Required isolation projects the authorized executable source read/execute-only when it is outside the cwd mount.
+- `ExecutableName` is one bare name with no path separator. Envd resolves it only through trusted configured search roots, never ambient or request-controlled `PATH`.
+- `ExecutablePath` is an `EIPPath` under a configured mount that permits executable-source use. It cannot contain a native host path.
 
-### Explicit shell profiles
-
-`kind="shell"` selects a trusted configured profile. Operator configuration uses this conceptual, non-EIP shape:
+Operator configuration uses this non-EIP shape:
 
 ```python
 class TrustedShellProfile(BaseModel):
     profile_id: str
+    display_name: str
     native_executable: str
-    fixed_arguments: tuple[str, ...]
-    safe_base_environment: dict[str, str]
-    executable_search_roots: tuple[str, ...]
+    fixed_arguments: tuple[str, ...] = ()
+    safe_base_environment: dict[str, str] = Field(default_factory=dict)
+    executable_search_roots: tuple[str, ...] = ()
     max_script_bytes: int
     allow_login_mode: bool = False
 ```
 
-Native executable and search roots are canonical trusted paths validated before readiness. Request data cannot replace or prepend them. The EIP descriptor exposes only:
+The EIP descriptor exposes only:
 
 ```python
 class ShellProfileDescriptor(BaseModel):
@@ -110,43 +106,24 @@ class ShellProfileDescriptor(BaseModel):
     max_script_bytes: int
 ```
 
-The trusted profile owns the absolute shell executable, fixed invocation arguments, permitted script and login modes, safe base environment, and executable search roots. `login=true` is accepted only when that profile explicitly permits it; no request can supply login-wrapper arguments. EIP does not accept a native shell path or arbitrary wrapper arguments. The script is passed as one data argument or descriptor according to the profile; it is never interpolated into an additional shell command constructed by envd.
+`kind="shell"` selects one trusted profile. Its descriptor copies `profile_id`, `display_name`, and `max_script_bytes` exactly and maps `allow_login_mode` to `supports_login_mode`. The profile owns its canonical native executable, fixed arguments, safe base environment, search roots, script ceiling, and login support. `login=true` is accepted only when allowed. EIP never accepts a native shell path or wrapper arguments, and request text is passed as script data rather than interpolated into another envd-constructed shell command.
 
-A descriptor reports only logical profile information, not native helper paths or host configuration. Unsupported profile selection fails before execution preparation.
+### Working directory and environment
 
-### Working directory
+`cwd` must be an existing directory under a configured mount that permits command use. Its read/write posture constrains the isolation projection. Selecting a cwd does not grant another mount or a daemon-private path.
 
-`cwd` selects one configured mount and is canonicalized under [Resource Operations](04-resource-operations.md). It must be an existing directory whose mount permits command cwd use; a read-only mount can be a working directory but remains read-only. Curated runtime roots plus private `HOME` and temporary roots remain available only as defined by the isolation contract. A valid cwd grants no additional EIP mount authority. Required isolation constructs child authority from already authorized roots without requiring a portable native FileID. Disabled native execution performs only the admission-time path snapshot described by [Execution Isolation](07-execution-isolation.md#disabled-mode).
-
-### Environment construction
-
-The final payload environment is built from explicit layers:
-
-1. start empty;
-2. copy values selected by a bounded daemon-owned allowlist of ordinary compatibility variables, such as locale, terminal, proxy, certificate-bundle, and language-tool cache locations;
-3. add the trusted profile's minimal safe base values;
-4. add trusted per-binding credential or compatibility projection, if separately authorized;
-5. apply validated request `set` values and `unset` names within their allowed namespace;
-6. force daemon-owned `PATH` from the selected trusted search roots and force `HOME`, `TMPDIR`, `TMP`, and `TEMP` to private execution roots;
-7. remove every daemon bootstrap secret, transport value, internal launcher variable, dynamic-loader variable not explicitly allowed by policy, and inherited descriptor reference.
-
-The daemon process environment is never inherited wholesale. The ordinary compatibility allowlist is finite, excludes daemon/control-plane credentials and control-plane names, and supplies only named values already present at daemon startup. Operator proxy URLs are compatibility configuration and can contain their own endpoint credentials; deployments that do not want them inherited unset them at the daemon boundary or through the command request. `AGENT_ENVD_*` names and all internal control/carrier names are reserved and cannot be set or unset through EIP. Request values affect only the final payload; they are not installed on bubblewrap, `sandbox-exec`, the trusted supervisor, or another pre-isolation helper.
-
-Business credentials projected for a particular command remain distinct from envd carrier attachment credentials. Projection requires current policy, audience, lifetime, and redaction controls; ambient host credentials are never a fallback. Long-running credential rotation belongs to an explicit broker or mounted provider facility rather than hidden daemon-environment inheritance.
+The payload environment starts from a small daemon-owned compatibility allowlist and the selected shell profile, then applies authorized binding values and request changes. Envd forces trusted `PATH` and private `HOME`/temporary roots. It never inherits the daemon environment wholesale. Attachment credentials, `AGENT_ENVD_*`, control-channel values, dynamic-loader injection values, and ambient service credentials are removed. Request values reach only the final payload, not an isolation helper or supervisor.
 
 ### Network and resource limits
 
-`network="configured"` uses the daemon's configured command network posture. `network="deny"` can only narrow that posture and is honored only when the active required-isolation backend can enforce it. A command can never widen daemon-wide `deny` to host networking. In `disabled` isolation mode, per-command `deny` is unsupported because envd cannot claim enforcement from native spawn alone.
+A request can only narrow configured policy. `network="deny"` is accepted when the active required backend proves per-command denial; it cannot widen configured `deny`, and it is unsupported in `disabled` mode.
 
-Every requested `CommandLimits` value narrows finite daemon, binding, and isolation-backend ceilings. A missing field uses the effective upstream ceiling, not infinity. `EnvironmentDescriptor.execution_features` reports exact support for the optional `process_count`, `memory_bytes`, and `cpu_time_ms` fields and for per-command network deny. A false feature makes that requested option fail before dispatch; envd does not present wall-clock cancellation or outer-container policy as a portable CPU or memory guarantee. The descriptor's `EIPLimits.max_processes` is daemon-wide active-command admission and must not be interpreted as support for the per-command descendant `process_count` field.
+Requested limits narrow finite daemon/provider ceilings. The descriptor's `execution_features` reports whether process-count, memory, CPU-time, per-command network denial, interrupt, and terminate semantics are enforceable. Requesting an unsupported optional limit fails before payload execution. Wall time, stdin bytes, command admission, and output are always finite.
 
-Wall time, process admission, stdin bytes, stdout/stderr output, retained objects, and daemon-owned process count are always bounded even when a platform lacks portable CPU or memory enforcement. Wall time and stdin bytes are baseline request semantics and therefore have no optional feature boolean.
-
-## Process Identity and State
+## Process Status
 
 ```python
 type ProcessPhase = Literal[
-    "starting",
     "running",
     "exited",
     "signaled",
@@ -155,12 +132,14 @@ type ProcessPhase = Literal[
     "failed",
 ]
 
+
 type CleanupOutcome = Literal[
     "pending",
     "complete",
     "residual_confined",
     "failed",
 ]
+
 
 type TerminationReason = Literal[
     "exit",
@@ -177,19 +156,14 @@ class ProcessStatus(BaseModel):
     termination_reason: TerminationReason | None
     exit_code: int | None
     signal: Literal["interrupt", "terminate", "kill"] | None
-    started_at: datetime | None
+    started_at: datetime
     ended_at: datetime | None
     cleanup: CleanupOutcome
 
 
-class ProcessStreamSnapshot(BaseModel):
-    stream: Literal["stdout", "stderr"]
-    capture: OutputCapture
-
-
-class ProcessOutputSnapshot(BaseModel):
-    stdout: ProcessStreamSnapshot
-    stderr: ProcessStreamSnapshot
+class ProcessOutput(BaseModel):
+    stdout: OutputInfo
+    stderr: OutputInfo
 
 
 class ProcessInfo(BaseModel):
@@ -198,51 +172,26 @@ class ProcessInfo(BaseModel):
     generation: int
     status: ProcessStatus
     stdin_open: bool
-    output: ProcessOutputSnapshot
+    output: ProcessOutput
 ```
 
-`starting` is internal until `process.start` can return a committed handle; a client normally first observes `running` or an already terminal phase. `exit_code` belongs to the initial requested executable, never a supervisor or sandbox wrapper. A normal Unix signal is mapped only to the supported semantic signal names; raw host signal numbers are not a portable EIP contract.
+`exit_code` is the requested executable's status, never a wrapper's. A raw platform signal number is not portable EIP data.
 
-Initial-command terminal state and command cleanup are independent. `phase="exited"` with `cleanup="pending"` means the requested executable ended while backend-owned members or supervisor cleanup remain. `cleanup="complete"` proves the cleanup guarantee advertised by the active backend, not a stronger guarantee than the descriptor reports. A required process-containment backend proves its whole-tree teardown contract. Disabled `outer_host` execution proves only its platform-native managed target: the initial process group on Unix, or the initial process plus any descendants covered by a successful best-effort task-tree operation on Windows. A descendant that deliberately escapes Unix group observation, or that Windows cannot recover after the initial process exits, is outside envd's native proof and remains the outer Host's responsibility. `residual_confined` is allowed only for a required isolation backend that can prove residual descendants remain under the original confinement but cannot prove they all exited. It is never returned by disabled native execution.
+The initial executable can be terminal while descendants are still being cleaned, so terminal `phase` can coexist with `cleanup="pending"`. `cleanup="complete"` means the active backend's advertised tree-cleanup guarantee is satisfied. `residual_confined` is available only for required macOS isolation when remaining descendants are still proven Seatbelt-confined but complete exit cannot be observed. `cleanup="failed"` never claims that descendants are gone.
 
-`failed` with `termination_reason="output_limit"` means a background producer crossed a fail-on-overflow threshold after `process.start` had already returned and envd terminated the tree under that process's stored policy. `failed` with `termination_reason="backend_lost"` means envd lost trustworthy supervision after dispatch. Neither case carries a fabricated exit code or signal. Cleanup, output counts, and receipt evidence determine which later facts are known.
+`phase="failed"` with `output_limit` means stdout or stderr crossed its per-stream ceiling and the tree was terminated. `backend_lost` means trustworthy supervision was lost. Neither invents an exit code.
 
-## One Transactional Start Pipeline
+## Start Atomicity
 
-Every command uses the same prepare/commit/release sequence:
+Before the requested executable can run, envd validates the request, reserves command/process/output capacity, establishes the selected isolation boundary, and commits command ownership plus both output references. A failure before that point starts no payload and releases the reservation.
 
-```mermaid
-sequenceDiagram
-    participant Method as shell.exec or process.start
-    participant Manager as Execution manager
-    participant Backend as Native or isolated backend
-    participant Supervisor as Gated supervisor
-    participant Store as Process and output stores
-    participant Payload as Requested executable
+`process.start` returns only after envd knows the requested executable reached exec successfully. `shell.exec` uses the same start boundary and then waits. If evidence is lost after possible payload release, envd retains the command record, requests cleanup, and reports `unknown_outcome`; it never retries through a weaker path or classifies possible dispatch as pre-dispatch failure. Once command ownership and selectors are committed, that terminal error includes bounded command evidence. A background start includes `process`, which makes inspect, kill, and release possible. Foreground execution includes `process_status` plus `output`, which keeps both streams readable and releasable; it also includes `process` when an owner record remains necessary for later control or reclamation. No committed command owner becomes unreachable merely because its success result could not be established. The [operation ledger](02-eip-protocol.md#operation-ledger-and-cancellation) therefore keeps the originating `shell.exec` or `process.start` evidence replayable while any process or output record disclosed by that evidence remains live.
 
-    Method->>Manager: validate request and reserve quotas
-    Manager->>Backend: construct policy and prepare tree with gate closed
-    Backend->>Supervisor: enter final execution boundary
-    Supervisor-->>Manager: typed ready acknowledgement
-    Manager->>Store: commit handle, ownership, output, and cancellation records
-    Store-->>Manager: registration committed
-    Manager->>Supervisor: typed release message
-    Supervisor->>Payload: start final payload launcher
-    Payload-->>Manager: close-on-exec success acknowledgement
-    Manager-->>Method: committed start or continue foreground wait
-```
+The implementation can use a gate, supervisor, job, namespace, or another platform mechanism. The observable invariant is that request code cannot execute uncontained or unowned.
 
-The requested executable cannot run while policy is built, the sandbox is entered, quotas are only provisional, or stores are uncommitted. The supervisor reaches its ready gate only after the final Seatbelt/bubblewrap/native execution boundary and child environment preconditions are in place.
-
-The internal launch plan travels through a bounded inherited descriptor using a typed, versioned encoding. Command data and request environment never travel through launcher environment variables or a string command protocol. Control messages are typed and length-bounded. All non-stdio descriptors close unless they are explicit short-lived gate, exec-acknowledgement, output, or stable policy descriptors. Internal protocol details are not EIP, but these properties are part of the security and no-unregistered-execution contract.
-
-After store commit, envd releases the gate. A close-on-exec acknowledgement distinguishes successful execution of the requested executable from a payload-launcher setup or `exec` failure. `process.start` returns a handle only after exec success is established. `shell.exec` continues waiting under the same committed record.
-
-A failure before store commit closes the gate, kills and reaps the prepared backend, releases every provisional quota, and returns a pre-dispatch or isolation error. After commit, a supervisor-confirmed spawn failure proves that no requested payload exists and safely releases the unpublished record. Loss of confirmation after gate release is `unknown_outcome`: envd retains bounded generation-owned state, requests cleanup, and never rewrites possible dispatch as a pre-dispatch start failure. Failure to establish required containment or final payload identity returns `execution_isolation_failed`; a confirmed failure to execute the selected requested executable returns `command_start_failed` with bounded receipt evidence. Envd never retries the payload through a less restrictive backend.
+Advertising either `shell.exec` or `process.start` also requires `output.read`, `output.release`, `process.inspect`, `process.kill`, and `process.release`, so every committed command owner and output object has a reconciliation and cleanup path. This narrow dependency does not imply stdin, semantic signals, ports, or another optional method.
 
 ## Foreground Execution
-
-`shell.exec` returns only after the initial command reaches a terminal state and tree cleanup reaches a terminal cleanup outcome, unless provider evidence is lost.
 
 ```python
 class ShellExecParams(BaseModel):
@@ -252,21 +201,15 @@ class ShellExecParams(BaseModel):
 
 class ShellExecResult(BaseModel):
     status: ProcessStatus
-    output: ProcessOutputSnapshot
+    output: ProcessOutput
     receipt: OperationReceipt
 ```
 
-The foreground record is not exposed as a reusable `ProcessHandle`. It still uses the same internal manager, output store, cancellation path, and cleanup semantics as a background process.
+`shell.exec` returns after the initial command is terminal and cleanup has a terminal outcome, unless supervision evidence is lost. It always returns stdout and stderr references. Their bounded previews make small results immediately useful; `output.read` can retrieve complete large output after the call returns.
 
-A wall-time deadline requests the active backend's strongest command cleanup, closes stdin, continues bounded output drain, and waits for cleanup within a finite grace. A proven timeout returns `phase="timed_out"` and `termination_reason="timeout"`. If backend evidence is lost during that sequence, envd returns `unknown_outcome` with the strongest receipt and retained output metadata it has.
+Timeout and cancellation close stdin, request the backend's strongest cleanup, and continue draining stdout/stderr. A proven timeout or cancellation is represented in `ProcessStatus`; uncertainty remains `unknown_outcome` with the strongest bounded receipt and command evidence.
 
-Cancellation follows the same backend-owned cleanup path. Output overflow does not block pipe draining: envd retains, truncates, or discards bytes according to [EIP `OutputPolicy`](06-output-retention.md) while continuing to drain boundedly until terminal cleanup.
-
-## Background Process Lifecycle
-
-### Start and inspect
-
-`process.start` uses these serialized shapes:
+## Background Process Methods
 
 ```python
 class ProcessStartParams(BaseModel):
@@ -277,13 +220,8 @@ class ProcessStartParams(BaseModel):
 class ProcessStartResult(BaseModel):
     process: ProcessInfo
     receipt: OperationReceipt
-```
 
-The returned process is `running` or already terminal, its executable has passed the exec acknowledgement, and its handle is registered atomically with output and ownership state. Opaque process, output, and transfer selectors plus operation receipt evidence include a generation namespace, so a selector from an old daemon generation cannot resolve to a newly allocated object even when local counters restart. An EIP timeout before dispatch returns no handle. A timeout after possible dispatch reconciles the operation ID or receipt before the client can safely repeat start.
 
-All follow-up methods use these serialized shapes:
-
-```python
 class ProcessInspectParams(BaseModel):
     context: EIPCallContext
     handle: ProcessHandle
@@ -291,27 +229,6 @@ class ProcessInspectParams(BaseModel):
 
 class ProcessInspectResult(BaseModel):
     process: ProcessInfo
-
-
-class ProcessReadOutputParams(BaseModel):
-    context: EIPCallContext
-    handle: ProcessHandle
-    wait_ms: int = 0
-    output_policy: OutputPolicy | None = None
-    stdout_offset: int
-    stderr_offset: int
-
-
-class ProcessStreamRead(BaseModel):
-    chunks: tuple[OutputSegment, ...]
-    capture: OutputCapture
-    next_offset: int
-
-
-class ProcessReadOutputResult(BaseModel):
-    process: ProcessInfo
-    stdout: ProcessStreamRead
-    stderr: ProcessStreamRead
 
 
 class ProcessWriteStdinParams(BaseModel):
@@ -379,126 +296,54 @@ class ProcessReleaseResult(BaseModel):
     receipt: OperationReceipt
 ```
 
-`process.inspect` returns the latest typed snapshot without draining output or changing lifetime.
+`process.inspect` is a non-draining snapshot. Both stream references are stable for the process lifetime, so output is read only through `output.read`; EIP has no duplicate `process.read_output` method or output cursor.
 
-### Output reads
+Stdin writes are serialized with close, bounded, and backpressured. A result reports exactly how many bytes envd accepted. Initial stdin is delivered incrementally; if start becomes ambiguous after partial delivery, the operation is not automatically repeated. `keep_stdin_open=false` closes stdin after complete initial delivery. Process termination and daemon drain also close it.
 
-`process.read_output` accepts independent explicit stdout/stderr offsets, a wait duration narrowed by the call timeout, and an `OutputPolicy`. Each result returns contiguous stream-tagged chunks, one `next_offset` per stream, captured/dropped counts, completeness, process status, and available bounds. Reads are non-draining because offsets are caller-owned values rather than server cursor objects. An offset below the retention floor or inside a gap returns `retention_gap`; an offset at the current end can wait boundedly for data or producer completion. Offset and gap semantics are owned by [Output Retention](06-output-retention.md).
+`process.signal` accepts only descriptor-advertised semantic actions. Unsupported actions fail before backend control and are never mapped to kill. `process.kill` requests the strongest tree cleanup and waits within the call deadline for the best terminal evidence.
 
-### Stdin
+`process.wait(condition="initial_terminal")` waits for a terminal initial-command phase. `tree_cleaned` additionally waits until cleanup is no longer pending. Timeout returns a typed error and does not mutate the process.
 
-`process.write_stdin` accepts one bounded encoded byte chunk and an optional `close_after_write`. Writes are serialized per process, apply backpressure, and either report the accepted byte count or a typed closed/busy failure. A partial native write is reported explicitly and never automatically repeats the remainder under the same method unless the response proves its accepted count.
+`process.release` is legal only after terminal cleanup. It removes the process handle and detaches its two output objects without deleting them; both references remain readable and separately releasable through `output.release`. Releasing a live or cleanup-pending process is a conflict. Releasing an individual background stream before its process record is removed is also a conflict, so a process snapshot never contains a dangling output reference.
 
-`process.close_stdin` is idempotent and makes later writes fail. Session close, process termination, timeout, cancellation, and kill also close stdin. Initial stdin delivery is incremental and cancellable so it cannot block control or daemon drain; failure after a partial initial delivery is an ambiguous dispatched start and returns `unknown_outcome`. `keep_stdin_open=false` closes stdin after complete `initial_stdin` delivery.
+## Lifetime and Concurrency
 
-### Signal, kill, and wait
+A process belongs to the daemon generation, not the session that started it. Carrier loss, reconnect, `session.close`, and Harness-run completion do not terminate it. A later authenticated session for the same Environment and generation can inspect and control the same handle.
 
-`process.signal` accepts an action only when the corresponding `execution_features.signal_interrupt` or `signal_terminate` boolean is true. The method is absent from `available_methods` when both are false; an unlisted action returns `unsupported` before any supervisor/backend control request. A supported backend targets the owned command tree with that distinct semantic action and returns whether a live target accepted it. The method never exposes arbitrary numeric signals or another process, and an unsupported action is never mapped to force kill.
+Process records remain until explicit `process.release` or daemon-generation end. Detached output records remain under their independent lifetime. Envd does not evict a valid terminal process or output record to admit another command. Finite active-tree and record capacity can therefore reject new starts until callers release old records.
 
-`process.kill` requests the backend's strongest force-cleanup behavior and waits within the effective relative call timeout for a terminal cleanup outcome. A successful request is not misreported as a particular initial-command signal unless the backend observed it.
+Per-process mutations serialize where their effects conflict: stdin write with close, signals with force cleanup, and release with terminal transition. Status and output reads can proceed concurrently from snapshots. Envd never adopts a caller-supplied PID or a native process it did not start.
 
-`process.wait` waits for one of two explicit conditions:
-
-- `initial_terminal`: the requested executable has a terminal `ProcessPhase`;
-- `tree_cleaned`: the initial command is terminal and `cleanup` is no longer pending.
-
-It returns the current `ProcessInfo` on satisfaction or a typed timeout without changing the process. Transport connection close is not a wait result.
-
-### Release
-
-`process.release` removes a terminal, fully cleaned process record and its generation-owned output references. Releasing an active process is a conflict; the client first cancels or kills it. Release is idempotent for an already released handle while its tombstone remains, then becomes `not_found_or_denied` after bounded tombstone expiry.
-
-## Generation-scoped Process Lifetime
-
-Every background process belongs to the daemon generation, not to the protocol session that started it. Stdio or reverse-WebSocket carrier loss, session close, and Harness run completion do not terminate it. A fresh authenticated session initialized against the same Environment identity and generation can inspect and control the existing handle.
-
-An owned command ends through its own command lifecycle, an explicit cancellation/signal/kill path, an enforced limit, policy revocation requiring termination, or daemon drain. `process.release` acts only after terminal cleanup and removes the record; it does not terminate a live command. No handle or native command is adopted after daemon restart. Envd shutdown applies the active backend's strongest cleanup to every still-owned command; disabled mode still relies on outer-Host generation teardown for descendants outside its platform-native target. A provider that needs background work to continue keeps the same envd process alive.
-
-A start reserves one process-record slot before native preparation. `max_processes` bounds active command trees, while `max_process_records` bounds active plus terminal handle records. A terminal fully cleaned record remains usable until explicit release, `terminal_process_record_ttl_ms`, or capacity reclamation. When a new start needs a record slot, envd can reclaim the oldest terminal fully cleaned record and its process-owned output references; it never reclaims an active or cleanup-pending record. A reclaimed handle returns `not_found_or_denied`, and reads of reclaimed output return the applicable `retention_gap` or handle error. The TTL is an upper retention bound, not a minimum guarantee against earlier capacity reclamation.
-
-## Concurrency and Ownership
-
-The execution manager uses async admission and event-driven child/output observation so waiting for one process does not block unrelated EIP work. This is an observable scalability requirement, not a public class API. Blocking OS waits or reads are isolated from the protocol event loop.
-
-Daemon-global active-process, process-record, and start-admission limits apply before preparation. A process start reserves active count, one handle record, output budget, supervisor capacity, and any isolation resources atomically. Failure releases all reservations.
-
-Operations on one handle obey a defined order:
-
-- stdin writes serialize with stdin close;
-- signal and kill serialize with terminal transition;
-- status observation and output reads can proceed concurrently from immutable snapshots;
-- release linearizes selector removal only after full cleanup; already-admitted operations retain their record snapshot and complete with their observed result or a typed gap, while later lookups cannot reacquire the handle;
-- daemon shutdown uses the same owner, rather than racing a second cleanup registry.
-
-A native process discovered outside this manager cannot be adopted through EIP. Envd never controls by caller-supplied PID.
-
-## Descendants and Cleanup
-
-Every descendant inherits the selected execution boundary. The command tree remains owned until cleanup reaches a terminal outcome even after the initial executable exits.
-
-Linux required isolation uses a PID namespace and envd-owned PID 1 supervisor that reaps descendants, forwards supported semantic signals, and tears down the namespace. A descendant cannot escape by changing process group or session.
-
-macOS required isolation uses inherited Seatbelt plus tracked process-group and descendant cleanup. Since macOS has no PID namespace equivalent, full descendant exit can be unprovable; `residual_confined` preserves that distinction.
-
-Windows required isolation assigns the gated initial process to a non-breakaway Job Object before request code executes. Descendants inherit membership, and job-empty evidence owns complete cleanup. AppContainer/restricted-token and ACL projection separately own filesystem/network containment. A Job Object alone is never treated as a sandbox. Disabled native execution cannot call an unobserved residual confined.
-
-The supervisor's own exit status never replaces the initial command's status. Backend loss produces `termination_reason="backend_lost"`, strongest available cleanup, and safe unknown-outcome evidence.
+Daemon shutdown requests strongest cleanup for every owned tree. No managed process is contractually allowed to outlive the daemon generation. In explicit disabled mode, the outer Host remains responsible for any descendant outside envd's truthful native cleanup target.
 
 ## Failure Semantics
 
-| Failure stage                                                                 | Result                                                        | Payload or side-effect meaning                                         |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Schema, cwd, executable, profile, environment, authority, or quota validation | Typed pre-dispatch error                                      | No payload started                                                     |
-| Isolation policy or backend preparation fails before ready                    | `execution_isolation_failed`                                  | Gate remains closed; no payload started                                |
-| Store registration fails                                                      | Pre-dispatch failure                                          | Prepared tree killed and reaped; no payload started                    |
-| Gate release, final identity, or requested exec fails                         | `execution_isolation_failed` or `command_start_failed`        | Public handle rolled back; requested executable not reported started   |
-| Response lost after exec confirmation                                         | Potential `unknown_outcome`                                   | Reconcile operation ID, receipt, or process handle before retry        |
-| Initial command exits nonzero                                                 | Successful EIP method with typed exit status                  | Command failure is not protocol failure                                |
-| Filesystem/network policy denies child action                                 | Normal child stderr and exit behavior                         | Never triggers unsandboxed retry                                       |
-| Relative timeout or cancellation proves tree termination                      | Timed-out or cancelled typed status                           | Output remains bounded and cleanup is explicit                         |
-| Background output crosses fail threshold after start returned                 | Tree termination and `failed` status with `output_limit`      | Original start remains successful; later process state reports failure |
-| Backend supervision lost                                                      | `backend_lost`, cleanup attempt, and possible unknown outcome | No fabricated exit status                                              |
-| Initial command terminal but tree cleanup fails                               | `cleanup_failed` or status with `cleanup="failed"`            | Host cannot assume descendants are gone                                |
-| Daemon generation ends                                                        | Envd terminates every tree and invalidates all handles        | A later daemon cannot adopt or revive it                               |
+| Failure                                                         | Result                                              | Payload meaning                                 |
+| --------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------- |
+| Invalid command, cwd, profile, environment, option, or capacity | Typed pre-dispatch error                            | No requested executable starts                  |
+| Required containment cannot be established                      | `execution_isolation_failed`                        | No weaker fallback                              |
+| Selected executable cannot exec                                 | `command_start_failed`                              | No successful process handle                    |
+| Evidence lost after possible release                            | `unknown_outcome` plus receipt and command evidence | Inspect/kill/read/release; never blind retry    |
+| Initial executable exits nonzero                                | Successful EIP result with exit status              | Command failure is not protocol failure         |
+| Wall-time or cancellation cleanup is proven                     | Timed-out or cancelled status                       | Output remains readable                         |
+| Output ceiling crossed                                          | Failed status with `output_limit`                   | Retained prefixes remain; completeness is false |
+| Supervision is lost                                             | `backend_lost` and strongest cleanup                | No fabricated status                            |
+| Initial command ends but tree cleanup fails                     | `cleanup="failed"` or `cleanup_failed`              | Descendant exit is not assumed                  |
+| Daemon generation ends                                          | All handles and output references become stale      | No adoption by a later daemon                   |
 
 ## Compatibility
 
-Command schema changes, profile IDs, process phases, termination reasons, cleanup outcomes, and signal meanings are EIP compatibility facts. Additive status fields are safe only when old clients do not infer terminal cleanup from their absence. Changing when `process.start` publishes a handle, conflating wrapper and payload status, allowing active release, or making process lifetime session-owned requires an incompatible protocol revision.
-
-Backends can omit exact methods or reject unsupported limit options, but foreground and background lifecycle, transactional start, opaque ownership, output bounds, and cleanup distinctions remain common conformance requirements.
-
-## Trade-offs
-
-### One manager and transaction
-
-Registering a prepared tree before payload release adds a supervisor handshake and start latency. It prevents an unregistered command from running when policy setup, process-store insertion, output registration, or response construction fails.
-
-### Structured argv plus explicit shells
-
-Structured argv avoids accidental shell parsing. Explicit shell profiles preserve normal development workflows without allowing request data to choose an arbitrary native shell or wrapper.
-
-### Opaque handles over PIDs
-
-Opaque handles require envd follow-up methods and generation checks. They prevent caller-supplied PID targeting, wrapper/PID confusion, and silent retargeting after restart.
-
-### Generation ownership over session ownership
-
-Keeping processes under the daemon's single manager lets normal background work survive transient client reconnects without leases or detached children. The trade-off is explicit: daemon shutdown ends every process and no saved handle survives restart.
+Command shapes, executable selection, process phases, termination reasons, cleanup outcomes, semantic signals, start publication, output-reference behavior, and generation lifetime are EIP compatibility facts. Platform backends can change without a wire revision when they preserve those facts and report optional support truthfully.
 
 ## Invariants
 
-01. One execution manager is the sole native owner of every foreground and background command tree.
-02. `shell.exec` and `process.start` share one validation, reservation, isolation, registration, gate-release, and exec-acknowledgement pipeline.
-03. No requested executable runs before the final boundary is ready and its process/output/ownership records are committed.
-04. Command values are structured data and never interpolated into another shell command; shell text uses an explicit trusted profile.
-05. Only daemon-allowlisted ordinary compatibility values can reach payloads; attachment credentials, carrier state, ambient credentials, dynamic-loader values, and internal control variables never reach sandbox helpers or payloads.
-06. Every requested limit narrows finite upstream limits; unsupported enforcement fails explicitly.
-07. `process.start` returns no handle until requested-executable exec success is established.
-08. Initial-command status, wrapper status, tree cleanup, and Host completion remain separate facts.
-09. Process operations accept only opaque handles and repeat generation, ownership, exact-method availability, and policy checks.
-10. Output reads are non-draining and bounded, and output overflow never blocks native pipe draining.
-11. Session loss does not terminate a process; every process remains generation-scoped and daemon-owned, and daemon shutdown terminates all remaining command trees.
-12. Active and terminal process records are both bounded; only terminal fully cleaned records can expire or be capacity-reclaimed before generation end.
-13. A failed or unavailable isolation backend never triggers native fallback.
-14. Cwd and typed executable paths resolve only through configured mount grants; no session mode or native path string widens command authority.
-15. Cleanup uncertainty is explicit: only `complete` proves full teardown, and `residual_confined` is valid solely under an active required-isolation boundary.
+01. One command owner controls every foreground and background command tree through terminal cleanup.
+02. No requested executable runs before command, process, isolation, and output ownership are committed.
+03. Arguments are structured values; shell text uses only an explicit trusted profile.
+04. Request values and daemon secrets never leak into helpers or ambient payload environment.
+05. Unsupported enforcement options fail before payload execution.
+06. `process.start` returns no handle until requested-executable exec success is known.
+07. Initial-command status, wrapper status, tree cleanup, EIP delivery, and Host completion are separate facts.
+08. Every command has stable stdout and stderr references; complete output within the configured ceiling remains readable after completion through `output.read`.
+09. Session loss never terminates a process, while daemon-generation end terminates every owned tree and invalidates every handle.
+10. Process and output records are reclaimed explicitly, never silently retargeted or evicted.

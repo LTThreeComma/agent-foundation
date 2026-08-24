@@ -77,11 +77,11 @@ An initialized session binds:
 - the descriptor's exact `available_methods`, configured mounts, root mount, limits, and isolation posture;
 - bounded request correlation and session-owned transfer state.
 
-A session is not a Harness run, tenant, principal, generation lease, or resource-authority partition. It does not own accepted operations, process records, receipts, or retained output. It owns only file readers, writers that have not handed their candidate to a commit operation, binary attachments, and bounded transfer terminal state.
+A session is not a Harness run, tenant, principal, generation lease, or resource-authority partition. It does not own accepted operations, process records, receipts, or command output. It owns only file readers, writers that have not handed their candidate to a commit operation, and their binary attachments.
 
-Carrier loss destroys the session and all session-owned transfers. Generation-owned operations, handoff-complete commits, processes, receipts, and retained output remain under their owning daemon records. A later reverse-WebSocket connection always initializes a new session; it never resumes the prior WebSocket, request correlation table, reader, writer, or binary stream.
+Carrier loss destroys the session and all session-owned transfers. Generation-owned operations, handoff-complete commits, processes, receipts, and command output remain under their daemon records. A later reverse-WebSocket connection always initializes a new session; it never resumes the prior WebSocket, request correlation table, reader, writer, or binary stream.
 
-`session.close` atomically stops later session admission before cleaning session-owned transfers. A concurrently admitted `file.commit_writer` either completes its candidate handoff first and becomes operation-owned, or loses to session closing and remains cleanup-owned by the session. Session close does not cancel operations, close process stdin, terminate processes, or release retained output.
+`session.close` atomically stops later session admission before cleaning session-owned transfers. A concurrently admitted `file.commit_writer` either completes its candidate handoff first and becomes operation-owned, or loses to session closing and remains cleanup-owned by the session. Session close does not cancel operations, close process stdin, terminate processes, or release command output.
 
 ## Shared Carrier Rules
 
@@ -97,7 +97,7 @@ Both profiles enforce:
 - bounded fair scheduling so control, cancellation, reset, close, and unrelated transfers continue to make progress;
 - no implicit carrier fallback or replay after a possibly dispatched operation.
 
-A carrier can stop reading when admission or memory capacity is exhausted. Its per-transfer and aggregate queues apply backpressure to the producer rather than accumulating frames. Parsed requests, response waiters, and late-response correlation state are independently bounded. Abandoning a sent request cannot retain caller admission forever: the client either keeps only a separately bounded late-response tombstone or terminates the unhealthy carrier before admitting work that cannot be correlated safely.
+A carrier can stop reading when admission or memory capacity is exhausted. Its per-transfer and aggregate queues apply backpressure to the producer rather than accumulating frames. Request correlation remains finite. Abandoning a sent request releases caller-side admission; if a late response can no longer be correlated safely within bounded state, the client closes the carrier rather than reusing an ambiguous request ID.
 
 Carrier liveness and EIP operation timeout are separate. A liveness failure tears down the session but does not classify an accepted operation as cancelled or failed. `EIPCallContext.timeout_ms` is interpreted by the daemon after request admission using a monotonic clock. File transfer timeout is separately selected at open.
 
@@ -147,7 +147,7 @@ client file.commit_writer or file.abort_writer
 
 Writer `END_ACK` confirms that envd accepted and sealed the complete uploaded stream at the terminal offset. It does not publish the destination. Only `file.commit_writer` can hand off candidate ownership and perform the target mutation.
 
-When a client sends `RESET` for a live session-owned transfer, envd performs cleanup and returns at most one bounded `RESET` acknowledgement. The client consumes it through a bounded retired-handle record and never echoes it. Envd-initiated reset is already terminal. A reset received after writer ownership has handed off to commit cannot demote or cancel that operation.
+When a client sends `RESET` for a live session-owned transfer, envd performs cleanup and can return one `RESET` acknowledgement. Reset handling is finite; a peer that cannot finish transfer teardown loses the carrier. Envd-initiated reset is already terminal. A reset received after writer ownership has handed off to commit cannot demote or cancel that operation.
 
 EIP major 1 selects data-frame profile version 1 after initialization. An incompatible layout requires another EIP major. Later features can reuse the physical frame only with a typed handle, direction, lifecycle, and negotiated EIP contract; the frame does not create a generic byte-stream authority.
 
@@ -173,7 +173,7 @@ Content-Type: application/vnd.converge.eip-data\r\n
 
 `Content-Length` is mandatory, decimal, non-negative, and checked before body allocation. `Content-Type` is mandatory for binary data and, when present for control, identifies UTF-8 JSON. Header count, line length, and aggregate header bytes are bounded while reading; a parser never reads an unbounded line and checks it afterward. Repeated, malformed, or conflicting framing headers fail the carrier.
 
-Stdin carries requester-to-envd control and data frames. Stdout carries envd-to-requester control and data frames. A fair scheduler never splits an outer frame. Stderr carries structured daemon logs and never protocol frames. Command stdout and stderr remain retained-output data and never appear on daemon stdout.
+Stdin carries requester-to-envd control and data frames. Stdout carries envd-to-requester control and data frames. A fair scheduler never splits an outer frame. Stderr carries structured daemon logs and never protocol frames. Command stdout and stderr remain command-output data and never appear on daemon stdout.
 
 Stdio has no bearer credential. Its trust boundary requires the provider to create private pipes, launch the expected executable with trusted configuration, validate child ownership, and prevent another principal from replacing or attaching to the descriptors. The first request is `initialize`. Parent stdin EOF is carrier loss and normally also triggers daemon shutdown because the parent owns this daemon lifecycle. EOF is never successful transfer EOF or evidence that an operation was not dispatched.
 
@@ -285,7 +285,7 @@ A provider selects stdio or reverse WebSocket before session establishment. It c
 03. Envd exposes no inbound network listener, HTTP control/data routes, or health endpoints.
 04. Every reverse-WebSocket connection uses `wss`, ordinary certificate and hostname validation, no redirects, a short-lived Bearer attachment credential, and exactly one supported `eip.v<major>` subprotocol.
 05. The requester's first application message is `initialize`, and every successful connection creates a fresh EIP session.
-06. Carrier loss removes only session-owned transfers; generation-owned operations, processes, receipts, and retained output survive reconnect within the same daemon generation.
+06. Carrier loss removes only session-owned transfers; generation-owned operations, processes, receipts, and command output survive reconnect within the same daemon generation.
 07. Reconnect never automatically replays a request or resumes a file transfer.
 08. Every transfer has one session, direction, attachment, exact offset sequence, finite bounds, and typed completion.
 09. Reader acceptance occurs only through successful `file.close_reader`; readers do not use `END_ACK`, while writers retain `END_ACK` before commit.
