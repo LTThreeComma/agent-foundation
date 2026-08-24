@@ -94,9 +94,9 @@ Required isolation grants executable mapping only where code execution is intend
 
 Protected paths include daemon configuration and credentials, `AGENT_ENVD_RUNTIME_DIR` except exact dedicated execution-home and temporary children, retained-output storage, transport sockets, logs, install and helper roots, service definitions, isolation control data, and probe sentinels.
 
-Protected denial has absolute precedence. Every root is canonicalized and identity checked. In `scoped` authority, a selected mount, runtime root, or extra root is rejected when it equals, contains, or is contained by a protected path, equals the host filesystem root or host home, or overlaps another authorized root with a different policy. The exact dedicated execution-home and temporary children are explicit protected-parent exceptions.
+Protected denial has absolute precedence. Every root is canonicalized, checked for prohibited overlap, and opened as a capability root before use. The launching provider keeps each configured root's containing directory outside payload or other untrusted mutation during bootstrap, and envd opens the root's final component without following a link; this prevents path retargeting without a portable FileID. In `scoped` authority, a selected mount, runtime root, or extra root is rejected when it equals, contains, or is contained by a protected path, equals the host filesystem root or host home, or overlaps another authorized root with a different policy. The exact dedicated execution-home and temporary children are explicit protected-parent exceptions.
 
-A server-root mount necessarily contains protected paths. Required isolation therefore masks or denies those nested paths with backend-enforced precedence while exposing the remainder of the selected root. The production probe must prove that this subtraction works on the active backend; if it cannot, commands under `server` authority are unavailable in required mode rather than silently exposing control state or falling back. This exception affects child filesystem construction only: server-authority EIP file methods still represent the envd process's own native filesystem visibility. Symlink aliases are evaluated after canonicalization, and root identity is revalidated immediately before command setup. A changed root fails the command.
+A server-root mount necessarily contains protected paths. Required isolation therefore masks or denies those nested paths with backend-enforced precedence while exposing the remainder of the selected root. The production probe must prove that this subtraction works on the active backend; if it cannot, commands under `server` authority are unavailable in required mode rather than silently exposing control state or falling back. This exception affects child filesystem construction only: server-authority EIP file methods still represent the envd process's own native filesystem visibility. Symlink aliases and protected-path overlap are evaluated after canonicalization, and command setup uses the already opened authorized roots rather than accepting another request-selected native root.
 
 ### Disabled-mode meaning
 
@@ -104,7 +104,7 @@ In `disabled` mode, envd still validates the requested cwd, session resource aut
 
 Envd's disabled native supervisor targets the initial Unix process group and uses best-effort task-tree operations on Windows. A payload can deliberately call `setsid`, create a new process group, or use an equivalent platform mechanism to leave Unix observation; Windows cannot recover a complete descendant set after the initial process exits without an outer Job Object. `cleanup="complete"` in this mode proves cleanup only for that platform-native managed target; the descriptor therefore reports `process_containment=false` and `cleanup_guarantee="outer_host"`. The outer Host must provide PID namespace, Job Object, container/VM destruction, or an equivalent generation boundary when escaped descendants must not survive.
 
-The outer host must also prevent payloads from inspecting envd memory, its original process environment, service configuration, trusted proxy headers, retained output, or private control channels; otherwise a payload can steal `AGENT_ENVD_API_KEY` or bypass the EIP boundary. Destination-local staged candidates are intentionally not a confidentiality boundary and are protected from undetected publication by identity and digest checks. A distinct final payload UID/GID, outer mount and process/PID isolation, protected process filesystems, and removal of debugger/root capability are valid mechanisms. Explicit `disabled` mode accepts the outer boundary only when it provides that separation, not merely because a container exists.
+The outer host must also prevent payloads from inspecting envd memory, its original process environment, service configuration, trusted proxy headers, retained output, or private control channels; otherwise a payload can steal `AGENT_ENVD_API_KEY` or bypass the EIP boundary. Destination-local staged candidates are intentionally neither a confidentiality boundary nor a lock; envd verifies the complete held candidate and uses one same-directory publication but does not serialize another actor that already controls that writable directory. A distinct final payload UID/GID, outer mount and process/PID isolation, protected process filesystems, and removal of debugger/root capability are valid mechanisms. Explicit `disabled` mode accepts the outer boundary only when it provides that separation, not merely because a container exists.
 
 The descriptor therefore reports envd inner filesystem, process, and network isolation as false. An outer provider can separately report its own sandbox posture through Host-owned provider metadata; envd never conflates the two.
 
@@ -118,7 +118,7 @@ Request-controlled environment is dangerous before isolation because dynamic loa
 - request values are installed only in the final payload after the sandbox, release gate, payload identity, and no-new-privileges policy are active;
 - all other inherited descriptors close before payload exec.
 
-Command arguments are structured argv. Paths become backend parameters or descriptor-backed sources and are never concatenated into a Seatbelt profile or shell wrapper. Trusted helpers resolve by verified absolute identity, not the workspace or child `PATH`.
+Command arguments are structured argv. Paths become backend parameters or descriptor-backed sources and are never concatenated into a Seatbelt profile or shell wrapper. Trusted helpers resolve from verified absolute configuration and release-integrity checks, not the workspace or child `PATH`.
 
 The final payload environment is cleared and rebuilt as defined by [Command and Process Execution](05-command-and-process-execution.md#environment-construction). It can include only daemon-allowlisted ordinary compatibility values, including operator proxy configuration, plus explicit trusted and request layers. `HOME` and temporary-directory variables always point to private execution roots. `AGENT_ENVD_API_KEY`, transport/session values, daemon state paths, internal carrier names, dynamic-loader values, and ambient cloud or service credentials are absent.
 
@@ -173,7 +173,7 @@ For each command tree, the backend creates:
 - `PR_SET_NO_NEW_PRIVS` before final payload exec;
 - a fresh network namespace when effective network posture is `deny`.
 
-Source roots are opened or identity-pinned before bubblewrap setup and revalidated so a concurrent symlink or replacement cannot redirect a bind. The namespace supervisor reaps descendants, preserves the initial executable's status, forwards supported interrupt/terminate semantics, and tears down residual descendants after the initial command exits. Force cleanup destroys the namespace from the outer manager. A descendant cannot escape cleanup by creating another process group or session inside the PID namespace.
+Source roots come from already authorized opened roots or backend-specific descriptor/path representations rather than request-selected native paths. The provider-owned bootstrap stability and envd's no-follow final-component open select the authorized capability without a portable native FileID. Backend setup revalidates path shape and protected-path policy at its publication boundary but does not claim compare-and-swap over later content mutations by another actor with independent native authority. The namespace supervisor reaps descendants, preserves the initial executable's status, forwards supported interrupt/terminate semantics, and tears down residual descendants after the initial command exits. Force cleanup destroys the namespace from the outer manager. A descendant cannot escape cleanup by creating another process group or session inside the PID namespace.
 
 The network-deny mechanism is a fresh network namespace with no host routes. It preserves Unix-domain IPC created inside the sandbox and does not claim domain-level filtering. Host D-Bus, SSH-agent, container-engine, and similar sockets remain absent because they are not mounted.
 
@@ -218,7 +218,7 @@ In `required` mode, envd runs the same installed helper, profile builder, superv
 
 The bounded probe proves:
 
-- helper/system-launcher identity and executable integrity;
+- configured helper/system-launcher selection and executable integrity;
 - allowed read and configured mount write behavior;
 - read-only mount denial;
 - protected and random host sentinel denial, including nested protected-path masking for server-root commands;
@@ -265,9 +265,9 @@ The descriptor reveals no native profile, helper path, protected path, host iden
 
 | Failure                                                                 | Outcome                                                                  |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Invalid mode/network/path/identity matrix                               | Daemon startup fails before readiness                                    |
+| Invalid mode/network/path/payload-identity matrix                       | Daemon startup fails before readiness                                    |
 | Required backend unsupported, helper invalid, or production probe fails | Daemon startup fails; no fallback                                        |
-| Per-command root identity or policy construction fails                  | `execution_isolation_failed` before payload release                      |
+| Per-command root or policy construction fails                           | `execution_isolation_failed` before payload release                      |
 | Supervisor not ready under final policy                                 | Prepared tree killed/reaped; no payload starts                           |
 | Store commit fails                                                      | Gate remains closed; prepared tree killed/reaped                         |
 | Gate, payload identity, or no-new-privileges setup fails                | Public start rolls back; tree cleaned; `execution_isolation_failed`      |
@@ -317,7 +317,7 @@ Narrow runtime grants can require explicit configuration for Homebrew, Nix, or c
 03. Disabled mode is explicit and delegates only OS command containment; all other envd controls remain active.
 04. EIP callers cannot select isolation mode, backend, profile, helper, native root, payload identity, or wider network policy.
 05. Required filesystem authority starts deny-by-default and includes only the command's effective `cwd` mount, private execution roots, curated runtime, explicit read-only roots, minimal devices, and stdio; a server-root command still excludes envd protected control paths.
-06. Scoped protected-path overlap is rejected symmetrically after canonicalization; server-root overlap is denied by backend-enforced masking proven at startup, and symlinks or concurrent root replacement cannot widen grants.
+06. Scoped protected-path overlap is rejected symmetrically after canonicalization; server-root overlap is denied by backend-enforced masking proven at startup; configured root parents remain provider-owned during bootstrap; and final-component no-follow opening prevents a substituted link from widening grants.
 07. Request environment reaches only the final payload after isolation and identity setup; daemon secrets and transport state never reach helpers or payloads.
 08. No requested executable starts before final sandbox readiness and process/output ownership commit.
 09. Linux uses verified non-setuid bubblewrap with user/mount/PID/IPC/UTS namespaces, private `/proc`, PID 1 supervision, and optional network namespace.

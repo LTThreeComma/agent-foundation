@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -45,28 +44,7 @@ struct ResourceInner {
 struct RemovePlanEntry {
     relative: PathBuf,
     directory: bool,
-    identity: CapEntryIdentity,
 }
-
-#[cfg(unix)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CapEntryIdentity {
-    device: u64,
-    inode: u64,
-    file_type: u64,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CapEntryIdentity {
-    volume_serial_number: u64,
-    file_id: [u8; 16],
-    file_type: u8,
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CapEntryIdentity;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ResourceError {
@@ -170,7 +148,6 @@ impl ResourceRegistry {
             &mount,
             &params.path,
             1,
-            false,
             &self.inner.operations,
             &params.context.operation_id,
         )?
@@ -208,7 +185,6 @@ impl ResourceRegistry {
             } else {
                 1
             },
-            false,
             &self.inner.operations,
             &params.context.operation_id,
         )?
@@ -248,7 +224,6 @@ impl ResourceRegistry {
             &mount,
             &params.root,
             MAX_TRAVERSAL_DEPTH,
-            false,
             &self.inner.operations,
             &params.context.operation_id,
         )?;
@@ -522,16 +497,6 @@ impl ResourceRegistry {
             return Err(ResourceError::Unsupported);
         }
         let mount = write_mount(mounts, &params.source, "move")?;
-        let source_relative = mount
-            .relative_path(&params.source)
-            .map_err(map_mount_error)?;
-        let destination_relative = mount
-            .relative_path(&params.destination)
-            .map_err(map_mount_error)?;
-        let source = mount
-            .metadata(&params.source, false)
-            .map_err(map_mount_error)?;
-        let source_identity = cap_entry_identity(&mount.root, &source_relative, &source, false)?;
         let destination = match mount.metadata(&params.destination, false) {
             Ok(metadata) => Some(metadata),
             Err(MountPathError::NotFound) => None,
@@ -547,12 +512,6 @@ impl ResourceRegistry {
         let metadata = mount
             .metadata(&params.destination, false)
             .map_err(|_| ResourceError::UnknownOutcome)?;
-        if cap_entry_identity(&mount.root, &destination_relative, &metadata, false)
-            .map_err(|_| ResourceError::UnknownOutcome)?
-            != source_identity
-        {
-            return Err(ResourceError::UnknownOutcome);
-        }
         Ok(cap_file_info(&params.destination, &metadata))
     }
 
@@ -590,9 +549,8 @@ impl ResourceRegistry {
                             .root
                             .symlink_metadata(&entry.relative)
                             .map_err(|_| ResourceError::Conflict)?;
-                        if cap_entry_identity(&mount.root, &entry.relative, &current, false)?
-                            != entry.identity
-                        {
+                        let current_is_directory = current.is_dir() && !current.is_symlink();
+                        if current_is_directory != entry.directory {
                             return Err(ResourceError::Conflict);
                         }
                         if entry.directory {
@@ -735,16 +693,9 @@ fn commit_candidate(
     mount
         .publish_candidate(candidate, path, replace)
         .map_err(map_mount_error)?;
-    let candidate_metadata = candidate
-        .file
-        .metadata()
-        .map_err(|_| ResourceError::UnknownOutcome)?;
     let opened = mount
         .open_regular(path)
         .map_err(|_| ResourceError::UnknownOutcome)?;
-    if !same_file_identity(&candidate_metadata, &opened.metadata) {
-        return Err(ResourceError::UnknownOutcome);
-    }
     Ok(file_info(path, &opened.metadata))
 }
 
@@ -782,17 +733,6 @@ fn copy_with_digest(
 }
 
 #[cfg(unix)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.len() == right.len() && left.modified().ok() == right.modified().ok()
-}
-
-#[cfg(unix)]
 fn file_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     metadata.nlink() != 1
@@ -824,17 +764,15 @@ fn build_remove_plan(
     if max_entries == 0 {
         return Err(ResourceError::Limit);
     }
-    let mut pending = vec![(root.to_path_buf(), 0_u32, false, None)];
+    let mut pending = vec![(root.to_path_buf(), 0_u32, false)];
     let mut plan = Vec::new();
     let mut discovered = 0_u64;
-    let mut visited = BTreeSet::new();
-    while let Some((relative, depth, expanded, saved_identity)) = pending.pop() {
+    while let Some((relative, depth, expanded)) = pending.pop() {
         check_operation(operations, operation_id)?;
         if expanded {
             plan.push(RemovePlanEntry {
                 relative,
                 directory: true,
-                identity: saved_identity.ok_or(ResourceError::Internal)?,
             });
             continue;
         }
@@ -846,17 +784,12 @@ fn build_remove_plan(
             .root
             .symlink_metadata(&relative)
             .map_err(|_| ResourceError::Conflict)?;
-        let identity = cap_entry_identity(&mount.root, &relative, &metadata, false)?;
         if !metadata.is_dir() || metadata.is_symlink() {
             plan.push(RemovePlanEntry {
                 relative,
                 directory: false,
-                identity,
             });
             continue;
-        }
-        if !visited.insert(identity) {
-            return Err(ResourceError::Conflict);
         }
         let reader = mount
             .root
@@ -872,154 +805,27 @@ fn build_remove_plan(
             return Err(ResourceError::Limit);
         }
         children.sort();
-        pending.push((relative, depth, true, Some(identity)));
+        pending.push((relative, depth, true));
         pending.extend(
             children
                 .into_iter()
                 .rev()
-                .map(|child| (child, depth + 1, false, None)),
+                .map(|child| (child, depth + 1, false)),
         );
     }
     Ok(plan)
-}
-
-#[cfg(unix)]
-fn cap_entry_identity(
-    _root: &cap_std::fs::Dir,
-    _relative: &Path,
-    metadata: &cap_std::fs::Metadata,
-    _follow_symlinks: bool,
-) -> Result<CapEntryIdentity, ResourceError> {
-    use cap_std::fs::MetadataExt;
-    Ok(CapEntryIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        file_type: u64::from(metadata.mode()) & u64::from(libc::S_IFMT),
-    })
-}
-
-#[cfg(windows)]
-fn cap_entry_identity(
-    root: &cap_std::fs::Dir,
-    relative: &Path,
-    _metadata: &cap_std::fs::Metadata,
-    follow_symlinks: bool,
-) -> Result<CapEntryIdentity, ResourceError> {
-    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
-
-    use cap_std::fs::{OpenOptions, OpenOptionsExt};
-    use windows_sys::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FileIdInfo,
-            GetFileInformationByHandleEx,
-        },
-    };
-
-    let mut options = OpenOptions::new();
-    options.access_mode(0);
-    let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
-    if !follow_symlinks {
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    }
-    options.custom_flags(flags);
-    let entry = root
-        .open_with(relative, &options)
-        .map_err(|_| ResourceError::Conflict)?;
-    let entry_metadata = entry.metadata().map_err(|_| ResourceError::Conflict)?;
-    let mut info = MaybeUninit::<FILE_ID_INFO>::uninit();
-    let info_size =
-        u32::try_from(std::mem::size_of::<FILE_ID_INFO>()).map_err(|_| ResourceError::Internal)?;
-    // SAFETY: `entry` owns a valid handle, `info` is large and aligned for
-    // `FILE_ID_INFO`, and the buffer is initialized before `assume_init`.
-    let populated = unsafe {
-        GetFileInformationByHandleEx(
-            entry.as_raw_handle() as HANDLE,
-            FileIdInfo,
-            info.as_mut_ptr().cast(),
-            info_size,
-        )
-    };
-    if populated == 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(map_windows_file_id_error(&error));
-    }
-    // SAFETY: a successful `GetFileInformationByHandleEx` initialized `info`.
-    let info = unsafe { info.assume_init() };
-    let file_type = entry_metadata.file_type();
-    windows_entry_identity(
-        info.VolumeSerialNumber,
-        info.FileId.Identifier,
-        if file_type.is_dir() {
-            1
-        } else if file_type.is_symlink() {
-            2
-        } else {
-            0
-        },
-    )
-}
-
-#[cfg(windows)]
-fn windows_entry_identity(
-    volume_serial_number: u64,
-    file_id: [u8; 16],
-    file_type: u8,
-) -> Result<CapEntryIdentity, ResourceError> {
-    if file_id == [0; 16] {
-        return Err(ResourceError::Unsupported);
-    }
-    Ok(CapEntryIdentity {
-        volume_serial_number,
-        file_id,
-        file_type,
-    })
-}
-
-#[cfg(windows)]
-fn map_windows_file_id_error(error: &std::io::Error) -> ResourceError {
-    use windows_sys::Win32::Foundation::{
-        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
-    };
-
-    let Some(code) = error
-        .raw_os_error()
-        .and_then(|code| u32::try_from(code).ok())
-    else {
-        return ResourceError::Io;
-    };
-    if matches!(
-        code,
-        ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED
-    ) {
-        ResourceError::Unsupported
-    } else {
-        ResourceError::Io
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn cap_entry_identity(
-    _root: &cap_std::fs::Dir,
-    _relative: &Path,
-    _metadata: &cap_std::fs::Metadata,
-    _follow_symlinks: bool,
-) -> Result<CapEntryIdentity, ResourceError> {
-    Err(ResourceError::Unsupported)
 }
 
 fn walk_entries(
     mount: &Arc<Mount>,
     root: &EIPPath,
     max_depth: u32,
-    follow_symlinks: bool,
     operations: &OperationRegistry,
     operation_id: &str,
 ) -> Result<Vec<FileListEntry>, ResourceError> {
     let root_relative = mount.relative_path(root).map_err(map_mount_error)?;
     let mut pending = vec![(root_relative, String::new(), 0_u32)];
     let mut entries = Vec::new();
-    let mut visited = BTreeSet::new();
     while let Some((directory, prefix, depth)) = pending.pop() {
         check_operation(operations, operation_id)?;
         if depth >= max_depth {
@@ -1049,20 +855,10 @@ fn walk_entries(
                 mount_id: root.mount_id.clone(),
                 path: logical,
             };
-            let metadata = mount
-                .metadata(&path, follow_symlinks)
-                .map_err(map_mount_error)?;
+            let metadata = mount.metadata(&path, false).map_err(map_mount_error)?;
             let info = cap_file_info(&path, &metadata);
             let child_relative = mount.relative_path(&path).map_err(map_mount_error)?;
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                if !visited.insert(cap_entry_identity(
-                    &mount.root,
-                    &child_relative,
-                    &metadata,
-                    follow_symlinks,
-                )?) {
-                    return Err(ResourceError::Conflict);
-                }
                 children.push((child_relative, relative_path.clone(), depth + 1));
             }
             entries.push(FileListEntry {
@@ -1631,32 +1427,22 @@ fn map_mount_error(error: MountPathError) -> ResourceError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::Duration,
-    };
+    use std::{fs, path::PathBuf, time::Duration};
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use crate::eip::{
-        FileCopyParams, FileMkdirParams, FileMoveParams, FilePatchTextParams, FileWriteMode,
-        FileWriteTextParams,
-    };
+    use crate::eip::{FileCopyParams, FileMkdirParams, FileMoveParams, FilePatchTextParams};
     use crate::{
         config::{Config, TrustedMountConfig},
         eip::{
             EIPCallContext, EIPPath, FileFindParams, FileKind, FileListParams, FileReadTextParams,
-            FileRemoveParams, FileSearchParams, FileStatParams, SearchMode,
+            FileRemoveParams, FileSearchParams, FileStatParams, FileWriteMode, FileWriteTextParams,
+            SearchMode,
         },
         mount::MountRegistry,
         operation::{OperationRegistry, random_selector},
     };
 
-    use super::{
-        ResourceError, ResourceRegistry, apply_unified_diff, cap_entry_identity, join_logical,
-    };
-    #[cfg(windows)]
-    use super::{map_windows_file_id_error, windows_entry_identity};
+    use super::{ResourceError, ResourceRegistry, apply_unified_diff, join_logical};
 
     struct TempTree(PathBuf);
 
@@ -1777,70 +1563,6 @@ mod tests {
     fn joins_mount_relative_paths() {
         assert_eq!(join_logical("/", "a/b"), "/a/b");
         assert_eq!(join_logical("/root", "a"), "/root/a");
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn entry_identities_are_stable_and_distinguish_directories() {
-        let fixture = Fixture::read_only();
-        fs::create_dir(fixture.native.join("first")).expect("first directory");
-        fs::create_dir(fixture.native.join("second")).expect("second directory");
-        let mount = fixture.mounts.get("workspace").expect("workspace mount");
-
-        let first_path = Path::new("first");
-        let first_metadata = mount
-            .root
-            .symlink_metadata(first_path)
-            .expect("first metadata");
-        let first = match cap_entry_identity(&mount.root, first_path, &first_metadata, false) {
-            Ok(identity) => identity,
-            Err(ResourceError::Unsupported) if cfg!(windows) => return,
-            Err(error) => panic!("first identity failed: {error:?}"),
-        };
-        let repeated = cap_entry_identity(&mount.root, first_path, &first_metadata, false)
-            .expect("repeated first identity");
-        let second_path = Path::new("second");
-        let second_metadata = mount
-            .root
-            .symlink_metadata(second_path)
-            .expect("second metadata");
-        let second = cap_entry_identity(&mount.root, second_path, &second_metadata, false)
-            .expect("second identity");
-        fs::rename(fixture.native.join("first"), fixture.native.join("renamed"))
-            .expect("renames first directory");
-        let renamed_path = Path::new("renamed");
-        let renamed_metadata = mount
-            .root
-            .symlink_metadata(renamed_path)
-            .expect("renamed metadata");
-        let renamed = cap_entry_identity(&mount.root, renamed_path, &renamed_metadata, false)
-            .expect("renamed identity");
-
-        assert!(first == repeated);
-        assert!(first != second);
-        assert!(first == renamed);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn rejects_unusable_windows_file_ids_and_classifies_query_errors() {
-        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED};
-
-        assert!(matches!(
-            windows_entry_identity(1, [0; 16], 0),
-            Err(ResourceError::Unsupported)
-        ));
-        let unsupported = std::io::Error::from_raw_os_error(
-            i32::try_from(ERROR_NOT_SUPPORTED).expect("Win32 error code fits i32"),
-        );
-        assert_eq!(
-            map_windows_file_id_error(&unsupported),
-            ResourceError::Unsupported
-        );
-        let access_denied = std::io::Error::from_raw_os_error(
-            i32::try_from(ERROR_ACCESS_DENIED).expect("Win32 error code fits i32"),
-        );
-        assert_eq!(map_windows_file_id_error(&access_denied), ResourceError::Io);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2016,23 +1738,22 @@ mod tests {
         assert!(continued.has_more);
         assert_ne!(continued.entries, first_list.entries);
 
-        let found = match fixture.resources.find(
-            &fixture.mounts,
-            &FileFindParams {
-                context: context("find"),
-                root: path("/"),
-                pattern: "*.txt".to_owned(),
-                offset: 0,
-                max_results: 100,
-                recursive: true,
-                include_hidden: false,
-                kinds: vec![FileKind::File],
-            },
-        ) {
-            Ok(found) => found,
-            Err(ResourceError::Unsupported) if cfg!(windows) => return,
-            Err(error) => panic!("find failed: {error:?}"),
-        };
+        let found = fixture
+            .resources
+            .find(
+                &fixture.mounts,
+                &FileFindParams {
+                    context: context("find"),
+                    root: path("/"),
+                    pattern: "*.txt".to_owned(),
+                    offset: 0,
+                    max_results: 100,
+                    recursive: true,
+                    include_hidden: false,
+                    kinds: vec![FileKind::File],
+                },
+            )
+            .expect("find succeeds");
         assert_eq!(found.entries.len(), 10);
         assert!(!found.has_more);
 
@@ -2098,26 +1819,50 @@ mod tests {
         fs::write(fixture.native.join("tree/first/nested/one.txt"), "one").expect("first file");
         fs::write(fixture.native.join("tree/second/two.txt"), "two").expect("second file");
 
-        let removed = match fixture.resources.remove(
-            &fixture.mounts,
-            &FileRemoveParams {
-                context: context("recursive-remove"),
-                path: path("/tree"),
-                expected_kind: FileKind::Directory,
-                recursive: true,
-                max_entries: 6,
-            },
-        ) {
-            Ok(removed) => removed,
-            Err(ResourceError::Unsupported) => {
-                assert!(fixture.native.join("tree").exists());
-                return;
-            }
-            Err(error) => panic!("recursive removal failed: {error:?}"),
-        };
+        let removed = fixture
+            .resources
+            .remove(
+                &fixture.mounts,
+                &FileRemoveParams {
+                    context: context("recursive-remove"),
+                    path: path("/tree"),
+                    expected_kind: FileKind::Directory,
+                    recursive: true,
+                    max_entries: 6,
+                },
+            )
+            .expect("recursive removal succeeds");
 
         assert_eq!(removed, 6);
         assert!(!fixture.native.join("tree").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replaces_an_existing_windows_file_without_native_identity() {
+        let fixture = Fixture::with_mount(true, 64 * 1024 * 1024, 64);
+        fs::write(fixture.native.join("target.txt"), "old").expect("existing target");
+
+        let (info, bytes) = fixture
+            .resources
+            .write_text(
+                &fixture.mounts,
+                &FileWriteTextParams {
+                    context: context("replace"),
+                    path: path("/target.txt"),
+                    mode: FileWriteMode::Replace,
+                    text: "new content".to_owned(),
+                    executable: None,
+                },
+            )
+            .expect("replace succeeds");
+
+        assert_eq!(info.path, path("/target.txt"));
+        assert_eq!(bytes, 11);
+        assert_eq!(
+            fs::read_to_string(fixture.native.join("target.txt")).expect("replaced target"),
+            "new content"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

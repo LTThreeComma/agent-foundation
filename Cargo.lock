@@ -146,6 +146,7 @@ name = "converge-agent-envd"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "cap-primitives",
  "cap-std",
  "chrono",
  "getrandom",
@@ -161,7 +162,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

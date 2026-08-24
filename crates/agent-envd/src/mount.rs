@@ -161,7 +161,7 @@ impl MountRegistry {
             if mounts.contains_key(&prepared.mount_id) {
                 return Err(MountInitError::new("mount_id values must be unique"));
             }
-            let root = open_pinned_directory(&prepared.native_root, "mount root")?;
+            let root = open_capability_directory(&prepared.native_root)?;
             let mount = Arc::new(Mount {
                 mount_id: prepared.mount_id.clone(),
                 native_root: prepared.native_root,
@@ -633,12 +633,11 @@ impl Mount {
         }
         let source = Path::new(&candidate.name);
         let target = Path::new(&candidate.destination_name);
-        let opened = candidate.file.metadata().map_err(MountPathError::from_io)?;
         let named = candidate
             .parent
             .symlink_metadata(source)
             .map_err(MountPathError::from_io)?;
-        if !named.is_file() || named.is_symlink() || !candidate_identity_matches(&opened, &named) {
+        if !named.is_file() || named.is_symlink() {
             return Err(MountPathError::Denied);
         }
         if replace {
@@ -820,34 +819,22 @@ fn canonical_directory(path: &Path, field: &str) -> Result<PathBuf, MountInitErr
         .map_err(|error| MountInitError::io("canonicalize mount directory", error))
 }
 
-fn open_pinned_directory(path: &Path, label: &str) -> Result<Dir, MountInitError> {
-    let before = fs::metadata(path)
-        .map_err(|error| MountInitError::io("inspect canonical directory", error))?;
-    let directory = Dir::open_ambient_dir(path, ambient_authority())
-        .map_err(|error| MountInitError::io("open pinned directory", error))?;
-    let opened = directory
-        .try_clone()
-        .and_then(|directory| directory.into_std_file().metadata())
-        .map_err(|error| MountInitError::io("inspect pinned directory", error))?;
-    let after = fs::metadata(path)
-        .map_err(|error| MountInitError::io("reinspect canonical directory", error))?;
-    if !same_directory_identity(&before, &opened) || !same_directory_identity(&opened, &after) {
-        return Err(MountInitError::new(format!(
-            "{label} identity changed while it was opened"
-        )));
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.is_dir() && right.is_dir() && left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_directory_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.is_dir() && right.is_dir()
+fn open_capability_directory(path: &Path) -> Result<Dir, MountInitError> {
+    let Some(name) = path.file_name() else {
+        return Dir::open_ambient_dir(path, ambient_authority())
+            .map_err(|error| MountInitError::io("open mount root", error));
+    };
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| MountInitError::new("mount directory must have a parent"))?;
+    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
+        .map_err(|error| MountInitError::io("open mount parent", error))?;
+    let parent_file = parent.into_std_file();
+    let directory =
+        cap_primitives::fs::open_dir_nofollow(&parent_file, Path::new(name)).map_err(|error| {
+            MountInitError::io("open mount directory without following links", error)
+        })?;
+    Ok(Dir::from_std_file(directory))
 }
 
 fn random_candidate_name() -> Result<String, getrandom::Error> {
@@ -890,24 +877,14 @@ fn set_private_file_permissions(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_directory(directory: &Dir) -> std::io::Result<()> {
     directory.open(".")?.sync_all()
 }
 
-#[cfg(unix)]
-fn candidate_identity_matches(opened: &std::fs::Metadata, named: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as CapMetadataExt;
-    use std::os::unix::fs::MetadataExt as StdMetadataExt;
-    let file_type_mask = u64::from(libc::S_IFMT);
-    StdMetadataExt::dev(opened) == CapMetadataExt::dev(named)
-        && StdMetadataExt::ino(opened) == CapMetadataExt::ino(named)
-        && (u64::from(StdMetadataExt::mode(opened)) & file_type_mask)
-            == (u64::from(CapMetadataExt::mode(named)) & file_type_mask)
-}
-
 #[cfg(not(unix))]
-fn candidate_identity_matches(_opened: &std::fs::Metadata, _named: &cap_std::fs::Metadata) -> bool {
-    false
+fn sync_directory(_directory: &Dir) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1037,6 +1014,8 @@ impl Error for MountInitError {}
 #[cfg(test)]
 mod tests {
     use super::{logical_to_relative, valid_candidate_name, valid_mount_id};
+    #[cfg(unix)]
+    use super::{open_capability_directory, random_candidate_name};
 
     #[test]
     fn validates_logical_paths_without_normalizing_authority() {
@@ -1069,5 +1048,27 @@ mod tests {
             ".eip-stage-0123456789abcdef0123456789abcdef"
         ));
         assert!(!valid_candidate_name(".eip-stage-../escape"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_root_open_does_not_follow_a_replaced_final_link() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let root = std::env::temp_dir().join(
+            random_candidate_name()
+                .expect("random test directory name")
+                .replace(".eip-stage-", "agent-envd-mount-"),
+        );
+        let target = root.join("target");
+        let selected = root.join("selected");
+        fs::create_dir_all(&target).expect("create target directory");
+        symlink(&target, &selected).expect("replace selected root with symlink");
+
+        let result = open_capability_directory(&selected);
+        fs::remove_file(&selected).expect("remove test symlink");
+        fs::remove_dir_all(&root).expect("remove test directory");
+
+        assert!(result.is_err());
     }
 }

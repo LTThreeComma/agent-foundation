@@ -1243,17 +1243,9 @@ impl WriterCommit {
         mount
             .publish_candidate(&mut self.candidate, &self.path, replace)
             .map_err(map_mount_error)?;
-        let candidate_metadata = self
-            .candidate
-            .file
-            .metadata()
-            .map_err(|_| TransferError::UnknownOutcome)?;
         let opened = mount
             .open_regular(&self.path)
             .map_err(|_| TransferError::UnknownOutcome)?;
-        if !same_file_identity(&candidate_metadata, &opened.metadata) {
-            return Err(TransferError::UnknownOutcome);
-        }
         Ok(WriterCommitOutput {
             info: file_info(&self.path, &opened.metadata),
             transferred_bytes: self.transferred,
@@ -1377,17 +1369,6 @@ pub(crate) fn file_info(path: &EIPPath, metadata: &std::fs::Metadata) -> FileInf
         modified_at: metadata.modified().ok().map(chrono::DateTime::from),
         executable: executable(metadata),
     }
-}
-
-#[cfg(unix)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 #[cfg(unix)]
