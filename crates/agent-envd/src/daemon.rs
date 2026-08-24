@@ -3111,12 +3111,12 @@ mod tests {
     use serde_json::{Value, json};
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use crate::eip::{EipHandler, FileWriterOpenParams};
+    use crate::eip::FileWriterOpenParams;
     use crate::{
         config::{Config, TrustedMountConfig},
         eip::{
-            EIPCallContext, EIPPath, EnvironmentDescribeParams, FileWriteMode, FileWriteTextParams,
-            OperationCancelParams, OperationCancelStatus,
+            EIPCallContext, EIPPath, EipHandler, EnvironmentDescribeParams, FileWriteMode,
+            FileWriteTextParams, OperationCancelParams, OperationCancelStatus,
         },
         operation::{BeginOutcome, random_selector},
     };
