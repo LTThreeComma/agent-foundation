@@ -130,6 +130,7 @@ Run migration graph, clean-upgrade, schema-parity, and relevant PostgreSQL lock/
 - Every source file under `docs/` must be Markdown.
 - Update `mkdocs.yml` when adding, removing, or moving a page.
 - Run `make docs-build` after documentation or site configuration changes.
+- The canonical public site is [agent-foundation-docs.converge.ai](https://agent-foundation-docs.converge.ai/).
 - The `Docs` GitHub Actions workflow publishes build artifacts for pull requests and deploys `main` to the `agent-foundation-docs` Cloudflare Pages project.
 
 ## Specification Changes

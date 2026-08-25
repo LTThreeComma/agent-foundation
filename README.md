@@ -38,7 +38,7 @@ Start with the runnable, tested [examples](examples/README.md) to see public ext
 
 ## Documentation
 
-- Start with the [user documentation](docs/index.md).
+- Start with the [published user documentation](https://agent-foundation-docs.converge.ai/).
 - Read the [platform specification](spec/README.md) for the current architecture and design boundaries.
 
 ## Contributing

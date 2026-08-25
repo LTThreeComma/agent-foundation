@@ -61,7 +61,7 @@ Trivial corrections may start as a pull request when no material discussion or t
 
 ## Documentation System
 
-Documentation sources live in `docs/` and use Markdown. The site is built with MkDocs Material through the Python development environment declared in `pyproject.toml` and locked by `uv.lock`.
+Documentation sources live in `docs/` and use Markdown. The canonical public site is `https://agent-foundation-docs.converge.ai/`. It is built with MkDocs Material through the Python development environment declared in `pyproject.toml` and locked by `uv.lock`.
 
 - `docs/index.md` is the initial documentation entry point.
 - `mkdocs.yml` owns site metadata, navigation, Markdown extensions, and the build directory.

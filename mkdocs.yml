@@ -1,5 +1,6 @@
 site_name: Agent Foundation
 site_description: Documentation for the Agent Foundation project
+site_url: https://agent-foundation-docs.converge.ai/
 repo_name: converge-ai-labs/agent-foundation
 repo_url: https://github.com/converge-ai-labs/agent-foundation
 edit_uri: edit/main/docs/
