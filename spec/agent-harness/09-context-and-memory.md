@@ -36,10 +36,10 @@ Instruction ordering follows Pydantic AI Capability composition. A Capability de
 The standard Capability set performs the following semantic work without creating a global stage API:
 
 1. validate imported message structure and apply the mandatory message-integrity Filter without rewriting provider semantics;
-1. apply handoff, accepted enqueue content, completed background work, and explicit file references;
-1. compact history when the configured budget requires it;
-1. resolve current Environment projection, working-state, memory, and skill guidance;
-1. finalize media and verify tool-call/result integrity before provider dispatch.
+2. apply handoff, accepted enqueue content, completed background work, and explicit file references;
+3. compact history when the configured budget requires it;
+4. resolve current Environment projection, working-state, memory, and skill guidance;
+5. finalize media and verify tool-call/result integrity before provider dispatch.
 
 The list defines expected ordering relationships for first-party Capabilities. Native model adapters and `ModelProfile` own ordinary provider reasoning, tool-argument, and history projection compatibility. Only while the latest upstream lacks a required public seam may an exact-model-integration-scoped Capability apply a tested public-hook repair; it carries typed configuration and an upstream-removal condition and never becomes a standard global normalization stage. Third-party Capabilities compose through Pydantic ordering constraints rather than registering a named stage.
 

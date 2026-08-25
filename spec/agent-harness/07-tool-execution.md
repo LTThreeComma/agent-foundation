@@ -313,20 +313,20 @@ Stable harness categories cover invalid input, unavailable tool, denied, approva
 
 ## Invariants
 
-1. Every model-selected function-tool call resolves to one Pydantic AI `ToolDefinition`; Harness metadata is optional and never inferred.
-1. Every valid Capability graph sorts the tool execution boundary outside all other wrappers; every locally executable function-tool call therefore crosses that dispatcher, which always applies the text/JSON result boundary and applies authorization, managed retry, and invocation events only when valid Harness metadata is present.
-1. Managed `tool_id` values are unique within one assembled run and are checked again whenever dynamic or deferred Toolsets prepare definitions.
-1. A host that requires all model-visible function tools to be managed rejects each unannotated definition at the authoritative per-run or per-step Toolset preparation boundary before model exposure; eager checks of direct static `Tool` inputs are only an optimization.
-1. Approval for a managed tool binds effective input and never overrides live deny policy.
-1. Managed credentials are audience-bound and never fall back to ambient authority.
-1. Managed remote retry follows provider idempotency or reconciliation evidence.
-1. Trusted plugin code, unmanaged tool dispatch, and direct Python I/O are not represented as wrapper-enforced isolation.
-1. Every client-side tool is an upstream external tool: no handler runs in the Harness process, its declared name survives final assembly exactly, and external calls never share approval semantics.
-1. A run-specific client-tool replacement is accepted only when the materialized Client Tools Capability permits it; the effective whole surface is fixed for that run and remounted exactly for deferred resume.
-1. External results correlate through `DeferredToolResume` to the authoritative pending `.calls` batch and start a new run with fresh bindings; the Host verifies exact surface identity, while stream events, metadata, and client-held history grant no result authority.
-1. Every locally executed function tool's native JSON or `ToolReturn` textual/JSON output is subject to finite per-call inline and total bounds; producer-side streaming or retention applies a finite capture bound before full materialization whenever the provider controls production.
-1. Every first-party output spool enforces finite aggregate storage; Direct Local charges actual bytes until release or binding close, while envd reserves finite command-output records and bytes until explicit release or daemon shutdown.
-1. First-party Toolsets own semantic progressive disclosure and can share the one run-local spill owner; the mandatory outer boundary always retains validation, redaction, and a larger finite hard fallback, and no second model-visible result wrapper exists.
-1. A Toolset acknowledgement is a process-local Harness type, never a model-authored flag; it bypasses only the ordinary generic inline projection and cannot bypass the final hard ceiling.
-1. Native multimodal tool-return parts cross the tool execution boundary unchanged and are owned by the definition-selected content compatibility filter at model-request time.
-1. The EIP adapter never serializes Harness output policy or metadata into command requests; it enforces finite provider reads over envd's bounded raw output before Toolset-owned semantic projection and final boundary validation.
+01. Every model-selected function-tool call resolves to one Pydantic AI `ToolDefinition`; Harness metadata is optional and never inferred.
+02. Every valid Capability graph sorts the tool execution boundary outside all other wrappers; every locally executable function-tool call therefore crosses that dispatcher, which always applies the text/JSON result boundary and applies authorization, managed retry, and invocation events only when valid Harness metadata is present.
+03. Managed `tool_id` values are unique within one assembled run and are checked again whenever dynamic or deferred Toolsets prepare definitions.
+04. A host that requires all model-visible function tools to be managed rejects each unannotated definition at the authoritative per-run or per-step Toolset preparation boundary before model exposure; eager checks of direct static `Tool` inputs are only an optimization.
+05. Approval for a managed tool binds effective input and never overrides live deny policy.
+06. Managed credentials are audience-bound and never fall back to ambient authority.
+07. Managed remote retry follows provider idempotency or reconciliation evidence.
+08. Trusted plugin code, unmanaged tool dispatch, and direct Python I/O are not represented as wrapper-enforced isolation.
+09. Every client-side tool is an upstream external tool: no handler runs in the Harness process, its declared name survives final assembly exactly, and external calls never share approval semantics.
+10. A run-specific client-tool replacement is accepted only when the materialized Client Tools Capability permits it; the effective whole surface is fixed for that run and remounted exactly for deferred resume.
+11. External results correlate through `DeferredToolResume` to the authoritative pending `.calls` batch and start a new run with fresh bindings; the Host verifies exact surface identity, while stream events, metadata, and client-held history grant no result authority.
+12. Every locally executed function tool's native JSON or `ToolReturn` textual/JSON output is subject to finite per-call inline and total bounds; producer-side streaming or retention applies a finite capture bound before full materialization whenever the provider controls production.
+13. Every first-party output spool enforces finite aggregate storage; Direct Local charges actual bytes until release or binding close, while envd reserves finite command-output records and bytes until explicit release or daemon shutdown.
+14. First-party Toolsets own semantic progressive disclosure and can share the one run-local spill owner; the mandatory outer boundary always retains validation, redaction, and a larger finite hard fallback, and no second model-visible result wrapper exists.
+15. A Toolset acknowledgement is a process-local Harness type, never a model-authored flag; it bypasses only the ordinary generic inline projection and cannot bypass the final hard ceiling.
+16. Native multimodal tool-return parts cross the tool execution boundary unchanged and are owned by the definition-selected content compatibility filter at model-request time.
+17. The EIP adapter never serializes Harness output policy or metadata into command requests; it enforces finite provider reads over envd's bounded raw output before Toolset-owned semantic projection and final boundary validation.
