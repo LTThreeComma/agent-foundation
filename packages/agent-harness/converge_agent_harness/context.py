@@ -7,7 +7,7 @@ import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -18,6 +18,7 @@ from converge_agent_harness.identity import AgentIdentityRef, AgentInstanceConte
 from converge_agent_harness.state import AgentContextState, HarnessState
 
 if TYPE_CHECKING:
+    from converge_agent_harness.environment.models import EnvironmentPath
     from converge_agent_harness.environment.providers import BoundEnvironment, EnvironmentRunBinding
     from converge_agent_harness.events import HarnessEventEmitter
     from converge_agent_harness.execution import AgentDefinition, ExecutableAgent, SubagentDefinition
@@ -142,6 +143,99 @@ class RunBindings:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillPath:
+    """One resolved run-scoped skill directory and its provenance."""
+
+    name: str
+    source_id: str
+    directory: EnvironmentPath
+
+    def __post_init__(self) -> None:
+        from converge_agent_harness.environment.models import EnvironmentPath
+
+        _validate_runtime_metadata_id(self.name, "skill name")
+        _validate_runtime_metadata_id(self.source_id, "skill source_id")
+        if not isinstance(self.directory, EnvironmentPath):
+            raise TypeError("skill directory must be an EnvironmentPath")
+
+
+class RunSkillPaths:
+    """Owner-bound run-scoped publication of resolved skill directories."""
+
+    def __init__(self) -> None:
+        self._by_owner: dict[str, tuple[SkillPath, ...]] = {}
+
+    def publish(self, owner_id: str, paths: Sequence[SkillPath]) -> None:
+        owner = _validate_runtime_metadata_id(owner_id, "skill path owner_id")
+        values = tuple(paths)
+        if not all(isinstance(item, SkillPath) for item in values):
+            raise TypeError("skill paths must contain only SkillPath values")
+        existing = self._by_owner.get(owner)
+        if existing is None:
+            self._by_owner[owner] = values
+        elif existing != values:
+            raise RuntimeError(f"Skill path owner {owner!r} already published a different value")
+
+    @property
+    def values(self) -> tuple[SkillPath, ...]:
+        """Return an immutable snapshot in owner publication order."""
+        return tuple(path for paths in self._by_owner.values() for path in paths)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolMetadataKey[T]:
+    """Typed process-local key interpreted by its owning Toolset."""
+
+    name: str
+    value_type: type[T]
+
+    def __post_init__(self) -> None:
+        _validate_runtime_metadata_id(self.name, "tool metadata key")
+        if not isinstance(self.value_type, type):
+            raise TypeError("tool metadata value_type must be a runtime type")
+
+
+class ToolRuntimeMetadata:
+    """Passive owner-bound metadata consumed by Toolsets during one logical run."""
+
+    def __init__(self) -> None:
+        self._key_types: dict[str, type[object]] = {}
+        self._by_key: dict[ToolMetadataKey[Any], dict[str, object]] = {}
+
+    def publish[T](self, key: ToolMetadataKey[T], owner_id: str, value: T) -> None:
+        if not isinstance(key, ToolMetadataKey):
+            raise TypeError("tool metadata key must be a ToolMetadataKey")
+        owner = _validate_runtime_metadata_id(owner_id, "tool metadata owner_id")
+        if not isinstance(value, key.value_type):
+            raise TypeError(
+                f"Tool metadata {key.name!r} requires {key.value_type.__name__}, not {type(value).__name__}"
+            )
+        existing_type = self._key_types.setdefault(key.name, key.value_type)
+        if existing_type is not key.value_type:
+            raise TypeError(f"Tool metadata key {key.name!r} is already bound to another value type")
+        owners = self._by_key.setdefault(key, {})
+        if owner not in owners:
+            owners[owner] = value
+        elif owners[owner] != value:
+            raise RuntimeError(f"Tool metadata owner {owner!r} already published a different value for {key.name!r}")
+
+    def values[T](self, key: ToolMetadataKey[T]) -> tuple[T, ...]:
+        """Return an immutable snapshot in owner publication order."""
+        if not isinstance(key, ToolMetadataKey):
+            raise TypeError("tool metadata key must be a ToolMetadataKey")
+        existing_type = self._key_types.get(key.name)
+        if existing_type is not None and existing_type is not key.value_type:
+            raise TypeError(f"Tool metadata key {key.name!r} is already bound to another value type")
+        return tuple(cast(T, value) for value in self._by_key.get(key, {}).values())
+
+
+def _validate_runtime_metadata_id(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 256 or "\x00" in value:
+        raise ValueError(f"{field_name} must be a non-blank bounded string without NUL")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
 class AgentContext:
     """The one dependency object shared across a Pydantic AI run."""
 
@@ -156,6 +250,8 @@ class AgentContext:
     usage_attribution: RunUsageLedger = field(repr=False)
     deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
+    skill_paths: RunSkillPaths = field(default_factory=RunSkillPaths, compare=False)
+    tool_metadata: ToolRuntimeMetadata = field(default_factory=ToolRuntimeMetadata, compare=False)
     _capability_provenance: _CapabilityProvenance = field(default_factory=_CapabilityProvenance, repr=False)
     _managed_tool_ids: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({}),

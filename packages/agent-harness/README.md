@@ -43,9 +43,11 @@ Every built Agent includes one outer `ToolExecutionBoundaryCapability` and one i
 
 Request/history filters live in `converge_agent_harness.filters`. Message integrity is mandatory; `ContentFilterCapability` and `ColdStartFilterCapability` are optional definition-selected filters for native multimodal request compatibility and cold-cache reduction of already-consumed tool-result strings. Model-specific one-shot history repair remains in `SelfHealingModel`, and interrupted-stream semantic retry remains in Harness recovery rather than either filter.
 
-## Runnable local example
+## Runnable examples and guides
 
-The [Local Agent example](../../examples/local-agent/README.md) builds an offline Agent, executes a managed file tool through a Direct Local Environment, records working state, suspends for structured input, and resumes with fresh bindings. The [Agent Harness user guide](../../docs/agent-harness/index.md) covers installation, first-party feature families, filters, Environments, results, resume, and usage.
+The [Local Agent example](../../examples/local-agent/README.md) builds an offline Agent, executes a managed file tool through a Direct Local Environment, records working state, suspends for structured input, and resumes with fresh bindings. The [plugin integration example](../../examples/plugins/README.md) publishes and selects a real Harness plugin distribution.
+
+The [Agent Harness user guide](../../docs/agent-harness/index.md) covers installation, first-party feature families, filters, Environments, results, resume, and usage. The [plugin guide](../../docs/agent-harness/plugins.md) covers packaging, configuration, lifecycle, and discovery from a Host-managed plugin directory without a process restart.
 
 ## Versioning
 

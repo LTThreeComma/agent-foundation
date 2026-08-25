@@ -39,6 +39,10 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, Use
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 pytestmark = pytest.mark.anyio
+requires_posix_process_groups = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Direct Local process groups require POSIX",
+)
 _PROCESS_EXECUTABLE = Path(sys.executable).resolve()
 
 
@@ -149,6 +153,7 @@ class _ImmediateMonitor:
         self.closed = True
 
 
+@requires_posix_process_groups
 async def test_monitored_process_shares_process_reference_status_and_accepted_delivery(tmp_path: Path) -> None:
     monitor = _ImmediateMonitor()
     calls: list[list[ModelMessage]] = []
@@ -253,6 +258,7 @@ async def test_monitored_process_requires_fresh_host_attachment_before_model_req
     assert model_called is False
 
 
+@requires_posix_process_groups
 async def test_in_process_monitor_detects_fast_completion_without_losing_record(tmp_path: Path) -> None:
     binding = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=binding)
@@ -305,6 +311,7 @@ async def test_in_process_monitor_detects_fast_completion_without_losing_record(
     assert any(item.kind == "completion" for item in observed)
 
 
+@requires_posix_process_groups
 async def test_in_process_monitor_retires_acknowledged_terminal_records(tmp_path: Path) -> None:
     binding = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=binding)
@@ -351,6 +358,7 @@ async def test_in_process_monitor_retires_acknowledged_terminal_records(tmp_path
     assert await monitor.pending() == ()
 
 
+@requires_posix_process_groups
 async def test_in_process_monitor_backpressures_before_pending_completion_can_be_lost(tmp_path: Path) -> None:
     binding = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=binding)
@@ -440,6 +448,7 @@ async def test_monitored_process_rejects_orphan_run_attachment_before_model_requ
     assert model_called is False
 
 
+@requires_posix_process_groups
 async def test_in_process_monitor_close_publishes_gap_for_running_process(tmp_path: Path) -> None:
     binding = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=binding)
@@ -476,6 +485,7 @@ async def test_in_process_monitor_close_publishes_gap_for_running_process(tmp_pa
         assert "previous logical run" in (pending[0].message or "")
 
 
+@requires_posix_process_groups
 async def test_in_process_monitor_surfaces_observer_failure_as_pending_gap() -> None:
     class _Processes:
         def __init__(self) -> None:
@@ -528,6 +538,7 @@ async def test_in_process_monitor_surfaces_observer_failure_as_pending_gap() -> 
         await monitor.close()
 
 
+@requires_posix_process_groups
 async def test_process_monitor_cancellation_finishes_kill_before_reraising(tmp_path: Path) -> None:
     monitor = _BlockingMonitor()
 

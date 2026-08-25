@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/ci-agent-stream-protocol.yml"
       - ".github/workflows/release-harness.yml"
+      - "packages/agent-envd-client/**"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
       - "pyproject.toml"
@@ -17,6 +18,7 @@ on:
     paths:
       - ".github/workflows/ci-agent-stream-protocol.yml"
       - ".github/workflows/release-harness.yml"
+      - "packages/agent-envd-client/**"
       - "packages/agent-harness/**"
       - "packages/agent-stream-protocol/**"
       - "pyproject.toml"
@@ -80,10 +82,13 @@ jobs:
           packages/agent-stream-protocol/tests
           scripts/tests/test_check_agent_distributions.py
 
-      - name: Build Harness library distributions
+      - name: Build Harness libraries and local distribution dependencies
         run: |
+          uv build --package converge-agent-envd-client --out-dir dist/harness
           uv build --package converge-agent-harness --out-dir dist/harness
           uv build --package converge-agent-stream-protocol --out-dir dist/harness
 
       - name: Verify isolated development distributions
-        run: uv run --locked python scripts/check-agent-distributions.py dist/harness
+        run: >-
+          uv run --locked python scripts/check-agent-distributions.py
+          dist/harness --require-local-dependencies

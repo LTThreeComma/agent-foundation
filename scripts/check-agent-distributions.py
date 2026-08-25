@@ -16,6 +16,9 @@ PACKAGES = {
     "converge-agent-harness": "converge_agent_harness",
     "converge-agent-stream-protocol": "converge_agent_stream_protocol",
 }
+LOCAL_INSTALL_DEPENDENCIES = {
+    "converge-agent-envd-client": "converge_agent_envd_client",
+}
 
 
 class DistributionError(ValueError):
@@ -68,7 +71,12 @@ def _venv_python(environment: Path) -> Path:
     return environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
 
-def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bool = False) -> str:
+def validate_distributions(
+    dist_dir: Path,
+    *,
+    require_exact_internal_version: bool = False,
+    require_local_dependencies: bool = False,
+) -> str:
     uv = shutil.which("uv")
     if uv is None:
         raise DistributionError("uv is required to validate Harness distributions")
@@ -76,23 +84,30 @@ def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bo
     wheels: dict[str, Path] = {}
     sdists: dict[str, Path] = {}
     metadata: list[tuple[str, str, list[str], Path]] = []
+    required_artifacts = set(PACKAGES)
+    if require_local_dependencies:
+        required_artifacts.update(LOCAL_INSTALL_DEPENDENCIES)
     for path in (*dist_dir.glob("*.whl"), *dist_dir.glob("*.tar.gz")):
         name, version, requirements = _metadata(path)
-        if name not in PACKAGES:
+        if name not in required_artifacts:
             continue
         artifacts = wheels if path.suffix == ".whl" else sdists
         if name in artifacts:
             raise DistributionError(f"Found more than one {path.suffix} artifact for {name}")
         artifacts[name] = path.resolve()
-        metadata.append((name, version, requirements, path))
-    missing_wheels = sorted(set(PACKAGES) - set(wheels))
-    missing_sdists = sorted(set(PACKAGES) - set(sdists))
+        if name in PACKAGES:
+            metadata.append((name, version, requirements, path))
+    missing_wheels = sorted(required_artifacts - set(wheels))
+    missing_sdists = sorted(required_artifacts - set(sdists))
     if missing_wheels or missing_sdists:
-        raise DistributionError(f"Missing Harness artifacts: wheels={missing_wheels}, sdists={missing_sdists}")
+        raise DistributionError(f"Missing local artifacts: wheels={missing_wheels}, sdists={missing_sdists}")
     versions = {version for _, version, _, _ in metadata}
     if len(versions) != 1:
         raise DistributionError(f"Harness distribution versions do not match: {sorted(versions)}")
     version = versions.pop()
+    local_dependency_versions = (
+        {name: _metadata(wheels[name])[1] for name in LOCAL_INSTALL_DEPENDENCIES} if require_local_dependencies else {}
+    )
     for name, _, requirements, path in metadata:
         if name == "converge-agent-stream-protocol":
             _validate_protocol_requirement(
@@ -115,6 +130,10 @@ def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bo
             if create.returncode != 0:
                 raise DistributionError(f"Cannot create smoke environment for {distribution}:\n{create.stderr}")
             python = _venv_python(environment)
+            install_wheels = [wheels[name] for name in LOCAL_INSTALL_DEPENDENCIES] if require_local_dependencies else []
+            if distribution == "converge-agent-stream-protocol":
+                install_wheels.append(wheels["converge-agent-harness"])
+            install_wheels.append(wheels[distribution])
             install = subprocess.run(
                 [
                     uv,
@@ -124,7 +143,7 @@ def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bo
                     str(python),
                     "--find-links",
                     str(dist_dir.resolve()),
-                    str(wheels[distribution]),
+                    *(str(path) for path in install_wheels),
                 ],
                 check=False,
                 capture_output=True,
@@ -132,6 +151,10 @@ def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bo
             )
             if install.returncode != 0:
                 raise DistributionError(f"Cannot install {distribution} wheel in isolation:\n{install.stderr}")
+            dependency_assertions = "".join(
+                f"; assert version('{name}') == '{dependency_version}'"
+                for name, dependency_version in local_dependency_versions.items()
+            )
             smoke = subprocess.run(
                 [
                     str(python),
@@ -139,6 +162,7 @@ def validate_distributions(dist_dir: Path, *, require_exact_internal_version: bo
                     (
                         f"import {module}; from importlib.metadata import version; "
                         f"assert {module}.__version__ == version('{distribution}') == '{version}'"
+                        f"{dependency_assertions}"
                     ),
                 ],
                 check=False,
@@ -156,12 +180,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Install and smoke-test same-version Harness wheels in isolation.")
     parser.add_argument("dist_dir", type=Path)
     parser.add_argument("--require-exact-internal-version", action="store_true")
+    parser.add_argument("--require-local-dependencies", action="store_true")
     args = parser.parse_args()
 
     try:
         version = validate_distributions(
             args.dist_dir,
             require_exact_internal_version=args.require_exact_internal_version,
+            require_local_dependencies=args.require_local_dependencies,
         )
     except (DistributionError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
         raise SystemExit(str(error)) from error

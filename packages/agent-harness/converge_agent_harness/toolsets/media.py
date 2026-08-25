@@ -112,8 +112,6 @@ class MediaToolset:
                 assert resource.direct_url is not None
                 content = VideoUrl(url=resource.direct_url, media_type=resource.media_type)
             message = f"The {resource.kind} is attached in the user message.\n\nCanonical source: {resource.source_url}"
-            if instructions is not None and instructions.strip():
-                message = f"{message}\n\nAnalysis instructions:\n{instructions.strip()}"
             return ToolReturn(return_value=message, content=[content])
         except TimeoutError:
             return _media_error("media_timeout", retry_hint="retry")

@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import importlib
+import sys
 import traceback
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
 from converge_agent_harness import (
+    HARNESS_PLUGIN_ENTRY_POINT_GROUP,
     AbstractHarnessPlugin,
+    HarnessBuildContext,
+    HarnessBuilder,
     HarnessPluginFactory,
     HarnessPluginFactoryContext,
     PluginError,
     build_harness_plugin_factory_catalog,
     discover_harness_plugin_factory_references,
 )
+from pydantic_ai.agent.spec import AgentSpec
 
 
 class _HarnessPlugin(AbstractHarnessPlugin):
@@ -133,6 +140,92 @@ def test_discovery_reads_metadata_without_importing_targets(monkeypatch: pytest.
     assert references[1].distribution_name == "test-harness-plugin"
     assert references[1].distribution_version == "1.2.3"
     assert first.load_count == second.load_count == 0
+
+
+def test_new_builder_finds_completed_distribution_added_to_import_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_key = "test.runtime-added"
+    module_name = "runtime_added_harness_plugin"
+    plugin_root = tmp_path / "plugins"
+    plugin_root.mkdir()
+    importlib.invalidate_caches()
+
+    assert plugin_key not in {reference.plugin_key for reference in discover_harness_plugin_factory_references()}
+
+    package = plugin_root / module_name
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        f'''from converge_agent_harness import AbstractHarnessPlugin, HarnessPluginFactory
+
+
+class RuntimeAddedPlugin(AbstractHarnessPlugin):
+    def __init__(self, plugin_id: str) -> None:
+        self._plugin_id = plugin_id
+
+    @property
+    def plugin_id(self) -> str:
+        return self._plugin_id
+
+
+class RuntimeAddedFactory(HarnessPluginFactory):
+    @classmethod
+    def plugin_key(cls) -> str:
+        return "{plugin_key}"
+
+    def create_plugin(self, context):
+        return RuntimeAddedPlugin(context.plugin_id)
+''',
+        encoding="utf-8",
+    )
+    dist_info = plugin_root / "runtime_added_harness_plugin-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: runtime-added-harness-plugin\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[{HARNESS_PLUGIN_ENTRY_POINT_GROUP}]\n{plugin_key} = {module_name}:RuntimeAddedFactory\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.syspath_prepend(str(plugin_root))
+    importlib.invalidate_caches()
+
+    references = discover_harness_plugin_factory_references()
+    catalog = build_harness_plugin_factory_catalog(plugin_keys=(plugin_key,))
+    plugin = catalog.create_plugin(
+        HarnessPluginFactoryContext(
+            plugin_key=plugin_key,
+            plugin_id="runtime-added-1",
+            configuration={},
+            extensions={},
+        )
+    )
+    context = HarnessBuildContext.from_configuration(
+        {
+            "schema_version": "1",
+            "plugins": [
+                {
+                    "plugin_id": "runtime-added-2",
+                    "plugin_key": plugin_key,
+                    "enabled": True,
+                    "configuration": {},
+                }
+            ],
+        }
+    )
+    executable = HarnessBuilder(build_context=context).build_code(
+        AgentSpec(model="test"),
+        output_type=str,
+    )
+
+    assert plugin_key in {reference.plugin_key for reference in references}
+    assert plugin.plugin_id == "runtime-added-1"
+    assert type(plugin).__module__ == module_name
+    assert [item.plugin_id for item in executable._plugins] == ["runtime-added-2"]
+    sys.modules.pop(module_name, None)
 
 
 def test_discovery_sanitizes_metadata_enumeration_failure(monkeypatch: pytest.MonkeyPatch) -> None:

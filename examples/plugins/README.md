@@ -145,7 +145,26 @@ plugins:
 
 `plugin_id`, `plugin_key`, and `enabled` belong to the Harness envelope. `count_events` is a real package-owned parameter validated by `RunRecorderConfiguration` and used directly by the plugin. Disabled entries are neither imported on their own nor created.
 
-[`run_harness_entrypoint_demo()`](src/converge_plugin_examples/demo_harness.py) loads this YAML with `HarnessBuildContext.from_file()`. `HarnessBuilder` selects the installed `example.run-recorder` entry point and builds the concrete middleware without exposing the factory or plugin object in `AgentDefinition`:
+A Host does not need a file. It can pass the same data schema directly:
+
+```python
+context = HarnessBuildContext.from_configuration(
+    {
+        "schema_version": "1",
+        "plugins": [
+            {
+                "plugin_id": "recorder-entrypoint",
+                "plugin_key": "example.run-recorder",
+                "enabled": True,
+                "configuration": {"count_events": True},
+            }
+        ],
+    }
+)
+builder = HarnessBuilder(build_context=context)
+```
+
+[`run_harness_entrypoint_demo()`](src/converge_plugin_examples/demo_harness.py) uses the optional file form and loads the YAML with `HarnessBuildContext.from_file()`. `HarnessBuilder` selects the installed `example.run-recorder` entry point and builds the concrete middleware without exposing the factory or plugin object in `AgentDefinition`:
 
 ```bash
 uv run plugin-example-harness-entrypoint
@@ -163,6 +182,12 @@ builder = HarnessBuilder(configured_plugins_enabled=True)
 ```
 
 `True` overrides only the enable switch; source precedence, validation, selected-key import, and failure behavior remain identical. The choice is fixed when the Agent is built because plugins may contribute Capabilities, tools, settings, instructions, and hooks. `run()` and `stream()` therefore do not expose an unsafe partial late toggle.
+
+### Long-lived Host plugin directory
+
+A Host may install a complete plugin distribution into a fresh directory that is not yet searchable, publish that directory on Python's package search path while the Host remains alive, invalidate Python's import caches, and construct a new builder. The new builder sees the current entry-point metadata. Existing builders retain their selected factories and create fresh plugin instances from them on later builds; existing executables retain their already constructed plugin graphs. This supports adding plugins without rebuilding the Host image or restarting its Python process, but it does not define in-place reload or replacement of an already imported module.
+
+Use `PYTHONPATH` or `sys.path` for Python packages; the shell executable `PATH` is unrelated. Never install incrementally into a directory already exposed to the running process. The completed distribution must include `.dist-info` entry-point metadata rather than only the import module. See the [Harness plugin guide](../../docs/agent-harness/plugins.md#use-a-host-managed-plugin-directory) for the complete Host sequence and rollout boundaries.
 
 ### Explicit code mode
 

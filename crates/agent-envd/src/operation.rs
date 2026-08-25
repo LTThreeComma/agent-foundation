@@ -7,6 +7,7 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tokio::sync::{Notify, oneshot, watch};
 
 use crate::eip::{
     EIPCallContext, EIPError, OperationCancelStatus, OperationReceipt, ReceiptOutcome, ReceiptStage,
@@ -21,8 +22,8 @@ pub(crate) async fn scope_carrier_attempt<F: Future>(attempt: u64, future: F) ->
 }
 
 #[derive(Clone)]
-pub(crate) struct OperationRegistry {
-    inner: Arc<RegistryInner>,
+pub(crate) struct OperationLedger {
+    inner: Arc<LedgerInner>,
 }
 
 #[derive(Clone)]
@@ -31,8 +32,12 @@ pub(crate) struct ShortIdAllocator {
     counters: Arc<Mutex<BTreeMap<&'static str, u64>>>,
 }
 
-struct RegistryInner {
-    state: Mutex<RegistryState>,
+struct LedgerInner {
+    state: Mutex<LedgerState>,
+    pending_changed: Notify,
+    owned_idle: Notify,
+    #[cfg(test)]
+    pending_wait_entered: Notify,
     environment_id: String,
     generation: u64,
     max_records: usize,
@@ -41,10 +46,18 @@ struct RegistryInner {
 }
 
 #[derive(Default)]
-struct RegistryState {
+struct LedgerState {
     records: BTreeMap<String, OperationRecord>,
     terminal_order: VecDeque<String>,
+    pending: BTreeMap<String, PendingOperationState>,
     next_attempt: u64,
+    draining: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PendingOperationState {
+    requests: usize,
+    admitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +80,7 @@ struct OperationRecord {
     result: Option<serde_json::Value>,
     failure: Option<EIPError>,
     pins: BTreeSet<String>,
+    owned: bool,
 }
 
 enum RecordStatus {
@@ -82,7 +96,7 @@ pub(crate) enum BeginOutcome {
 }
 
 pub(crate) struct OperationLease {
-    registry: OperationRegistry,
+    ledger: OperationLedger,
     operation_id: String,
     replay_class: ReplayClass,
     failure_on_drop: Option<Box<(OperationReceipt, EIPError)>>,
@@ -90,14 +104,35 @@ pub(crate) struct OperationLease {
 }
 
 pub(crate) struct ActiveResponseHandoff {
-    registry: OperationRegistry,
+    ledger: OperationLedger,
     operation_id: String,
     attempt: u64,
     completed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegistryError {
+pub(crate) enum PendingAdmissionWait {
+    Admitted,
+    Removed,
+    TimedOut,
+    Closed,
+}
+
+pub(crate) struct PendingOperationGuard {
+    ledger: OperationLedger,
+    operation_id: String,
+}
+
+struct OwnedOperationTaskGuard {
+    ledger: OperationLedger,
+    operation_id: String,
+    attempt: u64,
+}
+
+pub(crate) type OwnedOperationResult<T> = oneshot::Receiver<Option<Result<T, EIPError>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LedgerError {
     Collision,
     DeadlineExpired,
     InProgress,
@@ -112,7 +147,7 @@ pub(crate) enum OperationInterruption {
     TimedOut,
 }
 
-impl OperationRegistry {
+impl OperationLedger {
     pub(crate) fn new(
         environment_id: String,
         generation: u64,
@@ -121,8 +156,12 @@ impl OperationRegistry {
         max_duration: Duration,
     ) -> Self {
         Self {
-            inner: Arc::new(RegistryInner {
-                state: Mutex::new(RegistryState::default()),
+            inner: Arc::new(LedgerInner {
+                state: Mutex::new(LedgerState::default()),
+                pending_changed: Notify::new(),
+                owned_idle: Notify::new(),
+                #[cfg(test)]
+                pending_wait_entered: Notify::new(),
                 environment_id,
                 generation,
                 max_records,
@@ -132,12 +171,169 @@ impl OperationRegistry {
         }
     }
 
+    pub(crate) fn track_pending(&self, operation_id: String) -> PendingOperationGuard {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let pending = state
+            .pending
+            .entry(operation_id.clone())
+            .or_insert(PendingOperationState {
+                requests: 0,
+                admitted: false,
+            });
+        pending.requests = pending
+            .requests
+            .checked_add(1)
+            .expect("pending request accounting overflow");
+        PendingOperationGuard {
+            ledger: self.clone(),
+            operation_id,
+        }
+    }
+
+    pub(crate) async fn wait_for_admission(
+        &self,
+        operation_id: &str,
+        deadline: Instant,
+        mut closed: watch::Receiver<bool>,
+    ) -> PendingAdmissionWait {
+        loop {
+            let changed = self.inner.pending_changed.notified();
+            let status = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pending
+                .get(operation_id)
+                .map(|pending| pending.admitted);
+            match status {
+                Some(true) => return PendingAdmissionWait::Admitted,
+                None => return PendingAdmissionWait::Removed,
+                Some(false) if *closed.borrow() => return PendingAdmissionWait::Closed,
+                Some(false) => {
+                    #[cfg(test)]
+                    self.inner.pending_wait_entered.notify_one();
+                }
+            }
+            tokio::select! {
+                _ = changed => {}
+                changed = closed.changed() => {
+                    if changed.is_err() || *closed.borrow() {
+                        return PendingAdmissionWait::Closed;
+                    }
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    return PendingAdmissionWait::TimedOut;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_until_admission_wait(&self) {
+        self.inner.pending_wait_entered.notified().await;
+    }
+
+    pub(crate) fn spawn_owned<T, F>(
+        &self,
+        operation_id: String,
+        future: F,
+    ) -> OwnedOperationResult<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, EIPError>> + Send + 'static,
+    {
+        let (result_tx, result_rx) = oneshot::channel();
+        let attempt = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.draining {
+                None
+            } else {
+                state.records.get_mut(&operation_id).and_then(|record| {
+                    if record.owned || !matches!(record.status, RecordStatus::Active) {
+                        None
+                    } else {
+                        record.owned = true;
+                        Some(record.attempt)
+                    }
+                })
+            }
+        };
+        let Some(attempt) = attempt else {
+            drop(future);
+            let _ = result_tx.send(None);
+            return result_rx;
+        };
+        let guard = OwnedOperationTaskGuard {
+            ledger: self.clone(),
+            operation_id,
+            attempt,
+        };
+        tokio::spawn(async move {
+            let result = future.await;
+            drop(guard);
+            let _ = result_tx.send(Some(result));
+        });
+        result_rx
+    }
+
+    pub(crate) fn begin_drain(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.draining = true;
+        for record in state.records.values_mut().filter(|record| record.owned) {
+            record.cancellation_requested = true;
+        }
+    }
+
+    pub(crate) async fn wait_until_owned_idle(&self) {
+        loop {
+            let notified = self.inner.owned_idle.notified();
+            let idle = !self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .records
+                .values()
+                .any(|record| record.owned);
+            if idle {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_owned_ids(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .records
+            .iter()
+            .filter(|(_, record)| record.owned)
+            .map(|(operation_id, _)| operation_id.clone())
+            .collect()
+    }
+
     pub(crate) fn begin<P: Serialize>(
         &self,
         method: &str,
         context: &EIPCallContext,
         params: &P,
-    ) -> Result<BeginOutcome, RegistryError> {
+    ) -> Result<BeginOutcome, LedgerError> {
         let replay_class = replay_class(method)?;
         let reconciliation = is_reconciliation_method(method);
         let request_digest = canonical_request_digest(method, params)?;
@@ -150,24 +346,30 @@ impl OperationRegistry {
             .unwrap_or_else(PoisonError::into_inner);
         state.prune(now, self.inner.terminal_ttl);
         if let Some(record) = state.records.get(&context.operation_id) {
-            if record.method != method || record.request_digest != request_digest {
-                return Err(RegistryError::Collision);
-            }
-            return match &record.status {
-                RecordStatus::Active | RecordStatus::Completing => Err(RegistryError::InProgress),
-                RecordStatus::Terminal { .. } => {
-                    if record.replay_class != ReplayClass::TerminalEvidence {
-                        return Err(RegistryError::TerminalFailure);
-                    }
-                    if let Some(result) = &record.result {
-                        Ok(BeginOutcome::Replay(result.clone()))
-                    } else if let Some(failure) = &record.failure {
-                        Ok(BeginOutcome::ReplayFailure(Box::new(failure.clone())))
-                    } else {
-                        Err(RegistryError::TerminalFailure)
+            let outcome = if record.method != method || record.request_digest != request_digest {
+                Err(LedgerError::Collision)
+            } else {
+                match &record.status {
+                    RecordStatus::Active | RecordStatus::Completing => Err(LedgerError::InProgress),
+                    RecordStatus::Terminal { .. } => {
+                        if record.replay_class != ReplayClass::TerminalEvidence {
+                            Err(LedgerError::TerminalFailure)
+                        } else if let Some(result) = &record.result {
+                            Ok(BeginOutcome::Replay(result.clone()))
+                        } else if let Some(failure) = &record.failure {
+                            Ok(BeginOutcome::ReplayFailure(Box::new(failure.clone())))
+                        } else {
+                            Err(LedgerError::TerminalFailure)
+                        }
                     }
                 }
             };
+            let admitted = outcome.is_ok() && state.mark_pending_admitted(&context.operation_id);
+            drop(state);
+            if admitted {
+                self.inner.pending_changed.notify_waiters();
+            }
+            return outcome;
         }
         let capacity = if reconciliation {
             1
@@ -182,13 +384,13 @@ impl OperationRegistry {
             >= capacity
         {
             if !state.reclaim_oldest_terminal(reconciliation) {
-                return Err(RegistryError::Capacity);
+                return Err(LedgerError::Capacity);
             }
         }
         state.next_attempt = state
             .next_attempt
             .checked_add(1)
-            .ok_or(RegistryError::Capacity)?;
+            .ok_or(LedgerError::Capacity)?;
         let attempt = state.next_attempt;
         state.records.insert(
             context.operation_id.clone(),
@@ -206,10 +408,16 @@ impl OperationRegistry {
                 result: None,
                 failure: None,
                 pins: BTreeSet::new(),
+                owned: false,
             },
         );
+        let admitted = state.mark_pending_admitted(&context.operation_id);
+        drop(state);
+        if admitted {
+            self.inner.pending_changed.notify_waiters();
+        }
         Ok(BeginOutcome::New(OperationLease {
-            registry: self.clone(),
+            ledger: self.clone(),
             operation_id: context.operation_id.clone(),
             replay_class,
             failure_on_drop: None,
@@ -354,7 +562,7 @@ impl OperationRegistry {
             return None;
         }
         Some(ActiveResponseHandoff {
-            registry: self.clone(),
+            ledger: self.clone(),
             operation_id: operation_id.to_owned(),
             attempt: record.attempt,
             completed: false,
@@ -404,6 +612,44 @@ impl OperationRegistry {
         }
     }
 
+    fn release_pending(&self, operation_id: &str) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pending) = state.pending.get_mut(operation_id) {
+            pending.requests = pending
+                .requests
+                .checked_sub(1)
+                .expect("pending request guard released exactly once");
+            if pending.requests == 0 {
+                state.pending.remove(operation_id);
+            }
+        }
+        drop(state);
+        self.inner.pending_changed.notify_waiters();
+    }
+
+    fn complete_owned(&self, operation_id: &str, attempt: u64) {
+        let idle = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(record) = state.records.get_mut(operation_id)
+                && record.attempt == attempt
+            {
+                record.owned = false;
+            }
+            !state.records.values().any(|record| record.owned)
+        };
+        if idle {
+            self.inner.owned_idle.notify_waiters();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn record_stats(&self) -> (usize, usize, usize) {
         let state = self
@@ -429,7 +675,7 @@ impl OperationRegistry {
 impl OperationLease {
     pub(crate) fn request_digest(&self) -> String {
         let state = self
-            .registry
+            .ledger
             .inner
             .state
             .lock()
@@ -447,12 +693,12 @@ impl OperationLease {
         method: &str,
         stage: ReceiptStage,
         outcome: Option<ReceiptOutcome>,
-    ) -> Result<OperationReceipt, RegistryError> {
+    ) -> Result<OperationReceipt, LedgerError> {
         Ok(OperationReceipt {
             operation_id: self.operation_id.clone(),
             method: method.to_owned(),
-            environment_id: self.registry.inner.environment_id.clone(),
-            generation: self.registry.inner.generation,
+            environment_id: self.ledger.inner.environment_id.clone(),
+            generation: self.ledger.inner.generation,
             request_digest: self.request_digest(),
             stage,
             outcome,
@@ -472,12 +718,12 @@ impl OperationLease {
         mut self,
         result: &T,
         receipt: Option<OperationReceipt>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), LedgerError> {
         if self.replay_class == ReplayClass::ActiveOnly {
             self.finish_active();
             return Ok(());
         }
-        let result = serde_json::to_value(result).map_err(|_| RegistryError::Encoding)?;
+        let result = serde_json::to_value(result).map_err(|_| LedgerError::Encoding)?;
         self.finish_value(Some(result), None, receipt);
         Ok(())
     }
@@ -492,7 +738,7 @@ impl OperationLease {
 
     fn finish_active(&mut self) {
         let mut state = self
-            .registry
+            .ledger
             .inner
             .state
             .lock()
@@ -514,7 +760,7 @@ impl OperationLease {
     ) {
         let now = Instant::now();
         let mut state = self
-            .registry
+            .ledger
             .inner
             .state
             .lock()
@@ -538,9 +784,21 @@ impl OperationLease {
     }
 }
 
+impl Drop for PendingOperationGuard {
+    fn drop(&mut self) {
+        self.ledger.release_pending(&self.operation_id);
+    }
+}
+
+impl Drop for OwnedOperationTaskGuard {
+    fn drop(&mut self) {
+        self.ledger.complete_owned(&self.operation_id, self.attempt);
+    }
+}
+
 impl ActiveResponseHandoff {
     pub(crate) fn complete(mut self) {
-        self.registry
+        self.ledger
             .complete_active_handoff(&self.operation_id, self.attempt);
         self.completed = true;
     }
@@ -549,7 +807,7 @@ impl ActiveResponseHandoff {
 impl Drop for ActiveResponseHandoff {
     fn drop(&mut self) {
         if !self.completed {
-            self.registry
+            self.ledger
                 .complete_active_handoff(&self.operation_id, self.attempt);
             self.completed = true;
         }
@@ -567,7 +825,7 @@ impl Drop for OperationLease {
             return;
         }
         let mut state = self
-            .registry
+            .ledger
             .inner
             .state
             .lock()
@@ -581,12 +839,23 @@ impl Drop for OperationLease {
     }
 }
 
-impl RegistryState {
+impl LedgerState {
+    fn mark_pending_admitted(&mut self, operation_id: &str) -> bool {
+        match self.pending.get_mut(operation_id) {
+            Some(pending) if !pending.admitted => {
+                pending.admitted = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn prune(&mut self, now: Instant, ttl: Duration) {
         let mut retained = VecDeque::with_capacity(self.terminal_order.len());
         while let Some(operation_id) = self.terminal_order.pop_front() {
             let expired = self.records.get(&operation_id).is_some_and(|record| {
-                record.pins.is_empty()
+                !record.owned
+                    && record.pins.is_empty()
                     && matches!(
                         record.status,
                         RecordStatus::Terminal { completed_at }
@@ -609,6 +878,7 @@ impl RegistryState {
             let eligible = !reclaimed
                 && self.records.get(&operation_id).is_some_and(|record| {
                     record.reconciliation == reconciliation
+                        && !record.owned
                         && record.pins.is_empty()
                         && matches!(record.status, RecordStatus::Terminal { .. })
                 });
@@ -628,15 +898,15 @@ impl RegistryState {
     }
 }
 
-fn replay_class(method: &str) -> Result<ReplayClass, RegistryError> {
+fn replay_class(method: &str) -> Result<ReplayClass, LedgerError> {
     let metadata = crate::eip::METHODS
         .iter()
         .find(|metadata| metadata.name == method)
-        .ok_or(RegistryError::Encoding)?;
+        .ok_or(LedgerError::Encoding)?;
     match metadata.replay_class {
         "active_only" => Ok(ReplayClass::ActiveOnly),
         "terminal_evidence" => Ok(ReplayClass::TerminalEvidence),
-        _ => Err(RegistryError::Encoding),
+        _ => Err(LedgerError::Encoding),
     }
 }
 
@@ -725,14 +995,14 @@ fn operation_deadline(
     requested_ms: Option<u64>,
     now: Instant,
     max_duration: Duration,
-) -> Result<Instant, RegistryError> {
+) -> Result<Instant, LedgerError> {
     let hard = now + max_duration;
     let Some(requested_ms) = requested_ms else {
         return Ok(hard);
     };
     let requested = Duration::from_millis(requested_ms);
     if requested.is_zero() {
-        return Err(RegistryError::DeadlineExpired);
+        return Err(LedgerError::DeadlineExpired);
     }
     Ok(hard.min(now + requested))
 }
@@ -740,9 +1010,9 @@ fn operation_deadline(
 pub(crate) fn canonical_request_digest<P: Serialize>(
     method: &str,
     params: &P,
-) -> Result<String, RegistryError> {
-    let mut value = serde_json::to_value(params).map_err(|_| RegistryError::Encoding)?;
-    let object = value.as_object_mut().ok_or(RegistryError::Encoding)?;
+) -> Result<String, LedgerError> {
+    let mut value = serde_json::to_value(params).map_err(|_| LedgerError::Encoding)?;
+    let object = value.as_object_mut().ok_or(LedgerError::Encoding)?;
     if let Some(context) = object
         .get_mut("context")
         .and_then(serde_json::Value::as_object_mut)
@@ -750,7 +1020,7 @@ pub(crate) fn canonical_request_digest<P: Serialize>(
         context.remove("operation_id");
         context.remove("timeout_ms");
     }
-    let canonical = serde_json::to_vec(&value).map_err(|_| RegistryError::Encoding)?;
+    let canonical = serde_json::to_vec(&value).map_err(|_| LedgerError::Encoding)?;
     let mut hasher = Sha256::new();
     hasher.update(crate::eip::EIP_PROTOCOL_VERSION.as_bytes());
     hasher.update([0]);
@@ -768,10 +1038,10 @@ impl ShortIdAllocator {
         }
     }
 
-    pub(crate) fn next(&self, prefix: &'static str) -> Result<String, RegistryError> {
+    pub(crate) fn next(&self, prefix: &'static str) -> Result<String, LedgerError> {
         let mut counters = self.counters.lock().unwrap_or_else(PoisonError::into_inner);
         let counter = counters.entry(prefix).or_default();
-        *counter = counter.checked_add(1).ok_or(RegistryError::Encoding)?;
+        *counter = counter.checked_add(1).ok_or(LedgerError::Encoding)?;
         Ok(format!("{prefix}-{}-{counter}", self.namespace))
     }
 }
@@ -792,9 +1062,9 @@ fn encode_base36(mut value: u64) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn random_selector(prefix: &str) -> Result<String, RegistryError> {
+pub(crate) fn random_selector(prefix: &str) -> Result<String, LedgerError> {
     let mut bytes = [0_u8; 18];
-    getrandom::fill(&mut bytes).map_err(|_| RegistryError::Encoding)?;
+    getrandom::fill(&mut bytes).map_err(|_| LedgerError::Encoding)?;
     use base64::Engine as _;
     Ok(format!(
         "{prefix}-{}",
@@ -807,7 +1077,7 @@ mod tests {
     use crate::eip::{EIPCallContext, EIPError, ErrorType};
 
     use super::{
-        BeginOutcome, OperationInterruption, OperationRegistry, RegistryError, ShortIdAllocator,
+        BeginOutcome, LedgerError, OperationInterruption, OperationLedger, ShortIdAllocator,
         canonical_request_digest,
     };
 
@@ -854,8 +1124,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_replays_only_the_same_operation_identity_and_request() {
-        let registry = OperationRegistry::new(
+    fn ledger_replays_only_the_same_operation_identity_and_request() {
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             2,
@@ -870,7 +1140,7 @@ mod tests {
             operation_id: "one".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(lease) = registry
+        let BeginOutcome::New(lease) = ledger
             .begin("file.write_text", &context, &params)
             .expect("accepted")
         else {
@@ -881,7 +1151,7 @@ mod tests {
             .expect("finishes");
 
         assert!(matches!(
-            registry
+            ledger
                 .begin("file.write_text", &context, &params)
                 .expect("same operation replays"),
             BeginOutcome::Replay(_)
@@ -891,18 +1161,18 @@ mod tests {
             "value": 2
         });
         assert!(matches!(
-            registry.begin("file.write_text", &context, &mismatched),
-            Err(RegistryError::Collision)
+            ledger.begin("file.write_text", &context, &mismatched),
+            Err(LedgerError::Collision)
         ));
         assert!(matches!(
-            registry.begin("file.mkdir", &context, &params),
-            Err(RegistryError::Collision)
+            ledger.begin("file.mkdir", &context, &params),
+            Err(LedgerError::Collision)
         ));
     }
 
     #[test]
     fn dispatched_failure_is_published_atomically_after_lease_completion() {
-        let registry = OperationRegistry::new(
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             2,
@@ -917,7 +1187,7 @@ mod tests {
             operation_id: "failed".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(lease) = registry
+        let BeginOutcome::New(lease) = ledger
             .begin("file.write_text", &context, &params)
             .expect("operation begins")
         else {
@@ -926,8 +1196,8 @@ mod tests {
         drop(lease);
 
         assert!(matches!(
-            registry.begin("file.write_text", &context, &params),
-            Err(RegistryError::InProgress)
+            ledger.begin("file.write_text", &context, &params),
+            Err(LedgerError::InProgress)
         ));
 
         let failure = serde_json::from_value::<EIPError>(serde_json::json!({
@@ -940,9 +1210,9 @@ mod tests {
             }
         }))
         .expect("typed failure");
-        registry.finish_dispatched_failure("file.write_text", &params, failure);
+        ledger.finish_dispatched_failure("file.write_text", &params, failure);
 
-        let BeginOutcome::ReplayFailure(replayed) = registry
+        let BeginOutcome::ReplayFailure(replayed) = ledger
             .begin("file.write_text", &context, &params)
             .expect("failure replays")
         else {
@@ -954,7 +1224,7 @@ mod tests {
 
     #[test]
     fn active_only_records_live_until_the_exact_response_handoff() {
-        let registry = OperationRegistry::new(
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             2,
@@ -970,7 +1240,7 @@ mod tests {
             operation_id: "page".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(lease) = registry
+        let BeginOutcome::New(lease) = ledger
             .begin("output.read", &context, &params)
             .expect("active-only operation begins")
         else {
@@ -980,19 +1250,19 @@ mod tests {
             .finish(&serde_json::json!({"next_offset": 0}), None)
             .expect("active-only operation completes handler work");
         assert!(matches!(
-            registry.begin("output.read", &context, &params),
-            Err(RegistryError::InProgress)
+            ledger.begin("output.read", &context, &params),
+            Err(LedgerError::InProgress)
         ));
 
-        let first = registry
+        let first = ledger
             .active_response_handoff("output.read", &params)
             .expect("handoff token exists");
-        let stale = registry
+        let stale = ledger
             .active_response_handoff("output.read", &params)
             .expect("duplicate waiter observes the same admission attempt");
         first.complete();
 
-        let BeginOutcome::New(second) = registry
+        let BeginOutcome::New(second) = ledger
             .begin("output.read", &context, &params)
             .expect("operation ID is reusable after handoff")
         else {
@@ -1003,19 +1273,19 @@ mod tests {
             .expect("second attempt completes handler work");
         drop(stale);
         assert!(matches!(
-            registry.begin("output.read", &context, &params),
-            Err(RegistryError::InProgress)
+            ledger.begin("output.read", &context, &params),
+            Err(LedgerError::InProgress)
         ));
-        registry
+        ledger
             .active_response_handoff("output.read", &params)
             .expect("second handoff token exists")
             .complete();
-        assert_eq!(registry.record_stats().1, 0);
+        assert_eq!(ledger.record_stats().1, 0);
     }
 
     #[test]
     fn session_resource_creation_stays_active_until_response_handoff() {
-        let registry = OperationRegistry::new(
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             2,
@@ -1030,7 +1300,7 @@ mod tests {
             operation_id: "open-reader".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(lease) = registry
+        let BeginOutcome::New(lease) = ledger
             .begin("file.open_reader", &context, &params)
             .expect("session resource operation begins")
         else {
@@ -1040,19 +1310,19 @@ mod tests {
             .finish(&serde_json::json!({"reader": "reader-1"}), None)
             .expect("session resource handler completes");
         assert!(matches!(
-            registry.begin("file.open_reader", &context, &params),
-            Err(RegistryError::InProgress)
+            ledger.begin("file.open_reader", &context, &params),
+            Err(LedgerError::InProgress)
         ));
-        registry
+        ledger
             .active_response_handoff("file.open_reader", &params)
             .expect("session resource response has a handoff")
             .complete();
-        assert_eq!(registry.record_stats().1, 0);
+        assert_eq!(ledger.record_stats().1, 0);
     }
 
     #[test]
     fn pinned_command_origin_cannot_consume_the_reconciliation_reserve() {
-        let registry = OperationRegistry::new(
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             1,
@@ -1067,7 +1337,7 @@ mod tests {
             operation_id: "start".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(start) = registry
+        let BeginOutcome::New(start) = ledger
             .begin("process.start", &start_context, &start_params)
             .expect("command origin begins")
         else {
@@ -1098,8 +1368,8 @@ mod tests {
             timeout_ms: None,
         };
         assert!(matches!(
-            registry.begin("file.write_text", &ordinary_context, &ordinary_params),
-            Err(RegistryError::Capacity)
+            ledger.begin("file.write_text", &ordinary_context, &ordinary_params),
+            Err(LedgerError::Capacity)
         ));
 
         let reconcile_params = serde_json::json!({
@@ -1110,7 +1380,7 @@ mod tests {
             operation_id: "inspect".to_owned(),
             timeout_ms: None,
         };
-        let BeginOutcome::New(inspect) = registry
+        let BeginOutcome::New(inspect) = ledger
             .begin("process.inspect", &reconcile_context, &reconcile_params)
             .expect("reconciliation reserve remains available")
         else {
@@ -1119,16 +1389,16 @@ mod tests {
         inspect
             .finish(&serde_json::json!({"process": {}}), None)
             .expect("reconciliation handler completes");
-        registry
+        ledger
             .active_response_handoff("process.inspect", &reconcile_params)
             .expect("reconciliation response has a handoff")
             .complete();
 
-        registry.release_selector("process", "process-1");
-        registry.release_selector("output", "output-1");
-        registry.release_selector("output", "output-2");
+        ledger.release_selector("process", "process-1");
+        ledger.release_selector("output", "output-1");
+        ledger.release_selector("output", "output-2");
         assert!(matches!(
-            registry
+            ledger
                 .begin("file.write_text", &ordinary_context, &ordinary_params)
                 .expect("unpinned origin becomes reclaimable"),
             BeginOutcome::New(_)
@@ -1136,8 +1406,139 @@ mod tests {
     }
 
     #[test]
+    fn lost_cancel_response_keeps_target_cancellation_for_both_replay_classes() {
+        for (target_method, target_id) in [
+            ("environment.describe", "active-target"),
+            ("file.write_text", "terminal-target"),
+        ] {
+            let ledger = OperationLedger::new(
+                "env".to_owned(),
+                7,
+                4,
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(60),
+            );
+            let target_context = EIPCallContext {
+                operation_id: target_id.to_owned(),
+                timeout_ms: None,
+            };
+            let target_params = serde_json::json!({
+                "context": {"operation_id": target_id},
+                "value": 1
+            });
+            let BeginOutcome::New(_target) = ledger
+                .begin(target_method, &target_context, &target_params)
+                .expect("target begins")
+            else {
+                panic!("new target expected")
+            };
+
+            let cancel_context = EIPCallContext {
+                operation_id: "cancel-request".to_owned(),
+                timeout_ms: None,
+            };
+            let cancel_params = serde_json::json!({
+                "context": {"operation_id": "cancel-request"},
+                "target_operation_id": target_id
+            });
+            let BeginOutcome::New(cancel) = ledger
+                .begin("operation.cancel", &cancel_context, &cancel_params)
+                .expect("cancel begins")
+            else {
+                panic!("new cancel expected")
+            };
+            assert_eq!(
+                ledger.cancel(target_id),
+                crate::eip::OperationCancelStatus::CancellationRequested
+            );
+            cancel
+                .finish(
+                    &serde_json::json!({"status": "cancellation_requested"}),
+                    None,
+                )
+                .expect("cancel handler finishes");
+            drop(
+                ledger
+                    .active_response_handoff("operation.cancel", &cancel_params)
+                    .expect("cancel response has handoff"),
+            );
+
+            assert_eq!(
+                ledger.interruption(target_id),
+                Some(OperationInterruption::Cancelled)
+            );
+            assert!(matches!(
+                ledger
+                    .begin("operation.cancel", &cancel_context, &cancel_params)
+                    .expect("lost cancel response frees active-only identity"),
+                BeginOutcome::New(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_record_is_not_reclaimed_before_owned_native_completion() {
+        let ledger = OperationLedger::new(
+            "env".to_owned(),
+            7,
+            1,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(60),
+        );
+        let context = EIPCallContext {
+            operation_id: "owned".to_owned(),
+            timeout_ms: None,
+        };
+        let params = serde_json::json!({
+            "context": {"operation_id": "owned"},
+            "value": 1
+        });
+        let BeginOutcome::New(operation) = ledger
+            .begin("file.write_text", &context, &params)
+            .expect("owned mutation begins")
+        else {
+            panic!("new operation expected")
+        };
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let owned = ledger.spawn_owned("owned".to_owned(), async move {
+            operation
+                .finish(&serde_json::json!({"completed": true}), None)
+                .expect("terminal evidence publishes");
+            let _ = terminal_tx.send(());
+            let _ = release_rx.await;
+            Ok(())
+        });
+        terminal_rx.await.expect("terminal evidence is visible");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let next_context = EIPCallContext {
+            operation_id: "next".to_owned(),
+            timeout_ms: None,
+        };
+        let next_params = serde_json::json!({
+            "context": {"operation_id": "next"},
+            "value": 2
+        });
+        assert!(matches!(
+            ledger.begin("file.write_text", &next_context, &next_params),
+            Err(LedgerError::Capacity)
+        ));
+
+        release_tx.send(()).expect("release owned mutation");
+        assert!(matches!(owned.await, Ok(Some(Ok(())))));
+        ledger.wait_until_owned_idle().await;
+        assert!(matches!(
+            ledger
+                .begin("file.write_text", &next_context, &next_params)
+                .expect("completed unpinned evidence becomes reclaimable"),
+            BeginOutcome::New(_)
+        ));
+    }
+
+    #[test]
     fn operation_deadlines_are_finite_and_observable_by_workers() {
-        let registry = OperationRegistry::new(
+        let ledger = OperationLedger::new(
             "env".to_owned(),
             7,
             4,
@@ -1149,7 +1550,7 @@ mod tests {
             timeout_ms: None,
         };
         let params = serde_json::json!({"context": {"operation_id": "timed"}});
-        let _lease = match registry
+        let _lease = match ledger
             .begin("environment.describe", &context, &params)
             .expect("operation begins")
         {
@@ -1160,7 +1561,7 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert_eq!(
-            registry.interruption("timed"),
+            ledger.interruption("timed"),
             Some(OperationInterruption::TimedOut)
         );
 
@@ -1169,8 +1570,8 @@ mod tests {
             timeout_ms: Some(0),
         };
         assert!(matches!(
-            registry.begin("environment.describe", &expired, &params),
-            Err(RegistryError::DeadlineExpired)
+            ledger.begin("environment.describe", &expired, &params),
+            Err(LedgerError::DeadlineExpired)
         ));
     }
 }

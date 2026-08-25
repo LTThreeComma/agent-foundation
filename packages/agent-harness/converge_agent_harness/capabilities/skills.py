@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
-from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -16,7 +15,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
-from converge_agent_harness.context import AgentContext
+from converge_agent_harness.context import AgentContext, SkillPath
 from converge_agent_harness.environment.files import FileMetadata
 from converge_agent_harness.environment.models import EnvironmentError, EnvironmentPath
 from converge_agent_harness.environment.providers import BoundEnvironment
@@ -395,23 +394,20 @@ class _SkillsRunCapability(SkillsCapability):
         self._catalog = tuple(item.model_copy(deep=True) for item in catalog)
         self._context = context
         keys: dict[tuple[str, int, str], SkillCatalogItem] = {}
-        directories: list[EnvironmentPath] = []
+        skill_paths: list[SkillPath] = []
         for item in self._catalog:
-            directories.append(context.environment.resolve_path(item.path))
+            assert item.source_id is not None
+            skill_paths.append(
+                SkillPath(
+                    name=item.name,
+                    source_id=item.source_id,
+                    directory=context.environment.resolve_path(item.path),
+                )
+            )
             selected = context.environment.resolve_path(_join_logical_path(item.path, _SKILL_FILE_NAME))
             keys[(selected.binding_id, selected.binding_revision, selected.path)] = item
         self._access_keys = MappingProxyType(keys)
-        self._selected_directories = tuple(directories)
-
-    def is_selected_markdown(self, path: str) -> bool:
-        """Return whether a logical path is Markdown beneath one selected skill directory."""
-        try:
-            selected = self._context.environment.resolve_path(path)
-        except EnvironmentError:
-            return False
-        if PurePosixPath(selected.path).suffix.casefold() != ".md":
-            return False
-        return any(_is_within_root(selected, directory) for directory in self._selected_directories)
+        context.skill_paths.publish(SKILLS_CAPABILITY_ID, skill_paths)
 
     async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
         if ctx.deps is not self._context:

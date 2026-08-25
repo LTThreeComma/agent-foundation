@@ -10,6 +10,7 @@ TAG_PREFIXES = {
     "agent-ui": "release/agent-ui-v",
     "foundation": "release/foundation-v",
     "agent-envd": "release/agent-envd-v",
+    "foundation-cli": "release/foundation-cli-v",
     "sdk-python": "release/sdk/python/",
     "sdk-go": "release/sdk/go/",
     "sdk-rust": "release/sdk/rust/",
@@ -20,6 +21,7 @@ INITIAL_NOTES = {
     "agent-ui": "Initial release for Converge Agent UI.",
     "foundation": "Initial release for Agent Foundation.",
     "agent-envd": "Initial release for agent-envd.",
+    "foundation-cli": "Initial release for the Agent Foundation CLI.",
     "sdk-python": "Initial release for the Foundation SDK for Python.",
     "sdk-go": "Initial release for the Foundation SDK for Go.",
     "sdk-rust": "Initial release for the Foundation SDK for Rust.",
@@ -114,6 +116,8 @@ def build_release_command(
         "--title",
         title,
     ]
+    if component == "foundation-cli":
+        command.append("--latest=false")
     if parse_release_version(version).is_prerelease:
         command.append("--prerelease")
     if previous_tag is None:

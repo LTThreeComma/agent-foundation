@@ -14,6 +14,7 @@ COMPONENTS = (
     "agent-ui",
     "foundation",
     "agent-envd",
+    "foundation-cli",
     "sdk-python",
     "sdk-go",
     "sdk-rust",
@@ -52,6 +53,9 @@ SDK_PYTHON_MANIFEST = Path("sdk/python/pyproject.toml")
 SDK_PYTHON_LOCK = Path("sdk/python/uv.lock")
 SDK_RUST_MANIFEST = Path("sdk/rust/Cargo.toml")
 SDK_RUST_LOCK = Path("sdk/rust/Cargo.lock")
+FOUNDATION_CLI_MANIFEST = Path("sdk/rust/agent-foundation-cli/Cargo.toml")
+FOUNDATION_CLI_LOCK = Path("sdk/rust/agent-foundation-cli/Cargo.lock")
+FOUNDATION_CLI_PACKAGE = "agent-foundation-cli"
 SDK_TYPESCRIPT_MANIFEST = Path("sdk/typescript/package.json")
 SDK_TYPESCRIPT_LOCK = Path("sdk/typescript/package-lock.json")
 RELEASE_VERSION_PATTERN = re.compile(
@@ -323,6 +327,15 @@ def component_versions(root: Path, component: str) -> dict[str, str]:
                 root,
                 SDK_RUST_LOCK,
                 "converge-foundation-sdk",
+            ),
+        }
+    if component == "foundation-cli":
+        return {
+            str(FOUNDATION_CLI_MANIFEST): _cargo_package_version(root, FOUNDATION_CLI_MANIFEST),
+            f"{FOUNDATION_CLI_LOCK} package {FOUNDATION_CLI_PACKAGE}": _lock_package_version(
+                root,
+                FOUNDATION_CLI_LOCK,
+                FOUNDATION_CLI_PACKAGE,
             ),
         }
     if component == "sdk-typescript":
@@ -647,6 +660,19 @@ def prepare_component_version(root: Path, component: str, version: str) -> tuple
             "converge-foundation-sdk",
             canonical_version,
             SDK_RUST_LOCK,
+        )
+    elif component == "foundation-cli":
+        planned[FOUNDATION_CLI_MANIFEST] = _replace_table_version(
+            _read_text(root, FOUNDATION_CLI_MANIFEST),
+            "package",
+            canonical_version,
+            FOUNDATION_CLI_MANIFEST,
+        )
+        planned[FOUNDATION_CLI_LOCK] = _replace_lock_package_version(
+            _read_text(root, FOUNDATION_CLI_LOCK),
+            FOUNDATION_CLI_PACKAGE,
+            canonical_version,
+            FOUNDATION_CLI_LOCK,
         )
     elif component == "sdk-typescript":
         planned[SDK_TYPESCRIPT_MANIFEST] = _replace_json_versions(

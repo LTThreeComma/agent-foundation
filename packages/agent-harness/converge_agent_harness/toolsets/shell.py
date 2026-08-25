@@ -55,6 +55,7 @@ from .output import (
     DEFAULT_TOOL_OUTPUT_CHARS,
     acknowledge_tool_output,
     continuation_disclosure,
+    disclose_sequence_field,
     disclose_text_paths,
     tool_output_size,
 )
@@ -78,6 +79,7 @@ from .shell_results import (
 _MAX_MODEL_TEXT_BYTES = 256 * 1024
 _MAX_MODEL_OUTPUT_BYTES = 1024 * 1024
 _MAX_MODEL_RESULTS = 1_000
+_PROCESS_RESULT_ENVELOPE_CHARS = 128
 _MAX_REFERENCE_ENTRIES = 100_000
 _REFERENCE_PATTERN = re.compile(r"^process-([1-9][0-9]*)$")
 
@@ -610,12 +612,30 @@ class ShellToolset:
                     },
                 }
             )
-        return {
+        projected: dict[str, JsonValue] = {
             "ok": True,
-            "processes": processes,
+            "processes": cast(JsonValue, processes),
+            "showing": len(processes),
             "next_cursor": next_cursor,
             "truncated": next_cursor is not None,
         }
+        bounded, showing = await disclose_sequence_field(
+            ctx.deps,
+            projected,
+            field="processes",
+            content_complete=next_cursor is None,
+            noun="process status page",
+            continuation_hint="Call environment_process_status again with next_cursor as cursor to continue.",
+        )
+        bounded["showing"] = showing
+        disclosure = bounded.get("disclosure")
+        if showing < len(processes) and isinstance(disclosure, dict) and disclosure.get("output_file_path") is None:
+            bounded["next_cursor"] = cursor
+            bounded["truncated"] = True
+            disclosure["hint"] = (
+                "Call environment_process_status again with this next_cursor as cursor and a smaller limit."
+            )
+        return cast(ProcessStatusListResult, bounded)
 
     async def environment_process_read_output(
         self,
@@ -928,7 +948,7 @@ class ShellToolset:
             stdout_available,
             stderr_available,
             raw_budget=output_budget,
-            json_budget=DEFAULT_TOOL_OUTPUT_CHARS,
+            json_budget=DEFAULT_TOOL_OUTPUT_CHARS - _PROCESS_RESULT_ENVELOPE_CHARS,
             project=project,
         )
         entry.stdout_offset = max(entry.stdout_offset, len(stdout_data))
@@ -1021,7 +1041,7 @@ class ShellToolset:
                     stdout_available,
                     stderr_available,
                     raw_budget=aggregate_budget,
-                    json_budget=DEFAULT_TOOL_OUTPUT_CHARS,
+                    json_budget=DEFAULT_TOOL_OUTPUT_CHARS - _PROCESS_RESULT_ENVELOPE_CHARS,
                     project=project,
                 )
                 _require_stream_progress(stdout_available, stderr_available, stdout_data, stderr_data)

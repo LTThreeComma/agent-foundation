@@ -49,6 +49,14 @@ repos:
         entry: cargo fmt --manifest-path sdk/rust/Cargo.toml
         language: system
         files: ^sdk/rust/.*\.rs$
+        exclude: ^sdk/rust/agent-foundation-cli/
+        pass_filenames: false
+
+      - id: foundation-cli-rustfmt
+        name: rustfmt (Foundation CLI)
+        entry: cargo fmt --manifest-path sdk/rust/agent-foundation-cli/Cargo.toml
+        language: system
+        files: ^sdk/rust/agent-foundation-cli/.*\.rs$
         pass_filenames: false
 
       - id: foundation-web-prettier

@@ -2,7 +2,7 @@
 
 from .context import HandoffToolset
 from .documents import DocumentsToolset
-from .files import FileToolset
+from .files import FILE_VIEW_RULES, FileToolset, FileViewRule
 from .interaction import UserInteractionToolset
 from .media import MediaToolset
 from .output import (
@@ -29,10 +29,12 @@ from .working_state import WorkingStateToolset
 
 __all__ = [
     "DEFAULT_TOOL_OUTPUT_CHARS",
+    "FILE_VIEW_RULES",
     "FINAL_TOOL_OUTPUT_HARD_CHARS",
     "MAX_TOOL_OUTPUT_SPILL_BYTES",
     "DocumentsToolset",
     "FileToolset",
+    "FileViewRule",
     "HandoffToolset",
     "MediaToolset",
     "MonitoredProcessToolset",

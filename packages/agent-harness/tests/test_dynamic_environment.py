@@ -63,7 +63,11 @@ from converge_agent_harness.tools import (
     ToolOutputPolicy,
 )
 from converge_agent_harness.toolsets.files import FileToolset
-from converge_agent_harness.toolsets.output import DEFAULT_TOOL_OUTPUT_CHARS, tool_output_size
+from converge_agent_harness.toolsets.output import (
+    DEFAULT_TOOL_OUTPUT_CHARS,
+    disclose_sequence_field,
+    tool_output_size,
+)
 from converge_agent_harness.toolsets.shell import ShellToolset, _CompactReferenceTable, _fit_stream_prefixes
 from pydantic_ai import BinaryContent
 from pydantic_ai.agent.spec import AgentSpec
@@ -72,7 +76,82 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, RetryPromptPart, To
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 pytestmark = pytest.mark.anyio
+requires_posix_process_groups = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Direct Local process groups require POSIX",
+)
 _PROCESS_EXECUTABLE = Path(sys.executable).resolve()
+
+
+async def test_incomplete_oversized_sequence_spills_before_preserving_provider_cursor() -> None:
+    spilled: list[bytes] = []
+
+    class Context:
+        async def _spill_tool_result(self, data: bytes, *, suffix: str) -> str:
+            assert suffix == ".json"
+            spilled.append(data)
+            return "/workspace/page.json"
+
+    value = {
+        "ok": True,
+        "entries": [{"path": f"/entry-{index}-{'x' * 80}"} for index in range(200)],
+        "has_more": True,
+        "next_offset": 200,
+    }
+    bounded, showing = await disclose_sequence_field(
+        cast(Any, Context()),
+        cast(Any, value),
+        field="entries",
+        content_complete=False,
+        noun="test page",
+        continuation_hint="Continue from next_offset.",
+    )
+
+    assert showing < len(value["entries"])
+    assert bounded["next_offset"] == 200
+    assert bounded["disclosure"]["output_file_path"] == "/workspace/page.json"
+    assert b"entry-199" in spilled[0]
+
+
+async def test_file_list_restarts_page_when_secondary_spill_is_unavailable() -> None:
+    class PagingFiles:
+        async def list(self, path: str, *, offset: int, max_results: int, include_hidden: bool):
+            del path, include_hidden
+            entries = tuple(
+                FileMetadata(
+                    path=f"/entry-{index}-{'x' * 80}",
+                    kind="file",
+                    size=1,
+                    writable=False,
+                )
+                for index in range(offset, min(200, offset + max_results))
+            )
+            return FileEntriesResult(
+                entries=entries,
+                offset=offset,
+                has_more=offset + len(entries) < 200,
+            )
+
+    class Context:
+        async def _spill_tool_result(self, data: bytes, *, suffix: str) -> None:
+            del data, suffix
+            return None
+
+    toolset = FileToolset(cast(Any, PagingFiles()))
+    ctx = cast(Any, SimpleNamespace(deps=Context()))
+
+    oversized = await toolset.ls(ctx, "/", max_results=200)
+    retried = await toolset.ls(ctx, "/", offset=oversized["next_offset"], max_results=10)
+
+    assert oversized["showing"] < 200
+    assert oversized["next_offset"] == 0
+    assert oversized["has_more"] is True
+    assert oversized["disclosure"]["output_file_path"] is None
+    assert "smaller max_results" in oversized["disclosure"]["hint"]
+    assert retried["entries"] == [
+        {"path": f"/entry-{index}-{'x' * 80}", "kind": "file", "size": 1, "writable": False} for index in range(10)
+    ]
+    assert retried["next_offset"] == 10
 
 
 def test_stream_prefixes_do_not_split_valid_utf8_characters() -> None:
@@ -433,7 +512,9 @@ async def test_exact_edits_are_agent_friendly_and_failed_batch_is_not_published(
 
 
 async def test_grep_returns_requested_context_at_file_boundaries(tmp_path: Path) -> None:
-    (tmp_path / "context.txt").write_text("needle0 top\nbefore middle\nneedle1 middle\nafter middle\nneedle2 bottom\n")
+    (tmp_path / "context.txt").write_bytes(
+        b"needle0 top\nbefore middle\nneedle1 middle\nafter middle\nneedle2 bottom\n"
+    )
     observed: list[dict[str, Any]] = []
     requests = (
         {"pattern": "needle0", "context_lines": 0},
@@ -1547,7 +1628,7 @@ async def test_terminal_waits_for_delayed_topology_adapter_drain(
 
 async def test_dynamic_file_operations_accept_non_virtual_file_operator(tmp_path: Path) -> None:
     source = tmp_path / "sample.txt"
-    source.write_text("provider-neutral\n", encoding="utf-8")
+    source.write_bytes(b"provider-neutral\n")
     files = LocalFileOperator(
         root=tmp_path,
         read_only=False,
@@ -1604,10 +1685,14 @@ async def test_file_toolset_list_continues_after_a_fully_filtered_raw_page() -> 
     assert first["entries"] == []
     assert first["has_more"] is True
     assert first["next_offset"] == 1_000
+    assert first["disclosure"]["content_complete"] is False
+    assert "next_offset" in first["disclosure"]["hint"]
     assert second["entries"] == [{"path": "/visible.txt", "kind": "file", "size": 1, "writable": False}]
     assert second["next_offset"] is None
+    assert "disclosure" not in second
 
 
+@requires_posix_process_groups
 async def test_process_output_is_drained_once_without_model_output_references(tmp_path: Path) -> None:
     aggregate = _local_binding(tmp_path, process_output=True)
     run_bindings = RunBindings.local(environment=aggregate)
@@ -1647,6 +1732,7 @@ async def test_process_output_is_drained_once_without_model_output_references(tm
         assert released == {"ok": True, "released": True}
 
 
+@requires_posix_process_groups
 async def test_process_output_offsets_advance_only_for_delivered_bytes(tmp_path: Path) -> None:
     aggregate = _local_binding(tmp_path, process_output=True)
     async with aggregate.bind(run_id="run-offset", instance=RunBindings.local().instance) as environment:
@@ -1684,6 +1770,7 @@ async def test_process_output_offsets_advance_only_for_delivered_bytes(tmp_path:
         await toolset.environment_process_release(ctx, process)
 
 
+@requires_posix_process_groups
 async def test_process_output_projection_budgets_serialized_replacement_text(tmp_path: Path) -> None:
     aggregate = _local_binding(tmp_path, process_output=True)
     async with aggregate.bind(run_id="run-invalid-output", instance=RunBindings.local().instance) as environment:
@@ -1719,6 +1806,7 @@ async def test_process_output_projection_budgets_serialized_replacement_text(tmp
         await toolset.environment_process_release(ctx, process)
 
 
+@requires_posix_process_groups
 async def test_model_process_release_retries_after_partial_output_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1992,10 +2080,10 @@ async def test_large_exact_edit_transformation_runs_off_event_loop(
 
     monkeypatch.setattr(file_toolset_module, "_apply_text_edits", slow_transform)
     edit_task = asyncio.create_task(toolset.edit(ctx, "/value.txt", "before", "after"))
-    for _ in range(100):
+    for _ in range(200):
         if started.is_set():
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
 
     assert started.is_set()
     await asyncio.sleep(0.01)

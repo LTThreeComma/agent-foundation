@@ -11,9 +11,11 @@ The platform consists of:
 - `agent-ui`, distributed as `converge-agent-ui`, for local sessions and WebUI/TUI interaction;
 - `agent-envd`, distributed as `converge-agent-envd`, for Environment Interaction Protocol operations;
 - `converge-agent-envd-client`, the generated low-level Python EIP client;
-- `foundation-service`, distributed as `converge-foundation-service`, for optional durable hosting.
+- `foundation-service`, distributed as `converge-foundation-service`, for optional durable hosting;
+- Foundation Service SDKs for typed access to the hosted `/api` boundary;
+- `agent-foundation`, a cross-platform remote CLI built above the Foundation Rust SDK.
 
-An application can embed the Harness directly, install Agent UI for a local interactive Host, use Foundation Service, or replace providers through documented typed and protocol boundaries.
+An application can embed the Harness directly, install Agent UI for a local interactive Host, use Foundation Service through an SDK or the CLI, or replace providers through documented typed and protocol boundaries.
 
 ## Architecture
 
@@ -37,6 +39,11 @@ flowchart TB
         Sessions[Local sessions]
         WebUI[Bundled WebUI]
         TUI[Terminal UI]
+    end
+
+    subgraph FoundationClients[Foundation clients]
+        FoundationCLI[agent-foundation CLI]
+        RustSDK[Foundation Rust SDK]
     end
 
     subgraph Harness[agent-harness]
@@ -69,6 +76,7 @@ flowchart TB
     end
 
     Product --> Service
+    FoundationCLI --> RustSDK --> Control
     Product -. embedded .-> Definition
     Product -. local interactive .-> AppService
     AppService --> Sessions
@@ -89,7 +97,7 @@ flowchart TB
     Run -. telemetry .-> OTel
 ```
 
-Dependency direction is one-way: Hosts embed the Harness; Agent UI and hosted transports consume Agent Stream Protocol above public Harness observations; the Harness uses provider and Environment boundaries; providers do not import Host lifecycle or presentation types.
+Dependency direction is one-way: Hosts embed the Harness; Agent UI and hosted transports consume Agent Stream Protocol above public Harness observations; the Harness uses provider and Environment boundaries; providers do not import Host lifecycle or presentation types. Foundation clients call only the public service `/api` boundary, and the Foundation CLI consumes the Rust SDK rather than implementing a second transport client.
 
 ## Component Responsibilities
 
@@ -100,6 +108,8 @@ Dependency direction is one-way: Hosts embed the Harness; Agent UI and hosted tr
 | `agent-ui`              | Local profiles, sessions, foreground orchestration, process-local background children, application service, WebUI, and TUI                                     | Distributed execution, multi-tenant authorization, or another Agent loop                                     |
 | `agent-envd-client`     | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                                   | Harness routing, product-user authorization, provider provisioning, Host lifecycle                           |
 | `agent-envd`            | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, disk-backed command output, daemon generation, and native command containment | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy             |
+| Foundation SDKs         | Language-typed access to the public Foundation Service `/api` contract                                                                                         | Service internals, product policy, or durable lifecycle authority                                            |
+| `agent-foundation`      | Cross-platform command-line interaction with public Foundation Service operations through the Rust SDK                                                         | A second HTTP client, service process management, persistence, queues, migrations, or infrastructure control |
 | `foundation-service`    | Host-owned definition/Presets/revisions, reconstruction locks, Executions/Attempts, client tools, APIs, events, usage records, and optional web projection     | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning         |
 | Product                 | Caller authentication, business policy, user experience, and final delivery                                                                                    | Harness internals and provider implementation                                                                |
 
@@ -148,6 +158,14 @@ Environment is a Harness-owned run lifecycle resource, not a Capability. `BoundE
 The Harness adapts EIP through `converge-agent-envd-client`; other trusted consumers such as product file gateways can use that client independently. `agent-envd` carries JSON-RPC control and raw bidirectional file transfer over trusted stdio or an envd-initiated reverse WebSocket, and owns daemon-generation operation/receipt evidence, process handles, disk-backed command output with explicit-offset reads, session-scoped transfers, and Linux/macOS/Windows command containment. Product/browser authentication stays at the gateway/control service, and short-lived envd attachment credentials never reach the browser. The Host selects providers and desired topology and materializes trusted process-local bindings. The Harness imports no vendor provisioning API, and Foundation Service does not persist a generic Sandbox resource.
 
 Provider-defined portable backend data can enter only the explicit `HarnessState.environment_state` field after fresh bindings are selected. Provider resource-incarnation evidence and optional launch/reattachment payload remain in a separate encrypted Host envelope. Live clients, sockets, credentials, process handles, readiness, controllers, and provider authority do not become Harness state. Optional `DynamicEnvironmentCapability` composes File/Shell tools with dynamic model context but owns neither provider lifecycle nor state.
+
+## Foundation Client Surfaces
+
+Foundation Service clients operate only through the public `/api` namespace. The language SDKs own typed transport and service-contract mapping. The `agent-foundation` executable is a user-facing composition layer above the Rust SDK and does not duplicate HTTP serialization, authentication transport, retries, or service models.
+
+A CLI network command and its backing SDK operation enter the platform together with the corresponding real service API and end-to-end behavior. The CLI does not reserve unsupported commands as placeholders. Service-process startup, migrations, databases, Redis, queues, containers, Kubernetes, and other operator internals remain owned by Foundation Service deployment surfaces rather than the remote client.
+
+The CLI source, workspace isolation, validation, and binary-only release channel are defined by the [repository model](repository-model.md).
 
 ## Hosted Service Foundation
 

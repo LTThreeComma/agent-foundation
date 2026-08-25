@@ -100,6 +100,7 @@ format: sync foundation-web-sync harness-ui-sync sdk-python-sync sdk-typescript-
 	@files="$$(find sdk/go -type f -name '*.go')"; gofmt -w $$files
 	@cargo fmt --all
 	@(cd sdk/rust && cargo fmt)
+	@(cd sdk/rust/agent-foundation-cli && cargo fmt)
 	@npm --prefix apps/foundation-web run format
 	@npm --prefix apps/harness-ui run format
 	@npm --prefix sdk/typescript run format
@@ -318,6 +319,34 @@ sdk-rust-check: sdk-rust-isolation-check sdk-rust-format-check sdk-rust-lint ## 
 .PHONY: sdk-rust-check-all
 sdk-rust-check-all: sdk-rust-check sdk-rust-test sdk-rust-build sdk-rust-package ## Run the complete Rust SDK gate
 
+.PHONY: foundation-cli-isolation-check
+foundation-cli-isolation-check: ## Verify the Foundation CLI remains an independent Cargo project
+	@cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; from pathlib import Path; cli = Path("sdk/rust/agent-foundation-cli/Cargo.toml").resolve(); manifests = {Path(item["manifest_path"]).resolve() for item in json.load(sys.stdin)["packages"]}; assert cli not in manifests, "Foundation CLI must remain outside the root Cargo workspace"'
+	@cargo metadata --locked --no-deps --manifest-path sdk/rust/agent-foundation-cli/Cargo.toml --format-version 1 | python3 -c 'import json, sys; from pathlib import Path; cli = Path("sdk/rust/agent-foundation-cli/Cargo.toml").resolve(); data = json.load(sys.stdin); packages = data["packages"]; manifests = {Path(item["manifest_path"]).resolve() for item in packages}; member_ids = set(data["workspace_members"]); package_ids = {item["id"] for item in packages}; assert Path(data["workspace_root"]).resolve() == cli.parent, "Foundation CLI must own its Cargo workspace"; assert manifests == {cli} and member_ids == package_ids, "Foundation CLI workspace must contain only the CLI package"'
+	@cargo package --locked --allow-dirty --manifest-path sdk/rust/Cargo.toml --list | python3 -c 'import sys; paths = sys.stdin.read().splitlines(); assert not any(path == "agent-foundation-cli" or path.startswith("agent-foundation-cli/") for path in paths), "Rust SDK source package must exclude the Foundation CLI"'
+
+.PHONY: foundation-cli-format-check
+foundation-cli-format-check: ## Check Foundation CLI formatting
+	@(cd sdk/rust/agent-foundation-cli && cargo fmt -- --check)
+
+.PHONY: foundation-cli-lint
+foundation-cli-lint: ## Run Foundation CLI Clippy with warnings denied
+	@(cd sdk/rust/agent-foundation-cli && cargo clippy --all-targets --all-features --locked -- -D warnings)
+
+.PHONY: foundation-cli-test
+foundation-cli-test: ## Run Foundation CLI tests
+	@(cd sdk/rust/agent-foundation-cli && cargo test --all-features --locked)
+
+.PHONY: foundation-cli-build
+foundation-cli-build: ## Build the Foundation CLI
+	@(cd sdk/rust/agent-foundation-cli && cargo build --all-features --locked)
+
+.PHONY: foundation-cli-check
+foundation-cli-check: foundation-cli-isolation-check foundation-cli-format-check foundation-cli-lint ## Run Foundation CLI formatting and lint checks
+
+.PHONY: foundation-cli-check-all
+foundation-cli-check-all: foundation-cli-check foundation-cli-test foundation-cli-build ## Run the complete Foundation CLI gate
+
 .PHONY: harness-ui-sync
 harness-ui-sync: ## Install locked Harness UI dependencies
 	@npm --prefix apps/harness-ui ci
@@ -388,7 +417,7 @@ sdk-check: sdk-python-check sdk-go-check sdk-rust-check sdk-typescript-check ## 
 sdk-check-all: sdk-python-check-all sdk-go-check-all sdk-rust-check-all sdk-typescript-check-all ## Run all complete standalone SDK gates
 
 .PHONY: build
-build: python-build rust-build foundation-web-build sdk-build ## Build all workspace, application, and SDK artifacts
+build: python-build rust-build foundation-web-build sdk-build foundation-cli-build ## Build all workspace, application, SDK, and CLI artifacts
 
 .PHONY: db-migrate
 db-migrate: sync ## Generate a migration (usage: make db-migrate msg="description")
@@ -415,7 +444,7 @@ db-history: sync ## Show foundation-service migration history
 	@uv run --locked foundation-service db history
 
 .PHONY: release-check
-release-check: ## Validate a component version (component=harness|agent-ui|foundation|agent-envd|sdk-<language> version=X.Y.Z or X.Y.Z-rc.N)
+release-check: ## Validate a component version (component=harness|agent-ui|foundation|agent-envd|foundation-cli|sdk-<language> version=X.Y.Z or X.Y.Z-rc.N)
 	@test -n "$(component)" || { echo "component is required"; exit 2; }
 	@test -n "$(version)" || { echo "version is required"; exit 2; }
 	@uv run --locked python scripts/check-release-version.py "$(component)" "$(version)"
@@ -457,34 +486,36 @@ python-check-all: python-check test python-build docs-build ## Run the complete 
 
 .PHONY: check
 check: ## Check formatting, lint, and types without rewriting repository sources
-	@printf '\n==> [1/10] Lint repository and check Python/Markdown formatting\n'
+	@printf '\n==> [1/11] Lint repository and check Python/Markdown formatting\n'
 	@$(MAKE) --no-print-directory lint
-	@printf '\n==> [2/10] Type-check Python workspace with Pyright\n'
+	@printf '\n==> [2/11] Type-check Python workspace with Pyright\n'
 	@$(MAKE) --no-print-directory typecheck
-	@printf '\n==> [3/10] Check examples with Ruff and Pyright\n'
+	@printf '\n==> [3/11] Check examples with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory examples-check
-	@printf '\n==> [4/10] Check Foundation Web with Prettier and TypeScript\n'
+	@printf '\n==> [4/11] Check Foundation Web with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory foundation-web-check
-	@printf '\n==> [5/10] Check Harness UI with Prettier and TypeScript\n'
+	@printf '\n==> [5/11] Check Harness UI with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory harness-ui-check
-	@printf '\n==> [6/10] Check Rust workspace with rustfmt and Clippy\n'
+	@printf '\n==> [6/11] Check Rust workspace with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory rust-check
-	@printf '\n==> [7/10] Check Python SDK with Ruff and Pyright\n'
+	@printf '\n==> [7/11] Check Python SDK with Ruff and Pyright\n'
 	@$(MAKE) --no-print-directory sdk-python-check
-	@printf '\n==> [8/10] Check Go SDK with gofmt and vet\n'
+	@printf '\n==> [8/11] Check Go SDK with gofmt and vet\n'
 	@$(MAKE) --no-print-directory sdk-go-check
-	@printf '\n==> [9/10] Check Rust SDK with rustfmt and Clippy\n'
+	@printf '\n==> [9/11] Check Rust SDK with rustfmt and Clippy\n'
 	@$(MAKE) --no-print-directory sdk-rust-check
-	@printf '\n==> [10/10] Check TypeScript SDK with Prettier and TypeScript\n'
+	@printf '\n==> [10/11] Check TypeScript SDK with Prettier and TypeScript\n'
 	@$(MAKE) --no-print-directory sdk-typescript-check
+	@printf '\n==> [11/11] Check Foundation CLI with rustfmt and Clippy\n'
+	@$(MAKE) --no-print-directory foundation-cli-check
 	@printf '\n==> Check completed without rewriting repository sources\n'
 
 .PHONY: check-all
-check-all: eip-check examples-check-all foundation-web-check-all harness-ui-check-all python-check-all rust-check-all sdk-check-all ## Run the complete repository gate
+check-all: eip-check examples-check-all foundation-web-check-all harness-ui-check-all python-check-all rust-check-all sdk-check-all foundation-cli-check-all ## Run the complete repository gate
 
 .PHONY: clean
 clean: ## Remove generated local artifacts
-	@rm -rf .pytest_cache .ruff_cache dist examples/plugins/dist site target sdk/python/dist sdk/rust/target packages/agent-ui/converge_agent_ui/static
+	@rm -rf .pytest_cache .ruff_cache dist examples/plugins/dist site target sdk/python/dist sdk/rust/target sdk/rust/agent-foundation-cli/target packages/agent-ui/converge_agent_ui/static
 	@npm --prefix apps/foundation-web run clean
 	@npm --prefix apps/harness-ui run clean
 	@npm --prefix sdk/typescript run clean

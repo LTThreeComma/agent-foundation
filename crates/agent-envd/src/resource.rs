@@ -18,7 +18,7 @@ use crate::{
         FileWriteTextParams, SearchMode,
     },
     mount::{Mount, MountPathError, MountRegistry, StagedCandidate},
-    operation::{OperationInterruption, OperationRegistry},
+    operation::{OperationInterruption, OperationLedger},
     transfer::file_info,
 };
 
@@ -37,7 +37,7 @@ pub(crate) struct ResourceRegistry {
 struct ResourceInner {
     max_inline_bytes: u64,
     max_response_bytes: u64,
-    operations: OperationRegistry,
+    operations: OperationLedger,
 }
 
 #[derive(Clone)]
@@ -67,7 +67,7 @@ pub(crate) enum ResourceError {
 }
 
 impl ResourceRegistry {
-    pub(crate) fn new(config: &crate::config::Config, operations: OperationRegistry) -> Self {
+    pub(crate) fn new(config: &crate::config::Config, operations: OperationLedger) -> Self {
         Self {
             inner: Arc::new(ResourceInner {
                 max_inline_bytes: config.limits.max_output_preview_bytes,
@@ -706,7 +706,7 @@ fn copy_with_digest(
     source: &mut std::fs::File,
     destination: &mut StagedCandidate,
     max_bytes: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<(u64, String), ResourceError> {
     let mut total = 0_u64;
@@ -746,10 +746,7 @@ fn file_has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-fn check_operation(
-    operations: &OperationRegistry,
-    operation_id: &str,
-) -> Result<(), ResourceError> {
+fn check_operation(operations: &OperationLedger, operation_id: &str) -> Result<(), ResourceError> {
     match operations.interruption(operation_id) {
         Some(OperationInterruption::Cancelled) => Err(ResourceError::Cancelled),
         Some(OperationInterruption::TimedOut) => Err(ResourceError::Timeout),
@@ -761,7 +758,7 @@ fn build_remove_plan(
     mount: &Arc<Mount>,
     root: &Path,
     max_entries: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<Vec<RemovePlanEntry>, ResourceError> {
     if max_entries == 0 {
@@ -823,7 +820,7 @@ fn walk_entries(
     mount: &Arc<Mount>,
     root: &EIPPath,
     max_depth: u32,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<Vec<FileListEntry>, ResourceError> {
     let root_relative = mount.relative_path(root).map_err(map_mount_error)?;
@@ -907,7 +904,7 @@ struct LinePreview {
 fn read_file_bounded(
     mut file: std::fs::File,
     max_bytes: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<Vec<u8>, ResourceError> {
     let mut bytes = Vec::new();
@@ -934,7 +931,7 @@ fn read_text_selection(
     line_limit: u64,
     max_line_length: u64,
     max_bytes: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<TextSelection, ResourceError> {
     let max_chars = usize::try_from(max_line_length).map_err(|_| ResourceError::Limit)?;
@@ -987,7 +984,7 @@ fn read_text_selection(
 fn read_line_preview<R: BufRead>(
     reader: &mut R,
     max_chars: usize,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<Option<LinePreview>, ResourceError> {
     let capture_limit = max_chars
@@ -1179,7 +1176,7 @@ fn search_file(
     path: &EIPPath,
     matcher: &ContentMatcher,
     max_line_length: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<Vec<FileSearchMatch>, ResourceError> {
     let opened = mount.open_regular(path).map_err(map_mount_error)?;
@@ -1442,7 +1439,7 @@ mod tests {
             SearchMode,
         },
         mount::MountRegistry,
-        operation::{OperationRegistry, random_selector},
+        operation::{OperationLedger, random_selector},
     };
 
     use super::{ResourceError, ResourceRegistry, apply_unified_diff, join_logical};
@@ -1506,7 +1503,7 @@ mod tests {
                 max_file_bytes: 1024 * 1024,
                 allowed_operations: Vec::new(),
             });
-            let operations = OperationRegistry::new(
+            let operations = OperationLedger::new(
                 config.environment_id.clone(),
                 7,
                 256,

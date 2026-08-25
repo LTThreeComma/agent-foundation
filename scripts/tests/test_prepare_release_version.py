@@ -28,6 +28,8 @@ RELEASE_FILES = (
     Path("sdk/python/uv.lock"),
     Path("sdk/rust/Cargo.toml"),
     Path("sdk/rust/Cargo.lock"),
+    Path("sdk/rust/agent-foundation-cli/Cargo.toml"),
+    Path("sdk/rust/agent-foundation-cli/Cargo.lock"),
     Path("sdk/typescript/package.json"),
     Path("sdk/typescript/package-lock.json"),
 )
@@ -119,6 +121,13 @@ def run_script(
             {Path("sdk/rust/Cargo.toml"), Path("sdk/rust/Cargo.lock")},
         ),
         (
+            "foundation-cli",
+            {
+                Path("sdk/rust/agent-foundation-cli/Cargo.toml"),
+                Path("sdk/rust/agent-foundation-cli/Cargo.lock"),
+            },
+        ),
+        (
             "sdk-typescript",
             {
                 Path("sdk/typescript/package.json"),
@@ -164,6 +173,7 @@ def test_prepares_ecosystem_specific_rc_versions(tmp_path: Path) -> None:
         "sdk-python",
         "sdk-go",
         "sdk-rust",
+        "foundation-cli",
         "sdk-typescript",
     ):
         result = run_script(PREPARER, tmp_path, component, "9.8.7-rc.2")
@@ -183,7 +193,24 @@ def test_prepares_ecosystem_specific_rc_versions(tmp_path: Path) -> None:
     assert 'version = "9.8.7rc2"' in (tmp_path / "packages/agent-envd-client/pyproject.toml").read_text()
     assert 'version = "9.8.7rc2"' in (tmp_path / "sdk/python/pyproject.toml").read_text()
     assert 'version = "9.8.7-rc.2"' in (tmp_path / "sdk/rust/Cargo.toml").read_text()
+    assert 'version = "9.8.7-rc.2"' in (tmp_path / "sdk/rust/agent-foundation-cli/Cargo.toml").read_text()
     assert json.loads((tmp_path / "sdk/typescript/package.json").read_text())["version"] == "9.8.7-rc.2"
+
+
+def test_foundation_cli_and_rust_sdk_release_independently(tmp_path: Path) -> None:
+    copy_release_files(tmp_path)
+
+    cli_result = run_script(PREPARER, tmp_path, "foundation-cli", "9.8.7")
+
+    assert cli_result.returncode == 0, cli_result.stderr
+    sdk_check = run_script(CHECKER, tmp_path, "sdk-rust", "0.0.0")
+    assert sdk_check.returncode == 0, sdk_check.stderr
+
+    sdk_result = run_script(PREPARER, tmp_path, "sdk-rust", "7.8.9")
+
+    assert sdk_result.returncode == 0, sdk_result.stderr
+    cli_check = run_script(CHECKER, tmp_path, "foundation-cli", "9.8.7")
+    assert cli_check.returncode == 0, cli_check.stderr
 
 
 def test_harness_release_does_not_version_agent_ui_or_foundation(tmp_path: Path) -> None:

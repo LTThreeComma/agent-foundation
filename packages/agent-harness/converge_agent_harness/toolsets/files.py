@@ -6,6 +6,7 @@ import asyncio
 import fnmatch
 import posixpath
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, cast
 
@@ -14,14 +15,14 @@ from pydantic_ai import BinaryContent, RunContext, ToolReturn
 from pydantic_ai.toolsets import FunctionToolset
 
 from converge_agent_harness._json import redact_json
-from converge_agent_harness.context import AgentContext
+from converge_agent_harness.context import AgentContext, ToolMetadataKey
 from converge_agent_harness.environment.files import (
     FileMetadata,
     FileOperator,
     FileQueryRequest,
     FileTextSearchRequest,
 )
-from converge_agent_harness.environment.models import EnvironmentError
+from converge_agent_harness.environment.models import EnvironmentError, EnvironmentPath
 from converge_agent_harness.environment.providers import FileScopeProvider
 from converge_agent_harness.tools.metadata import (
     HarnessTool,
@@ -43,6 +44,7 @@ from .file_results import (
     FileWriteResult,
 )
 from .output import (
+    DEFAULT_TOOL_OUTPUT_CHARS,
     FINAL_TOOL_OUTPUT_HARD_CHARS,
     acknowledge_tool_output,
     continuation_disclosure,
@@ -57,11 +59,51 @@ _MAX_MODEL_TEXT_PAGE_BYTES = 4 * 1024 * 1024
 _MAX_MODEL_EDIT_BYTES = 16 * 1024 * 1024
 _MAX_MODEL_RESULTS = 1_000
 _MAX_MODEL_MEDIA_BYTES = 16 * 1024 * 1024
-_MAX_SKILL_MARKDOWN_PAGE_BYTES = 16 * 1024 * 1024
+_MAX_MODEL_TEXT_RULE_PAGE_BYTES = 16 * 1024 * 1024
 _SKILL_MARKDOWN_LINE_LIMIT = 800
 _SKILL_MARKDOWN_MAX_LINE_LENGTH = 20_000
 
 type _UnlimitedOrPositiveResults = Literal[-1] | Annotated[int, Field(gt=0, le=_MAX_MODEL_RESULTS)]
+
+
+@dataclass(frozen=True, slots=True)
+class FileViewRule:
+    """One typed run-scoped widening rule for text file views."""
+
+    roots: tuple[EnvironmentPath, ...]
+    suffixes: tuple[str, ...]
+    initial_line_limit: int | None = None
+    max_line_length: int | None = None
+    page_bytes: int | None = None
+    semantic_output_chars: int | None = None
+    preserve_complete_lines: bool = False
+
+    def __post_init__(self) -> None:
+        roots = tuple(self.roots)
+        suffixes = tuple(suffix.casefold() for suffix in self.suffixes)
+        if not roots or not all(isinstance(root, EnvironmentPath) for root in roots):
+            raise ValueError("FileViewRule roots must contain resolved EnvironmentPath values")
+        if not suffixes or any(not suffix.startswith(".") or "/" in suffix or "\x00" in suffix for suffix in suffixes):
+            raise ValueError("FileViewRule suffixes must contain file suffixes beginning with '.'")
+        for name in ("initial_line_limit", "max_line_length", "page_bytes", "semantic_output_chars"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+                raise ValueError(f"FileViewRule {name} must be a positive integer")
+        object.__setattr__(self, "roots", roots)
+        object.__setattr__(self, "suffixes", suffixes)
+
+
+FILE_VIEW_RULES = ToolMetadataKey("converge.files.view-rules", FileViewRule)
+
+
+@dataclass(frozen=True, slots=True)
+class _FileViewProfile:
+    initial_line_limit: int
+    max_line_length: int
+    page_bytes: int
+    semantic_output_chars: int
+    preserve_complete_lines: bool
+
 
 _MEDIA_TYPES = {
     ".png": "image/png",
@@ -215,20 +257,6 @@ class FileToolset:
         ] = None,
     ) -> FileViewResult:
         """Read bounded text or attach a common media file natively."""
-        selected_skill_markdown = _is_selected_skill_markdown(ctx, file_path)
-        full_skill_markdown_read = line_offset in {None, 0} and selected_skill_markdown
-        effective_line_limit = max(line_limit, _SKILL_MARKDOWN_LINE_LIMIT) if full_skill_markdown_read else line_limit
-        effective_max_line_length = (
-            max(max_line_length, _SKILL_MARKDOWN_MAX_LINE_LENGTH) if selected_skill_markdown else max_line_length
-        )
-        page_limit = _MAX_SKILL_MARKDOWN_PAGE_BYTES if selected_skill_markdown else _MAX_MODEL_TEXT_PAGE_BYTES
-        if effective_line_limit * (effective_max_line_length + 1) > page_limit:
-            return _environment_error_result(
-                EnvironmentError(
-                    "Requested text page exceeds the model view limit.",
-                    code="environment_too_large",
-                )
-            )
         extension = posixpath.splitext(file_path)[1].casefold()
         if extension == ".pdf":
             return {
@@ -269,8 +297,6 @@ class FileToolset:
                             code="environment_too_large",
                         )
                     message = f"The {media_type} file {file_path} is attached in the user message."
-                    if instructions is not None and instructions.strip():
-                        message = f"{message}\n\nAnalysis instructions:\n{instructions.strip()}"
                     return ToolReturn(
                         return_value=message,
                         content=[BinaryContent(data=data, media_type=media_type)],
@@ -278,15 +304,33 @@ class FileToolset:
             except EnvironmentError as exc:
                 return _environment_error_result(exc)
 
+        profile = _file_view_profile(ctx.deps, file_path)
+        effective_line_limit = line_limit
+        if line_offset in {None, 0}:
+            effective_line_limit = max(effective_line_limit, profile.initial_line_limit)
+        effective_max_line_length = max(max_line_length, profile.max_line_length)
+        if effective_line_limit * (effective_max_line_length + 1) > profile.page_bytes:
+            return _environment_error_result(
+                EnvironmentError(
+                    "Requested text page exceeds the model view limit.",
+                    code="environment_too_large",
+                )
+            )
+
         async def disclose(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-            if selected_skill_markdown:
-                return await _disclose_skill_markdown_page(ctx.deps, value)
+            if profile.preserve_complete_lines or bool(value.get("has_more")):
+                return await _disclose_line_preserving_file_page(
+                    ctx.deps,
+                    value,
+                    limit=profile.semantic_output_chars,
+                )
             return await disclose_text_fields(
                 ctx.deps,
                 value,
                 text_fields=("content",),
                 content_complete=not bool(value.get("has_more")),
                 noun="file page",
+                limit=profile.semantic_output_chars,
             )
 
         return await self._execute(
@@ -382,8 +426,18 @@ class FileToolset:
                 field="entries",
                 content_complete=not bool(value.get("has_more")),
                 noun="directory page",
+                continuation_hint="Call ls again with next_offset as offset to continue listing this directory.",
             )
             bounded["showing"] = showing
+            entries = value.get("entries")
+            _restart_unspilled_page(
+                bounded,
+                shown=showing,
+                total=len(entries) if isinstance(entries, list) else showing,
+                cursor_field="next_offset",
+                restart_cursor=offset,
+                hint="Call ls again with this next_offset as offset and a smaller max_results value.",
+            )
             return bounded
 
         def project(result) -> Mapping[str, JsonValue]:
@@ -451,8 +505,18 @@ class FileToolset:
                 field="files",
                 content_complete=not bool(value.get("has_more")),
                 noun="glob page",
+                continuation_hint="Call glob again with next_offset as offset to continue this query.",
             )
             bounded["showing"] = showing
+            files = value.get("files")
+            _restart_unspilled_page(
+                bounded,
+                shown=showing,
+                total=len(files) if isinstance(files, list) else showing,
+                cursor_field="next_offset",
+                restart_cursor=offset,
+                hint="Call glob again with this next_offset as offset and a smaller max_results value.",
+            )
             return bounded
 
         return await self._execute(
@@ -580,8 +644,18 @@ class FileToolset:
                 field="matches",
                 content_complete=not bool(value.get("has_more")),
                 noun="grep page",
+                continuation_hint="Call grep again with next_offset as offset to continue this search.",
             )
             bounded["showing"] = showing
+            matches = value.get("matches")
+            _restart_unspilled_page(
+                bounded,
+                shown=showing,
+                total=len(matches) if isinstance(matches, dict) else showing,
+                cursor_field="next_offset",
+                restart_cursor=offset,
+                hint="Call grep again with this next_offset as offset and smaller result limits.",
+            )
             return bounded
 
         return await self._execute(
@@ -694,21 +768,104 @@ class FileToolset:
             self._guard_execution()
 
 
-def _is_selected_skill_markdown(ctx: RunContext[AgentContext], file_path: str) -> bool:
-    from converge_agent_harness.capabilities.skills import SKILLS_CAPABILITY_ID, _SkillsRunCapability
+def _restart_unspilled_page(
+    result: dict[str, JsonValue],
+    *,
+    shown: int,
+    total: int,
+    cursor_field: str,
+    restart_cursor: int,
+    hint: str,
+) -> None:
+    if shown >= total:
+        return
+    disclosure = result.get("disclosure")
+    if not isinstance(disclosure, dict) or disclosure.get("output_file_path") is not None:
+        return
+    result[cursor_field] = restart_cursor
+    if "has_more" in result:
+        result["has_more"] = True
+    disclosure["hint"] = hint
 
-    capability = ctx.capabilities.get(SKILLS_CAPABILITY_ID)
-    return isinstance(capability, _SkillsRunCapability) and capability.is_selected_markdown(file_path)
+
+def _file_view_profile(context: AgentContext, file_path: str) -> _FileViewProfile:
+    initial_line_limit = 0
+    max_line_length = 0
+    page_bytes = _MAX_MODEL_TEXT_PAGE_BYTES
+    semantic_output_chars = DEFAULT_TOOL_OUTPUT_CHARS
+    preserve_complete_lines = False
+    if not isinstance(context, AgentContext):
+        return _FileViewProfile(
+            initial_line_limit=initial_line_limit,
+            max_line_length=max_line_length,
+            page_bytes=page_bytes,
+            semantic_output_chars=semantic_output_chars,
+            preserve_complete_lines=preserve_complete_lines,
+        )
+    try:
+        candidate = context.environment.resolve_path(file_path)
+    except EnvironmentError:
+        return _FileViewProfile(
+            initial_line_limit=initial_line_limit,
+            max_line_length=max_line_length,
+            page_bytes=page_bytes,
+            semantic_output_chars=semantic_output_chars,
+            preserve_complete_lines=preserve_complete_lines,
+        )
+
+    suffix = PurePosixPath(candidate.path).suffix.casefold()
+    if suffix == ".md" and any(
+        _is_within_environment_root(candidate, skill.directory) for skill in context.skill_paths.values
+    ):
+        initial_line_limit = _SKILL_MARKDOWN_LINE_LIMIT
+        max_line_length = _SKILL_MARKDOWN_MAX_LINE_LENGTH
+        page_bytes = _MAX_MODEL_TEXT_RULE_PAGE_BYTES
+        semantic_output_chars = FINAL_TOOL_OUTPUT_HARD_CHARS
+        preserve_complete_lines = True
+
+    for rule in context.tool_metadata.values(FILE_VIEW_RULES):
+        if suffix not in rule.suffixes or not any(_is_within_environment_root(candidate, root) for root in rule.roots):
+            continue
+        if rule.initial_line_limit is not None:
+            initial_line_limit = max(initial_line_limit, min(rule.initial_line_limit, _MAX_MODEL_RESULTS))
+        if rule.max_line_length is not None:
+            max_line_length = max(max_line_length, min(rule.max_line_length, _MAX_MODEL_TEXT_BYTES))
+        if rule.page_bytes is not None:
+            page_bytes = max(page_bytes, min(rule.page_bytes, _MAX_MODEL_TEXT_RULE_PAGE_BYTES))
+        if rule.semantic_output_chars is not None:
+            semantic_output_chars = max(
+                semantic_output_chars,
+                min(rule.semantic_output_chars, FINAL_TOOL_OUTPUT_HARD_CHARS),
+            )
+        preserve_complete_lines = preserve_complete_lines or rule.preserve_complete_lines
+
+    return _FileViewProfile(
+        initial_line_limit=initial_line_limit,
+        max_line_length=max_line_length,
+        page_bytes=page_bytes,
+        semantic_output_chars=semantic_output_chars,
+        preserve_complete_lines=preserve_complete_lines,
+    )
 
 
-async def _disclose_skill_markdown_page(
+def _is_within_environment_root(candidate: EnvironmentPath, root: EnvironmentPath) -> bool:
+    if candidate.binding_id != root.binding_id or candidate.binding_revision != root.binding_revision:
+        return False
+    normalized_root = root.path.rstrip("/")
+    prefix = f"{normalized_root}/" if normalized_root else "/"
+    return candidate.path == root.path or candidate.path.startswith(prefix)
+
+
+async def _disclose_line_preserving_file_page(
     context: AgentContext,
     value: Mapping[str, JsonValue],
+    *,
+    limit: int,
 ) -> Mapping[str, JsonValue]:
     safe_value = redact_json(cast(JsonValue, dict(value)))
     assert isinstance(safe_value, dict)
     result = safe_value
-    result_fits = tool_output_size(result) <= FINAL_TOOL_OUTPUT_HARD_CHARS
+    result_fits = tool_output_size(result) <= limit
     if result_fits and not bool(result.get("has_more")):
         return acknowledge_tool_output(result)
     content = result.get("content")
@@ -720,8 +877,8 @@ async def _disclose_skill_markdown_page(
             result,
             text_fields=("content",),
             content_complete=not bool(result.get("has_more")),
-            noun="skill Markdown page",
-            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+            noun="file page",
+            limit=limit,
         )
 
     if result_fits:
@@ -730,10 +887,10 @@ async def _disclose_skill_markdown_page(
             JsonValue,
             continuation_disclosure(
                 result,
-                hint="Call view again with next_line_offset as line_offset to continue reading this skill Markdown file.",
+                hint="Call view again with next_line_offset as line_offset to continue reading this file.",
             ),
         )
-        if tool_output_size(result) <= FINAL_TOOL_OUTPUT_HARD_CHARS:
+        if tool_output_size(result) <= limit:
             return acknowledge_tool_output(result)
 
     lines = _lf_lines(content)
@@ -743,13 +900,13 @@ async def _disclose_skill_markdown_page(
             result,
             text_fields=("content",),
             content_complete=not bool(result.get("has_more")),
-            noun="skill Markdown page",
-            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+            noun="file page",
+            limit=limit,
         )
 
     disclosure = continuation_disclosure(
         result,
-        hint="Call view again with next_line_offset as line_offset to continue reading this skill Markdown file.",
+        hint="Call view again with next_line_offset as line_offset to continue reading this file.",
     )
     preview: dict[str, JsonValue] = {
         **result,
@@ -767,7 +924,7 @@ async def _disclose_skill_markdown_page(
         preview["content"] = candidate_content
         preview["lines_read"] = shown + 1
         preview["next_line_offset"] = line_offset + shown + 1
-        if tool_output_size(preview) > FINAL_TOOL_OUTPUT_HARD_CHARS:
+        if tool_output_size(preview) > limit:
             preview["content"] = selected_content
             preview["lines_read"] = shown
             preview["next_line_offset"] = line_offset + shown
@@ -781,8 +938,8 @@ async def _disclose_skill_markdown_page(
             result,
             text_fields=("content",),
             content_complete=not bool(result.get("has_more")),
-            noun="skill Markdown page",
-            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+            noun="file page",
+            limit=limit,
         )
     preview["truncated_lines"] = cast(
         JsonValue,
@@ -879,4 +1036,4 @@ def _matches_file_glob(path: str, *, root: str, pattern: str) -> bool:
     return PurePosixPath(normalized_path).full_match(pattern)
 
 
-__all__ = ["FileTextEdit", "FileToolset"]
+__all__ = ["FILE_VIEW_RULES", "FileTextEdit", "FileToolset", "FileViewRule"]

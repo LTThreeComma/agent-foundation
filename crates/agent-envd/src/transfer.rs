@@ -19,7 +19,7 @@ use crate::{
         FileWriterHandle, FileWriterOpenParams, FileWriterOpenResult,
     },
     mount::{Mount, MountPathError, MountRegistry, StagedCandidate},
-    operation::{OperationInterruption, OperationRegistry, RegistryError, ShortIdAllocator},
+    operation::{LedgerError, OperationInterruption, OperationLedger, ShortIdAllocator},
 };
 
 #[derive(Clone)]
@@ -230,7 +230,7 @@ impl TransferRegistry {
             .inner
             .selector_ids
             .next("reader")
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         let (cancellation, _) = watch::channel(false);
         let record = Arc::new(Mutex::new(ReaderRecord {
             handle: handle.clone(),
@@ -377,7 +377,7 @@ impl TransferRegistry {
             .inner
             .selector_ids
             .next("writer")
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         let record = Arc::new(Mutex::new(WriterRecord {
             handle: handle.clone(),
             path: params.path.clone(),
@@ -1087,7 +1087,7 @@ impl TransferRegistry {
 impl WriterCommit {
     pub(crate) async fn execute(
         self,
-        operations: OperationRegistry,
+        operations: OperationLedger,
         operation_id: String,
     ) -> Result<WriterCommitOutput, TransferError> {
         let registry = self.registry.clone();
@@ -1115,7 +1115,7 @@ impl WriterCommit {
 
     fn execute_sync(
         mut self,
-        operations: &OperationRegistry,
+        operations: &OperationLedger,
         operation_id: &str,
     ) -> Result<WriterCommitOutput, TransferError> {
         check_operation(operations, operation_id)?;
@@ -1220,7 +1220,7 @@ impl TransferState {
 fn hash_exact(
     file: &mut std::fs::File,
     mut remaining: u64,
-    operations: &OperationRegistry,
+    operations: &OperationLedger,
     operation_id: &str,
 ) -> Result<String, TransferError> {
     let mut hasher = Sha256::new();
@@ -1240,10 +1240,7 @@ fn hash_exact(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn check_operation(
-    operations: &OperationRegistry,
-    operation_id: &str,
-) -> Result<(), TransferError> {
+fn check_operation(operations: &OperationLedger, operation_id: &str) -> Result<(), TransferError> {
     match operations.interruption(operation_id) {
         Some(OperationInterruption::Cancelled) => Err(TransferError::Cancelled),
         Some(OperationInterruption::TimedOut) => Err(TransferError::Timeout),
@@ -1400,7 +1397,7 @@ fn map_mount_error(error: MountPathError) -> TransferError {
     }
 }
 
-fn map_registry_error(_error: RegistryError) -> TransferError {
+fn map_ledger_error(_error: LedgerError) -> TransferError {
     TransferError::Internal
 }
 
@@ -1425,7 +1422,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         eip::{FileWriteMode, FileWriterCommitParams, FileWriterOpenParams},
-        operation::OperationRegistry,
+        operation::OperationLedger,
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1713,7 +1710,7 @@ mod tests {
             algorithm: "sha256".to_owned(),
             value: format!("{:x}", Sha256::digest(content)),
         };
-        let operations = OperationRegistry::new(
+        let operations = OperationLedger::new(
             "env-test".to_owned(),
             7,
             16,
@@ -1880,7 +1877,7 @@ mod tests {
             FileWriterAbortStatus::CommitInProgress
         );
 
-        let operations = OperationRegistry::new(
+        let operations = OperationLedger::new(
             "env-test".to_owned(),
             7,
             16,
@@ -1999,7 +1996,7 @@ mod tests {
             algorithm: "sha256".to_owned(),
             value: format!("{:x}", Sha256::digest(suffix)),
         };
-        let operations = OperationRegistry::new(
+        let operations = OperationLedger::new(
             "env-test".to_owned(),
             7,
             16,

@@ -75,6 +75,49 @@ Before `Agent.from_spec()`, the Harness validates every visible `CapabilitySpec`
 
 ## AgentContext
 
+Two passive process-local publications let independently authored Capabilities describe run facts without introducing another lifecycle or lookup plane:
+
+```python
+@dataclass(frozen=True, slots=True)
+class SkillPath:
+    name: str
+    source_id: str
+    directory: EnvironmentPath
+
+
+@dataclass(frozen=True, slots=True)
+class ToolMetadataKey[T]:
+    name: str
+    value_type: type[T]
+
+
+class RunSkillPaths:
+    def publish(
+        self,
+        owner_id: str,
+        paths: Sequence[SkillPath],
+    ) -> None: ...
+
+    @property
+    def values(self) -> tuple[SkillPath, ...]: ...
+
+
+class ToolRuntimeMetadata:
+    def publish[T](
+        self,
+        key: ToolMetadataKey[T],
+        owner_id: str,
+        value: T,
+    ) -> None: ...
+
+    def values[T](
+        self,
+        key: ToolMetadataKey[T],
+    ) -> tuple[T, ...]: ...
+```
+
+A built-in or external Capability can publish resolved skill paths. Any Toolset package can define and export a typed metadata key and immutable value class, and any compatible Capability can publish values under that key. Publications are owner-bound and idempotent: repeating the same owner and value is valid, while changing that owner's value or supplying the wrong runtime type fails deterministically. Snapshots are immutable tuples; published values remain process-local objects and are required by contract to be passive values rather than mutable services. There is no central registration of permitted external key types or namespaces.
+
 ```python
 @dataclass(frozen=True, slots=True)
 class AgentContext:
@@ -88,6 +131,8 @@ class AgentContext:
     plugins: BoundPluginContext
     subagents: SubagentCollection
     metadata: Mapping[str, JsonValue]
+    skill_paths: RunSkillPaths
+    tool_metadata: ToolRuntimeMetadata
 
     @property
     def identity(self) -> AgentIdentityRef: ...
@@ -117,9 +162,11 @@ One fresh context is created for every logical Harness run and reused by that ru
 - `usage_attribution` retains mixed-source immutable records and reports them at model-request boundaries;
 - `plugins` indexes the complete fresh run-bound plugin graph after binding;
 - `subagents` is the immutable collection owned by the executable;
-- `metadata` is immutable non-authoritative correlation.
+- `metadata` is immutable non-authoritative correlation;
+- `skill_paths` is the shared passive snapshot of explicitly selected, resolved skill directories and provenance;
+- `tool_metadata` stores typed passive values whose meaning and hard-limit validation belong to the Toolset that defines each key.
 
-`identity` is derived from `instance`; no second value can diverge. The context is not a generic service locator and cannot be supplied by plugins or model content.
+`identity` is derived from `instance`; no second value can diverge. The context is not a generic service locator and cannot be supplied by plugins or model content. Skill paths and tool metadata contain no callable service, lifecycle hook, ordering edge, dispatch route, authority, or durable state. They are created once with the logical-run context and reused across its internal model attempts.
 
 ## Lifecycle Integration
 
@@ -129,6 +176,7 @@ One fresh context is created for every logical Harness run and reused by that ru
 | Transform semantic input/result       | Harness plugin `wrap_run()`                             |
 | Bind a fresh Agent-loop feature       | Capability `for_run()`                                  |
 | Contribute instructions or tools      | Native Capability/Toolset                               |
+| Publish passive run facts for tools   | `skill_paths` or an owner-defined `ToolMetadataKey[T]`  |
 | Observe model, node, or tool behavior | Native hooks plus `AgentContext.events`                 |
 | Attribute provider usage              | `AgentContext.record_provider_usage()`                  |
 | Resolve a logical Model               | Thin `ResolveModelId` over `AgentContext.model_binding` |
@@ -136,7 +184,7 @@ One fresh context is created for every logical Harness run and reused by that ru
 | Operate on or observe Environment     | Fixed `AgentContext.environment` resource               |
 | Persist a checkpoint candidate        | Host adapter using exported `HarnessState`              |
 
-A Capability that needs another run-bound Capability uses Pydantic's public run-bound mapping after binding. A Capability contributed by a Harness plugin resolves the matching fresh plugin through `ctx.deps.plugins.require(id, ExpectedType)`.
+A Capability that needs another run-bound Capability uses Pydantic's public run-bound mapping after binding. A Capability contributed by a Harness plugin resolves the matching fresh plugin through `ctx.deps.plugins.require(id, ExpectedType)`. A Capability that only needs to publish passive information for a Toolset uses the Toolset owner's public typed key instead of requiring or impersonating that Toolset's owning Capability.
 
 The Harness does not validate class-free Host role names or maintain another registry of final Capability replacements. A Host that needs an exact run collaborator constructs a typed Capability and its feature-specific code validates the expected public type and ID before use.
 

@@ -2,17 +2,16 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
-    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::{
     config::Config,
@@ -26,8 +25,9 @@ use crate::{
     },
     mount::MountRegistry,
     operation::{
-        ActiveResponseHandoff, BeginOutcome, OperationInterruption, OperationLease,
-        OperationRegistry, RegistryError, scope_carrier_attempt,
+        ActiveResponseHandoff, BeginOutcome, LedgerError, OperationInterruption, OperationLease,
+        OperationLedger, OwnedOperationResult, PendingAdmissionWait, PendingOperationGuard,
+        scope_carrier_attempt,
     },
     process::{ExecutionManager, ProcessError, StartFailure},
     resource::{ResourceError, ResourceRegistry},
@@ -58,62 +58,6 @@ struct SessionAdmissionState {
 struct SessionWorkGuard<'a> {
     admission: &'a SessionAdmission,
 }
-
-#[derive(Clone, Default)]
-struct PendingOperations {
-    inner: Arc<PendingOperationsInner>,
-}
-
-#[derive(Default)]
-struct PendingOperationsInner {
-    state: Mutex<BTreeMap<String, PendingOperationState>>,
-    changed: Notify,
-    #[cfg(test)]
-    wait_entered: Notify,
-}
-
-#[derive(Clone, Copy)]
-struct PendingOperationState {
-    requests: usize,
-    admitted: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingAdmissionWait {
-    Admitted,
-    Removed,
-    TimedOut,
-    Closed,
-}
-
-pub(crate) struct PendingOperationGuard {
-    operations: PendingOperations,
-    operation_id: String,
-}
-
-#[derive(Clone, Default)]
-struct OwnedOperationTasks {
-    inner: Arc<OwnedOperationTasksInner>,
-}
-
-#[derive(Default)]
-struct OwnedOperationTasksInner {
-    state: Mutex<OwnedOperationTaskState>,
-    idle: Notify,
-}
-
-#[derive(Default)]
-struct OwnedOperationTaskState {
-    tasks: BTreeMap<String, Option<oneshot::Sender<()>>>,
-    draining: bool,
-}
-
-struct OwnedOperationTaskGuard {
-    tasks: OwnedOperationTasks,
-    operation_id: String,
-}
-
-type OwnedOperationResult<T> = oneshot::Receiver<Option<Result<T, EIPError>>>;
 
 struct AuthoritySurface {
     mounts: MountRegistry,
@@ -146,9 +90,7 @@ pub(crate) struct Daemon {
     surfaces: AuthoritySurfaces,
     session: SessionAdmission,
     max_operation_duration: Duration,
-    operations: OperationRegistry,
-    pending_operations: PendingOperations,
-    owned_operations: OwnedOperationTasks,
+    operations: OperationLedger,
     resources: ResourceRegistry,
     retention: RetentionStore,
     execution: Option<ExecutionManager>,
@@ -201,248 +143,6 @@ impl Drop for SessionWorkGuard<'_> {
         drop(state);
         if idle {
             self.admission.idle.notify_waiters();
-        }
-    }
-}
-
-impl PendingOperations {
-    fn register(&self, operation_id: String) -> PendingOperationGuard {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let pending = state
-            .entry(operation_id.clone())
-            .or_insert(PendingOperationState {
-                requests: 0,
-                admitted: false,
-            });
-        pending.requests = pending
-            .requests
-            .checked_add(1)
-            .expect("pending request accounting overflow");
-        PendingOperationGuard {
-            operations: self.clone(),
-            operation_id,
-        }
-    }
-
-    fn mark_admitted(&self, operation_id: &str) {
-        let changed = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match state.get_mut(operation_id) {
-                Some(pending) if !pending.admitted => {
-                    pending.admitted = true;
-                    true
-                }
-                _ => false,
-            }
-        };
-        if changed {
-            self.inner.changed.notify_waiters();
-        }
-    }
-
-    async fn wait_for_admission(
-        &self,
-        operation_id: &str,
-        deadline: Instant,
-        mut closed: watch::Receiver<bool>,
-    ) -> PendingAdmissionWait {
-        loop {
-            let changed = self.inner.changed.notified();
-            let status = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(operation_id)
-                .map(|pending| pending.admitted);
-            match status {
-                Some(true) => return PendingAdmissionWait::Admitted,
-                None => return PendingAdmissionWait::Removed,
-                Some(false) if *closed.borrow() => return PendingAdmissionWait::Closed,
-                Some(false) => {
-                    #[cfg(test)]
-                    self.inner.wait_entered.notify_one();
-                }
-            }
-            tokio::select! {
-                _ = changed => {}
-                changed = closed.changed() => {
-                    if changed.is_err() || *closed.borrow() {
-                        return PendingAdmissionWait::Closed;
-                    }
-                }
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                    return PendingAdmissionWait::TimedOut;
-                }
-            }
-        }
-    }
-
-    #[cfg(test)]
-    async fn wait_until_admission_wait(&self) {
-        self.inner.wait_entered.notified().await;
-    }
-
-    fn release(&self, operation_id: &str) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(pending) = state.get_mut(operation_id) {
-            pending.requests = pending
-                .requests
-                .checked_sub(1)
-                .expect("pending request guard released exactly once");
-            if pending.requests == 0 {
-                state.remove(operation_id);
-            }
-        }
-        drop(state);
-        self.inner.changed.notify_waiters();
-    }
-}
-
-impl Drop for PendingOperationGuard {
-    fn drop(&mut self) {
-        self.operations.release(&self.operation_id);
-    }
-}
-
-impl OwnedOperationTasks {
-    fn spawn<T, F>(&self, operation_id: String, future: F) -> OwnedOperationResult<T>
-    where
-        T: Send + 'static,
-        F: Future<Output = Result<T, EIPError>> + Send + 'static,
-    {
-        let (reconcile_tx, mut reconcile_rx) = oneshot::channel();
-        let (result_tx, result_rx) = oneshot::channel();
-        let mut reconcile_tx = Some(reconcile_tx);
-        let registered = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if state.draining {
-                false
-            } else {
-                let replaced = state
-                    .tasks
-                    .insert(operation_id.clone(), reconcile_tx.take());
-                assert!(
-                    replaced.is_none(),
-                    "operation task IDs are generation-unique"
-                );
-                true
-            }
-        };
-        if !registered {
-            drop(future);
-            let _ = result_tx.send(None);
-            return result_rx;
-        }
-        let guard = OwnedOperationTaskGuard {
-            tasks: self.clone(),
-            operation_id,
-        };
-        tokio::spawn(async move {
-            let _guard = guard;
-            let mut future = Box::pin(future);
-            let result = tokio::select! {
-                biased;
-                _ = &mut reconcile_rx => {
-                    drop(future);
-                    None
-                }
-                result = future.as_mut() => Some(result),
-            };
-            let _ = result_tx.send(result);
-        });
-        result_rx
-    }
-
-    #[cfg(test)]
-    fn active_ids(&self) -> Vec<String> {
-        self.inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .tasks
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    fn begin_drain(&self) -> Vec<String> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.draining = true;
-        state.tasks.keys().cloned().collect()
-    }
-
-    fn request_reconciliation(&self) {
-        let senders = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            state.draining = true;
-            state
-                .tasks
-                .values_mut()
-                .filter_map(Option::take)
-                .collect::<Vec<_>>()
-        };
-        for sender in senders {
-            let _ = sender.send(());
-        }
-    }
-
-    async fn wait_until_idle(&self) {
-        loop {
-            let notified = self.inner.idle.notified();
-            if self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .tasks
-                .is_empty()
-            {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-impl Drop for OwnedOperationTaskGuard {
-    fn drop(&mut self) {
-        let idle = {
-            let mut state = self
-                .tasks
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            state.tasks.remove(&self.operation_id);
-            state.tasks.is_empty()
-        };
-        if idle {
-            self.tasks.inner.idle.notify_waiters();
         }
     }
 }
@@ -563,7 +263,7 @@ impl Daemon {
         })?;
         let transfers = TransferRegistry::new(config, generation)
             .map_err(|_| DaemonInitError::new("transfer registry initialization failed"))?;
-        let operations = OperationRegistry::new(
+        let operations = OperationLedger::new(
             config.environment_id.clone(),
             generation,
             max_operation_records,
@@ -597,8 +297,6 @@ impl Daemon {
             },
             max_operation_duration: Duration::from_millis(config.limits.max_operation_duration_ms),
             operations,
-            pending_operations: PendingOperations::default(),
-            owned_operations: OwnedOperationTasks::default(),
             resources,
             retention,
             execution,
@@ -620,7 +318,7 @@ impl Daemon {
             .get("context")?
             .get("operation_id")?
             .as_str()?;
-        Some(self.pending_operations.register(operation_id.to_owned()))
+        Some(self.operations.track_pending(operation_id.to_owned()))
     }
 
     pub(crate) fn has_active_file_transfers(&self) -> bool {
@@ -670,22 +368,11 @@ impl Daemon {
 
     pub(crate) async fn drain_owned_operations(&self, budget: Duration) -> bool {
         let started = Instant::now();
-        for operation_id in self.owned_operations.begin_drain() {
-            self.operations.cancel(&operation_id);
-        }
-        let task_budget = budget / 3;
+        self.operations.begin_drain();
         let tasks_drained =
-            if tokio::time::timeout(task_budget, self.owned_operations.wait_until_idle())
+            tokio::time::timeout(budget / 2, self.operations.wait_until_owned_idle())
                 .await
-                .is_ok()
-            {
-                true
-            } else {
-                self.owned_operations.request_reconciliation();
-                tokio::time::timeout(task_budget, self.owned_operations.wait_until_idle())
-                    .await
-                    .is_ok()
-            };
+                .is_ok();
         let transfers_reconciled = tokio::time::timeout(
             budget.saturating_sub(started.elapsed()),
             self.transfers.reconcile_committing(),
@@ -959,12 +646,9 @@ impl Daemon {
         context: &eip::EIPCallContext,
         params: &P,
     ) -> Result<BeginOutcome, EIPError> {
-        let outcome = self
-            .operations
+        self.operations
             .begin(method, context, params)
-            .map_err(map_registry_error)?;
-        self.pending_operations.mark_admitted(&context.operation_id);
-        Ok(outcome)
+            .map_err(map_ledger_error)
     }
 
     #[allow(clippy::result_large_err)]
@@ -1007,9 +691,7 @@ impl EipHandler for Daemon {
         let result = EnvironmentDescribeResult {
             descriptor: self.effective_surface()?.descriptor.clone(),
         };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1095,9 +777,7 @@ impl EipHandler for Daemon {
         self.session.wait_until_idle().await;
         self.transfers.close_session().await;
         let result = SessionCloseResult { closed: true };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1112,9 +792,7 @@ impl EipHandler for Daemon {
         let operation = self
             .operations
             .begin("file.open_reader", &params.context, &params)
-            .map_err(map_registry_error)?;
-        self.pending_operations
-            .mark_admitted(&params.context.operation_id);
+            .map_err(map_ledger_error)?;
         drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1127,9 +805,7 @@ impl EipHandler for Daemon {
             .open_reader(&mounts, &params)
             .await
             .map_err(map_transfer_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1148,9 +824,7 @@ impl EipHandler for Daemon {
             .close_reader(&params.reader)
             .await
             .map_err(map_transfer_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1165,9 +839,7 @@ impl EipHandler for Daemon {
         let operation = self
             .operations
             .begin("file.open_writer", &params.context, &params)
-            .map_err(map_registry_error)?;
-        self.pending_operations
-            .mark_admitted(&params.context.operation_id);
+            .map_err(map_ledger_error)?;
         drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1180,9 +852,7 @@ impl EipHandler for Daemon {
             .open_writer(&mounts, &params)
             .await
             .map_err(map_transfer_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1203,9 +873,7 @@ impl EipHandler for Daemon {
                 .await
                 .map_err(map_transfer_error)?,
         };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1236,8 +904,8 @@ impl EipHandler for Daemon {
         let operations = self.operations.clone();
         let commit_operation_id = operation_id.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let committed = match commit.execute(operations, commit_operation_id).await {
                     Ok(committed) => committed,
                     Err(error) => {
@@ -1256,7 +924,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1280,9 +948,7 @@ impl EipHandler for Daemon {
             .await
             .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
             .map_err(map_resource_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1303,9 +969,7 @@ impl EipHandler for Daemon {
             .await
             .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
             .map_err(map_resource_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1326,9 +990,7 @@ impl EipHandler for Daemon {
             .await
             .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
             .map_err(map_resource_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1349,9 +1011,7 @@ impl EipHandler for Daemon {
             .await
             .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
             .map_err(map_resource_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1372,9 +1032,7 @@ impl EipHandler for Daemon {
             .await
             .map_err(|_| protocol_error(ErrorType::InternalError, "resource worker failed"))?
             .map_err(map_resource_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1395,8 +1053,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let write =
                     tokio::task::spawn_blocking(move || resources.write_text(&mounts, &params))
                         .await;
@@ -1424,7 +1082,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1447,8 +1105,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let mkdir =
                     tokio::task::spawn_blocking(move || resources.mkdir(&mounts, &params)).await;
                 let (info, created_directories) = match mkdir {
@@ -1475,7 +1133,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1499,8 +1157,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let patch =
                     tokio::task::spawn_blocking(move || resources.patch_text(&mounts, &params))
                         .await;
@@ -1528,7 +1186,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1551,8 +1209,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let copy =
                     tokio::task::spawn_blocking(move || resources.copy(&mounts, &params)).await;
                 let (destination, bytes_copied) = match copy {
@@ -1579,7 +1237,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1602,8 +1260,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let moved =
                     tokio::task::spawn_blocking(move || resources.move_path(&mounts, &params))
                         .await;
@@ -1630,7 +1288,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1653,8 +1311,8 @@ impl EipHandler for Daemon {
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let owned = self
-            .owned_operations
-            .spawn(operation_id.clone(), async move {
+            .operations
+            .spawn_owned(operation_id.clone(), async move {
                 let removed =
                     tokio::task::spawn_blocking(move || resources.remove(&mounts, &params)).await;
                 let removed_entries = match removed {
@@ -1680,7 +1338,7 @@ impl EipHandler for Daemon {
                 };
                 operation
                     .finish(&result, Some(receipt))
-                    .map_err(map_registry_error)?;
+                    .map_err(map_ledger_error)?;
                 Ok(result)
             });
         drop(work);
@@ -1701,7 +1359,7 @@ impl EipHandler for Daemon {
         let mut status = self.operations.cancel(&params.target_operation_id);
         if status == eip::OperationCancelStatus::NotFound {
             match self
-                .pending_operations
+                .operations
                 .wait_for_admission(
                     &params.target_operation_id,
                     deadline,
@@ -1728,9 +1386,7 @@ impl EipHandler for Daemon {
             }
         }
         let result = eip::OperationCancelResult { status };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1749,9 +1405,7 @@ impl EipHandler for Daemon {
             .receipt_by_operation(&params.operation_id)
             .ok_or_else(|| protocol_error(ErrorType::NotFoundOrDenied, "receipt was not found"))?;
         let result = eip::ReceiptGetResult { receipt };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1771,9 +1425,7 @@ impl EipHandler for Daemon {
             .read(&params, deadline)
             .await
             .map_err(map_retention_error)?;
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1808,7 +1460,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1825,9 +1477,7 @@ impl EipHandler for Daemon {
         let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let observation = inspect_port(&params.target, deadline).await;
         let result = eip::PortInspectResult { observation };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1865,9 +1515,7 @@ impl EipHandler for Daemon {
             };
             if observation.status == desired {
                 let result = eip::PortWaitResult { observation };
-                operation
-                    .finish(&result, None)
-                    .map_err(map_registry_error)?;
+                operation.finish(&result, None).map_err(map_ledger_error)?;
                 return Ok(result);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1972,7 +1620,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -1992,9 +1640,7 @@ impl EipHandler for Daemon {
                 .inspect(&params.handle)
                 .map_err(map_process_error)?,
         };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2029,9 +1675,7 @@ impl EipHandler for Daemon {
             }
         };
         let result = eip::ProcessWaitResult { process };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
+        operation.finish(&result, None).map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2067,7 +1711,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2095,7 +1739,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2132,7 +1776,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2172,7 +1816,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2207,7 +1851,7 @@ impl EipHandler for Daemon {
         };
         operation
             .finish(&result, Some(receipt))
-            .map_err(map_registry_error)?;
+            .map_err(map_ledger_error)?;
         Ok(result)
     }
 
@@ -2355,7 +1999,7 @@ impl EipHandler for Daemon {
         };
         let pending_release = execution.prepare_started_release(&started);
         if let Err(error) = operation.finish(&result, Some(receipt)) {
-            return Err(map_registry_error(error));
+            return Err(map_ledger_error(error));
         }
         if let Some(release) = pending_release {
             release.preserve_output();
@@ -2425,7 +2069,7 @@ fn mutation_receipt_at(
 ) -> Result<(OperationLease, eip::OperationReceipt), EIPError> {
     let receipt = operation
         .receipt(method, stage, Some(ReceiptOutcome::Succeeded))
-        .map_err(map_registry_error)?;
+        .map_err(map_ledger_error)?;
     let mut unknown_receipt = receipt.clone();
     unknown_receipt.stage = ReceiptStage::Unknown;
     unknown_receipt.outcome = Some(ReceiptOutcome::Unknown);
@@ -2740,34 +2384,34 @@ fn map_dispatch_error(error: DispatchError, _method: &str) -> EIPError {
     }
 }
 
-fn map_registry_error(error: RegistryError) -> EIPError {
+fn map_ledger_error(error: LedgerError) -> EIPError {
     let (error_type, message, retry_hint) = match error {
-        RegistryError::Collision => (
+        LedgerError::Collision => (
             ErrorType::Conflict,
             "operation_id is already active or retained",
             RetryHint::Never,
         ),
-        RegistryError::DeadlineExpired => (
+        LedgerError::DeadlineExpired => (
             ErrorType::Timeout,
             "operation deadline has expired",
             RetryHint::Never,
         ),
-        RegistryError::InProgress => (
+        LedgerError::InProgress => (
             ErrorType::OperationInProgress,
             "matching operation is still in progress",
             RetryHint::ReconcileFirst,
         ),
-        RegistryError::TerminalFailure => (
+        LedgerError::TerminalFailure => (
             ErrorType::Conflict,
             "matching operation completed without a replayable success result",
             RetryHint::ReconcileFirst,
         ),
-        RegistryError::Capacity => (
+        LedgerError::Capacity => (
             ErrorType::Busy,
             "operation record capacity is currently exhausted",
             RetryHint::AfterCapacity,
         ),
-        RegistryError::Encoding => (
+        LedgerError::Encoding => (
             ErrorType::InternalError,
             "operation evidence encoding failed",
             RetryHint::Never,
@@ -3202,7 +2846,7 @@ mod tests {
                     .await
             })
         };
-        daemon.pending_operations.wait_until_admission_wait().await;
+        daemon.operations.wait_until_admission_wait().await;
         let target_params = EnvironmentDescribeParams {
             context: EIPCallContext {
                 operation_id: "pending-target".to_owned(),
@@ -3252,7 +2896,7 @@ mod tests {
                     .await
             })
         };
-        daemon.pending_operations.wait_until_admission_wait().await;
+        daemon.operations.wait_until_admission_wait().await;
         let timeout = timing_out
             .await
             .expect("timeout wait joins")
@@ -3282,7 +2926,7 @@ mod tests {
                     .await
             })
         };
-        daemon.pending_operations.wait_until_admission_wait().await;
+        daemon.operations.wait_until_admission_wait().await;
         daemon.closed.send_replace(true);
         let closed = waiting
             .await
@@ -3385,7 +3029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operation_registry_memory_is_bounded_by_id_and_record_limits() {
+    async fn operation_ledger_memory_is_bounded_by_id_and_record_limits() {
         let mut config = Config::for_test("env-test");
         config.limits.max_concurrent_operations = 1;
         config.limits.max_operation_records = 2;
@@ -3845,7 +3489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborted_mutation_owner_preserves_unknown_outcome_replay() {
+    async fn abandoned_waiter_does_not_end_owned_native_mutation_early() {
         let config = Config::for_test("env-test");
         let daemon = Daemon::with_generation(&config, 13).expect("daemon builds");
         let _ = initialize(&daemon).await;
@@ -3878,8 +3522,8 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let owned =
             daemon
-                .owned_operations
-                .spawn(params.context.operation_id.clone(), async move {
+                .operations
+                .spawn_owned(params.context.operation_id.clone(), async move {
                     tokio::task::spawn_blocking(move || {
                         let _ = started_tx.send(());
                         let (released, changed) = &*blocking_gate;
@@ -3910,30 +3554,32 @@ mod tests {
         );
         assert_eq!(daemon.operations.record_stats().0, 1);
         assert_eq!(
-            daemon.owned_operations.active_ids(),
+            daemon.operations.active_owned_ids(),
             vec!["drain-write".to_owned()]
         );
-        daemon.owned_operations.request_reconciliation();
-        daemon.owned_operations.wait_until_idle().await;
+        daemon.operations.begin_drain();
+        let ledger = daemon.operations.clone();
+        let draining = tokio::spawn(async move {
+            ledger.wait_until_owned_idle().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!draining.is_finished());
+
         let (released, changed) = &*gate;
         *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
         changed.notify_all();
+        draining
+            .await
+            .expect("owned mutation reaches native completion");
 
         let retry = params;
         let replay = daemon
             .begin_record("file.write_text", &retry.context, &retry)
             .expect("same operation identity replays");
-        let BeginOutcome::ReplayFailure(error) = replay else {
-            panic!("unknown-outcome failure replay expected");
+        let BeginOutcome::Replay(result) = replay else {
+            panic!("completed result replay expected");
         };
-        assert_eq!(error.data.error_type, crate::eip::ErrorType::UnknownOutcome);
-        assert_eq!(error.data.operation_id.as_deref(), Some("drain-write"));
-        let replayed_receipt = error.data.receipt.expect("unknown receipt is retained");
-        assert_eq!(replayed_receipt.operation_id, "drain-write");
-        assert_eq!(
-            replayed_receipt.outcome,
-            Some(crate::eip::ReceiptOutcome::Unknown)
-        );
+        assert_eq!(result["completed"], true);
     }
 
     #[tokio::test]
@@ -3941,7 +3587,7 @@ mod tests {
         let config = Config::for_test("env-test");
         let daemon = Daemon::with_generation(&config, 14).expect("daemon builds");
         let _ = initialize(&daemon).await;
-        daemon.owned_operations.begin_drain();
+        daemon.operations.begin_drain();
         let params = FileWriteTextParams {
             context: EIPCallContext {
                 operation_id: "late-write".to_owned(),
@@ -3970,8 +3616,8 @@ mod tests {
         let worker_dispatched = Arc::clone(&dispatched);
         let owned =
             daemon
-                .owned_operations
-                .spawn(params.context.operation_id.clone(), async move {
+                .operations
+                .spawn_owned(params.context.operation_id.clone(), async move {
                     worker_dispatched.store(true, Ordering::SeqCst);
                     operation
                         .finish(&json!({"completed": true}), Some(receipt))
@@ -3984,7 +3630,7 @@ mod tests {
             .expect_err("late registration is reconciled");
         assert_eq!(error.data.error_type, crate::eip::ErrorType::UnknownOutcome);
         assert!(!dispatched.load(Ordering::SeqCst));
-        daemon.owned_operations.wait_until_idle().await;
+        daemon.operations.wait_until_owned_idle().await;
     }
 
     #[tokio::test]

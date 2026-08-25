@@ -19,6 +19,7 @@ This document defines the normative content and workflow boundaries of the Agent
 | `examples/`       | Runnable, tested developer examples of public integration and extension boundaries                    | Normative design, published user documentation, production packages, and release artifacts                        |
 | `packages/`       | Python 3.13 uv workspace packages whose distribution names use the `converge-` prefix                 | Design discussion and unrelated generated artifacts                                                               |
 | `crates/`         | Rust workspace crates whose package names use the `converge-` prefix                                  | Python packages and local reference repositories                                                                  |
+| `sdk/`            | Standalone Foundation Service language SDKs and the companion remote client CLI                       | Root language workspace membership, service implementation, and generated release artifacts                       |
 | `proto/`          | Language-neutral protocol IDL consumed by deterministic repository generators                         | Handwritten language-local implementations, release artifacts, and normative design prose                         |
 
 There is no repository-local `issues/` directory. "Issues" means the repository's GitHub Issues.
@@ -26,6 +27,12 @@ There is no repository-local `issues/` directory. "Issues" means the repository'
 Workspace membership does not by itself select a release group. The Harness release group contains `packages/agent-harness` and `packages/agent-stream-protocol`; one `release/harness-v<version>` tag assigns the same version to both Python distributions and publishes them through one workflow. The published Stream Protocol artifact requires the exact same Harness version. `packages/agent-ui` releases independently through `release/agent-ui-v<version>` and its published artifacts require one reviewed Harness release version for both Harness and Stream Protocol. Source manifests keep those workspace dependencies unversioned so uv resolves local members during repository development. Release versions follow the stable and RC forms defined by [Release Automation](#release-automation). Foundation releases exclude these packages and select their own compatible published Harness release.
 
 `packages/agent-envd-client` participates in root Python development and validation but is versioned and published with `crates/agent-envd` by the agent-envd release workflow. Foundation releases exclude that package and consume a compatible published version. Other release-group exceptions require an explicit owning specification and release workflow rather than inference from directory placement.
+
+Foundation Service SDKs are independent projects under `sdk/{python,go,rust,typescript}` rather than root language-workspace members. The companion CLI at `sdk/rust/agent-foundation-cli` is also an independent Cargo project: it has its own manifest and lock file, is not a member of either Rust workspace, and is excluded from the Rust SDK source package. Its Cargo package is `agent-foundation-cli`, and its installed executable is `agent-foundation`.
+
+The CLI is a remote client for the Foundation Service `/api` boundary. Network commands consume typed operations from the Foundation Rust SDK; the CLI does not own a parallel HTTP client, service persistence, queues, migrations, or infrastructure control. A network command is introduced only with the corresponding service API, Rust SDK operation, and end-to-end validation rather than as a nonfunctional placeholder.
+
+The CLI releases independently from all SDK channels through `release/foundation-cli-v<version>`. One release contains immutable archives for Linux x86_64 and ARM64, macOS x86_64 and ARM64, and Windows x86_64 and ARM64, plus `SHA256SUMS`. Archives contain the executable and repository license. The channel publishes no crate or registry package and defines no mutable `latest` selector for either stable or RC releases.
 
 Projects under `examples/` may carry their own manifests and lock files when realistic packaging is part of the integration being demonstrated. They remain outside production package workspaces and release groups; example distribution names and artifacts are not platform packages.
 
@@ -88,7 +95,7 @@ The development guide does not establish product semantics or subsystem ownershi
 
 Every release channel accepts a canonical stable `X.Y.Z` identity or RC `X.Y.Z-rc.N` identity, where `N` is a positive integer without leading zeroes. The canonical identity appears in release tags, GitHub Release titles, Rust and npm package metadata, Go module tags, binary archive names, and exact container tags. Python package metadata, lock entries, and artifact names use the PEP 440-normalized `X.Y.ZrcN` spelling for the same RC identity.
 
-An RC runs the owning release workflow, publishes its normal immutable artifacts to the owning registries, and creates a GitHub prerelease. It never advances a stable mutable selector: Foundation and agent-envd RCs do not modify the corresponding container `latest` tag, and a TypeScript SDK RC publishes under the npm `rc` dist-tag rather than `latest`. A stable release creates a normal GitHub Release and advances the owning `latest` selectors.
+An RC runs the owning release workflow, publishes its normal immutable artifacts to the owning registries, and creates a GitHub prerelease. It never advances a stable mutable selector: Foundation and agent-envd RCs do not modify the corresponding container `latest` tag, and a TypeScript SDK RC publishes under the npm `rc` dist-tag rather than `latest`. A stable release creates a normal GitHub Release and advances only the mutable `latest` selectors defined by its owning channel. The Foundation CLI channel has no mutable selector for stable or RC releases.
 
 Generated notes for a stable release compare with the preceding stable tag and therefore exclude RC tags as comparison bases. Generated notes for an RC compare with the immediately preceding canonical release identity in that component channel, so the first RC follows the previous stable release and later RCs follow the preceding RC.
 
@@ -103,8 +110,8 @@ The root `Makefile` is the stable local entry point. `pre-commit` provides fast 
 - `make test` runs the Python workspace test suite;
 - `make examples-check` validates independent example locks, style, and types;
 - `make examples-check-all` additionally runs example tests, offline smoke paths, and builds;
-- `make build` builds every workspace package, private browser application, and standalone SDK, preparing generated package assets before Python distribution builds;
+- `make build` builds every workspace package, private browser application, standalone SDK, and the Foundation CLI, preparing generated package assets before Python distribution builds;
 - `make check` verifies repository formatting, lint, static analysis, and types without rewriting repository sources or running tests;
-- `make check-all` runs the complete EIP, example, browser application, Python, Rust, and standalone SDK gates, including tests and builds.
+- `make check-all` runs the complete EIP, example, browser application, Python, Rust, standalone SDK, and Foundation CLI gates, including tests and builds.
 
 As implementation packages are added, their focused lint, type-check, test, and build commands must be added behind these stable Make targets rather than requiring contributors to discover unrelated tool-specific commands.

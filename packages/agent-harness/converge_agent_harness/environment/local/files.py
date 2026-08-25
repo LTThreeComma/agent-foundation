@@ -293,6 +293,8 @@ class LocalFileOperator:
         exists = destination.exists() or destination.is_symlink()
         if destination.is_symlink():
             raise EnvironmentError("Writing through a symlink is denied.", code="environment_denied")
+        if exists and destination.is_dir():
+            raise EnvironmentError("Destination is a directory.", code="environment_request_invalid")
         if mode in {"replace", "append"} and not exists:
             raise EnvironmentError("Destination does not exist.", code="environment_not_found")
         try:

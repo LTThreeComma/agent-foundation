@@ -180,6 +180,7 @@ async def disclose_sequence_field(
     content_complete: bool,
     noun: str = "output",
     limit: int = DEFAULT_TOOL_OUTPUT_CHARS,
+    continuation_hint: str | None = None,
 ) -> tuple[dict[str, JsonValue], int]:
     """Keep as many complete sequence items as fit and spill the fuller value."""
     result = _redacted_mapping(value)
@@ -187,7 +188,12 @@ async def disclose_sequence_field(
     if not isinstance(items, list):
         raise TypeError(f"{field} must be a list")
     if tool_output_size(result) <= limit:
-        return acknowledge_tool_output(result), len(items)
+        if content_complete or continuation_hint is None:
+            return acknowledge_tool_output(result), len(items)
+        continuation = continuation_disclosure(result, hint=continuation_hint)
+        continued = {**result, "disclosure": cast(JsonValue, continuation)}
+        if tool_output_size(continued) <= limit:
+            return acknowledge_tool_output(continued), len(items)
     disclosure = await create_tool_output_disclosure(
         context,
         result,
@@ -219,6 +225,7 @@ async def disclose_mapping_field(
     content_complete: bool,
     noun: str = "output",
     limit: int = DEFAULT_TOOL_OUTPUT_CHARS,
+    continuation_hint: str | None = None,
 ) -> tuple[dict[str, JsonValue], int]:
     """Keep as many complete mapping entries as fit and spill the fuller value."""
     result = _redacted_mapping(value)
@@ -226,7 +233,12 @@ async def disclose_mapping_field(
     if not isinstance(items, dict):
         raise TypeError(f"{field} must be a mapping")
     if tool_output_size(result) <= limit:
-        return acknowledge_tool_output(result), len(items)
+        if content_complete or continuation_hint is None:
+            return acknowledge_tool_output(result), len(items)
+        continuation = continuation_disclosure(result, hint=continuation_hint)
+        continued = {**result, "disclosure": cast(JsonValue, continuation)}
+        if tool_output_size(continued) <= limit:
+            return acknowledge_tool_output(continued), len(items)
     disclosure = await create_tool_output_disclosure(
         context,
         result,

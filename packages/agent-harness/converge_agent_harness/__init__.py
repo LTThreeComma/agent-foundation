@@ -74,7 +74,16 @@ from converge_agent_harness.capabilities import (
     WorkingStateConfiguration,
 )
 from converge_agent_harness.capability_types import CapabilityTypeCatalog, CapabilityTypeRegistration
-from converge_agent_harness.context import AgentContext, BuiltSubagent, RunBindings, SubagentCollection
+from converge_agent_harness.context import (
+    AgentContext,
+    BuiltSubagent,
+    RunBindings,
+    RunSkillPaths,
+    SkillPath,
+    SubagentCollection,
+    ToolMetadataKey,
+    ToolRuntimeMetadata,
+)
 from converge_agent_harness.environment import (
     DEFAULT_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS,
     ENVIRONMENT_ACTION_CATALOG_VERSION,
@@ -256,8 +265,10 @@ from converge_agent_harness.state import (
 )
 from converge_agent_harness.tools.deferred import DeferredToolResume
 from converge_agent_harness.toolsets import (
+    FILE_VIEW_RULES,
     DocumentsToolset,
     FileToolset,
+    FileViewRule,
     HandoffToolset,
     MediaToolset,
     MonitoredProcessToolset,
@@ -289,6 +300,7 @@ __all__ = [
     "ENVIRONMENT_ACTION_CATALOG_VERSION",
     "ENVIRONMENT_ACTION_DISPATCH",
     "ENVIRONMENT_PROVIDER_ENTRY_POINT_GROUP",
+    "FILE_VIEW_RULES",
     "HARNESS_PLUGIN_CONFIG_ENABLED_ENV",
     "HARNESS_PLUGIN_CONFIG_FILE_ENV",
     "HARNESS_PLUGIN_CONFIG_JSON_ENV",
@@ -406,6 +418,7 @@ __all__ = [
     "FileTextSearchRequest",
     "FileTextSearchResult",
     "FileToolset",
+    "FileViewRule",
     "FileWriteMode",
     "FileWriteResult",
     "HandoffCapability",
@@ -488,6 +501,7 @@ __all__ = [
     "RunInputFactory",
     "RunInputValue",
     "RunPreparationContext",
+    "RunSkillPaths",
     "RunUsageLedger",
     "RuntimeContextCapability",
     "RuntimeContextConfiguration",
@@ -500,6 +514,7 @@ __all__ = [
     "SkillCatalogItem",
     "SkillManager",
     "SkillMaterializer",
+    "SkillPath",
     "SkillSource",
     "SkillsCapability",
     "SkillsPolicy",
@@ -512,6 +527,8 @@ __all__ = [
     "TaskStateCell",
     "TaskStateError",
     "TaskStateRunCapability",
+    "ToolMetadataKey",
+    "ToolRuntimeMetadata",
     "UsageMeasure",
     "UsageRecord",
     "UserInteractionCapability",

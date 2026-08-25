@@ -28,6 +28,7 @@ from release_notes import (  # noqa: E402
         ("agent-ui", "release/agent-ui-v1.2.3"),
         ("foundation", "release/foundation-v1.2.3"),
         ("agent-envd", "release/agent-envd-v1.2.3"),
+        ("foundation-cli", "release/foundation-cli-v1.2.3"),
         ("sdk-python", "release/sdk/python/1.2.3"),
         ("sdk-go", "release/sdk/go/1.2.3"),
         ("sdk-rust", "release/sdk/rust/1.2.3"),
@@ -64,6 +65,16 @@ def test_rc_release_uses_previous_rc_in_the_same_channel() -> None:
 
     assert previous_release_tag("foundation", "2.0.0-rc.2", tags) == "release/foundation-v2.0.0-rc.1"
     assert previous_release_tag("foundation", "2.0.0-rc.1", tags) == "release/foundation-v1.10.0"
+
+
+def test_foundation_and_foundation_cli_release_notes_are_independent() -> None:
+    tags = [
+        "release/foundation-v1.2.3",
+        "release/foundation-cli-v9.8.7",
+    ]
+
+    assert previous_release_tag("foundation", "1.2.4", tags) == "release/foundation-v1.2.3"
+    assert previous_release_tag("foundation-cli", "9.8.8", tags) == "release/foundation-cli-v9.8.7"
 
 
 def test_harness_and_agent_ui_release_notes_are_independent() -> None:
@@ -123,6 +134,20 @@ def test_builds_generated_notes_command_for_later_release() -> None:
     ]
 
 
+@pytest.mark.parametrize("version", ["1.2.3", "1.2.3-rc.1"])
+def test_foundation_cli_never_updates_latest_release(version: str) -> None:
+    command = build_release_command(
+        component="foundation-cli",
+        version=version,
+        repository="converge-ai-labs/agent-foundation",
+        title=f"Agent Foundation CLI {version}",
+        assets=["dist/agent-foundation.zip"],
+        previous_tag=None,
+    )
+
+    assert "--latest=false" in command
+
+
 def test_marks_rc_github_release_as_prerelease() -> None:
     command = build_release_command(
         component="sdk-typescript",
@@ -139,17 +164,17 @@ def test_marks_rc_github_release_as_prerelease() -> None:
 
 def test_builds_initial_release_command_without_cross_channel_notes() -> None:
     command = build_release_command(
-        component="agent-envd",
+        component="foundation-cli",
         version="0.0.0",
         repository="converge-ai-labs/agent-foundation",
-        title="agent-envd 0.0.0",
+        title="Agent Foundation CLI 0.0.0",
         assets=[],
         previous_tag=None,
     )
 
     assert "--generate-notes" not in command
     assert "--notes-start-tag" not in command
-    assert command[-2:] == ["--notes", INITIAL_NOTES["agent-envd"]]
+    assert command[-2:] == ["--notes", INITIAL_NOTES["foundation-cli"]]
 
 
 def test_prepends_manual_notes_to_generated_notes() -> None:

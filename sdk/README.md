@@ -9,6 +9,8 @@ The Foundation Service SDKs live under one standalone `sdk/` boundary. They are 
 | Rust       | `converge-foundation-sdk`                             | `sdk/rust`       | `release/sdk/rust/<version>`       |
 | TypeScript | `@converge.ai/foundation-sdk`                         | `sdk/typescript` | `release/sdk/typescript/<version>` |
 
+The `agent-foundation` remote CLI is a companion to these SDKs, not another SDK distribution. It is an independent Cargo project at `sdk/rust/agent-foundation-cli` with package name `agent-foundation-cli`, its own lock file, and no membership in the root Rust workspace or the Rust SDK project. Network commands use typed operations from `converge-foundation-sdk`; they do not maintain a separate HTTP client. The CLI does not manage Foundation Service processes or access service implementation internals.
+
 `<version>` is stable `X.Y.Z` or RC `X.Y.Z-rc.N`. Python package metadata normalizes an RC to `X.Y.ZrcN`, and TypeScript RCs publish under the npm `rc` dist-tag rather than `latest`.
 
 All four SDKs currently provide publishable `0.0.x` package shells only. They reserve stable package identities without committing the project to a generator, transport, or service contract before the API is ready. SDK language versions are independent.
@@ -18,4 +20,8 @@ Run the fast standalone SDK checks while iterating and the complete release chec
 ```bash
 make sdk-check
 make sdk-check-all
+make foundation-cli-check
+make foundation-cli-check-all
 ```
+
+The CLI releases as six platform-specific binary archives plus `SHA256SUMS` through `release/foundation-cli-v<version>`. It is not published to crates.io and has no mutable `latest` release selector.

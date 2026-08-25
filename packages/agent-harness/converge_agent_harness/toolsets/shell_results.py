@@ -82,8 +82,10 @@ type ProcessStatusItem = ProcessStatusItemSuccess | ProcessStatusItemFailure
 class ProcessStatusListSuccess(TypedDict):
     ok: Literal[True]
     processes: list[ProcessStatusItem]
+    showing: int
     next_cursor: int | None
     truncated: bool
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type ProcessStatusListResult = ProcessStatusListSuccess | ToolFailure

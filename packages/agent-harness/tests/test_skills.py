@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
 from converge_agent_harness import (
+    FILE_VIEW_RULES,
+    AgentContext,
     DefinitionError,
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
@@ -20,6 +23,7 @@ from converge_agent_harness import (
     EnvironmentStateLimits,
     EnvironmentTopologyLimits,
     EnvironmentTopologyRequest,
+    FileViewRule,
     HarnessBuilder,
     HarnessEvent,
     HarnessExtensionEvent,
@@ -27,11 +31,14 @@ from converge_agent_harness import (
     RunBindings,
     SkillCatalogItem,
     SkillManager,
+    SkillPath,
     SkillsCapability,
     create_environment_run_binding,
 )
 from converge_agent_harness.tools import InvocationPolicyCapability, InvocationPolicyDecision
+from pydantic_ai import RunContext
 from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
@@ -53,6 +60,45 @@ class _StaticSource:
     async def catalog(self, *, environment) -> tuple[SkillCatalogItem, ...]:
         del environment
         return self.entries
+
+
+@dataclass(init=False)
+class _ExternalSkillPathsCapability(AbstractCapability[AgentContext]):
+    id = "test.external-skill-paths"
+
+    async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
+        ctx.deps.skill_paths.publish(
+            self.id,
+            (
+                SkillPath(
+                    name="external",
+                    source_id="external-source",
+                    directory=ctx.deps.environment.resolve_path("/workspace/external-skill"),
+                ),
+            ),
+        )
+        return self
+
+
+@dataclass(init=False)
+class _ExternalFileViewRulesCapability(AbstractCapability[AgentContext]):
+    id = "test.external-file-view-rules"
+
+    async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
+        ctx.deps.tool_metadata.publish(
+            FILE_VIEW_RULES,
+            self.id,
+            FileViewRule(
+                roots=(ctx.deps.environment.resolve_path("/workspace/external-files"),),
+                suffixes=(".guide",),
+                initial_line_limit=800,
+                max_line_length=20_000,
+                page_bytes=100_000_000,
+                semantic_output_chars=100_000_000,
+                preserve_complete_lines=True,
+            ),
+        )
+        return self
 
 
 class _Materializer:
@@ -107,6 +153,62 @@ def _manager(*, materialize: bool = False) -> SkillManager:
         ),
         materializers=(_Materializer(),) if materialize else (),
     )
+
+
+async def _run_single_view(
+    tmp_path: Path,
+    *,
+    capability: AbstractCapability[AgentContext],
+    file_path: str,
+) -> dict[str, object]:
+    observed: dict[str, object] = {}
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="view",
+                    json_args=json.dumps({"file_path": file_path}),
+                    tool_call_id="external-view",
+                )
+            }
+        else:
+            assert isinstance(returns[-1].content, dict)
+            observed.update(returns[-1].content)
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            DynamicEnvironmentCapability(
+                DynamicEnvironmentConfiguration(
+                    max_topology_bindings=8,
+                    max_topology_bytes=4096,
+                    max_reference_entries=64,
+                )
+            ),
+            capability,
+        ),
+    )
+    result = await executable.run(
+        "Read",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(InvocationPolicyCapability(evaluator=_Allow()),),
+        ),
+    )
+    assert result.output_or_raise() == "done"
+    return observed
 
 
 async def test_skill_manager_materializes_into_authorized_root_and_freezes_frontmatter(tmp_path: Path) -> None:
@@ -238,14 +340,53 @@ async def test_ordinary_environment_skill_read_emits_usage_observation(tmp_path:
     )
 
 
+async def test_external_capability_can_publish_skill_paths_for_relaxed_markdown_view(tmp_path: Path) -> None:
+    skill = tmp_path / "external-skill"
+    skill.mkdir()
+    content = "".join(f"line {index}: {'x' * 60}\n" for index in range(220))
+    (skill / "guide.md").write_bytes(content.encode("utf-8"))
+
+    viewed = await _run_single_view(
+        tmp_path,
+        capability=_ExternalSkillPathsCapability(),
+        file_path="/workspace/external-skill/guide.md",
+    )
+
+    assert viewed["content"] == content
+    assert viewed["has_more"] is False
+    assert "disclosure" not in viewed
+
+
+async def test_external_capability_can_publish_file_view_rules_with_hard_limit_clamping(tmp_path: Path) -> None:
+    root = tmp_path / "external-files"
+    root.mkdir()
+    content = "".join(f"line {index}: {'x' * 80}\n" for index in range(520))
+    (root / "manual.guide").write_bytes(content.encode("utf-8"))
+
+    viewed = await _run_single_view(
+        tmp_path,
+        capability=_ExternalFileViewRulesCapability(),
+        file_path="/workspace/external-files/manual.guide",
+    )
+
+    assert isinstance(viewed["content"], str)
+    assert content.startswith(viewed["content"])
+    assert viewed["content"] != content
+    assert viewed["has_more"] is True
+    assert isinstance(viewed["next_line_offset"], int)
+    assert viewed["next_line_offset"] > 0
+    assert viewed["disclosure"]["truncated"] is True
+    assert len(json.dumps(viewed, ensure_ascii=False, separators=(",", ":"))) <= 20_000
+
+
 async def test_selected_skill_markdown_uses_relaxed_full_read_budget(tmp_path: Path) -> None:
     skill = tmp_path / ".agents" / "skills" / "review"
     skill.mkdir(parents=True)
     content = "---\nname: review\ndescription: Review code.\n---\n\n" + "".join(
         f"line {index}: {'x' * 60}\n" for index in range(220)
     )
-    (skill / "SKILL.md").write_text(content, encoding="utf-8")
-    (tmp_path / "notes.md").write_text(content, encoding="utf-8")
+    (skill / "SKILL.md").write_bytes(content.encode("utf-8"))
+    (tmp_path / "notes.md").write_bytes(content.encode("utf-8"))
     observed: dict[str, object] = {}
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
@@ -315,7 +456,7 @@ async def test_large_selected_skill_markdown_continues_without_skipping_lines(tm
     content = "---\nname: review\ndescription: Review code.\n---\n\n" + "".join(
         f"line {index}: {'x' * (3_000 if index == 300 else 80)}\n" for index in range(520)
     )
-    (skill / "SKILL.md").write_text(content, encoding="utf-8")
+    (skill / "SKILL.md").write_bytes(content.encode("utf-8"))
     pages: list[dict[str, object]] = []
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
