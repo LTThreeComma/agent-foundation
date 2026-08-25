@@ -1065,31 +1065,6 @@ impl TransferRegistry {
         state.records.len() > state.terminal_order.len()
     }
 
-    pub(crate) fn is_live_reader(&self, handle: &str) -> bool {
-        self.is_live_handle(handle, |record| matches!(record, TransferRecord::Reader(_)))
-    }
-
-    pub(crate) fn is_live_writer(&self, handle: &str) -> bool {
-        self.is_live_handle(handle, |record| matches!(record, TransferRecord::Writer(_)))
-    }
-
-    fn is_live_handle(
-        &self,
-        handle: &str,
-        expected_kind: impl FnOnce(&TransferRecord) -> bool,
-    ) -> bool {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.records.get(handle).is_some_and(expected_kind)
-            && !state
-                .terminal_order
-                .iter()
-                .any(|(terminal, _)| terminal == handle)
-    }
-
     fn mark_terminal(&self, handle: &str) {
         let mut state = self
             .inner
@@ -2071,7 +2046,6 @@ mod tests {
             transfers.close_reader(&opened.reader).await,
             Err(TransferError::Expired)
         );
-        assert!(!transfers.is_live_reader(&opened.reader.0));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

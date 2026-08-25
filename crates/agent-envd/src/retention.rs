@@ -1,19 +1,20 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    collections::BTreeMap,
+    io,
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use base64::Engine as _;
+use tokio::{
+    fs::{self, File, OpenOptions},
+    io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _},
+    sync::{Mutex as AsyncMutex, Notify},
+};
 
 use crate::{
-    eip::{
-        EncodedBytes, OutputCapture, OutputKind, OutputOverflow, OutputPolicy, OutputReadParams,
-        OutputReadResult, OutputReference, OutputSegment,
-    },
+    eip::{EncodedBytes, OutputInfo, OutputReadParams, OutputReadResult, OutputReference},
     operation::ShortIdAllocator,
 };
 
@@ -38,56 +39,71 @@ pub(crate) struct RetentionStore {
 }
 
 struct RetentionInner {
-    state: Mutex<RetentionState>,
+    objects: Mutex<BTreeMap<String, Arc<OutputObject>>>,
     quota: RetentionQuota,
-    max_objects: usize,
-    #[allow(dead_code)] // Used by producer integration; output.read itself does not allocate.
-    ttl: Duration,
-    max_inline_bytes: u64,
-    max_output_bytes: u64,
+    spool: Option<PathBuf>,
+    max_output_bytes_per_stream: u64,
+    max_preview_bytes: usize,
     max_response_bytes: u64,
     selector_ids: ShortIdAllocator,
 }
 
-#[derive(Default)]
-struct RetentionState {
-    objects: BTreeMap<String, RetainedObject>,
-    released: BTreeSet<String>,
-    released_order: VecDeque<String>,
-}
-
-struct RetainedObject {
-    capture: Arc<Mutex<RetainedCapture>>,
-    expires_at: Instant,
-    expires_at_utc: chrono::DateTime<chrono::Utc>,
-}
-
-struct RetainedCapture {
-    data: Vec<u8>,
-    producer_complete: bool,
-    produced_bytes: u64,
-    dropped_bytes: u64,
-    readable: bool,
-}
-
-pub(crate) struct LiveOutput {
-    store: RetentionStore,
+struct OutputObject {
     reference: OutputReference,
-    capture: Arc<Mutex<RetainedCapture>>,
-    capture_limit: u64,
-    release_on_drop: AtomicBool,
+    path: PathBuf,
+    state: Mutex<OutputState>,
+    writer: AsyncMutex<Option<File>>,
+    io: AsyncMutex<()>,
+    changed: Notify,
+    reservation: Arc<PairReservation>,
+    reservation_index: usize,
+    max_preview_bytes: usize,
+}
+
+struct OutputState {
+    producer_complete: bool,
+    content_complete: bool,
+    produced_bytes: u64,
+    retained_bytes: u64,
+    quota_bytes: u64,
+    charge_full_allowance: bool,
+    preview: Vec<u8>,
+    attached: bool,
+    released: bool,
+}
+
+struct PairReservation {
+    quota: RetentionQuota,
+    limit: u64,
+    state: Mutex<PairReservationState>,
+}
+
+struct PairReservationState {
+    complete: [bool; 2],
+    charged: [u64; 2],
+    settled: bool,
+    aborted: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveOutput {
+    object: Arc<OutputObject>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppendOutcome {
+    Complete,
+    LimitCrossed,
+    WriteFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetentionError {
-    Invalid,
-    Gap {
-        available_start: u64,
-        available_end: u64,
-    },
+    InvalidSelector,
+    InvalidOffset,
     Busy,
-    #[allow(dead_code)] // Constructed by producer-side capture before command producers land.
-    OutputLimit,
+    Conflict,
+    CleanupFailed,
     Internal,
 }
 
@@ -95,13 +111,13 @@ impl RetentionQuota {
     pub(crate) fn new(config: &crate::config::Config) -> Result<Self, RetentionError> {
         Ok(Self {
             inner: Arc::new(Mutex::new(QuotaState::default())),
-            max_bytes: config.limits.max_retained_bytes,
-            max_objects: usize::try_from(config.limits.max_retained_objects)
+            max_bytes: config.limits.max_spool_bytes,
+            max_objects: usize::try_from(config.limits.max_spool_objects)
                 .map_err(|_| RetentionError::Internal)?,
         })
     }
 
-    pub(crate) fn reserve(&self, bytes: u64, objects: usize) -> bool {
+    fn reserve(&self, bytes: u64, objects: usize) -> bool {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(next_bytes) = state.bytes.checked_add(bytes) else {
             return false;
@@ -117,7 +133,7 @@ impl RetentionQuota {
         true
     }
 
-    pub(crate) fn release(&self, bytes: u64, objects: usize) {
+    fn release(&self, bytes: u64, objects: usize) {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.bytes = state.bytes.saturating_sub(bytes);
         state.objects = state.objects.saturating_sub(objects);
@@ -138,196 +154,263 @@ impl RetentionStore {
     ) -> Result<Self, RetentionError> {
         Ok(Self {
             inner: Arc::new(RetentionInner {
-                state: Mutex::new(RetentionState::default()),
+                objects: Mutex::new(BTreeMap::new()),
                 quota,
-                max_objects: usize::try_from(config.limits.max_retained_objects)
+                spool: config
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.spool().to_path_buf()),
+                max_output_bytes_per_stream: config.limits.max_output_bytes_per_stream,
+                max_preview_bytes: usize::try_from(config.limits.max_output_preview_bytes)
                     .map_err(|_| RetentionError::Internal)?,
-                ttl: Duration::from_millis(config.limits.max_retention_ttl_ms),
-                max_inline_bytes: config.limits.max_inline_output_bytes,
-                max_output_bytes: config.limits.max_output_bytes,
                 max_response_bytes: config.limits.max_response_bytes,
                 selector_ids: ShortIdAllocator::for_generation(generation),
             }),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_live(
+    pub(crate) async fn create_live_pair(
         &self,
-        policy: Option<&OutputPolicy>,
-    ) -> Result<LiveOutput, RetentionError> {
-        self.create_live_many(policy, 1)?
-            .pop()
-            .ok_or(RetentionError::Internal)
-    }
-
-    pub(crate) fn create_live_pair(
-        &self,
-        policy: Option<&OutputPolicy>,
     ) -> Result<(LiveOutput, LiveOutput), RetentionError> {
-        let mut outputs = self.create_live_many(policy, 2)?.into_iter();
-        let stdout = outputs.next().ok_or(RetentionError::Internal)?;
-        let stderr = outputs.next().ok_or(RetentionError::Internal)?;
-        Ok((stdout, stderr))
-    }
-
-    fn create_live_many(
-        &self,
-        policy: Option<&OutputPolicy>,
-        count: usize,
-    ) -> Result<Vec<LiveOutput>, RetentionError> {
-        let policy = self.effective_policy(policy)?;
-        if policy.overflow != OutputOverflow::Retain || count == 0 {
-            return Err(RetentionError::Invalid);
-        }
-        let expires_at_utc = chrono::Duration::from_std(self.inner.ttl)
-            .map(|ttl| chrono::Utc::now() + ttl)
-            .map_err(|_| RetentionError::Internal)?;
-        let mut state = self.state();
-        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
-        if !self.inner.quota.reserve(0, count) {
+        let spool = self.inner.spool.as_ref().ok_or(RetentionError::Internal)?;
+        let limit = self.inner.max_output_bytes_per_stream;
+        let reserved = limit.checked_mul(2).ok_or(RetentionError::Internal)?;
+        if !self.inner.quota.reserve(reserved, 2) {
             return Err(RetentionError::Busy);
         }
-        let mut selectors = Vec::with_capacity(count);
-        for _ in 0..count {
-            match self.inner.selector_ids.next("output") {
-                Ok(selector) => selectors.push(selector),
+        let reservation = Arc::new(PairReservation {
+            quota: self.inner.quota.clone(),
+            limit,
+            state: Mutex::new(PairReservationState {
+                complete: [false; 2],
+                charged: [0; 2],
+                settled: false,
+                aborted: false,
+            }),
+        });
+        let mut created: Vec<Arc<OutputObject>> = Vec::with_capacity(2);
+        for index in 0..2 {
+            let selector = match self.inner.selector_ids.next("output") {
+                Ok(selector) => selector,
                 Err(_) => {
-                    self.inner.quota.release(0, count);
+                    self.rollback_creation(&created, &reservation).await;
                     return Err(RetentionError::Internal);
+                }
+            };
+            let path = spool.join(format!("{selector}.spool"));
+            let file = match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .read(false)
+                .open(&path)
+                .await
+            {
+                Ok(file) => file,
+                Err(_) => {
+                    self.rollback_creation(&created, &reservation).await;
+                    return Err(RetentionError::Internal);
+                }
+            };
+            let object = Arc::new(OutputObject {
+                reference: OutputReference(selector),
+                path,
+                state: Mutex::new(OutputState {
+                    producer_complete: false,
+                    content_complete: true,
+                    produced_bytes: 0,
+                    retained_bytes: 0,
+                    quota_bytes: 0,
+                    charge_full_allowance: false,
+                    preview: Vec::new(),
+                    attached: true,
+                    released: false,
+                }),
+                writer: AsyncMutex::new(Some(file)),
+                io: AsyncMutex::new(()),
+                changed: Notify::new(),
+                reservation: Arc::clone(&reservation),
+                reservation_index: index,
+                max_preview_bytes: self.inner.max_preview_bytes,
+            });
+            created.push(object);
+        }
+        let collision = {
+            let mut objects = self.objects();
+            if created
+                .iter()
+                .any(|object| objects.contains_key(&object.reference.0))
+            {
+                true
+            } else {
+                for object in &created {
+                    objects.insert(object.reference.0.clone(), Arc::clone(object));
+                }
+                false
+            }
+        };
+        if collision {
+            self.rollback_creation(&created, &reservation).await;
+            return Err(RetentionError::Internal);
+        }
+        Ok((
+            LiveOutput {
+                object: Arc::clone(&created[0]),
+            },
+            LiveOutput {
+                object: Arc::clone(&created[1]),
+            },
+        ))
+    }
+
+    async fn rollback_creation(
+        &self,
+        created: &[Arc<OutputObject>],
+        reservation: &PairReservation,
+    ) {
+        let mut removed_all = true;
+        for object in created {
+            match fs::remove_file(&object.path).await {
+                Ok(()) => {
+                    self.objects().remove(&object.reference.0);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.objects().remove(&object.reference.0);
+                }
+                Err(_) => removed_all = false,
+            }
+        }
+        if removed_all {
+            reservation.abort();
+        }
+    }
+
+    pub(crate) async fn read(
+        &self,
+        params: &OutputReadParams,
+        deadline: Instant,
+    ) -> Result<OutputReadResult, RetentionError> {
+        let object = self
+            .objects()
+            .get(&params.reference.0)
+            .cloned()
+            .ok_or(RetentionError::InvalidSelector)?;
+        let initial = object.snapshot()?;
+        if params.start_offset > initial.retained_bytes {
+            return Err(RetentionError::InvalidOffset);
+        }
+        if params.start_offset == initial.retained_bytes
+            && !initial.producer_complete
+            && params.wait_ms > 0
+        {
+            let wait_until = deadline.min(Instant::now() + Duration::from_millis(params.wait_ms));
+            loop {
+                let notified = object.changed.notified();
+                let current = object.snapshot()?;
+                if current.retained_bytes > params.start_offset || current.producer_complete {
+                    break;
+                }
+                let remaining = wait_until.saturating_duration_since(Instant::now());
+                if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
+                    break;
                 }
             }
         }
-        let expires_at = Instant::now() + self.inner.ttl;
-        let capture_limit = policy.max_output_bytes.min(self.inner.max_output_bytes);
-        let mut outputs = Vec::with_capacity(count);
-        for selector in selectors {
-            let capture = Arc::new(Mutex::new(RetainedCapture {
-                data: Vec::new(),
-                producer_complete: false,
-                produced_bytes: 0,
-                dropped_bytes: 0,
-                readable: true,
-            }));
-            state.objects.insert(
-                selector.clone(),
-                RetainedObject {
-                    capture: Arc::clone(&capture),
-                    expires_at,
-                    expires_at_utc,
-                },
-            );
-            outputs.push(LiveOutput {
-                store: self.clone(),
-                reference: OutputReference(selector),
-                capture,
-                capture_limit,
-                release_on_drop: AtomicBool::new(true),
-            });
+        let _io = object.io.lock().await;
+        let before = object.snapshot()?;
+        if params.start_offset > before.retained_bytes {
+            return Err(RetentionError::InvalidOffset);
         }
-        Ok(outputs)
-    }
-
-    pub(crate) fn read(
-        &self,
-        params: &OutputReadParams,
-    ) -> Result<OutputReadResult, RetentionError> {
-        let policy = self.effective_policy(params.output_policy.as_ref())?;
-        let mut state = self.state();
-        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
-        let reference = &params.reference.0;
-        let object = state.objects.get(reference).ok_or(RetentionError::Gap {
-            available_start: 0,
-            available_end: 0,
-        })?;
-        let capture = object
-            .capture
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !capture.readable {
-            return Err(RetentionError::Gap {
-                available_start: 0,
-                available_end: 0,
-            });
+        let maximum = self
+            .inner
+            .max_response_bytes
+            .saturating_sub(RESPONSE_RESERVE_BYTES)
+            / 4
+            * 3;
+        let available = before.retained_bytes.saturating_sub(params.start_offset);
+        let length =
+            usize::try_from(available.min(maximum)).map_err(|_| RetentionError::Internal)?;
+        let mut data = vec![0_u8; length];
+        if length > 0 {
+            let mut file = File::open(&object.path)
+                .await
+                .map_err(|_| RetentionError::Internal)?;
+            file.seek(io::SeekFrom::Start(params.start_offset))
+                .await
+                .map_err(|_| RetentionError::Internal)?;
+            file.read_exact(&mut data)
+                .await
+                .map_err(|_| RetentionError::Internal)?;
         }
-        let captured_bytes = capture.data.len() as u64;
-        let start = params.start_offset;
-        if start > captured_bytes {
-            return Err(RetentionError::Gap {
-                available_start: 0,
-                available_end: captured_bytes,
-            });
-        }
-        let maximum = policy
-            .max_inline_bytes
-            .min(
-                self.inner
-                    .max_response_bytes
-                    .saturating_sub(RESPONSE_RESERVE_BYTES),
-            )
-            .max(1);
-        if policy.overflow == OutputOverflow::Fail && captured_bytes.saturating_sub(start) > maximum
-        {
-            return Err(RetentionError::OutputLimit);
-        }
-        let end = start.saturating_add(maximum).min(captured_bytes);
-        let data = encoded(&capture.data[start as usize..end as usize]);
-        let producer_complete = capture.producer_complete;
-        let produced_bytes = capture.produced_bytes;
-        let dropped_bytes = capture.dropped_bytes;
-        let expires_at_utc = object.expires_at_utc;
-        drop(capture);
+        let output = object.snapshot()?;
+        let next_offset = params
+            .start_offset
+            .checked_add(data.len() as u64)
+            .ok_or(RetentionError::Internal)?;
         Ok(OutputReadResult {
-            chunks: if start == end {
-                Vec::new()
-            } else {
-                vec![OutputSegment {
-                    start_offset: start,
-                    data,
-                }]
-            },
-            capture: OutputCapture {
-                kind: OutputKind::Retained,
-                producer_complete,
-                content_complete: producer_complete && dropped_bytes == 0,
-                produced_bytes,
-                captured_bytes,
-                dropped_bytes,
-                inline: None,
-                preview: None,
-                reference: Some(params.reference.clone()),
-                available_start: 0,
-                available_end: captured_bytes,
-                expires_at: Some(expires_at_utc),
-            },
-            next_offset: end,
+            next_offset,
+            start_offset: params.start_offset,
+            data: encoded(&data),
+            output,
         })
     }
 
-    pub(crate) fn expire(&self) {
-        self.state()
-            .prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
+    pub(crate) async fn release_reference(
+        &self,
+        reference: &OutputReference,
+    ) -> Result<bool, RetentionError> {
+        let object = self
+            .objects()
+            .get(&reference.0)
+            .cloned()
+            .ok_or(RetentionError::InvalidSelector)?;
+        {
+            let state = object.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.producer_complete || state.attached {
+                return Err(RetentionError::Conflict);
+            }
+            if state.released {
+                return Err(RetentionError::InvalidSelector);
+            }
+        }
+        let _io = object.io.lock().await;
+        match fs::remove_file(&object.path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(RetentionError::CleanupFailed),
+        }
+        let charged = {
+            let mut state = object.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.released {
+                return Err(RetentionError::InvalidSelector);
+            }
+            state.released = true;
+            state.quota_bytes
+        };
+        let removed = self.objects().remove(&reference.0);
+        if removed.is_none() {
+            return Err(RetentionError::Internal);
+        }
+        self.inner.quota.release(charged, 1);
+        Ok(true)
     }
 
-    pub(crate) fn release_reference(&self, reference: &OutputReference) -> bool {
-        let mut state = self.state();
-        state.prune(Instant::now(), self.inner.max_objects, &self.inner.quota);
-        if let Some(object) = state.objects.remove(&reference.0) {
-            let captured_bytes = {
-                let mut capture = object
-                    .capture
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                capture.readable = false;
-                std::mem::take(&mut capture.data).len() as u64
-            };
-            self.inner.quota.release(captured_bytes, 1);
-            state.remember_release(format!("reference:{}", reference.0), self.inner.max_objects);
-            true
-        } else {
-            state
-                .released
-                .contains(&format!("reference:{}", reference.0))
+    pub(crate) async fn abort_pair(&self, outputs: [&LiveOutput; 2]) {
+        let reservation = &outputs[0].object.reservation;
+        let mut removed_all = true;
+        for output in outputs {
+            let _io = output.object.io.lock().await;
+            match fs::remove_file(&output.object.path).await {
+                Ok(()) => {
+                    self.objects().remove(&output.object.reference.0);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.objects().remove(&output.object.reference.0);
+                }
+                Err(_) => removed_all = false,
+            }
+        }
+        if removed_all {
+            reservation.abort();
         }
     }
 
@@ -336,202 +419,188 @@ impl RetentionStore {
         self.inner.quota.usage()
     }
 
-    fn effective_policy(
-        &self,
-        policy: Option<&OutputPolicy>,
-    ) -> Result<OutputPolicy, RetentionError> {
-        let policy = policy.cloned().unwrap_or(OutputPolicy {
-            max_inline_bytes: self.inner.max_inline_bytes,
-            max_output_bytes: self.inner.max_output_bytes,
-            overflow: OutputOverflow::Truncate,
-        });
-        if policy.max_inline_bytes == 0
-            || policy.max_output_bytes == 0
-            || policy.max_inline_bytes > policy.max_output_bytes
-            || policy.max_inline_bytes > self.inner.max_inline_bytes
-            || policy.max_output_bytes > self.inner.max_output_bytes
-        {
-            return Err(RetentionError::Invalid);
-        }
-        Ok(policy)
-    }
-
-    fn state(&self) -> std::sync::MutexGuard<'_, RetentionState> {
+    fn objects(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<OutputObject>>> {
         self.inner
-            .state
+            .objects
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl LiveOutput {
-    pub(crate) fn append_limited(
-        &self,
-        bytes: &[u8],
-        shared_allowance: u64,
-    ) -> Result<u64, RetentionError> {
-        let mut capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
-        capture.produced_bytes = capture
-            .produced_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or(RetentionError::Internal)?;
-        if !capture.readable {
-            capture.dropped_bytes = capture
-                .dropped_bytes
-                .checked_add(bytes.len() as u64)
-                .ok_or(RetentionError::Internal)?;
-            return Ok(0);
-        }
-        let remaining = self.capture_limit.saturating_sub(capture.data.len() as u64);
-        let requested = remaining.min(shared_allowance).min(bytes.len() as u64);
-        let retained = if requested > 0 && self.store.inner.quota.reserve(requested, 0) {
-            capture.data.extend_from_slice(&bytes[..requested as usize]);
-            requested
-        } else {
-            0
+    pub(crate) async fn append(&self, bytes: &[u8]) -> AppendOutcome {
+        let _io = self.object.io.lock().await;
+        let (prior_retained, write_len, crossed) = {
+            let mut state = self
+                .object
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.producer_complete {
+                state.content_complete = false;
+                return AppendOutcome::WriteFailed;
+            }
+            let Some(produced) = state.produced_bytes.checked_add(bytes.len() as u64) else {
+                state.content_complete = false;
+                return AppendOutcome::WriteFailed;
+            };
+            state.produced_bytes = produced;
+            let remaining = self
+                .object
+                .reservation
+                .limit
+                .saturating_sub(state.retained_bytes);
+            let write_len = usize::try_from(remaining.min(bytes.len() as u64)).unwrap_or(0);
+            let crossed = write_len < bytes.len();
+            if crossed {
+                state.content_complete = false;
+            }
+            (state.retained_bytes, write_len, crossed)
         };
-        capture.dropped_bytes = capture
-            .dropped_bytes
-            .checked_add((bytes.len() as u64).saturating_sub(retained))
-            .ok_or(RetentionError::Internal)?;
-        Ok(retained)
+        if write_len > 0 {
+            let mut writer = self.object.writer.lock().await;
+            let Some(file) = writer.as_mut() else {
+                self.mark_write_failed(true);
+                return AppendOutcome::WriteFailed;
+            };
+            if file.write_all(&bytes[..write_len]).await.is_err() || file.flush().await.is_err() {
+                let restored = file.set_len(prior_retained).await.is_ok()
+                    && file.seek(io::SeekFrom::Start(prior_retained)).await.is_ok();
+                *writer = None;
+                self.mark_write_failed(!restored);
+                return AppendOutcome::WriteFailed;
+            }
+            let mut state = self
+                .object
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.retained_bytes = state.retained_bytes.saturating_add(write_len as u64);
+            if state.preview.len() < self.object.max_preview_bytes {
+                let count = (self.object.max_preview_bytes - state.preview.len()).min(write_len);
+                state.preview.extend_from_slice(&bytes[..count]);
+            }
+        }
+        self.object.changed.notify_waiters();
+        if crossed {
+            AppendOutcome::LimitCrossed
+        } else {
+            AppendOutcome::Complete
+        }
     }
 
-    pub(crate) fn complete(&self) {
-        self.capture
+    fn mark_write_failed(&self, charge_full_allowance: bool) {
+        let mut state = self
+            .object
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.content_complete = false;
+        state.charge_full_allowance |= charge_full_allowance;
+        self.object.changed.notify_waiters();
+    }
+
+    pub(crate) fn mark_incomplete(&self) {
+        self.object
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .producer_complete = true;
+            .content_complete = false;
+        self.object.changed.notify_waiters();
     }
 
-    pub(crate) fn snapshot(&self) -> OutputCapture {
-        let (expires_at, retained) = {
-            let state = self.store.state();
-            state
-                .objects
-                .get(&self.reference.0)
-                .map(|object| (Some(object.expires_at_utc), true))
-                .unwrap_or((None, false))
+    pub(crate) async fn complete(&self) {
+        let _io = self.object.io.lock().await;
+        {
+            let mut writer = self.object.writer.lock().await;
+            if let Some(file) = writer.as_mut()
+                && file.flush().await.is_err()
+            {
+                self.mark_write_failed(true);
+            }
+            *writer = None;
+        }
+        let charged = {
+            let mut state = self
+                .object
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.producer_complete {
+                return;
+            }
+            state.producer_complete = true;
+            state.quota_bytes = if state.charge_full_allowance {
+                self.object.reservation.limit
+            } else {
+                state.retained_bytes
+            };
+            state.quota_bytes
         };
-        let capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
-        let captured_bytes = capture.data.len() as u64;
-        if retained && capture.readable {
-            OutputCapture {
-                kind: OutputKind::Retained,
-                producer_complete: capture.producer_complete,
-                content_complete: capture.producer_complete && capture.dropped_bytes == 0,
-                produced_bytes: capture.produced_bytes,
-                captured_bytes,
-                dropped_bytes: capture.dropped_bytes,
-                inline: None,
-                preview: None,
-                reference: Some(self.reference.clone()),
-                available_start: 0,
-                available_end: captured_bytes,
-                expires_at,
-            }
-        } else {
-            OutputCapture {
-                kind: if capture.produced_bytes == 0 {
-                    OutputKind::Empty
-                } else {
-                    OutputKind::Truncated
-                },
-                producer_complete: capture.producer_complete,
-                content_complete: capture.producer_complete && capture.produced_bytes == 0,
-                produced_bytes: capture.produced_bytes,
-                captured_bytes: 0,
-                dropped_bytes: capture.produced_bytes,
-                inline: None,
-                preview: None,
-                reference: None,
-                available_start: 0,
-                available_end: 0,
-                expires_at: None,
-            }
-        }
+        self.object
+            .reservation
+            .complete(self.object.reservation_index, charged);
+        self.object.changed.notify_waiters();
     }
 
-    pub(crate) fn read_range(
-        &self,
-        start: u64,
-        maximum: u64,
-    ) -> Result<(Vec<u8>, OutputCapture), RetentionError> {
-        let snapshot = self.snapshot();
-        if start < snapshot.available_start || start > snapshot.available_end {
-            return Err(RetentionError::Gap {
-                available_start: snapshot.available_start,
-                available_end: snapshot.available_end,
-            });
-        }
-        let capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
-        if !capture.readable {
-            return Err(RetentionError::Gap {
-                available_start: 0,
-                available_end: 0,
-            });
-        }
-        let end = start.saturating_add(maximum).min(capture.data.len() as u64);
-        Ok((
-            capture.data[start as usize..end as usize].to_vec(),
-            snapshot,
-        ))
-    }
-
-    pub(crate) fn reference(&self) -> OutputReference {
-        self.reference.clone()
+    pub(crate) fn snapshot(&self) -> Result<OutputInfo, RetentionError> {
+        self.object.snapshot()
     }
 
     pub(crate) fn detach(&self) {
-        self.release_on_drop.store(false, Ordering::Release);
+        self.object
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .attached = false;
     }
 }
 
-impl Drop for LiveOutput {
-    fn drop(&mut self) {
-        if self.release_on_drop.swap(false, Ordering::AcqRel) {
-            self.store.release_reference(&self.reference);
+impl OutputObject {
+    fn snapshot(&self) -> Result<OutputInfo, RetentionError> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.released {
+            return Err(RetentionError::InvalidSelector);
         }
+        Ok(OutputInfo {
+            reference: self.reference.clone(),
+            producer_complete: state.producer_complete,
+            content_complete: state.producer_complete && state.content_complete,
+            produced_bytes: state.produced_bytes,
+            retained_bytes: state.retained_bytes,
+            preview: encoded(&state.preview),
+        })
     }
 }
 
-impl RetentionState {
-    fn prune(&mut self, now: Instant, max_tombstones: usize, quota: &RetentionQuota) {
-        let expired_objects = self
-            .objects
-            .iter()
-            .filter(|(_, object)| object.expires_at <= now)
-            .map(|(reference, _)| reference.clone())
-            .collect::<Vec<_>>();
-        for reference in expired_objects {
-            if let Some(object) = self.objects.remove(&reference) {
-                let captured_bytes = {
-                    let mut capture = object
-                        .capture
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    capture.readable = false;
-                    std::mem::take(&mut capture.data).len() as u64
-                };
-                quota.release(captured_bytes, 1);
-            }
+impl PairReservation {
+    fn complete(&self, index: usize, charged: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.aborted || state.complete[index] {
+            return;
         }
-        while self.released_order.len() > max_tombstones {
-            if let Some(selector) = self.released_order.pop_front() {
-                self.released.remove(&selector);
-            }
+        state.complete[index] = true;
+        state.charged[index] = charged;
+        if state.complete == [true, true] && !state.settled {
+            state.settled = true;
+            let reserved = self.limit.saturating_mul(2);
+            let actual = state.charged[0].saturating_add(state.charged[1]);
+            self.quota.release(reserved.saturating_sub(actual), 0);
         }
     }
 
-    fn remember_release(&mut self, selector: String, max_tombstones: usize) {
-        if self.released.insert(selector.clone()) {
-            self.released_order.push_back(selector);
+    fn abort(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.aborted {
+            return;
         }
-        while self.released_order.len() > max_tombstones {
-            if let Some(selector) = self.released_order.pop_front() {
-                self.released.remove(&selector);
-            }
-        }
+        state.aborted = true;
+        let bytes = if state.settled {
+            state.charged[0].saturating_add(state.charged[1])
+        } else {
+            self.limit.saturating_mul(2)
+        };
+        self.quota.release(bytes, 2);
     }
 }
 
@@ -544,216 +613,174 @@ fn encoded(bytes: &[u8]) -> EncodedBytes {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        config::Config,
-        eip::{OutputOverflow, OutputPolicy, OutputReadParams},
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, Instant},
     };
 
-    use super::{RetentionError, RetentionQuota, RetentionStore};
+    use base64::Engine as _;
 
-    #[test]
-    fn retained_reads_are_non_draining_and_release_returns_quota() {
-        let config = Config::for_test("env");
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let live = store
-            .create_live(Some(&OutputPolicy {
-                max_inline_bytes: 2,
-                max_output_bytes: 8,
-                overflow: OutputOverflow::Retain,
-            }))
-            .expect("live output");
-        assert_eq!(live.append_limited(b"abcdefgh", 8).expect("append"), 8);
-        live.complete();
-        let reference = live.reference();
-        let params = OutputReadParams {
-            context: crate::eip::EIPCallContext {
-                operation_id: "read-one".to_owned(),
-                timeout_ms: None,
-            },
-            reference: reference.clone(),
-            start_offset: 0,
-            output_policy: Some(OutputPolicy {
-                max_inline_bytes: 2,
-                max_output_bytes: 8,
-                overflow: OutputOverflow::Truncate,
-            }),
-        };
-        let first = store.read(&params).expect("first read");
-        let repeated = store.read(&params).expect("non-draining repeated read");
-        assert_eq!(first.chunks, repeated.chunks);
-        assert_eq!(first.next_offset, 2);
-        let continued = store
-            .read(&OutputReadParams {
-                context: crate::eip::EIPCallContext {
-                    operation_id: "read-two".to_owned(),
-                    timeout_ms: None,
-                },
-                reference: reference.clone(),
-                start_offset: first.next_offset,
-                output_policy: params.output_policy.clone(),
-            })
-            .expect("continues from explicit offset");
-        assert_eq!(continued.next_offset, 4);
-        assert_eq!(store.quota().0, 8);
-        assert!(store.release_reference(&reference));
-        assert_eq!(store.quota().0, 0);
-        assert!(store.release_reference(&reference));
-    }
+    use crate::{
+        config::Config,
+        eip::{EIPCallContext, OutputReadParams},
+        runtime::RuntimeState,
+    };
 
-    #[test]
-    fn live_retention_reserves_before_growth_and_reports_exact_drops() {
-        let config = Config::for_test("env");
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let live = store
-            .create_live(Some(&OutputPolicy {
-                max_inline_bytes: 1,
-                max_output_bytes: 4,
-                overflow: OutputOverflow::Retain,
-            }))
-            .expect("live output");
-        assert_eq!(live.append_limited(b"abc", 2).expect("append"), 2);
-        assert_eq!(live.append_limited(b"def", 2).expect("append"), 2);
-        live.complete();
-        let capture = live.snapshot();
-        assert_eq!(capture.produced_bytes, 6);
-        assert_eq!(capture.captured_bytes, 4);
-        assert_eq!(capture.dropped_bytes, 2);
-        assert!(capture.producer_complete);
-        assert!(!capture.content_complete);
-        assert_eq!(store.quota(), (4, 1));
+    use super::{AppendOutcome, RetentionError, RetentionQuota, RetentionStore};
 
-        let reference = live.reference();
-        assert!(store.release_reference(&reference));
-        assert_eq!(store.quota(), (0, 0));
-        assert_eq!(
-            live.capture.lock().expect("capture lock").data.capacity(),
-            0,
-            "quota is returned only after the retained allocation is dropped",
-        );
-        assert_eq!(live.append_limited(b"gh", 2).expect("dropped append"), 0);
-        let released = live.snapshot();
-        assert_eq!(released.produced_bytes, 8);
-        assert_eq!(released.captured_bytes, 0);
-        assert_eq!(released.dropped_bytes, 8);
-    }
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
 
-    #[test]
-    fn detached_live_output_remains_readable_until_explicit_release() {
-        let config = Config::for_test("env");
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let live = store
-            .create_live(Some(&OutputPolicy {
-                max_inline_bytes: 1,
-                max_output_bytes: 3,
-                overflow: OutputOverflow::Retain,
-            }))
-            .expect("live output");
-        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
-        live.complete();
-        let reference = live.reference();
-        live.detach();
-        drop(live);
-
-        assert_eq!(store.quota(), (3, 1));
-        assert!(
-            store
-                .read(&OutputReadParams {
-                    context: crate::eip::EIPCallContext {
-                        operation_id: "detached-read".to_owned(),
-                        timeout_ms: None,
-                    },
-                    reference: reference.clone(),
-                    start_offset: 0,
-                    output_policy: None,
-                })
-                .is_ok()
-        );
-        assert!(store.release_reference(&reference));
-        assert_eq!(store.quota(), (0, 0));
-    }
-
-    #[test]
-    fn live_output_pair_reserves_object_slots_atomically() {
-        let mut config = Config::for_test("env");
-        config.limits.max_retained_objects = 1;
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let policy = OutputPolicy {
-            max_inline_bytes: 1,
-            max_output_bytes: 4,
-            overflow: OutputOverflow::Retain,
-        };
-        assert!(matches!(
-            store.create_live_pair(Some(&policy)),
-            Err(RetentionError::Busy)
+    fn setup(
+        stream_limit: u64,
+        spool_limit: u64,
+        object_limit: u64,
+    ) -> (PathBuf, Config, RetentionStore) {
+        let parent = std::env::temp_dir().join(format!(
+            "agent-envd-retention-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
         ));
-        assert_eq!(store.quota(), (0, 0));
+        let _ = fs::remove_dir_all(&parent);
+        let runtime = RuntimeState::prepare(&parent).expect("runtime");
+        let mut config = Config::for_test("env-test");
+        config.runtime = Some(runtime);
+        config.limits.max_output_preview_bytes = stream_limit.clamp(1, 3);
+        config.limits.max_output_bytes_per_stream = stream_limit;
+        config.limits.max_spool_bytes = spool_limit;
+        config.limits.max_spool_objects = object_limit;
+        let quota = RetentionQuota::new(&config).expect("quota");
+        let store = RetentionStore::new(&config, 1, quota).expect("store");
+        (parent, config, store)
     }
 
-    #[test]
-    fn expiry_drops_live_capture_allocation_while_the_producer_handle_survives() {
-        let mut config = Config::for_test("env");
-        config.limits.max_retention_ttl_ms = 1;
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let live = store
-            .create_live(Some(&OutputPolicy {
-                max_inline_bytes: 1,
-                max_output_bytes: 3,
-                overflow: OutputOverflow::Retain,
-            }))
-            .expect("live output");
-        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
-        assert_eq!(store.quota(), (3, 1));
-
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        store.expire();
-
-        assert_eq!(store.quota(), (0, 0));
-        let capture = live.capture.lock().expect("capture lock");
-        assert!(!capture.readable);
-        assert_eq!(capture.data.len(), 0);
-        assert_eq!(capture.data.capacity(), 0);
+    fn cleanup(parent: PathBuf, config: Config, store: RetentionStore) {
+        drop(store);
+        drop(config);
+        fs::remove_file(parent.join(".agent-envd.lock")).expect("lock file");
+        fs::remove_dir(parent).expect("runtime parent");
     }
 
-    #[test]
-    fn expired_references_report_a_retention_gap_and_return_quota() {
-        let mut config = Config::for_test("env");
-        config.limits.max_retention_ttl_ms = 1;
-        let store = RetentionStore::new(&config, 7, RetentionQuota::new(&config).expect("quota"))
-            .expect("store");
-        let live = store
-            .create_live(Some(&OutputPolicy {
-                max_inline_bytes: 1,
-                max_output_bytes: 3,
-                overflow: OutputOverflow::Retain,
-            }))
-            .expect("live output");
-        assert_eq!(live.append_limited(b"abc", 3).expect("append"), 3);
-        live.complete();
-        let reference = live.reference();
-        live.detach();
-        drop(live);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let result = store.read(&OutputReadParams {
-            context: crate::eip::EIPCallContext {
-                operation_id: "expired-read".to_owned(),
+    fn read_params(reference: crate::eip::OutputReference, start_offset: u64) -> OutputReadParams {
+        OutputReadParams {
+            context: EIPCallContext {
+                operation_id: format!("read-{start_offset}"),
                 timeout_ms: None,
             },
             reference,
-            start_offset: 0,
-            output_policy: None,
-        });
+            start_offset,
+            wait_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn pair_reservation_is_atomic_independent_and_settles_once() {
+        let (parent, config, store) = setup(4, 8, 2);
+        let (stdout, stderr) = store.create_live_pair().await.expect("pair");
+        assert_eq!(store.quota(), (8, 2));
+        assert!(matches!(
+            store.create_live_pair().await,
+            Err(RetentionError::Busy)
+        ));
+
+        assert_eq!(stdout.append(b"abcdef").await, AppendOutcome::LimitCrossed);
+        stdout.complete().await;
+        assert_eq!(store.quota(), (8, 2), "one stream cannot settle the pair");
+        assert_eq!(stderr.append(b"z").await, AppendOutcome::Complete);
+        stderr.complete().await;
+        stderr.complete().await;
+        assert_eq!(store.quota(), (5, 2), "pair settles exactly once");
+
+        let stdout_info = stdout.snapshot().expect("stdout snapshot");
+        assert_eq!(stdout_info.produced_bytes, 6);
+        assert_eq!(stdout_info.retained_bytes, 4);
+        assert!(!stdout_info.content_complete);
+        let result = store
+            .read(
+                &read_params(stdout_info.reference.clone(), 0),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("read retained prefix");
+        assert_eq!(result.next_offset, 4);
         assert_eq!(
-            result,
-            Err(RetentionError::Gap {
-                available_start: 0,
-                available_end: 0,
-            })
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(result.data.data)
+                .expect("base64"),
+            b"abcd"
+        );
+
+        assert_eq!(
+            store.release_reference(&stdout_info.reference).await,
+            Err(RetentionError::Conflict)
+        );
+        stdout.detach();
+        stderr.detach();
+        assert!(
+            store
+                .release_reference(&stdout_info.reference)
+                .await
+                .expect("release stdout")
+        );
+        assert_eq!(store.quota(), (1, 1));
+        assert!(
+            store
+                .release_reference(&stderr.snapshot().expect("stderr snapshot").reference)
+                .await
+                .expect("release stderr")
         );
         assert_eq!(store.quota(), (0, 0));
+
+        drop(stdout);
+        drop(stderr);
+        cleanup(parent, config, store);
+    }
+
+    #[tokio::test]
+    async fn contiguous_wait_observes_new_bytes_and_terminal_eof() {
+        let (parent, config, store) = setup(16, 32, 2);
+        let (stdout, stderr) = store.create_live_pair().await.expect("pair");
+        let reference = stdout.snapshot().expect("stdout snapshot").reference;
+        let waiting_store = store.clone();
+        let waiting_reference = reference.clone();
+        let waiter = tokio::spawn(async move {
+            let mut params = read_params(waiting_reference, 0);
+            params.wait_ms = 1_000;
+            waiting_store
+                .read(&params, Instant::now() + Duration::from_secs(2))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stdout.append(b"page").await;
+        let page = waiter.await.expect("waiter").expect("page");
+        assert_eq!(page.start_offset, 0);
+        assert_eq!(page.next_offset, 4);
+
+        stdout.complete().await;
+        stderr.complete().await;
+        let eof = store
+            .read(
+                &read_params(reference, 4),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("terminal eof");
+        assert_eq!(eof.next_offset, 4);
+        assert!(eof.output.producer_complete);
+
+        stdout.detach();
+        stderr.detach();
+        store
+            .release_reference(&stdout.snapshot().expect("stdout snapshot").reference)
+            .await
+            .expect("release stdout");
+        store
+            .release_reference(&stderr.snapshot().expect("stderr snapshot").reference)
+            .await
+            .expect("release stderr");
+        drop(stdout);
+        drop(stderr);
+        cleanup(parent, config, store);
     }
 }

@@ -30,7 +30,6 @@ from .methods import (
     PROCESS_CLOSE_STDIN,
     PROCESS_INSPECT,
     PROCESS_KILL,
-    PROCESS_READ_OUTPUT,
     PROCESS_RELEASE,
     PROCESS_SIGNAL,
     PROCESS_START,
@@ -94,8 +93,6 @@ from .models import (
     ProcessInspectResult,
     ProcessKillParams,
     ProcessKillResult,
-    ProcessReadOutputParams,
-    ProcessReadOutputResult,
     ProcessReleaseParams,
     ProcessReleaseResult,
     ProcessSignalParams,
@@ -200,9 +197,6 @@ class EIPClient:
 
     async def process_kill(self, params: ProcessKillParams) -> ProcessKillResult:
         return await self._requester.request(PROCESS_KILL, params)
-
-    async def process_read_output(self, params: ProcessReadOutputParams) -> ProcessReadOutputResult:
-        return await self._requester.request(PROCESS_READ_OUTPUT, params)
 
     async def process_release(self, params: ProcessReleaseParams) -> ProcessReleaseResult:
         return await self._requester.request(PROCESS_RELEASE, params)

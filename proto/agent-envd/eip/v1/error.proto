@@ -24,7 +24,8 @@ enum ErrorType {
   ERROR_TYPE_UNSUPPORTED = 11 [(eip_enum_value).json_name = "unsupported", (eip_enum_value).error_code = -32012];
   ERROR_TYPE_STALE_GENERATION = 12 [(eip_enum_value).json_name = "stale_generation", (eip_enum_value).error_code = -32020];
   ERROR_TYPE_INVALID_HANDLE = 13 [(eip_enum_value).json_name = "invalid_handle", (eip_enum_value).error_code = -32021];
-  ERROR_TYPE_RETENTION_GAP = 14 [(eip_enum_value).json_name = "retention_gap", (eip_enum_value).error_code = -32022];
+  reserved 14;
+  reserved "ERROR_TYPE_RETENTION_GAP";
   ERROR_TYPE_BUSY = 15 [(eip_enum_value).json_name = "busy", (eip_enum_value).error_code = -32030];
   ERROR_TYPE_QUOTA_EXCEEDED = 16 [(eip_enum_value).json_name = "quota_exceeded", (eip_enum_value).error_code = -32031];
   ERROR_TYPE_OUTPUT_LIMIT_EXCEEDED = 17 [(eip_enum_value).json_name = "output_limit_exceeded", (eip_enum_value).error_code = -32032];
@@ -77,15 +78,17 @@ message EIPErrorData {
   optional string field = 8;
   optional string handle_kind = 9;
   optional uint64 produced_bytes = 10;
-  optional uint64 captured_bytes = 11;
-  optional uint64 dropped_bytes = 12;
+  reserved 11, 12;
+  reserved "captured_bytes", "dropped_bytes";
   optional uint64 emitted_items = 13;
   optional uint64 dropped_items = 14;
   optional ProcessStatus process_status = 15;
   optional OperationReceipt receipt = 16;
   optional string safe_detail = 17;
-  optional uint64 available_start = 18;
-  optional uint64 available_end = 19;
+  reserved 18, 19;
+  reserved "available_start", "available_end";
+  optional ProcessInfo process = 20;
+  optional ProcessOutput output = 21;
 }
 
 message EIPError {

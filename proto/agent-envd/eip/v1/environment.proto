@@ -36,8 +36,8 @@ message EIPLimits {
   uint64 max_concurrent_operations = 3 [(eip_field).minimum = 1];
   uint64 max_processes = 4 [(eip_field).minimum = 1];
   uint64 max_operation_duration_ms = 5 [(eip_field).minimum = 1];
-  uint64 max_inline_output_bytes = 6 [(eip_field).minimum = 1];
-  uint64 max_output_bytes = 7 [(eip_field).minimum = 1];
+  uint64 max_output_preview_bytes = 6 [(eip_field).minimum = 1];
+  uint64 max_output_bytes_per_stream = 7 [(eip_field).minimum = 1];
   uint64 max_transfer_frame_bytes = 17 [(eip_field).minimum = 25];
   uint64 max_concurrent_file_transfers = 18 [(eip_field).minimum = 1];
   uint64 max_file_transfer_bytes = 25 [(eip_field).minimum = 1];

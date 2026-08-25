@@ -70,7 +70,7 @@ impl ResourceRegistry {
     pub(crate) fn new(config: &crate::config::Config, operations: OperationRegistry) -> Self {
         Self {
             inner: Arc::new(ResourceInner {
-                max_inline_bytes: config.limits.max_inline_output_bytes,
+                max_inline_bytes: config.limits.max_output_preview_bytes,
                 max_response_bytes: config.limits.max_response_bytes,
                 operations,
             }),

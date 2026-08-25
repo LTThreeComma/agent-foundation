@@ -9,6 +9,7 @@ strict: true
 
 nav:
   - Home: index.md
+  - Agent Harness: agent-harness/index.md
 
 theme:
   name: material

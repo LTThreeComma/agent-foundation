@@ -15,7 +15,7 @@ The normative contracts are [Harness State and Resume](../../spec/agent-harness/
 From the repository root:
 
 ```bash
-make examples-check
+make examples-check-all
 ```
 
 Or run only this project:

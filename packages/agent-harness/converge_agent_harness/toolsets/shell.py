@@ -17,6 +17,7 @@ from pydantic import Field, JsonValue
 from pydantic_ai import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
+from converge_agent_harness._json import redact_json
 from converge_agent_harness.context import AgentContext
 from converge_agent_harness.environment.commands import (
     ArgvCommand,
@@ -50,6 +51,13 @@ from converge_agent_harness.tools.metadata import (
 )
 
 from ._results import ToolFailure
+from .output import (
+    DEFAULT_TOOL_OUTPUT_CHARS,
+    acknowledge_tool_output,
+    continuation_disclosure,
+    disclose_text_paths,
+    tool_output_size,
+)
 from .shell_results import (
     OutputCaptureProjection,
     PortProjection,
@@ -374,7 +382,7 @@ class ShellToolset:
                         self.environment_process_read_output,
                         "environment.process_read_output",
                         {"read"},
-                        "read_only",
+                        "none",
                     ),
                     self._tool(
                         self.environment_process_write_stdin,
@@ -398,7 +406,7 @@ class ShellToolset:
                         self.environment_process_wait,
                         "environment.process_wait",
                         {"read"},
-                        "read_only",
+                        "none",
                     ),
                     self._tool(
                         self.environment_process_kill,
@@ -485,20 +493,34 @@ class ShellToolset:
                 max_inline_bytes=max_inline_bytes,
                 max_output_bytes=max_output_bytes,
             )
-            return await self._require_shell().exec(request, alias=alias)
+            return await self._require_shell().exec_captured(request, alias=alias)
 
-        async def project(result: Any) -> Mapping[str, object]:
-            stdout, stderr = await asyncio.gather(
-                self._materialize_capture(result.output.stdout),
-                self._materialize_capture(result.output.stderr),
-            )
+        def project(result: Any) -> Mapping[str, object]:
             return {
                 "status": self._project_status(result.status),
-                "stdout": stdout,
-                "stderr": stderr,
+                "stdout": self._project_capture(result.output.stdout, _capture_initial_bytes(result.output.stdout)),
+                "stderr": self._project_capture(result.output.stderr, _capture_initial_bytes(result.output.stderr)),
             }
 
-        return await self._execute(execute, project)
+        projected = await self._execute(execute, project)
+        if not isinstance(projected, dict) or projected.get("ok") is not True:
+            return cast(ShellExecToolResult, projected)
+        content_complete = all(
+            isinstance(stream, dict) and stream.get("content_complete") is True
+            for stream in (projected.get("stdout"), projected.get("stderr"))
+        )
+        return cast(
+            ShellExecToolResult,
+            await disclose_text_paths(
+                ctx.deps,
+                cast(Mapping[str, JsonValue], projected),
+                text_paths=(("stdout", "text"), ("stderr", "text")),
+                content_complete=content_complete,
+                noun="foreground command result",
+                limit=DEFAULT_TOOL_OUTPUT_CHARS,
+                preserve_tail=True,
+            ),
+        )
 
     async def environment_process_start(
         self,
@@ -604,10 +626,11 @@ class ShellToolset:
         max_inline_bytes: _PositiveTextBytes = 64 * 1024,
         max_output_bytes: _PositiveOutputBytes = 1024 * 1024,
     ) -> ProcessReadOutputResult:
-        del ctx, max_inline_bytes
+        del ctx
         return await self._drain_process_output(
             process,
             wait_seconds=wait_seconds,
+            max_inline_bytes=max_inline_bytes,
             max_output_bytes=max_output_bytes,
         )
 
@@ -659,6 +682,7 @@ class ShellToolset:
         *,
         condition: Literal["initial_terminal", "tree_cleaned"] = "tree_cleaned",
         timeout_seconds: _PositiveTimeout,
+        max_inline_bytes: _PositiveTextBytes = 64 * 1024,
         max_output_bytes: _PositiveOutputBytes = 1024 * 1024,
     ) -> ProcessReadOutputResult:
         del ctx
@@ -674,6 +698,7 @@ class ShellToolset:
         return await self._drain_process_output(
             process,
             wait_seconds=0,
+            max_inline_bytes=max_inline_bytes,
             max_output_bytes=max_output_bytes,
         )
 
@@ -696,10 +721,26 @@ class ShellToolset:
             handle = self._process(process)
             info = await self._require_processes().inspect(handle)
             for capture in (info.output.stdout, info.output.stderr):
-                if capture.reference is not None:
+                if capture.reference is None:
+                    continue
+                try:
                     await self._require_outputs().release(reference=capture.reference)
-            await self._require_processes().release(handle)
-            self._references.tombstone(process, "process")
+                except EnvironmentError as exc:
+                    if exc.code != "environment_not_found":
+                        raise
+
+            async def detach() -> None:
+                await self._require_processes().release(handle)
+                self._references.tombstone(process, "process")
+
+            cleanup = asyncio.create_task(detach())
+            cleanup_error, cancellation = await _await_owned_cleanup(cleanup)
+            if cancellation is not None:
+                if cleanup_error is not None:
+                    cancellation.add_note(f"Process detach also failed: {cleanup_error!r}")
+                raise cancellation
+            if cleanup_error is not None:
+                raise cleanup_error
 
         return await self._execute(release, lambda result: {"released": True})
 
@@ -809,7 +850,11 @@ class ShellToolset:
             result = await self._require_processes().start(request, alias=alias)
             try:
                 with self._reference_projection():
-                    return result.process, self._project_process(result.process, consume_output=True)
+                    return result.process, self._project_process(
+                        result.process,
+                        consume_output=True,
+                        output_budget=request.output_policy.max_inline_bytes,
+                    )
             except BaseException as projection_error:
                 cleanup = asyncio.create_task(self._cleanup_unprojected_process(result.process))
                 cleanup_error, cancellation = await _await_owned_cleanup(cleanup)
@@ -846,22 +891,49 @@ class ShellToolset:
         if failures:
             raise BaseExceptionGroup("Unprojected process cleanup failed", failures)
 
-    def _project_process(self, process: ProcessInfo, *, consume_output: bool = False) -> ProcessProjection:
+    def _project_process(
+        self,
+        process: ProcessInfo,
+        *,
+        consume_output: bool = False,
+        output_budget: int = _MAX_MODEL_TEXT_BYTES,
+    ) -> ProcessProjection:
         reservation = self._reference_reservation.get()
         reference = self._references.register("process", process.handle, reservation=reservation)
         entry = self._references.entry(reference)
-        stdout_data = _capture_initial_bytes(process.output.stdout) if consume_output else b""
-        stderr_data = _capture_initial_bytes(process.output.stderr) if consume_output else b""
-        if consume_output:
-            entry.stdout_offset = max(entry.stdout_offset, len(stdout_data))
-            entry.stderr_offset = max(entry.stderr_offset, len(stderr_data))
-        return {
-            "process": reference,
-            "status": self._project_status(process.status),
-            "stdin_open": process.stdin_open,
-            "stdout": self._project_capture(process.output.stdout, stdout_data),
-            "stderr": self._project_capture(process.output.stderr, stderr_data),
-        }
+        stdout_available = _capture_initial_bytes(process.output.stdout) if consume_output else b""
+        stderr_available = _capture_initial_bytes(process.output.stderr) if consume_output else b""
+
+        def project(stdout_data: bytes, stderr_data: bytes) -> ProcessProjection:
+            projected: ProcessProjection = {
+                "process": reference,
+                "status": self._project_status(process.status),
+                "stdin_open": process.stdin_open,
+                "stdout": self._project_capture(process.output.stdout, stdout_data),
+                "stderr": self._project_capture(process.output.stderr, stderr_data),
+            }
+            if consume_output and (
+                entry.stdout_offset + len(stdout_data) < process.output.stdout.available_end
+                or entry.stderr_offset + len(stderr_data) < process.output.stderr.available_end
+            ):
+                projected["disclosure"] = continuation_disclosure(
+                    cast(Mapping[str, JsonValue], projected),
+                    hint="Call environment_process_read_output to read the next retained output page.",
+                )
+            return projected
+
+        if not consume_output:
+            return project(b"", b"")
+        stdout_data, stderr_data, projected = _fit_stream_projection(
+            stdout_available,
+            stderr_available,
+            raw_budget=output_budget,
+            json_budget=DEFAULT_TOOL_OUTPUT_CHARS,
+            project=project,
+        )
+        entry.stdout_offset = max(entry.stdout_offset, len(stdout_data))
+        entry.stderr_offset = max(entry.stderr_offset, len(stderr_data))
+        return projected
 
     @staticmethod
     def _project_status(status: ProcessStatus) -> ProcessStatusProjection:
@@ -887,30 +959,12 @@ class ShellToolset:
             "available_end": capture.available_end,
         }
 
-    async def _materialize_capture(self, capture: EnvironmentOutputCapture) -> OutputCaptureProjection:
-        if capture.reference is None:
-            return self._project_capture(capture, _capture_initial_bytes(capture))
-        policy = EnvironmentOutputPolicy(
-            max_inline_bytes=max(1, capture.captured_bytes),
-            max_output_bytes=max(1, capture.captured_bytes),
-            overflow="truncate",
-        )
-        try:
-            result = await self._require_outputs().read(
-                capture.reference,
-                start_offset=0,
-                policy=policy,
-            )
-            data = b"".join(chunk.data for chunk in result.chunks)
-            return self._project_capture(capture, data)
-        finally:
-            await self._require_outputs().release(reference=capture.reference)
-
     async def _drain_process_output(
         self,
         process_reference: str,
         *,
         wait_seconds: float,
+        max_inline_bytes: int,
         max_output_bytes: int,
     ) -> ProcessReadOutputResult:
         try:
@@ -924,8 +978,9 @@ class ShellToolset:
                     code="environment_reference_invalid",
                 )
             async with entry.drain_lock:
+                aggregate_budget = min(max_inline_bytes, max_output_bytes)
                 policy = EnvironmentOutputPolicy(
-                    max_inline_bytes=max_output_bytes,
+                    max_inline_bytes=max(1, aggregate_budget),
                     max_output_bytes=max_output_bytes,
                     overflow="truncate",
                 )
@@ -936,16 +991,43 @@ class ShellToolset:
                     wait_seconds=wait_seconds,
                     policy=policy,
                 )
-                stdout_data, stdout_end = _materialize_segments(result.stdout.chunks, entry.stdout_offset)
-                stderr_data, stderr_end = _materialize_segments(result.stderr.chunks, entry.stderr_offset)
-                entry.stdout_offset = stdout_end
-                entry.stderr_offset = stderr_end
-                return {
-                    "ok": True,
-                    "process": self._project_process(result.process),
-                    "stdout": self._project_capture(result.stdout.capture, stdout_data),
-                    "stderr": self._project_capture(result.stderr.capture, stderr_data),
-                }
+                stdout_available, _ = _materialize_segments(result.stdout.chunks, entry.stdout_offset)
+                stderr_available, _ = _materialize_segments(result.stderr.chunks, entry.stderr_offset)
+                process_projection = self._project_process(result.process)
+
+                def project(stdout_data: bytes, stderr_data: bytes) -> dict[str, JsonValue]:
+                    projected: dict[str, JsonValue] = {
+                        "ok": True,
+                        "process": cast(JsonValue, process_projection),
+                        "stdout": cast(JsonValue, self._project_capture(result.stdout.capture, stdout_data)),
+                        "stderr": cast(JsonValue, self._project_capture(result.stderr.capture, stderr_data)),
+                    }
+                    if (
+                        entry.stdout_offset + len(stdout_data) < result.stdout.capture.available_end
+                        or entry.stderr_offset + len(stderr_data) < result.stderr.capture.available_end
+                    ):
+                        projected["disclosure"] = cast(
+                            JsonValue,
+                            continuation_disclosure(
+                                projected,
+                                hint=(
+                                    "Call environment_process_read_output again to read the next retained output page."
+                                ),
+                            ),
+                        )
+                    return projected
+
+                stdout_data, stderr_data, projected = _fit_stream_projection(
+                    stdout_available,
+                    stderr_available,
+                    raw_budget=aggregate_budget,
+                    json_budget=DEFAULT_TOOL_OUTPUT_CHARS,
+                    project=project,
+                )
+                _require_stream_progress(stdout_available, stderr_available, stdout_data, stderr_data)
+                entry.stdout_offset += len(stdout_data)
+                entry.stderr_offset += len(stderr_data)
+                return cast(ProcessReadOutputResult, acknowledge_tool_output(projected))
         except EnvironmentError as exc:
             return _environment_error_result(exc)
 
@@ -1027,6 +1109,98 @@ class ShellToolset:
         if self._ports is None:
             raise EnvironmentError("Port operation facet is unavailable.", code="environment_unsupported")
         return self._ports
+
+
+def _fit_stream_prefixes(stdout: bytes, stderr: bytes, budget: int) -> tuple[bytes, bytes]:
+    """Allocate one aggregate contiguous-prefix budget across two output streams."""
+    if budget <= 0:
+        return b"", b""
+    stdout_limit = (budget + 1) // 2
+    stderr_limit = budget // 2
+    selected_stdout = stdout[:stdout_limit]
+    selected_stderr = stderr[:stderr_limit]
+    remaining = budget - len(selected_stdout) - len(selected_stderr)
+    if remaining > 0:
+        extra_stdout = stdout[len(selected_stdout) : len(selected_stdout) + remaining]
+        selected_stdout += extra_stdout
+        remaining -= len(extra_stdout)
+    if remaining > 0:
+        selected_stderr += stderr[len(selected_stderr) : len(selected_stderr) + remaining]
+    return _utf8_safe_prefix(selected_stdout, stdout), _utf8_safe_prefix(selected_stderr, stderr)
+
+
+def _utf8_safe_prefix(value: bytes, available: bytes) -> bytes:
+    """Keep an arbitrary byte prefix from splitting a known valid UTF-8 sequence."""
+    if not value or len(value) >= len(available):
+        return value
+    end = len(value)
+    start = end - 1
+    while start >= 0 and end - start <= 4 and value[start] & 0xC0 == 0x80:
+        start -= 1
+    if start < 0:
+        return b""
+    lead = value[start]
+    expected = 1
+    if 0xC2 <= lead <= 0xDF:
+        expected = 2
+    elif 0xE0 <= lead <= 0xEF:
+        expected = 3
+    elif 0xF0 <= lead <= 0xF4:
+        expected = 4
+    if expected > 1 and end - start < expected:
+        sequence = available[start : start + expected]
+        try:
+            sequence.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return value
+        return value[:start]
+    return value
+
+
+def _require_stream_progress(
+    stdout_available: bytes,
+    stderr_available: bytes,
+    stdout_selected: bytes,
+    stderr_selected: bytes,
+) -> None:
+    if (stdout_available or stderr_available) and not (stdout_selected or stderr_selected):
+        raise EnvironmentError(
+            "The output page byte limit cannot contain the next complete UTF-8 character.",
+            code="environment_too_large",
+        )
+
+
+def _fit_stream_projection[ProjectionT](
+    stdout: bytes,
+    stderr: bytes,
+    *,
+    raw_budget: int,
+    json_budget: int,
+    project: Callable[[bytes, bytes], ProjectionT],
+) -> tuple[bytes, bytes, ProjectionT]:
+    """Fit contiguous raw prefixes against the actual serialized semantic result."""
+    selected_stdout, selected_stderr = _fit_stream_prefixes(stdout, stderr, 0)
+    selected_projection = project(selected_stdout, selected_stderr)
+    high = min(max(raw_budget, 0), len(stdout) + len(stderr))
+    low = 1
+    while low <= high:
+        candidate_budget = (low + high) // 2
+        candidate_stdout, candidate_stderr = _fit_stream_prefixes(
+            stdout,
+            stderr,
+            candidate_budget,
+        )
+        candidate_projection = project(candidate_stdout, candidate_stderr)
+        safe_projection = redact_json(cast(JsonValue, candidate_projection))
+        assert isinstance(safe_projection, dict)
+        if tool_output_size(safe_projection) <= json_budget:
+            selected_stdout = candidate_stdout
+            selected_stderr = candidate_stderr
+            selected_projection = candidate_projection
+            low = candidate_budget + 1
+        else:
+            high = candidate_budget - 1
+    return selected_stdout, selected_stderr, selected_projection
 
 
 def _capture_initial_bytes(capture: EnvironmentOutputCapture) -> bytes:

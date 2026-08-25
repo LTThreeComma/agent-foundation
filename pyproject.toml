@@ -34,6 +34,7 @@ default-groups = ["dev", "docs"]
 package = false
 
 [tool.uv.sources]
+converge-agent-envd-client = { workspace = true }
 converge-agent-harness = { workspace = true }
 converge-agent-stream-protocol = { workspace = true }
 converge-logging = { workspace = true }

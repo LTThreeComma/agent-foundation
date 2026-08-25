@@ -9,7 +9,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::eip::EIPLimits;
+use crate::{eip::EIPLimits, runtime::RuntimeState};
 
 const DEFAULT_MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -93,11 +93,24 @@ struct FileConfig {
     #[serde(default)]
     root_mount_id: Option<String>,
     #[serde(default)]
+    limits: FileLimitsConfig,
+    #[serde(default)]
     mounts: Vec<TrustedMountConfig>,
     #[serde(default)]
     trusted_executable_roots: Vec<PathBuf>,
     #[serde(default)]
     shell_profiles: Vec<TrustedShellProfileConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileLimitsConfig {
+    #[serde(default)]
+    max_output_preview_bytes: Option<u64>,
+    #[serde(default)]
+    max_output_bytes_per_stream: Option<u64>,
+    #[serde(default)]
+    max_spool_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,15 +120,13 @@ pub(crate) struct DaemonLimits {
     pub(crate) max_concurrent_operations: u64,
     pub(crate) max_processes: u64,
     pub(crate) max_operation_duration_ms: u64,
-    pub(crate) max_inline_output_bytes: u64,
-    pub(crate) max_output_bytes: u64,
-    pub(crate) max_retained_bytes: u64,
-    pub(crate) max_retained_objects: u64,
-    pub(crate) max_retention_ttl_ms: u64,
+    pub(crate) max_output_preview_bytes: u64,
+    pub(crate) max_output_bytes_per_stream: u64,
+    pub(crate) max_spool_bytes: u64,
+    pub(crate) max_spool_objects: u64,
     pub(crate) max_operation_records: u64,
     pub(crate) operation_record_ttl_ms: u64,
     pub(crate) max_process_records: u64,
-    pub(crate) terminal_process_record_ttl_ms: u64,
     pub(crate) max_transfer_frame_bytes: u64,
     pub(crate) max_concurrent_file_transfers: u64,
     pub(crate) max_file_transfer_records: u64,
@@ -134,8 +145,8 @@ impl DaemonLimits {
             max_concurrent_operations: self.max_concurrent_operations,
             max_processes: self.max_processes,
             max_operation_duration_ms: self.max_operation_duration_ms,
-            max_inline_output_bytes: self.max_inline_output_bytes,
-            max_output_bytes: self.max_output_bytes,
+            max_output_preview_bytes: self.max_output_preview_bytes,
+            max_output_bytes_per_stream: self.max_output_bytes_per_stream,
             max_transfer_frame_bytes: self.max_transfer_frame_bytes,
             max_concurrent_file_transfers: self.max_concurrent_file_transfers,
             max_file_transfer_bytes: self.max_staged_file_bytes,
@@ -152,6 +163,7 @@ pub(crate) struct Config {
     pub(crate) root_mount_id: Option<String>,
     pub(crate) mounts: Vec<TrustedMountConfig>,
     pub(crate) command: Option<CommandConfig>,
+    pub(crate) runtime: Option<RuntimeState>,
 }
 
 impl Config {
@@ -235,9 +247,15 @@ impl Config {
             ));
         }
 
-        let limits = default_limits();
+        let mut limits = default_limits();
+        apply_file_limits(&mut limits, file.limits)?;
+        let runtime = runtime_dir
+            .as_deref()
+            .map(RuntimeState::prepare)
+            .transpose()
+            .map_err(ConfigError::new)?;
         let command = prepare_command_config(
-            runtime_dir,
+            runtime.as_ref(),
             file.trusted_executable_roots,
             file.shell_profiles,
         )?;
@@ -248,6 +266,7 @@ impl Config {
             root_mount_id: file.root_mount_id,
             mounts: file.mounts,
             command,
+            runtime,
             limits,
         })
     }
@@ -262,8 +281,43 @@ impl Config {
             root_mount_id: None,
             mounts: Vec::new(),
             command: None,
+            runtime: None,
         }
     }
+}
+
+fn apply_file_limits(
+    limits: &mut DaemonLimits,
+    configured: FileLimitsConfig,
+) -> Result<(), ConfigError> {
+    limits.max_output_preview_bytes = configured
+        .max_output_preview_bytes
+        .unwrap_or(limits.max_output_preview_bytes);
+    limits.max_output_bytes_per_stream = configured
+        .max_output_bytes_per_stream
+        .unwrap_or(limits.max_output_bytes_per_stream);
+    limits.max_spool_bytes = configured.max_spool_bytes.unwrap_or(limits.max_spool_bytes);
+    if limits.max_output_preview_bytes == 0
+        || limits.max_output_bytes_per_stream == 0
+        || limits.max_spool_bytes == 0
+    {
+        return Err(ConfigError::new("output and spool limits must be positive"));
+    }
+    if limits.max_output_preview_bytes > limits.max_output_bytes_per_stream {
+        return Err(ConfigError::new(
+            "max_output_preview_bytes must not exceed max_output_bytes_per_stream",
+        ));
+    }
+    let required_spool = limits
+        .max_output_bytes_per_stream
+        .checked_mul(2)
+        .ok_or_else(|| ConfigError::new("max_output_bytes_per_stream is too large"))?;
+    if limits.max_spool_bytes < required_spool {
+        return Err(ConfigError::new(
+            "max_spool_bytes must be at least twice max_output_bytes_per_stream",
+        ));
+    }
+    Ok(())
 }
 
 fn default_allow_command_execution() -> bool {
@@ -271,28 +325,20 @@ fn default_allow_command_execution() -> bool {
 }
 
 fn prepare_command_config(
-    runtime_dir: Option<PathBuf>,
+    runtime: Option<&RuntimeState>,
     trusted_roots: Vec<PathBuf>,
     shell_profiles: Vec<TrustedShellProfileConfig>,
 ) -> Result<Option<CommandConfig>, ConfigError> {
     if trusted_roots.is_empty() && shell_profiles.is_empty() {
         return Ok(None);
     }
-    let runtime_root = runtime_dir.ok_or_else(|| {
+    let runtime = runtime.ok_or_else(|| {
         ConfigError::new(
             "AGENT_ENVD_RUNTIME_DIR is required when command execution policy is configured",
         )
     })?;
-    fs::create_dir_all(&runtime_root)
-        .map_err(|error| ConfigError::new(format!("cannot create runtime directory: {error}")))?;
-    let runtime_root = canonical_directory(&runtime_root, "AGENT_ENVD_RUNTIME_DIR")?;
-    let private_home = prepare_private_directory(&runtime_root.join("command-home"))?;
-    let private_temp = prepare_private_directory(&runtime_root.join("command-tmp"))?;
-    if !private_home.starts_with(&runtime_root) || !private_temp.starts_with(&runtime_root) {
-        return Err(ConfigError::new(
-            "private command directories must remain inside AGENT_ENVD_RUNTIME_DIR",
-        ));
-    }
+    let private_home = runtime.home().to_path_buf();
+    let private_temp = runtime.temp().to_path_buf();
 
     let mut canonical_roots = Vec::with_capacity(trusted_roots.len());
     for root in trusted_roots {
@@ -383,28 +429,6 @@ fn canonical_regular_file(path: &Path, label: &str) -> Result<PathBuf, ConfigErr
         return Err(ConfigError::new(format!("{label} must be a regular file")));
     }
     Ok(canonical)
-}
-
-fn prepare_private_directory(path: &Path) -> Result<PathBuf, ConfigError> {
-    fs::create_dir_all(path).map_err(|error| {
-        ConfigError::new(format!("cannot create private command directory: {error}"))
-    })?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        ConfigError::new(format!("cannot inspect private command directory: {error}"))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(ConfigError::new(
-            "private command directory must be a directory, not a symlink",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            ConfigError::new(format!("cannot protect private command directory: {error}"))
-        })?;
-    }
-    canonical_directory(path, "private command directory")
 }
 
 fn valid_policy_id(value: &str) -> bool {
@@ -560,15 +584,13 @@ fn default_limits() -> DaemonLimits {
         max_concurrent_operations: DEFAULT_MAX_CONCURRENT_OPERATIONS,
         max_processes: 128,
         max_operation_duration_ms: 24 * 60 * 60 * 1000,
-        max_inline_output_bytes: 2 * 1024 * 1024,
-        max_output_bytes: 256 * 1024 * 1024,
-        max_retained_bytes: 1024 * 1024 * 1024,
-        max_retained_objects: 16_384,
-        max_retention_ttl_ms: 24 * 60 * 60 * 1000,
+        max_output_preview_bytes: 2 * 1024 * 1024,
+        max_output_bytes_per_stream: 256 * 1024 * 1024,
+        max_spool_bytes: 1024 * 1024 * 1024,
+        max_spool_objects: 16_384,
         max_operation_records: 16_384,
         operation_record_ttl_ms: 24 * 60 * 60 * 1000,
         max_process_records: 1024,
-        terminal_process_record_ttl_ms: 24 * 60 * 60 * 1000,
         max_transfer_frame_bytes: DEFAULT_MAX_TRANSFER_FRAME_BYTES,
         max_concurrent_file_transfers: DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS,
         max_file_transfer_records: 512,
@@ -652,8 +674,8 @@ mod tests {
         assert_eq!(config.limits.max_response_bytes, 16 * 1024 * 1024);
         assert_eq!(config.limits.max_processes, 128);
         assert_eq!(config.limits.max_operation_duration_ms, 24 * 60 * 60 * 1000);
-        assert_eq!(config.limits.max_output_bytes, 256 * 1024 * 1024);
-        assert_eq!(config.limits.max_retained_bytes, 1024 * 1024 * 1024);
+        assert_eq!(config.limits.max_output_bytes_per_stream, 256 * 1024 * 1024);
+        assert_eq!(config.limits.max_spool_bytes, 1024 * 1024 * 1024);
         assert_eq!(config.limits.max_staged_file_bytes, 8 * 1024 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_COMMAND_ARGUMENTS, 1024);
         assert_eq!(DEFAULT_MAX_COMMAND_ARGUMENT_BYTES, 1024 * 1024);

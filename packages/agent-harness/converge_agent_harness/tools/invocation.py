@@ -22,6 +22,7 @@ from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 
 from converge_agent_harness._json import (
     dump_json_bytes,
+    dump_json_text,
     is_sensitive_key,
     redact_bearer,
     redact_json,
@@ -30,6 +31,10 @@ from converge_agent_harness._json import (
 from converge_agent_harness.context import AgentContext
 from converge_agent_harness.errors import DefinitionError
 from converge_agent_harness.events import HarnessExtensionEvent
+from converge_agent_harness.tools._output import (
+    FINAL_TOOL_OUTPUT_HARD_CHARS,
+    is_acknowledged_tool_output,
+)
 from converge_agent_harness.tools.deferred import managed_approval_tool_id
 from converge_agent_harness.tools.metadata import (
     HARNESS_TOOL_METADATA_KEY,
@@ -752,6 +757,8 @@ async def _apply_result_policy(
 ) -> Any:
     """Apply the textual result boundary without rewriting native media."""
     policy = source.output_policy if isinstance(source, HarnessToolMetadata) else source
+    if is_acknowledged_tool_output(result):
+        return await _apply_acknowledged_json_result_policy(result, policy)
     if isinstance(result, ToolReturn):
         return await _apply_native_tool_return_policy(
             result,
@@ -764,6 +771,34 @@ async def _apply_result_policy(
     return await _apply_json_result_policy(result, policy, context=context)
 
 
+async def _apply_acknowledged_json_result_policy(
+    result: Any,
+    policy: ToolOutputPolicy,
+) -> JsonValue:
+    """Keep semantic Toolset output intact unless it violates the larger hard ceiling."""
+    try:
+        value = _project_json_result(result)
+        safe_value = redact_json(value) if policy.redact else deepcopy(value)
+        output_chars, output_bytes, head, tail = _scan_json(
+            safe_value,
+            keep_bytes=min(policy.max_inline_bytes, FINAL_TOOL_OUTPUT_HARD_CHARS) // 2,
+        )
+    except (RecursionError, TypeError, ValueError, ValidationError) as exc:
+        raise ToolFailed("Tool returned an invalid result.") from exc
+    if output_chars <= FINAL_TOOL_OUTPUT_HARD_CHARS and output_bytes <= policy.max_output_bytes:
+        return safe_value
+    return _bounded_json_preview(
+        safe_value,
+        output_chars=output_chars,
+        output_bytes=output_bytes,
+        output_file_path=None,
+        head=head,
+        tail=tail,
+        char_limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        byte_limit=policy.max_inline_bytes,
+    )
+
+
 async def _apply_json_result_policy(
     result: Any,
     policy: ToolOutputPolicy,
@@ -773,11 +808,14 @@ async def _apply_json_result_policy(
     try:
         value = _project_json_result(result)
         safe_value = redact_json(value) if policy.redact else deepcopy(value)
-        output_bytes, head, tail = _scan_json(safe_value, keep_bytes=policy.max_inline_bytes // 2)
+        output_chars, output_bytes, head, tail = _scan_json(
+            safe_value,
+            keep_bytes=min(policy.max_inline_bytes, FINAL_TOOL_OUTPUT_HARD_CHARS) // 2,
+        )
     except (RecursionError, TypeError, ValueError, ValidationError) as exc:
         raise ToolFailed("Tool returned an invalid result.") from exc
 
-    if output_bytes <= policy.max_inline_bytes:
+    if output_chars <= FINAL_TOOL_OUTPUT_HARD_CHARS and output_bytes <= policy.max_inline_bytes:
         return safe_value
     if policy.overflow == "fail":
         raise ToolFailed("Tool result exceeded its output limit.")
@@ -789,11 +827,13 @@ async def _apply_json_result_policy(
 
     return _bounded_json_preview(
         safe_value,
+        output_chars=output_chars,
         output_bytes=output_bytes,
         output_file_path=output_file_path,
         head=head,
         tail=tail,
-        limit=policy.max_inline_bytes,
+        char_limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        byte_limit=policy.max_inline_bytes,
     )
 
 
@@ -890,8 +930,9 @@ async def _apply_text_result_policy(
         raise TypeError("native text fields must be strings")
     safe_value = redact_bearer(value) if policy.redact else value
     encoded = safe_value.encode("utf-8")
+    output_chars = len(safe_value)
     output_bytes = len(encoded)
-    if output_bytes <= policy.max_inline_bytes:
+    if output_chars <= FINAL_TOOL_OUTPUT_HARD_CHARS and output_bytes <= policy.max_inline_bytes:
         return safe_value
     if policy.overflow == "fail":
         raise ToolFailed("Tool result exceeded its output limit.")
@@ -900,57 +941,79 @@ async def _apply_text_result_policy(
     if policy.overflow == "spill" and output_bytes <= policy.max_output_bytes and context is not None:
         output_file_path = await context._spill_tool_result(encoded, suffix=".txt")
     marker = (
-        f"\n[tool result truncated; output_bytes={output_bytes}; "
+        f"\n[tool result truncated; output_chars={output_chars}; output_bytes={output_bytes}; "
         f"output_file_path={output_file_path or 'unavailable'}]\n"
     )
-    return _bounded_head_tail_text(safe_value, marker=marker, limit=policy.max_inline_bytes)
+    return _bounded_head_tail_text(
+        safe_value,
+        marker=marker,
+        char_limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        byte_limit=policy.max_inline_bytes,
+    )
 
 
 def _bounded_json_preview(
     value: JsonValue,
     *,
+    output_chars: int,
     output_bytes: int,
     output_file_path: str | None,
     head: bytes,
     tail: bytes,
-    limit: int,
+    char_limit: int,
+    byte_limit: int,
 ) -> dict[str, JsonValue]:
-    leaf_limit = max(8, limit // 4)
+    leaf_limit = max(8, min(char_limit, byte_limit) // 4)
     while leaf_limit >= 8:
         result = _truncate_json_strings(value, leaf_limit)
         envelope: dict[str, JsonValue] = {
             "result": result,
             "truncated": True,
+            "output_chars": output_chars,
             "output_bytes": output_bytes,
             "output_file_path": output_file_path,
         }
-        if len(dump_json_bytes(envelope)) <= limit:
+        if _json_fits(envelope, char_limit=char_limit, byte_limit=byte_limit):
             return envelope
         leaf_limit //= 2
 
     head_text = head.decode("utf-8", errors="ignore")
     tail_text = tail.decode("utf-8", errors="ignore")
-    omitted = max(0, output_bytes - len(head) - len(tail))
-    preview = f"{head_text}\n[... {omitted} bytes omitted ...]\n{tail_text}"
+    omitted_chars = max(0, output_chars - len(head_text) - len(tail_text))
+    omitted_bytes = max(0, output_bytes - len(head) - len(tail))
+    preview = f"{head_text}\n[... {omitted_chars} characters / {omitted_bytes} bytes omitted ...]\n{tail_text}"
     envelope = {
-        "result": preview,
+        "result": "",
         "truncated": True,
+        "output_chars": output_chars,
         "output_bytes": output_bytes,
         "output_file_path": output_file_path,
     }
-    while len(dump_json_bytes(envelope)) > limit and preview:
-        preview = _truncate_utf8(preview, max(0, len(preview.encode("utf-8")) - 32))
-        envelope["result"] = preview
+    low = 0
+    high = len(preview)
+    while low <= high:
+        retained = (low + high) // 2
+        candidate = _head_tail_chars(preview, retained)
+        envelope["result"] = candidate
+        if _json_fits(envelope, char_limit=char_limit, byte_limit=byte_limit):
+            low = retained + 1
+        else:
+            high = retained - 1
+    envelope["result"] = _head_tail_chars(preview, max(0, high))
     return envelope
 
 
 def _truncate_json_strings(value: JsonValue, limit: int) -> JsonValue:
     if isinstance(value, str):
-        encoded = value.encode("utf-8")
-        if len(encoded) <= limit:
+        if len(value) <= limit and len(value.encode("utf-8")) <= limit:
             return value
         marker = "\n[... truncated ...]\n"
-        return _bounded_head_tail_text(value, marker=marker, limit=limit)
+        return _bounded_head_tail_text(
+            value,
+            marker=marker,
+            char_limit=limit,
+            byte_limit=limit,
+        )
     if isinstance(value, list):
         return [_truncate_json_strings(item, limit) for item in value]
     if isinstance(value, dict):
@@ -958,39 +1021,76 @@ def _truncate_json_strings(value: JsonValue, limit: int) -> JsonValue:
     return value
 
 
-def _bounded_head_tail_text(value: str, *, marker: str, limit: int) -> str:
-    marker_bytes = marker.encode("utf-8")
-    if len(marker_bytes) >= limit:
-        return _truncate_utf8(marker, limit)
-    encoded = value.encode("utf-8")
-    available = limit - len(marker_bytes)
-    head_size = available // 2
-    tail_size = available - head_size
-    head = encoded[:head_size].decode("utf-8", errors="ignore")
-    tail = encoded[-tail_size:].decode("utf-8", errors="ignore") if tail_size else ""
-    candidate = f"{head}{marker}{tail}"
-    return _truncate_utf8(candidate, limit)
-
-
-def _truncate_utf8(value: str, limit: int) -> str:
-    if limit <= 0:
+def _bounded_head_tail_text(
+    value: str,
+    *,
+    marker: str,
+    char_limit: int,
+    byte_limit: int,
+) -> str:
+    if char_limit <= 0 or byte_limit <= 0:
         return ""
-    return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+    if len(marker) > char_limit or len(marker.encode("utf-8")) > byte_limit:
+        return _bounded_text_prefix(marker, char_limit=char_limit, byte_limit=byte_limit)
+    if len(value) <= char_limit and len(value.encode("utf-8")) <= byte_limit:
+        return value
+    low = 0
+    high = len(value)
+    while low <= high:
+        retained = (low + high) // 2
+        head_size = retained // 2
+        tail_size = retained - head_size
+        tail = value[-tail_size:] if tail_size else ""
+        candidate = f"{value[:head_size]}{marker}{tail}"
+        if len(candidate) <= char_limit and len(candidate.encode("utf-8")) <= byte_limit:
+            low = retained + 1
+        else:
+            high = retained - 1
+    head_size = max(0, high) // 2
+    tail_size = max(0, high) - head_size
+    tail = value[-tail_size:] if tail_size else ""
+    return f"{value[:head_size]}{marker}{tail}"
 
 
-def _scan_json(value: JsonValue, *, keep_bytes: int) -> tuple[int, bytes, bytes]:
-    total = 0
+def _head_tail_chars(value: str, retained: int) -> str:
+    head_size = retained // 2
+    tail_size = retained - head_size
+    tail = value[-tail_size:] if tail_size else ""
+    return f"{value[:head_size]}{tail}"
+
+
+def _bounded_text_prefix(value: str, *, char_limit: int, byte_limit: int) -> str:
+    low = 0
+    high = min(len(value), char_limit)
+    while low <= high:
+        selected = (low + high) // 2
+        if len(value[:selected].encode("utf-8")) <= byte_limit:
+            low = selected + 1
+        else:
+            high = selected - 1
+    return value[: max(0, high)]
+
+
+def _json_fits(value: JsonValue, *, char_limit: int, byte_limit: int) -> bool:
+    text = dump_json_text(value)
+    return len(text) <= char_limit and len(text.encode("utf-8")) <= byte_limit
+
+
+def _scan_json(value: JsonValue, *, keep_bytes: int) -> tuple[int, int, bytes, bytes]:
+    total_chars = 0
+    total_bytes = 0
     head = bytearray()
     tail = bytearray()
     for chunk in _iter_json(value, redact=False):
-        total += len(chunk)
+        total_chars += len(chunk.decode("utf-8"))
+        total_bytes += len(chunk)
         if len(head) < keep_bytes:
             head.extend(chunk[: keep_bytes - len(head)])
         if keep_bytes:
             tail.extend(chunk)
             if len(tail) > keep_bytes:
                 del tail[: len(tail) - keep_bytes]
-    return total, bytes(head), bytes(tail)
+    return total_chars, total_bytes, bytes(head), bytes(tail)
 
 
 def _project_json_result(result: Any) -> JsonValue:

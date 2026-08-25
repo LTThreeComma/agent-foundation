@@ -108,7 +108,7 @@ def build_openrpc(records: list[dict[str, Any]], schema: dict[str, object]) -> d
             "params": params,
             "paramStructure": "by-name",
             "x-eip-kind": record["kind"],
-            "x-eip-idempotency": record["idempotency"],
+            "x-eip-replay-class": record["replay_class"],
             "x-eip-introduced": record["introduced"],
             "x-eip-error-family": record["error_family"],
             "x-eip-transfer-action": record["transfer_action"],

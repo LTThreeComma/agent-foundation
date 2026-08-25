@@ -24,6 +24,7 @@ from .commands import (
     PortTarget,
     ProcessControlResult,
     ProcessInfo,
+    ProcessOutputSnapshot,
     ProcessReadOutputResult,
     ProcessSignalResult,
     ProcessStartResult,
@@ -70,7 +71,13 @@ from .providers import (
     EnvironmentTopologyObserver,
     FileScopeSelection,
 )
-from .retention import BoundOutputCursor, BoundOutputReference, EnvironmentOutputReadResult
+from .retention import (
+    BoundOutputCursor,
+    BoundOutputReference,
+    EnvironmentOutputCapture,
+    EnvironmentOutputPolicy,
+    EnvironmentOutputReadResult,
+)
 from .topology import DynamicTopologyController, DynamicTopologyObserver
 from .virtual_files import VirtualFileOperator, _PreparedFile
 
@@ -121,6 +128,19 @@ def _validate_provider_artifacts(entered: _EnteredBinding, value: Any) -> None:
     if isinstance(value, tuple | list):
         for item in value:
             _validate_provider_artifacts(entered, item)
+
+
+def _capture_contiguous_prefix(capture: EnvironmentOutputCapture) -> bytes:
+    if capture.inline is not None:
+        return capture.inline
+    expected = 0
+    chunks: list[bytes] = []
+    for segment in sorted(capture.preview, key=lambda item: item.start_offset):
+        if segment.start_offset != expected:
+            break
+        chunks.append(segment.data)
+        expected += len(segment.data)
+    return b"".join(chunks)
 
 
 def _validate_process_result_identity(expected: BoundProcessHandle, value: Any) -> None:
@@ -234,6 +254,100 @@ class _ShellFacade:
             result = await shell.exec(provider_request)
             _validate_provider_artifacts(entered, result)
             return result
+
+    async def exec_captured(self, request: CommandRequest, *, alias: str | None = None) -> ShellExecResult:
+        """Preflight and hold one revision through foreground output materialization."""
+        entered, provider_request = self._environment._prepare_command(request, alias=alias)
+        for action in (EnvironmentAction.SHELL_EXEC, EnvironmentAction.OUTPUT_READ, EnvironmentAction.OUTPUT_RELEASE):
+            selected = self._environment.require_action(entered.public.binding_id, action)
+            if selected is not entered:
+                raise EnvironmentError(
+                    "Shell binding revision changed before dispatch.", code="environment_stale_binding"
+                )
+        if entered.operations.outputs is None:
+            raise EnvironmentError("Output operation facet is unavailable.", code="environment_unsupported")
+        async with self._environment._operation_lease(
+            entered,
+            EnvironmentAction.SHELL_EXEC,
+            "shell",
+            timeout_seconds=provider_request.limits.wall_time_seconds,
+        ):
+            async with self._environment._operation_lease(
+                entered,
+                EnvironmentAction.OUTPUT_READ,
+                "outputs",
+            ):
+                async with self._environment._operation_lease(
+                    entered,
+                    EnvironmentAction.OUTPUT_RELEASE,
+                    "outputs",
+                ):
+                    shell = entered.operations.shell
+                    if shell is None:
+                        raise EnvironmentError(
+                            "Shell operation facet is unavailable.",
+                            code="environment_unsupported",
+                        )
+                    result = await shell.exec(provider_request)
+                    _validate_provider_artifacts(entered, result)
+                    stdout, stderr = await asyncio.gather(
+                        self._materialize_capture(entered, result.output.stdout, provider_request.output_policy),
+                        self._materialize_capture(entered, result.output.stderr, provider_request.output_policy),
+                    )
+                    return result.model_copy(update={"output": ProcessOutputSnapshot(stdout=stdout, stderr=stderr)})
+
+    @staticmethod
+    async def _materialize_capture(
+        entered: _EnteredBinding,
+        capture: EnvironmentOutputCapture,
+        policy: EnvironmentOutputPolicy,
+    ) -> EnvironmentOutputCapture:
+        if capture.reference is None:
+            return capture
+        outputs = entered.operations.outputs
+        if outputs is None:
+            raise EnvironmentError("Output operation facet is unavailable.", code="environment_unsupported")
+        read_policy = EnvironmentOutputPolicy(
+            max_inline_bytes=max(1, min(capture.captured_bytes, policy.max_output_bytes)),
+            max_output_bytes=max(1, policy.max_output_bytes),
+            overflow="truncate",
+        )
+        data = _capture_contiguous_prefix(capture)
+        materialized = False
+        try:
+            try:
+                result = await outputs.read(capture.reference, start_offset=0, policy=read_policy)
+                _validate_provider_artifacts(entered, result)
+                data = b"".join(chunk.data for chunk in result.chunks)
+                materialized = True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # The command has completed. A provider read failure must not turn
+                # its known outcome and side effects into a retry-shaped failure.
+                pass
+        finally:
+            try:
+                receipt = await outputs.release(reference=capture.reference)
+                _validate_provider_artifacts(entered, receipt)
+            except Exception:
+                # Output cleanup is best effort after the command and materialization
+                # have completed; it cannot replace their known result.
+                pass
+        return capture.model_copy(
+            update={
+                "kind": "empty" if not data else "inline",
+                "content_complete": (materialized and capture.content_complete and len(data) == capture.captured_bytes),
+                "captured_bytes": len(data),
+                "inline": data,
+                "preview": (),
+                "reference": None,
+                "cursor": None,
+                "available_start": 0,
+                "available_end": len(data),
+                "expires_at": None,
+            }
+        )
 
 
 class _ProcessFacade:

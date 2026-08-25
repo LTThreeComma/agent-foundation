@@ -17,6 +17,12 @@ from converge_agent_harness.tools import (
     ToolOutputPolicy,
 )
 from converge_agent_harness.tools.invocation import _apply_result_policy
+from converge_agent_harness.toolsets import (
+    FINAL_TOOL_OUTPUT_HARD_CHARS,
+    acknowledge_tool_output,
+    tool_output_bytes,
+    tool_output_text,
+)
 from pydantic_ai import (
     AudioUrl,
     BinaryContent,
@@ -474,6 +480,82 @@ async def test_native_tool_return_text_overflow_is_explicit_without_filtering_me
     assert projected.tools is not None
     assert len(projected.tools[0].encode("utf-8")) <= 512
     assert "tool result truncated" in projected.tools[0]
+
+
+async def test_acknowledged_result_bypasses_only_generic_inline_projection() -> None:
+    policy = ToolOutputPolicy(
+        max_inline_bytes=512,
+        max_output_bytes=2048,
+        overflow="truncate",
+        redact=True,
+    )
+    result = acknowledge_tool_output(
+        {
+            "content": "x" * 1_000,
+            "authorization": "Bearer private-token",
+        }
+    )
+
+    projected = await _apply_result_policy(result, policy)
+
+    assert projected == {
+        "content": "x" * 1_000,
+        "authorization": "[REDACTED]",
+    }
+
+
+async def test_acknowledged_result_can_bypass_the_byte_inline_policy() -> None:
+    policy = ToolOutputPolicy(
+        max_inline_bytes=512,
+        max_output_bytes=64 * 1024,
+        overflow="truncate",
+        redact=True,
+    )
+    result = acknowledge_tool_output({"content": "界" * 6_000})
+
+    projected = await _apply_result_policy(result, policy)
+
+    assert projected == {"content": "界" * 6_000}
+    assert len(tool_output_bytes(projected)) > policy.max_inline_bytes
+
+
+async def test_acknowledged_result_still_obeys_final_hard_ceiling() -> None:
+    policy = ToolOutputPolicy(
+        max_inline_bytes=512,
+        max_output_bytes=64 * 1024,
+        overflow="truncate",
+        redact=True,
+    )
+
+    projected = await _apply_result_policy(
+        acknowledge_tool_output({"content": "x" * 25_000}),
+        policy,
+    )
+
+    assert isinstance(projected, dict)
+    assert projected["truncated"] is True
+    assert projected["output_file_path"] is None
+    assert projected["output_chars"] > FINAL_TOOL_OUTPUT_HARD_CHARS
+    assert projected["output_bytes"] > FINAL_TOOL_OUTPUT_HARD_CHARS
+    assert len(tool_output_text(projected)) <= FINAL_TOOL_OUTPUT_HARD_CHARS
+    assert len(tool_output_bytes(projected)) <= policy.max_inline_bytes
+
+
+async def test_unacknowledged_result_still_obeys_final_character_ceiling() -> None:
+    policy = ToolOutputPolicy(
+        max_inline_bytes=256 * 1024,
+        max_output_bytes=256 * 1024,
+        overflow="truncate",
+        redact=True,
+    )
+
+    projected = await _apply_result_policy({"content": "x" * 25_000}, policy)
+
+    assert isinstance(projected, dict)
+    assert projected["truncated"] is True
+    assert projected["output_chars"] > FINAL_TOOL_OUTPUT_HARD_CHARS
+    assert len(tool_output_text(projected)) <= FINAL_TOOL_OUTPUT_HARD_CHARS
+    assert len(tool_output_bytes(projected)) <= policy.max_inline_bytes
 
 
 async def test_large_json_spill_without_sink_returns_bounded_structured_preview() -> None:

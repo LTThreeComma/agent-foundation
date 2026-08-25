@@ -4,7 +4,10 @@ use std::{
     fmt,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -23,9 +26,10 @@ use crate::{
     },
     mount::MountRegistry,
     operation::{
-        BeginOutcome, OperationInterruption, OperationLease, OperationRegistry, RegistryError,
+        ActiveResponseHandoff, BeginOutcome, OperationInterruption, OperationLease,
+        OperationRegistry, RegistryError, scope_carrier_attempt,
     },
-    process::{ExecutionManager, ProcessError},
+    process::{ExecutionManager, ProcessError, StartFailure},
     resource::{ResourceError, ResourceRegistry},
     retention::{RetentionError, RetentionQuota, RetentionStore},
     transfer::{TransferError, TransferRegistry},
@@ -120,6 +124,24 @@ struct AuthoritySurfaces {
     scoped: AuthoritySurface,
 }
 
+pub(crate) struct CarrierResponse {
+    payload: Vec<u8>,
+    handoff: Option<ActiveResponseHandoff>,
+}
+
+impl CarrierResponse {
+    fn plain(payload: Vec<u8>) -> Self {
+        Self {
+            payload,
+            handoff: None,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, Option<ActiveResponseHandoff>) {
+        (self.payload, self.handoff)
+    }
+}
+
 pub(crate) struct Daemon {
     surfaces: AuthoritySurfaces,
     session: SessionAdmission,
@@ -133,6 +155,7 @@ pub(crate) struct Daemon {
     transfers: TransferRegistry,
     closed: watch::Sender<bool>,
     max_response_bytes: usize,
+    next_carrier_attempt: AtomicU64,
 }
 
 impl SessionAdmission {
@@ -485,7 +508,6 @@ fn build_descriptor(
             "shell.exec".to_owned(),
             "process.start".to_owned(),
             "process.inspect".to_owned(),
-            "process.read_output".to_owned(),
             "process.write_stdin".to_owned(),
             "process.close_stdin".to_owned(),
             "process.wait".to_owned(),
@@ -583,6 +605,7 @@ impl Daemon {
             transfers,
             closed,
             max_response_bytes,
+            next_carrier_attempt: AtomicU64::new(1),
         })
     }
 
@@ -692,14 +715,25 @@ impl Daemon {
     }
 
     pub(crate) async fn maintenance(&self) {
-        self.retention.expire();
-        if let Some(execution) = &self.execution {
-            execution.maintenance();
-        }
         self.transfers.expire().await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn handle_payload(&self, payload: &str) -> Vec<u8> {
+        let response = self.handle_payload_for_carrier(payload).await;
+        let (payload, handoff) = response.into_parts();
+        if let Some(handoff) = handoff {
+            handoff.complete();
+        }
+        payload
+    }
+
+    pub(crate) async fn handle_payload_for_carrier(&self, payload: &str) -> CarrierResponse {
+        let attempt = self.next_carrier_attempt.fetch_add(1, Ordering::Relaxed);
+        scope_carrier_attempt(attempt, Box::pin(self.handle_payload_core(payload))).await
+    }
+
+    async fn handle_payload_core(&self, payload: &str) -> CarrierResponse {
         let request = match eip::decode::<JsonRpcRequest>(payload) {
             Ok(request) => request,
             Err(error) => {
@@ -721,33 +755,33 @@ impl Daemon {
                     }
                 };
                 self.close_if_uninitialized();
-                return self.error_response(
+                return CarrierResponse::plain(self.error_response(
                     request_id,
                     protocol_error(error_type, error_type_message(error_type)),
-                );
+                ));
             }
         };
 
         if !valid_request_id(&request.id) {
             self.close_if_uninitialized();
-            return self.error_response(
+            return CarrierResponse::plain(self.error_response(
                 None,
                 protocol_error(ErrorType::InvalidRequest, "invalid JSON-RPC request ID"),
-            );
+            ));
         }
 
         let request_id = request.id.clone();
         if let Err(error) = self.preflight(&request.method).await {
-            return self.error_response(Some(request_id), error);
+            return CarrierResponse::plain(self.error_response(Some(request_id), error));
         }
 
         let params_json = match serde_json::to_string(&request.params) {
             Ok(params) => params,
             Err(_) => {
-                return self.error_response(
+                return CarrierResponse::plain(self.error_response(
                     Some(request_id),
                     protocol_error(ErrorType::InternalError, "failed to encode request params"),
-                );
+                ));
             }
         };
         let is_initialization = request.method == "initialize";
@@ -765,8 +799,20 @@ impl Daemon {
             self.close_if_uninitialized();
         }
 
-        match result {
-            Ok(serde_json::Value::Object(fields)) => {
+        let handoff = match &result {
+            Ok(success) => self
+                .operations
+                .active_response_handoff(success.method, &success.params),
+            Err(DispatchError::Method { method, params, .. }) => {
+                self.operations.active_response_handoff(method, params)
+            }
+            Err(_) => None,
+        };
+        let payload = match result {
+            Ok(success) if matches!(success.result, serde_json::Value::Object(_)) => {
+                let serde_json::Value::Object(fields) = success.result else {
+                    unreachable!("guarded object result")
+                };
                 let response = JsonRpcSuccessResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request_id,
@@ -791,7 +837,8 @@ impl Daemon {
             Err(error) => {
                 self.error_response(Some(request_id), map_dispatch_error(error, &request.method))
             }
-        }
+        };
+        CarrierResponse { payload, handoff }
     }
 
     async fn preflight(&self, method: &str) -> Result<(), EIPError> {
@@ -880,7 +927,6 @@ impl Daemon {
         method: &str,
         context: &eip::EIPCallContext,
         params: &P,
-        key_allowed: bool,
     ) -> Result<BeginOutcome, EIPError> {
         let session = self.session.state();
         if session.lifecycle != SessionState::Initialized {
@@ -889,7 +935,7 @@ impl Daemon {
                 "session is not initialized",
             ));
         }
-        self.begin_record(method, context, params, key_allowed)
+        self.begin_record(method, context, params)
     }
 
     #[allow(clippy::result_large_err)]
@@ -902,7 +948,7 @@ impl Daemon {
         let work = self.session.admit_work().ok_or_else(|| {
             protocol_error(ErrorType::NotInitialized, "session is not initialized")
         })?;
-        let operation = self.begin_record(method, context, params, true)?;
+        let operation = self.begin_record(method, context, params)?;
         Ok((work, operation))
     }
 
@@ -912,11 +958,10 @@ impl Daemon {
         method: &str,
         context: &eip::EIPCallContext,
         params: &P,
-        key_allowed: bool,
     ) -> Result<BeginOutcome, EIPError> {
         let outcome = self
             .operations
-            .begin(method, context, params, key_allowed)
+            .begin(method, context, params)
             .map_err(map_registry_error)?;
         self.pending_operations.mark_admitted(&context.operation_id);
         Ok(outcome)
@@ -954,13 +999,11 @@ impl EipHandler for Daemon {
         params: EnvironmentDescribeParams,
     ) -> Result<EnvironmentDescribeResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("environment.describe", &params.context, &params, false)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("environment.describe", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let result = EnvironmentDescribeResult {
             descriptor: self.effective_surface()?.descriptor.clone(),
         };
@@ -1030,7 +1073,6 @@ impl EipHandler for Daemon {
         &self,
         params: SessionCloseParams,
     ) -> Result<SessionCloseResult, EIPError> {
-        ensure_deadline(&params.context)?;
         let operation = {
             let mut session = self.session.state();
             if session.lifecycle != SessionState::Initialized {
@@ -1039,7 +1081,7 @@ impl EipHandler for Daemon {
                     "session is not initialized",
                 ));
             }
-            let operation = self.begin_record("session.close", &params.context, &params, false)?;
+            let operation = self.begin_record("session.close", &params.context, &params)?;
             session.lifecycle = SessionState::Closed;
             operation
         };
@@ -1069,16 +1111,7 @@ impl EipHandler for Daemon {
         })?;
         let operation = self
             .operations
-            .begin_with_replay_validation(
-                "file.open_reader",
-                &params.context,
-                &params,
-                true,
-                |value| {
-                    serde_json::from_value::<eip::FileReaderOpenResult>(value.clone())
-                        .is_ok_and(|result| self.transfers.is_live_reader(&result.reader.0))
-                },
-            )
+            .begin("file.open_reader", &params.context, &params)
             .map_err(map_registry_error)?;
         self.pending_operations
             .mark_admitted(&params.context.operation_id);
@@ -1105,12 +1138,11 @@ impl EipHandler for Daemon {
         params: eip::FileReaderCloseParams,
     ) -> Result<eip::FileReaderCloseResult, EIPError> {
         self.ensure_initialized()?;
-        let operation =
-            match self.admit_record("file.close_reader", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("file.close_reader", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let result = self
             .transfers
             .close_reader(&params.reader)
@@ -1132,16 +1164,7 @@ impl EipHandler for Daemon {
         })?;
         let operation = self
             .operations
-            .begin_with_replay_validation(
-                "file.open_writer",
-                &params.context,
-                &params,
-                true,
-                |value| {
-                    serde_json::from_value::<eip::FileWriterOpenResult>(value.clone())
-                        .is_ok_and(|result| self.transfers.is_live_writer(&result.writer.0))
-                },
-            )
+            .begin("file.open_writer", &params.context, &params)
             .map_err(map_registry_error)?;
         self.pending_operations
             .mark_admitted(&params.context.operation_id);
@@ -1168,12 +1191,11 @@ impl EipHandler for Daemon {
         params: eip::FileWriterAbortParams,
     ) -> Result<eip::FileWriterAbortResult, EIPError> {
         self.ensure_initialized()?;
-        let operation =
-            match self.admit_record("file.abort_writer", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("file.abort_writer", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let result = eip::FileWriterAbortResult {
             status: self
                 .transfers
@@ -1194,12 +1216,11 @@ impl EipHandler for Daemon {
         let work = self.session.admit_work().ok_or_else(|| {
             protocol_error(ErrorType::NotInitialized, "session is not initialized")
         })?;
-        let operation =
-            match self.begin_record("file.commit_writer", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.begin_record("file.commit_writer", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let (operation, receipt) = mutation_receipt(operation, "file.commit_writer")?;
         let commit = match self.transfers.prepare_commit(&params).await {
             Ok(commit) => commit,
@@ -1247,8 +1268,7 @@ impl EipHandler for Daemon {
         params: eip::FileStatParams,
     ) -> Result<eip::FileStatResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("file.stat", &params.context, &params, false)? {
+        let operation = match self.admit_record("file.stat", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1271,13 +1291,11 @@ impl EipHandler for Daemon {
         params: eip::FileReadTextParams,
     ) -> Result<eip::FileReadTextResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("file.read_text", &params.context, &params, false)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("file.read_text", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let resources = self.resources.clone();
         let mounts = self.effective_surface()?.mounts.clone();
         let call = params.clone();
@@ -1296,8 +1314,7 @@ impl EipHandler for Daemon {
         params: eip::FileListParams,
     ) -> Result<eip::FileListResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("file.list", &params.context, &params, false)? {
+        let operation = match self.admit_record("file.list", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1320,8 +1337,7 @@ impl EipHandler for Daemon {
         params: eip::FileFindParams,
     ) -> Result<eip::FileFindResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("file.find", &params.context, &params, false)? {
+        let operation = match self.admit_record("file.find", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1344,8 +1360,7 @@ impl EipHandler for Daemon {
         params: eip::FileSearchParams,
     ) -> Result<eip::FileSearchResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("file.search", &params.context, &params, false)? {
+        let operation = match self.admit_record("file.search", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1368,7 +1383,6 @@ impl EipHandler for Daemon {
         params: eip::FileWriteTextParams,
     ) -> Result<eip::FileWriteTextResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) =
             self.admit_owned_record("file.write_text", &params.context, &params)?;
         let operation = match operation {
@@ -1422,7 +1436,6 @@ impl EipHandler for Daemon {
         params: eip::FileMkdirParams,
     ) -> Result<eip::FileMkdirResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) = self.admit_owned_record("file.mkdir", &params.context, &params)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1474,7 +1487,6 @@ impl EipHandler for Daemon {
         params: eip::FilePatchTextParams,
     ) -> Result<eip::FilePatchTextResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) =
             self.admit_owned_record("file.patch_text", &params.context, &params)?;
         let operation = match operation {
@@ -1528,7 +1540,6 @@ impl EipHandler for Daemon {
         params: eip::FileCopyParams,
     ) -> Result<eip::FileCopyResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) = self.admit_owned_record("file.copy", &params.context, &params)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1580,7 +1591,6 @@ impl EipHandler for Daemon {
         params: eip::FileMoveParams,
     ) -> Result<eip::FileMoveResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) = self.admit_owned_record("file.move", &params.context, &params)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1632,7 +1642,6 @@ impl EipHandler for Daemon {
         params: eip::FileRemoveParams,
     ) -> Result<eip::FileRemoveResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let (work, operation) = self.admit_owned_record("file.remove", &params.context, &params)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
@@ -1683,14 +1692,12 @@ impl EipHandler for Daemon {
         params: eip::OperationCancelParams,
     ) -> Result<eip::OperationCancelResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
-        let operation =
-            match self.admit_record("operation.cancel", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("operation.cancel", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let mut status = self.operations.cancel(&params.target_operation_id);
         if status == eip::OperationCancelStatus::NotFound {
             match self
@@ -1732,8 +1739,7 @@ impl EipHandler for Daemon {
         params: eip::ReceiptGetParams,
     ) -> Result<eip::ReceiptGetResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("receipt.get", &params.context, &params, false)? {
+        let operation = match self.admit_record("receipt.get", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1754,13 +1760,17 @@ impl EipHandler for Daemon {
         params: eip::OutputReadParams,
     ) -> Result<eip::OutputReadResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("output.read", &params.context, &params, false)? {
+        let operation = match self.admit_record("output.read", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
-        let result = self.retention.read(&params).map_err(map_retention_error)?;
+        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
+        let result = self
+            .retention
+            .read(&params, deadline)
+            .await
+            .map_err(map_retention_error)?;
         operation
             .finish(&result, None)
             .map_err(map_registry_error)?;
@@ -1772,14 +1782,26 @@ impl EipHandler for Daemon {
         params: eip::OutputReleaseParams,
     ) -> Result<eip::OutputReleaseResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("output.release", &params.context, &params, true)? {
+        let operation = match self.admit_record("output.release", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
         };
         let (operation, receipt) = mutation_receipt(operation, "output.release")?;
-        let released = self.retention.release_reference(&params.reference);
+        let released = match self.retention.release_reference(&params.reference).await {
+            Ok(released) => released,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "output.release",
+                    map_retention_error(error),
+                ));
+            }
+        };
+        if released {
+            self.operations
+                .release_selector("output", &params.reference.0);
+        }
         let result = eip::OutputReleaseResult {
             released,
             receipt: receipt.clone(),
@@ -1795,8 +1817,7 @@ impl EipHandler for Daemon {
         params: eip::PortInspectParams,
     ) -> Result<eip::PortInspectResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("port.inspect", &params.context, &params, false)? {
+        let operation = match self.admit_record("port.inspect", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1821,8 +1842,7 @@ impl EipHandler for Daemon {
                 "port.wait requires a finite context deadline",
             )
         })?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("port.wait", &params.context, &params, false)? {
+        let operation = match self.admit_record("port.wait", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -1866,10 +1886,9 @@ impl EipHandler for Daemon {
         params: eip::ProcessStartParams,
     ) -> Result<eip::ProcessStartResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
         let execution = self.execution_manager()?;
         let mounts = self.effective_surface()?.mounts.clone();
-        let operation = self.begin_record("process.start", &params.context, &params, true)?;
+        let operation = self.begin_record("process.start", &params.context, &params)?;
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
@@ -1891,13 +1910,17 @@ impl EipHandler for Daemon {
             .await
         {
             Ok(started) => started,
-            Err(error) => {
-                let mapped = map_process_error(error);
+            Err(StartFailure { error, started }) => {
+                let mapped = started.as_ref().map_or_else(
+                    || map_process_error(error),
+                    |started| map_started_process_error(error, started, execution),
+                );
                 return Err(
                     if matches!(
                         error,
                         ProcessError::PreDispatchCancelled | ProcessError::PreDispatchTimeout
-                    ) {
+                    ) && started.is_none()
+                    {
                         mutation_pre_dispatch_failure(operation, "process.start", mapped)
                     } else {
                         mutation_failure(operation, "process.start", mapped)
@@ -1914,11 +1937,10 @@ impl EipHandler for Daemon {
                 .interrupt_started(&started, reason, Instant::now() + Duration::from_secs(3))
                 .await
             {
-                let process = started.info(execution);
                 return Err(mutation_failure(
                     operation,
                     "process.start",
-                    map_process_error_with_evidence(error, &process),
+                    map_started_process_error(error, &started, execution),
                 ));
             }
             execution.release_started(&started);
@@ -1934,8 +1956,18 @@ impl EipHandler for Daemon {
         }
         let (operation, receipt) =
             mutation_receipt_at(operation, "process.start", ReceiptStage::ExecConfirmed)?;
+        let process = match started.info(execution) {
+            Ok(process) => process,
+            Err(error) => {
+                return Err(mutation_failure(
+                    operation,
+                    "process.start",
+                    map_process_error(error),
+                ));
+            }
+        };
         let result = eip::ProcessStartResult {
-            process: started.info(execution),
+            process,
             receipt: receipt.clone(),
         };
         operation
@@ -1949,13 +1981,11 @@ impl EipHandler for Daemon {
         params: eip::ProcessInspectParams,
     ) -> Result<eip::ProcessInspectResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("process.inspect", &params.context, &params, false)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("process.inspect", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let result = eip::ProcessInspectResult {
             process: self
                 .execution_manager()?
@@ -1973,8 +2003,7 @@ impl EipHandler for Daemon {
         params: eip::ProcessWaitParams,
     ) -> Result<eip::ProcessWaitResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("process.wait", &params.context, &params, false)? {
+        let operation = match self.admit_record("process.wait", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -2006,54 +2035,16 @@ impl EipHandler for Daemon {
         Ok(result)
     }
 
-    async fn process_read_output(
-        &self,
-        params: eip::ProcessReadOutputParams,
-    ) -> Result<eip::ProcessReadOutputResult, EIPError> {
-        self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("process.read_output", &params.context, &params, false)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
-        let deadline = effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
-        let (process, stdout, stderr) = self
-            .execution_manager()?
-            .read_output(
-                &params.handle,
-                params.stdout_offset,
-                params.stderr_offset,
-                params.wait_ms,
-                params.output_policy.as_ref(),
-                deadline,
-            )
-            .await
-            .map_err(map_process_error)?;
-        let result = eip::ProcessReadOutputResult {
-            process,
-            stdout,
-            stderr,
-        };
-        operation
-            .finish(&result, None)
-            .map_err(map_registry_error)?;
-        Ok(result)
-    }
-
     async fn process_write_stdin(
         &self,
         params: eip::ProcessWriteStdinParams,
     ) -> Result<eip::ProcessWriteStdinResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("process.write_stdin", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("process.write_stdin", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let (accepted_bytes, stdin_open) = match self
             .execution_manager()?
             .write_stdin(&params.handle, &params.data, params.close_after_write)
@@ -2085,13 +2076,11 @@ impl EipHandler for Daemon {
         params: eip::ProcessCloseStdinParams,
     ) -> Result<eip::ProcessCloseStdinResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("process.close_stdin", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("process.close_stdin", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         if let Err(error) = self.execution_manager()?.close_stdin(&params.handle).await {
             return Err(mutation_failure(
                 operation,
@@ -2115,8 +2104,7 @@ impl EipHandler for Daemon {
         params: eip::ProcessSignalParams,
     ) -> Result<eip::ProcessSignalResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("process.signal", &params.context, &params, true)? {
+        let operation = match self.admit_record("process.signal", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -2153,8 +2141,7 @@ impl EipHandler for Daemon {
         params: eip::ProcessKillParams,
     ) -> Result<eip::ProcessKillResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("process.kill", &params.context, &params, true)? {
+        let operation = match self.admit_record("process.kill", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -2194,13 +2181,11 @@ impl EipHandler for Daemon {
         params: eip::ProcessReleaseParams,
     ) -> Result<eip::ProcessReleaseResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation =
-            match self.admit_record("process.release", &params.context, &params, true)? {
-                BeginOutcome::Replay(value) => return self.decode_replay(value),
-                BeginOutcome::ReplayFailure(error) => return Err(*error),
-                BeginOutcome::New(operation) => operation,
-            };
+        let operation = match self.admit_record("process.release", &params.context, &params)? {
+            BeginOutcome::Replay(value) => return self.decode_replay(value),
+            BeginOutcome::ReplayFailure(error) => return Err(*error),
+            BeginOutcome::New(operation) => operation,
+        };
         let released = match self.execution_manager()?.release(&params.handle) {
             Ok(released) => released,
             Err(error) => {
@@ -2211,6 +2196,10 @@ impl EipHandler for Daemon {
                 ));
             }
         };
+        if released {
+            self.operations
+                .release_selector("process", &params.handle.0);
+        }
         let (operation, receipt) = mutation_receipt(operation, "process.release")?;
         let result = eip::ProcessReleaseResult {
             released,
@@ -2227,8 +2216,7 @@ impl EipHandler for Daemon {
         params: eip::ShellExecParams,
     ) -> Result<eip::ShellExecResult, EIPError> {
         self.ensure_initialized()?;
-        ensure_deadline(&params.context)?;
-        let operation = match self.admit_record("shell.exec", &params.context, &params, true)? {
+        let operation = match self.admit_record("shell.exec", &params.context, &params)? {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
             BeginOutcome::New(operation) => operation,
@@ -2238,7 +2226,7 @@ impl EipHandler for Daemon {
         let hard_deadline =
             effective_deadline(params.context.timeout_ms, self.max_operation_duration)?;
         let started = match execution
-            .start(&mounts, &params.request, false, || {
+            .start(&mounts, &params.request, true, || {
                 match self.operations.interruption(&params.context.operation_id) {
                     Some(OperationInterruption::Cancelled) => {
                         return Err(ProcessError::PreDispatchCancelled);
@@ -2253,13 +2241,17 @@ impl EipHandler for Daemon {
             .await
         {
             Ok(started) => started,
-            Err(error) => {
-                let mapped = map_process_error(error);
+            Err(StartFailure { error, started }) => {
+                let mapped = started.as_ref().map_or_else(
+                    || map_process_error(error),
+                    |started| map_started_process_error(error, started, execution),
+                );
                 return Err(
                     if matches!(
                         error,
                         ProcessError::PreDispatchCancelled | ProcessError::PreDispatchTimeout
-                    ) {
+                    ) && started.is_none()
+                    {
                         mutation_pre_dispatch_failure(operation, "shell.exec", mapped)
                     } else {
                         mutation_failure(operation, "shell.exec", mapped)
@@ -2279,11 +2271,10 @@ impl EipHandler for Daemon {
                 {
                     Ok(process) => break process,
                     Err(error) => {
-                        let process = started.info(execution);
                         return Err(mutation_failure(
                             operation,
                             "shell.exec",
-                            map_process_error_with_evidence(error, &process),
+                            map_started_process_error(error, &started, execution),
                         ));
                     }
                 }
@@ -2306,11 +2297,10 @@ impl EipHandler for Daemon {
                     {
                         Ok(process) => break process,
                         Err(error) => {
-                            let process = started.info(execution);
                             return Err(mutation_failure(
                                 operation,
                                 "shell.exec",
-                                map_process_error_with_evidence(error, &process),
+                                map_started_process_error(error, &started, execution),
                             ));
                         }
                     }
@@ -2326,63 +2316,27 @@ impl EipHandler for Daemon {
             }
         };
         if process.status.termination_reason == Some(eip::TerminationReason::BackendLost) {
-            let mut error = map_process_error(ProcessError::UnknownOutcome);
-            error.data.process_status = Some(process.status.clone());
-            error.data.produced_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .produced_bytes
-                    .saturating_add(process.output.stderr.capture.produced_bytes),
-            );
-            error.data.captured_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .captured_bytes
-                    .saturating_add(process.output.stderr.capture.captured_bytes),
-            );
-            error.data.dropped_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .dropped_bytes
-                    .saturating_add(process.output.stderr.capture.dropped_bytes),
-            );
-            execution.release_started(&started);
+            let release = execution.prepare_started_release(&started);
+            let error = if release.is_some() {
+                map_process_error_with_output_evidence(ProcessError::UnknownOutcome, &process)
+            } else {
+                map_process_error_with_evidence(ProcessError::UnknownOutcome, &process)
+            };
+            if let Some(release) = release {
+                release.preserve_output();
+            }
             return Err(mutation_failure(operation, "shell.exec", error));
         }
         if process.status.termination_reason == Some(eip::TerminationReason::OutputLimit) {
-            let mut error = map_process_error(ProcessError::OutputLimit);
-            error.data.process_status = Some(process.status.clone());
-            error.data.produced_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .produced_bytes
-                    .saturating_add(process.output.stderr.capture.produced_bytes),
-            );
-            error.data.captured_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .captured_bytes
-                    .saturating_add(process.output.stderr.capture.captured_bytes),
-            );
-            error.data.dropped_bytes = Some(
-                process
-                    .output
-                    .stdout
-                    .capture
-                    .dropped_bytes
-                    .saturating_add(process.output.stderr.capture.dropped_bytes),
-            );
-            execution.release_started(&started);
+            let release = execution.prepare_started_release(&started);
+            let error = if release.is_some() {
+                map_process_error_with_output_evidence(ProcessError::OutputLimit, &process)
+            } else {
+                map_process_error_with_evidence(ProcessError::OutputLimit, &process)
+            };
+            if let Some(release) = release {
+                release.preserve_output();
+            }
             return Err(mutation_failure(operation, "shell.exec", error));
         }
         let outcome = match process.status.phase {
@@ -2488,11 +2442,6 @@ fn mutation_receipt_at(
     failure.data.receipt = Some(unknown_receipt.clone());
     operation.preserve_failure_on_drop(unknown_receipt, failure);
     Ok((operation, receipt))
-}
-
-#[allow(clippy::unnecessary_wraps, clippy::result_large_err)]
-fn ensure_deadline(_context: &eip::EIPCallContext) -> Result<(), EIPError> {
-    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -2627,13 +2576,6 @@ fn map_resource_error(error: ResourceError) -> EIPError {
 }
 
 fn map_process_error(error: ProcessError) -> EIPError {
-    let gap_bounds = match error {
-        ProcessError::RetentionGap {
-            available_start,
-            available_end,
-        } => Some((available_start, available_end)),
-        _ => None,
-    };
     let (error_type, message, retry_hint) = match error {
         ProcessError::Invalid => (
             ErrorType::InvalidParams,
@@ -2653,11 +2595,6 @@ fn map_process_error(error: ProcessError) -> EIPError {
         ProcessError::NotFound => (
             ErrorType::NotFoundOrDenied,
             "process handle was not found",
-            RetryHint::Never,
-        ),
-        ProcessError::RetentionGap { .. } => (
-            ErrorType::RetentionGap,
-            "process output is unavailable at the requested offset",
             RetryHint::Never,
         ),
         ProcessError::Busy => (
@@ -2713,84 +2650,78 @@ fn map_process_error(error: ProcessError) -> EIPError {
     };
     let mut mapped = protocol_error(error_type, message);
     mapped.data.retry_hint = retry_hint;
-    if let Some((available_start, available_end)) = gap_bounds {
-        mapped.data.available_start = Some(available_start);
-        mapped.data.available_end = Some(available_end);
-    }
     mapped
 }
 
+fn map_started_process_error(
+    error: ProcessError,
+    started: &crate::process::StartedProcess,
+    execution: &ExecutionManager,
+) -> EIPError {
+    started.info(execution).map_or_else(
+        |_| map_process_error(error),
+        |process| map_process_error_with_evidence(error, &process),
+    )
+}
+
 fn map_process_error_with_evidence(error: ProcessError, process: &eip::ProcessInfo) -> EIPError {
+    let mut mapped = map_process_error_with_output_evidence(error, process);
+    mapped.data.process = Some(process.clone());
+    mapped
+}
+
+fn map_process_error_with_output_evidence(
+    error: ProcessError,
+    process: &eip::ProcessInfo,
+) -> EIPError {
     let mut mapped = map_process_error(error);
     mapped.data.process_status = Some(process.status.clone());
     mapped.data.produced_bytes = Some(
         process
             .output
             .stdout
-            .capture
             .produced_bytes
-            .saturating_add(process.output.stderr.capture.produced_bytes),
+            .saturating_add(process.output.stderr.produced_bytes),
     );
-    mapped.data.captured_bytes = Some(
-        process
-            .output
-            .stdout
-            .capture
-            .captured_bytes
-            .saturating_add(process.output.stderr.capture.captured_bytes),
-    );
-    mapped.data.dropped_bytes = Some(
-        process
-            .output
-            .stdout
-            .capture
-            .dropped_bytes
-            .saturating_add(process.output.stderr.capture.dropped_bytes),
-    );
+    mapped.data.output = Some(process.output.clone());
     mapped
 }
 
 fn map_retention_error(error: RetentionError) -> EIPError {
-    let gap_bounds = match error {
-        RetentionError::Gap {
-            available_start,
-            available_end,
-        } => Some((available_start, available_end)),
-        _ => None,
-    };
     let (error_type, message, retry_hint) = match error {
-        RetentionError::Invalid => (
-            ErrorType::InvalidParams,
-            "invalid output policy or selector",
+        RetentionError::InvalidSelector => (
+            ErrorType::InvalidHandle,
+            "output reference was not found",
             RetryHint::Never,
         ),
-        RetentionError::Gap { .. } => (
-            ErrorType::RetentionGap,
-            "retained output is unavailable at the requested offset",
+        RetentionError::InvalidOffset => (
+            ErrorType::InvalidParams,
+            "output start_offset exceeds retained bytes",
             RetryHint::Never,
         ),
         RetentionError::Busy => (
             ErrorType::Busy,
-            "retained output capacity is exhausted",
+            "output spool capacity is exhausted",
             RetryHint::AfterCapacity,
         ),
-        RetentionError::OutputLimit => (
-            ErrorType::OutputLimitExceeded,
-            "output exceeded the selected policy",
-            RetryHint::Never,
+        RetentionError::Conflict => (
+            ErrorType::Conflict,
+            "output is active or remains attached to a process",
+            RetryHint::AfterRefresh,
+        ),
+        RetentionError::CleanupFailed => (
+            ErrorType::CleanupFailed,
+            "output spool deletion could not be proven",
+            RetryHint::SameRequest,
         ),
         RetentionError::Internal => (
             ErrorType::InternalError,
-            "retained output operation failed internally",
+            "output spool operation failed internally",
             RetryHint::Never,
         ),
     };
     let mut mapped = protocol_error(error_type, message);
     mapped.data.retry_hint = retry_hint;
-    if let Some((available_start, available_end)) = gap_bounds {
-        mapped.data.available_start = Some(available_start);
-        mapped.data.available_end = Some(available_end);
-    }
     mapped
 }
 
@@ -2949,15 +2880,13 @@ fn protocol_error(error_type: ErrorType, message: impl Into<String>) -> EIPError
             field: None,
             handle_kind: None,
             produced_bytes: None,
-            captured_bytes: None,
-            dropped_bytes: None,
             emitted_items: None,
             dropped_items: None,
             process_status: None,
             receipt: None,
             safe_detail: None,
-            available_start: None,
-            available_end: None,
+            process: None,
+            output: None,
         },
     }
 }
@@ -3285,7 +3214,6 @@ mod tests {
                 "environment.describe",
                 &target_params.context,
                 &target_params,
-                false,
             )
             .expect("target admission succeeds");
         let BeginOutcome::New(target) = target else {
@@ -3299,6 +3227,7 @@ mod tests {
             cancelled.status,
             OperationCancelStatus::CancellationRequested
         );
+        daemon.operations.complete_active_for_test("pending-cancel");
         drop(target);
         drop(admission_guard);
 
@@ -3329,6 +3258,7 @@ mod tests {
             .expect("timeout wait joins")
             .expect_err("pending admission wait respects the cancel deadline");
         assert_eq!(timeout.data.error_type, crate::eip::ErrorType::Timeout);
+        daemon.operations.complete_active_for_test("timeout-cancel");
         drop(timeout_guard);
 
         let close_guard = daemon
@@ -3362,6 +3292,7 @@ mod tests {
             closed.data.error_type,
             crate::eip::ErrorType::NotInitialized
         );
+        daemon.operations.complete_active_for_test("close-cancel");
         drop(close_guard);
     }
 
@@ -3405,7 +3336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_operation_ids_replay_the_original_result() {
+    async fn active_only_operation_ids_are_reusable_after_response_handoff() {
         let config = Config::for_test("env-test");
         let daemon = Daemon::with_generation(&config, 9).expect("daemon builds");
         let _ = initialize(&daemon).await;
@@ -3418,9 +3349,39 @@ mod tests {
         let first: Value = serde_json::from_slice(&daemon.handle_payload(&describe).await)
             .expect("response is JSON");
         assert_eq!(first["result"]["descriptor"]["generation"], 9);
+        assert_eq!(daemon.operations.record_stats().1, 0);
         let repeated: Value = serde_json::from_slice(&daemon.handle_payload(&describe).await)
             .expect("response is JSON");
         assert_eq!(repeated["result"], first["result"]);
+        assert_eq!(daemon.operations.record_stats().1, 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_defaults_use_typed_identity_for_active_handoff() {
+        let config = Config::for_test("env-test");
+        let daemon = Daemon::with_generation(&config, 91).expect("daemon builds");
+        let _ = initialize(&daemon).await;
+        let payload = request(
+            json!(2),
+            "environment.describe",
+            json!({
+                "context": {
+                    "operation_id": "describe-explicit-default",
+                    "timeout_ms": null
+                }
+            }),
+        );
+
+        for _ in 0..2 {
+            let response = daemon.handle_payload_for_carrier(&payload).await;
+            let (payload, handoff) = response.into_parts();
+            let response: Value = serde_json::from_slice(&payload).expect("response is JSON");
+            assert_eq!(response["result"]["descriptor"]["generation"], 91);
+            handoff
+                .expect("successful active-only response has an exact handoff")
+                .complete();
+            assert_eq!(daemon.operations.record_stats().1, 0);
+        }
     }
 
     #[tokio::test]
@@ -3460,20 +3421,20 @@ mod tests {
 
         let (active, records, identifier_bytes) = daemon.operations.record_stats();
         assert_eq!(active, 0);
-        assert_eq!(records, 2);
-        assert!(identifier_bytes <= 2 * 128 * 4);
+        assert_eq!(records, 0);
+        assert_eq!(identifier_bytes, 0);
     }
 
     #[tokio::test]
-    async fn terminal_operation_ids_reclaim_by_capacity_and_ttl() {
-        let mut capacity_config = Config::for_test("env-test");
-        capacity_config.limits.max_concurrent_operations = 1;
-        capacity_config.limits.max_operation_records = 1;
-        let capacity_daemon = Daemon::with_generation(&capacity_config, 10).expect("daemon builds");
-        let _ = initialize(&capacity_daemon).await;
+    async fn active_only_ids_do_not_consume_terminal_capacity() {
+        let mut config = Config::for_test("env-test");
+        config.limits.max_concurrent_operations = 1;
+        config.limits.max_operation_records = 1;
+        let daemon = Daemon::with_generation(&config, 10).expect("daemon builds");
+        let _ = initialize(&daemon).await;
         for (request_id, operation_id) in [(2, "first"), (3, "second"), (4, "first")] {
             let response: Value = serde_json::from_slice(
-                &capacity_daemon
+                &daemon
                     .handle_payload(&request(
                         json!(request_id),
                         "environment.describe",
@@ -3484,19 +3445,22 @@ mod tests {
             .expect("response is JSON");
             assert_eq!(response["result"]["descriptor"]["generation"], 10);
         }
+    }
 
-        let mut ttl_config = Config::for_test("env-test");
-        ttl_config.limits.operation_record_ttl_ms = 1;
-        let ttl_daemon = Daemon::with_generation(&ttl_config, 11).expect("daemon builds");
-        let _ = initialize(&ttl_daemon).await;
+    #[tokio::test]
+    async fn active_only_ids_do_not_wait_for_terminal_ttl() {
+        let mut config = Config::for_test("env-test");
+        config.limits.operation_record_ttl_ms = 1;
+        let daemon = Daemon::with_generation(&config, 11).expect("daemon builds");
+        let _ = initialize(&daemon).await;
         let describe = request(
             json!(2),
             "environment.describe",
             json!({"context": {"operation_id": "expires"}}),
         );
-        let _ = ttl_daemon.handle_payload(&describe).await;
+        let _ = daemon.handle_payload(&describe).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
-        let reused: Value = serde_json::from_slice(&ttl_daemon.handle_payload(&describe).await)
+        let reused: Value = serde_json::from_slice(&daemon.handle_payload(&describe).await)
             .expect("response is JSON");
         assert_eq!(reused["result"]["descriptor"]["generation"], 11);
     }
@@ -3585,7 +3549,7 @@ mod tests {
                 .await,
         )
         .expect("collision response");
-        assert_eq!(collided["error"]["code"], -32060);
+        assert!(collided.get("result").is_some());
 
         let open_params = |operation_id: &str| {
             json!({
@@ -3605,7 +3569,7 @@ mod tests {
         .expect("reader open response");
         let reader = opened["result"]["reader"].clone();
         assert_eq!(reader, "reader-c-1");
-        let replayed: Value = serde_json::from_slice(
+        let repeated: Value = serde_json::from_slice(
             &daemon
                 .handle_payload(&request(
                     json!(13),
@@ -3614,8 +3578,8 @@ mod tests {
                 ))
                 .await,
         )
-        .expect("reader replay response");
-        assert_eq!(replayed["result"]["reader"], reader);
+        .expect("reader repeat response");
+        assert_eq!(repeated["result"]["reader"], "reader-c-2");
         let independently_opened: Value = serde_json::from_slice(
             &daemon
                 .handle_payload(&request(
@@ -3626,7 +3590,7 @@ mod tests {
                 .await,
         )
         .expect("independent reader response");
-        assert_eq!(independently_opened["result"]["reader"], "reader-c-2");
+        assert_eq!(independently_opened["result"]["reader"], "reader-c-3");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3899,7 +3863,7 @@ mod tests {
             executable: None,
         };
         let operation = match daemon
-            .begin_record("file.write_text", &params.context, &params, true)
+            .begin_record("file.write_text", &params.context, &params)
             .expect("operation is admitted")
         {
             BeginOutcome::New(operation) => operation,
@@ -3957,7 +3921,7 @@ mod tests {
 
         let retry = params;
         let replay = daemon
-            .begin_record("file.write_text", &retry.context, &retry, true)
+            .begin_record("file.write_text", &retry.context, &retry)
             .expect("same operation identity replays");
         let BeginOutcome::ReplayFailure(error) = replay else {
             panic!("unknown-outcome failure replay expected");
@@ -3992,7 +3956,7 @@ mod tests {
             executable: None,
         };
         let operation = match daemon
-            .begin_record("file.write_text", &params.context, &params, true)
+            .begin_record("file.write_text", &params.context, &params)
             .expect("operation is admitted")
         {
             BeginOutcome::New(operation) => operation,

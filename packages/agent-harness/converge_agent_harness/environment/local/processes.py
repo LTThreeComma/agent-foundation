@@ -61,12 +61,10 @@ class _OutputCollector:
         policy: EnvironmentOutputPolicy,
         buffer_limit: int,
         writer: LocalRetentionWriter | None,
-        output_limit: asyncio.Event,
     ) -> None:
         self.policy = policy
         self.buffer_limit = min(policy.max_inline_bytes, policy.max_output_bytes, buffer_limit)
         self.writer = writer
-        self.output_limit = output_limit
         self.produced = 0
         self.stored = 0
         self.preview = bytearray()
@@ -84,8 +82,6 @@ class _OutputCollector:
                     storage_remaining = self.policy.max_output_bytes - self.stored
                     if storage_remaining > 0:
                         self.stored += await self.writer.write(chunk[:storage_remaining])
-                if self.policy.overflow == "fail" and self.produced > self.policy.max_output_bytes:
-                    self.output_limit.set()
         finally:
             self.complete = True
 
@@ -163,7 +159,6 @@ class _ProcessRecord:
     wall_time_seconds: float
     stdout: _OutputCollector
     stderr: _OutputCollector
-    output_limit: asyncio.Event
     stdin_open: bool
     stdin_bytes: int
     stdin_limit: int | None
@@ -219,6 +214,14 @@ class LocalProcessManager:
                 timeout_seconds=self._effective_wall_time(request) + self._policy.terminate_grace_seconds * 2 + 1,
             )
             assert process.output.stdout.producer_complete and process.output.stderr.producer_complete
+            if request.output_policy.overflow == "fail" and any(
+                capture.produced_bytes > request.output_policy.max_output_bytes
+                for capture in (process.output.stdout, process.output.stderr)
+            ):
+                raise EnvironmentError(
+                    "Command output exceeds the requested projection limit.",
+                    code="environment_too_large",
+                )
             result = ShellExecResult(
                 status=process.status,
                 output=process.output,
@@ -259,32 +262,32 @@ class LocalProcessManager:
             async with self._lock:
                 if self._closed:
                     raise EnvironmentError("Direct Local process manager is closed.", code="environment_closed")
-            argv = self._argv(request)
+            argv = await asyncio.to_thread(self._argv, request)
             cwd = await self._files.resolve_native_directory(request.cwd or "/")
             environment = dict(request.environment.set)
             output_policy = request.output_policy
-            output_limit = asyncio.Event()
             stdout_collector = _OutputCollector(
                 policy=output_policy,
                 buffer_limit=self._output_policy.max_buffer_bytes,
                 writer=await self._reserve_output(output_policy),
-                output_limit=output_limit,
             )
             stderr_collector = _OutputCollector(
                 policy=output_policy,
                 buffer_limit=self._output_policy.max_buffer_bytes,
                 writer=await self._reserve_output(output_policy),
-                output_limit=output_limit,
             )
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=environment,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=cwd,
+                    env=environment,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise _environment_error_from_os(exc, action="start the configured executable") from exc
             token = token_hex(16)
             handle = BoundProcessHandle(
                 binding_id=self._binding_id,
@@ -301,7 +304,6 @@ class LocalProcessManager:
                 wall_time_seconds=self._effective_wall_time(request),
                 stdout=stdout_collector,
                 stderr=stderr_collector,
-                output_limit=output_limit,
                 stdin_open=process.stdin is not None,
                 stdin_bytes=0,
                 stdin_limit=stdin_limit,
@@ -352,9 +354,9 @@ class LocalProcessManager:
             raise EnvironmentError(
                 "Requested Direct Local resource limit is unsupported.", code="environment_unsupported"
             )
-        if request.limits.process_count not in {None, 1}:
+        if request.limits.process_count is not None:
             raise EnvironmentError(
-                "Direct Local cannot enforce a multi-process count ceiling.", code="environment_unsupported"
+                "Direct Local cannot enforce a process count ceiling.", code="environment_unsupported"
             )
         if not set(request.environment.set) <= self._policy.allowed_environment_keys:
             raise EnvironmentError("Command environment key is not allowed.", code="environment_denied")
@@ -413,20 +415,13 @@ class LocalProcessManager:
         stdout_task = asyncio.create_task(record.stdout.consume(stdout))
         stderr_task = asyncio.create_task(record.stderr.consume(stderr))
         wait_task = asyncio.create_task(record.process.wait())
-        limit_task = asyncio.create_task(record.output_limit.wait())
-        reason: Literal["exit", "signal", "timeout", "output_limit", "backend_lost"] = "exit"
+        reason: Literal["exit", "signal", "timeout", "backend_lost"] = "exit"
         try:
             done, _ = await asyncio.wait(
-                {wait_task, limit_task},
+                {wait_task},
                 timeout=record.wall_time_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
             )
-            if limit_task in done and record.output_limit.is_set():
-                reason = "output_limit"
-                if wait_task not in done:
-                    await self._terminate_process(record.process)
-                    await wait_task
-            elif wait_task not in done:
+            if wait_task not in done:
                 reason = "timeout"
                 await self._terminate_process(record.process)
                 await wait_task
@@ -435,8 +430,6 @@ class LocalProcessManager:
                 reason = "signal"
             await self._cleanup_group(record.process.pid)
             await asyncio.gather(stdout_task, stderr_task)
-            if reason == "exit" and record.output_limit.is_set():
-                reason = "output_limit"
             record.output = ProcessOutputSnapshot(
                 stdout=await record.stdout.finish(),
                 stderr=await record.stderr.finish(),
@@ -444,8 +437,6 @@ class LocalProcessManager:
             ended_at = datetime.now(UTC)
             if reason == "timeout":
                 phase = "timed_out"
-            elif reason == "output_limit":
-                phase = "failed"
             elif return_code is not None and return_code < 0:
                 phase = "signaled"
             else:
@@ -484,8 +475,6 @@ class LocalProcessManager:
             )
             raise
         finally:
-            limit_task.cancel()
-            await asyncio.gather(limit_task, return_exceptions=True)
             self._slots.release()
 
     async def inspect(self, handle: BoundProcessHandle) -> ProcessInfo:
@@ -539,6 +528,12 @@ class LocalProcessManager:
             raise EnvironmentError(
                 "Output cursor and offset cannot both be selected.",
                 code="environment_request_invalid",
+            )
+        selected_offset = start_offset or 0
+        if policy.overflow == "fail" and capture.available_end - selected_offset > policy.max_output_bytes:
+            raise EnvironmentError(
+                "Process output exceeds the requested projection limit.",
+                code="environment_too_large",
             )
         if capture.reference is not None:
             result = await self._retention.read(
@@ -612,7 +607,11 @@ class LocalProcessManager:
         condition: Literal["initial_terminal", "tree_cleaned"],
         timeout_seconds: float,
     ) -> ProcessInfo:
-        del condition
+        if condition != "tree_cleaned":
+            raise EnvironmentError(
+                "Direct Local supports only tree_cleaned process waits.",
+                code="environment_unsupported",
+            )
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise EnvironmentError("Process wait timeout is invalid.", code="environment_request_invalid")
         record = self._record(handle)
@@ -631,7 +630,7 @@ class LocalProcessManager:
         return ProcessControlResult(process=self._info(record), receipt=self._receipt())
 
     async def release(self, handle: BoundProcessHandle) -> EnvironmentOperationReceipt:
-        return await self._release_record(handle, release_outputs=True)
+        return await self._release_record(handle, release_outputs=False)
 
     async def _release_record(
         self,
@@ -811,6 +810,16 @@ def _signal_group(process_group: int, signal: int) -> None:
     except OSError as exc:
         if exc.errno != errno.ESRCH:
             raise
+
+
+def _environment_error_from_os(exc: OSError, *, action: str) -> EnvironmentError:
+    if isinstance(exc, FileNotFoundError):
+        code = "environment_not_found"
+    elif isinstance(exc, PermissionError):
+        code = "environment_denied"
+    else:
+        code = "environment_provider_failure"
+    return EnvironmentError(f"Direct Local could not {action}.", code=code)
 
 
 def _signal_name(return_code: int | None) -> Literal["interrupt", "terminate", "kill"] | None:

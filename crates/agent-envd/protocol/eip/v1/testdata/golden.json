@@ -46,8 +46,7 @@
             "executable_spec": {"kind": "name", "name": "git"},
             "kind": "argv"
           },
-          "cwd": {"mount_id": "workspace", "path": "/repo"},
-          "output_policy": {"max_inline_bytes": 16384, "max_output_bytes": 1048576, "overflow": "retain"}
+          "cwd": {"mount_id": "workspace", "path": "/repo"}
         }
       }
     },
@@ -91,15 +90,31 @@
     {
       "type": "EIPError",
       "value": {
-        "code": -32022,
+        "code": -32032,
         "data": {
-          "available_end": 8192,
-          "available_start": 4096,
           "dispatch_stage": "completed",
-          "error_type": "retention_gap",
+          "error_type": "output_limit_exceeded",
+          "output": {
+            "stderr": {
+              "content_complete": true,
+              "preview": {"data": "", "encoding": "base64"},
+              "producer_complete": true,
+              "produced_bytes": 0,
+              "reference": "output-stderr-1",
+              "retained_bytes": 0
+            },
+            "stdout": {
+              "content_complete": false,
+              "preview": {"data": "YWJj", "encoding": "base64"},
+              "producer_complete": true,
+              "produced_bytes": 4,
+              "reference": "output-stdout-1",
+              "retained_bytes": 3
+            }
+          },
           "retry_hint": "never"
         },
-        "message": "requested output is no longer available"
+        "message": "command output exceeded the stream limit"
       }
     }
   ]

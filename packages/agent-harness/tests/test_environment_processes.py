@@ -58,6 +58,7 @@ def _binding(
     shell_profiles: tuple[DirectLocalShellProfile, ...] = (),
     outputs: DirectLocalOutputPolicy | None = None,
     ports: DirectLocalPortPolicy | None = None,
+    permissions: frozenset[EnvironmentAction] = frozenset(EnvironmentAction),
 ):
     provider = DirectLocalEnvironmentProviderBinding(
         DirectLocalEnvironmentConfiguration(
@@ -82,7 +83,7 @@ def _binding(
                 binding_id="binding-1",
                 binding_revision=1,
                 alias="local",
-                permission_ceiling=EnvironmentPermissionSet(operations=frozenset(EnvironmentAction)),
+                permission_ceiling=EnvironmentPermissionSet(operations=permissions),
                 default_working_directory="/",
                 provider_binding=provider,
             ),
@@ -134,6 +135,69 @@ async def test_foreground_argv_uses_minimal_environment_and_returns_nonzero(
 
 
 @requires_posix_processes
+async def test_spawn_permission_error_is_normalized(tmp_path: Path) -> None:
+    executable = tmp_path / "not-executable"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o644)
+    binding = _binding(tmp_path, executables=frozenset({executable.resolve()}))
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        with pytest.raises(EnvironmentError) as denied:
+            await environment.processes.start(
+                CommandRequest(
+                    command=ArgvCommand(executable=str(executable.resolve())),
+                    output_policy=_output_policy(),
+                )
+            )
+
+    assert denied.value.code == "environment_denied"
+
+
+@requires_posix_processes
+async def test_process_count_limit_is_rejected_when_not_enforceable(tmp_path: Path) -> None:
+    executable = Path(sys.executable).resolve()
+    binding = _binding(tmp_path, executables=frozenset({executable}))
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        with pytest.raises(EnvironmentError) as unsupported:
+            await environment.processes.start(
+                CommandRequest(
+                    command=ArgvCommand(executable=str(executable), arguments=("-c", "pass")),
+                    limits=CommandLimits(process_count=1),
+                    output_policy=_output_policy(),
+                )
+            )
+
+    assert unsupported.value.code == "environment_unsupported"
+
+
+@requires_posix_processes
+async def test_initial_terminal_wait_is_rejected_when_not_supported(tmp_path: Path) -> None:
+    executable = Path(sys.executable).resolve()
+    binding = _binding(tmp_path, executables=frozenset({executable}))
+    request = CommandRequest(
+        command=ArgvCommand(executable=str(executable), arguments=("-c", "pass")),
+        output_policy=_output_policy(),
+    )
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        started = await environment.processes.start(request)
+        with pytest.raises(EnvironmentError) as unsupported:
+            await environment.processes.wait(
+                started.process.handle,
+                condition="initial_terminal",
+                timeout_seconds=1,
+            )
+        assert unsupported.value.code == "environment_unsupported"
+        await environment.processes.wait(
+            started.process.handle,
+            condition="tree_cleaned",
+            timeout_seconds=1,
+        )
+        await environment.processes.release(started.process.handle)
+
+
+@requires_posix_processes
 async def test_shell_profile_is_explicit_and_unlisted_executable_is_denied(tmp_path: Path) -> None:
     shell = Path("/bin/sh").resolve()
     binding = _binding(
@@ -157,6 +221,184 @@ async def test_shell_profile_is_explicit_and_unlisted_executable_is_denied(tmp_p
                 )
             )
         assert denied.value.code == "environment_denied"
+
+
+@requires_posix_processes
+async def test_foreground_capture_denial_happens_before_dispatch(tmp_path: Path) -> None:
+    executable = Path(sys.executable).resolve()
+    marker = tmp_path / "must-not-exist"
+    binding = _binding(
+        tmp_path,
+        executables=frozenset({executable}),
+        permissions=frozenset({EnvironmentAction.SHELL_EXEC}),
+    )
+    request = CommandRequest(
+        command=ArgvCommand(
+            executable=str(executable),
+            arguments=("-c", "import pathlib; pathlib.Path('must-not-exist').touch()"),
+        ),
+        output_policy=_output_policy(),
+    )
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        with pytest.raises(EnvironmentError) as denied:
+            await environment.shell.exec_captured(request)
+
+    assert denied.value.code == "environment_denied"
+    assert not marker.exists()
+
+
+@requires_posix_processes
+async def test_binding_refresh_cannot_split_exec_from_output_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path(sys.executable).resolve()
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+
+    def provider(environment_id: str, root: Path) -> DirectLocalEnvironmentProviderBinding:
+        return DirectLocalEnvironmentProviderBinding(
+            DirectLocalEnvironmentConfiguration(
+                environment_id=environment_id,
+                root=DirectLocalRootConfiguration(path=root, ownership="caller_owned"),
+                processes=DirectLocalProcessPolicy(
+                    allowed_executables=frozenset({executable}),
+                    max_wall_time_seconds=2,
+                    terminate_grace_seconds=0.02,
+                ),
+            )
+        )
+
+    initial = EnvironmentTopologyRequest(
+        topology_version=1,
+        bindings=(
+            EnvironmentBindingRequest(
+                binding_id="binding-1",
+                binding_revision=1,
+                alias="local",
+                permission_ceiling=EnvironmentPermissionSet(operations=frozenset(EnvironmentAction)),
+                default_working_directory="/",
+                provider_binding=provider("local-refresh", tmp_path),
+            ),
+        ),
+        default_binding_id="binding-1",
+    )
+    binding = create_environment_run_binding(
+        initial_topology=initial,
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+    )
+    read_started = asyncio.Event()
+    continue_read = asyncio.Event()
+    original_read = local_retention_module.LocalRetentionStore.read
+    blocked = False
+
+    async def pause_first_read(store, *args, **kwargs):
+        nonlocal blocked
+        if not blocked:
+            blocked = True
+            read_started.set()
+            await continue_read.wait()
+        return await original_read(store, *args, **kwargs)
+
+    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "read", pause_first_read)
+    request = CommandRequest(
+        command=ArgvCommand(
+            executable=str(executable),
+            arguments=("-c", "import sys; sys.stdout.buffer.write(b'x' * 20)"),
+        ),
+        output_policy=EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain"),
+    )
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        await environment.activate()
+        execution = asyncio.create_task(environment.shell.exec_captured(request))
+        await asyncio.wait_for(read_started.wait(), timeout=1)
+        refresh = asyncio.create_task(
+            binding.controller.apply(
+                EnvironmentTopologyRequest(
+                    topology_version=2,
+                    bindings=(
+                        EnvironmentBindingRequest(
+                            binding_id="binding-1",
+                            binding_revision=2,
+                            alias="local",
+                            permission_ceiling=EnvironmentPermissionSet(operations=frozenset(EnvironmentAction)),
+                            default_working_directory="/",
+                            provider_binding=provider("local-refresh", replacement_root),
+                        ),
+                    ),
+                    default_binding_id="binding-1",
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        continue_read.set()
+        result = await execution
+        await refresh
+
+    assert result.output.stdout.inline == b"x" * 20
+    assert result.output.stdout.reference is None
+
+
+@requires_posix_processes
+async def test_foreground_output_read_failure_preserves_completed_result_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path(sys.executable).resolve()
+    binding = _binding(tmp_path, executables=frozenset({executable}))
+
+    async def fail_read(store, *args, **kwargs):
+        del store, args, kwargs
+        raise RuntimeError("forced materialization failure")
+
+    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "read", fail_read)
+    request = CommandRequest(
+        command=ArgvCommand(
+            executable=str(executable),
+            arguments=("-c", "import sys; sys.stdout.buffer.write(b'x' * 20)"),
+        ),
+        output_policy=EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain"),
+    )
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        result = await environment.shell.exec_captured(request)
+
+    assert result.status.phase == "exited"
+    assert result.output.stdout.inline == b"xxxx"
+    assert result.output.stdout.content_complete is False
+    assert result.output.stdout.reference is None
+
+
+@requires_posix_processes
+async def test_foreground_output_cleanup_failure_does_not_replace_completed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = Path(sys.executable).resolve()
+    binding = _binding(tmp_path, executables=frozenset({executable}))
+
+    async def fail_release(store, **kwargs):
+        del store, kwargs
+        raise RuntimeError("forced cleanup failure")
+
+    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "release", fail_release)
+    request = CommandRequest(
+        command=ArgvCommand(
+            executable=str(executable),
+            arguments=("-c", "import sys; sys.stdout.buffer.write(b'x' * 20)"),
+        ),
+        output_policy=EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain"),
+    )
+
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        result = await environment.shell.exec_captured(request)
+
+    assert result.status.phase == "exited"
+    assert result.output.stdout.inline == b"x" * 20
+    assert result.output.stdout.reference is None
 
 
 @requires_posix_processes
@@ -311,12 +553,10 @@ async def test_terminal_cleanup_failure_record_can_be_released(
 
 
 @requires_posix_processes
-async def test_process_release_is_retryable_after_output_cleanup_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_provider_process_release_preserves_retained_output(tmp_path: Path) -> None:
     executable = Path(sys.executable).resolve()
     binding = _binding(tmp_path, executables=frozenset({executable}))
+    policy = EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain")
     request = CommandRequest(
         command=ArgvCommand(
             executable=str(executable),
@@ -325,37 +565,31 @@ async def test_process_release_is_retryable_after_output_cleanup_cancellation(
                 "import sys; sys.stdout.buffer.write(b'x' * 20); sys.stderr.buffer.write(b'y' * 20)",
             ),
         ),
-        output_policy=EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=64, overflow="retain"),
+        output_policy=policy,
     )
-    original_release = local_retention_module.LocalRetentionStore.release
-    second_release = asyncio.Event()
-    never = asyncio.Event()
-    calls = 0
 
-    async def cancel_second(store, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            second_release.set()
-            await never.wait()
-        return await original_release(store, **kwargs)
-
-    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "release", cancel_second)
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
         started = await environment.processes.start(request)
-        await environment.processes.wait(started.process.handle, condition="tree_cleaned", timeout_seconds=1)
-        release_task = asyncio.create_task(environment.processes.release(started.process.handle))
-        await asyncio.wait_for(second_release.wait(), timeout=1)
-        release_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await release_task
+        completed = await environment.processes.wait(
+            started.process.handle,
+            condition="tree_cleaned",
+            timeout_seconds=1,
+        )
+        stdout = completed.output.stdout.reference
+        stderr = completed.output.stderr.reference
+        assert stdout is not None and stderr is not None
 
-        retained = await environment.processes.inspect(started.process.handle)
-        assert retained.status.cleanup == "complete"
         await environment.processes.release(started.process.handle)
         with pytest.raises(EnvironmentError) as missing:
             await environment.processes.inspect(started.process.handle)
         assert missing.value.code == "environment_not_found"
+
+        stdout_read = await environment.outputs.read(stdout, start_offset=0, policy=policy)
+        stderr_read = await environment.outputs.read(stderr, start_offset=0, policy=policy)
+        assert b"".join(chunk.data for chunk in stdout_read.chunks) == b"xxxx"
+        assert b"".join(chunk.data for chunk in stderr_read.chunks) == b"yyyy"
+        await environment.outputs.release(reference=stdout)
+        await environment.outputs.release(reference=stderr)
 
 
 @requires_posix_processes
@@ -477,23 +711,29 @@ async def test_background_stdin_wait_kill_and_release(tmp_path: Path) -> None:
 
 
 @requires_posix_processes
-async def test_fast_process_still_fails_when_output_limit_is_crossed(tmp_path: Path) -> None:
+async def test_output_projection_overflow_does_not_terminate_the_command(tmp_path: Path) -> None:
     executable = Path(sys.executable).resolve()
+    marker = tmp_path / "completed"
     binding = _binding(tmp_path, executables=frozenset({executable}))
     request = CommandRequest(
         command=ArgvCommand(
             executable=str(executable),
-            arguments=("-c", "import sys; sys.stdout.buffer.write(b'x' * 100_000)"),
+            arguments=(
+                "-c",
+                "import pathlib,sys; "
+                "sys.stdout.buffer.write(b'x' * 100_000); sys.stdout.flush(); "
+                "pathlib.Path('completed').write_text('done')",
+            ),
         ),
         output_policy=EnvironmentOutputPolicy(max_inline_bytes=4, max_output_bytes=8, overflow="fail"),
     )
 
     async with binding.bind(run_id="run-1", instance=_instance()) as environment:
-        result = await environment.shell.exec(request)
+        with pytest.raises(EnvironmentError) as too_large:
+            await environment.shell.exec(request)
 
-    assert result.status.phase == "failed"
-    assert result.status.termination_reason == "output_limit"
-    assert result.output.stdout.content_complete is False
+    assert too_large.value.code == "environment_too_large"
+    assert marker.read_text() == "done"
 
 
 @requires_posix_processes

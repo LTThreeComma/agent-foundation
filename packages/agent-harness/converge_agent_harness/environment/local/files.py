@@ -9,6 +9,7 @@ import itertools
 import os
 import re
 import shutil
+import stat as stat_module
 import sys
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterator
@@ -71,7 +72,7 @@ class _LocalWriter:
             raise _environment_error_from_os(exc, action="open a staged file") from exc
         self._temp_path = Path(name)
         self._file = os.fdopen(fd, "wb")
-        if self._mode == "append" and self._native_path.exists():
+        if self._mode == "append" and await asyncio.to_thread(self._native_path.exists):
             await self._copy_append_source()
 
     async def _copy_append_source(self) -> None:
@@ -254,9 +255,26 @@ class LocalFileOperator:
 
     async def resolve_native_directory(self, path: str) -> Path:
         """Resolve a provider-local cwd without exposing native-path fallback publicly."""
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_dir():
-            raise EnvironmentError("Command cwd is not a directory.", code="environment_request_invalid")
+        return await asyncio.to_thread(self._resolve_directory, path, "Command cwd")
+
+    def _resolve_directory(self, path: str, subject: str) -> Path:
+        native = self._resolve(path)
+        try:
+            is_directory = native.is_dir()
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="inspect a directory") from exc
+        if not is_directory:
+            raise EnvironmentError(f"{subject} is not a directory.", code="environment_request_invalid")
+        return native
+
+    def _resolve_file(self, path: str, subject: str) -> Path:
+        native = self._resolve(path)
+        try:
+            is_file = native.is_file()
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="inspect a file") from exc
+        if not is_file:
+            raise EnvironmentError(f"{subject} is not a regular file.", code="environment_request_invalid")
         return native
 
     def _require_writable(self, path: Path) -> None:
@@ -316,9 +334,7 @@ class LocalFileOperator:
             raise EnvironmentError("max_line_length must be positive.", code="environment_request_invalid")
         if line_limit * max_line_length > self._policy.max_value_bytes:
             raise EnvironmentError("Requested text page exceeds configured limit.", code="environment_too_large")
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_file():
-            raise EnvironmentError("Path is not a regular file.", code="environment_request_invalid")
+        native = await asyncio.to_thread(self._resolve_file, path, "Path")
         try:
             text, lines_read, has_more, truncated_lines = await asyncio.to_thread(
                 _read_text_page,
@@ -332,6 +348,8 @@ class LocalFileOperator:
                 "Text source is not valid UTF-8.",
                 code="environment_unsupported",
             ) from exc
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="read a text file") from exc
         if len(text.encode("utf-8")) > self._policy.max_value_bytes:
             raise EnvironmentError("Text page exceeds configured limit.", code="environment_too_large")
         return FileTextResult(
@@ -352,23 +370,27 @@ class LocalFileOperator:
     ) -> bytes:
         if offset < 0 or (length is not None and length < 0):
             raise EnvironmentError("Invalid byte read range.", code="environment_request_invalid")
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_file():
-            raise EnvironmentError("Raw read source is not a file.", code="environment_request_invalid")
-        size = (await asyncio.to_thread(native.stat)).st_size
+        native = await asyncio.to_thread(self._resolve_file, path, "Raw read source")
+        try:
+            size = (await asyncio.to_thread(native.stat)).st_size
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="inspect a raw read source") from exc
         selected_bytes = max(size - offset, 0)
         if length is not None:
             selected_bytes = min(selected_bytes, length)
         if selected_bytes > self._policy.max_value_bytes:
             raise EnvironmentError("Raw read exceeds value limit.", code="environment_too_large")
         read_length = None if length is None else min(length, self._policy.max_value_bytes + 1)
-        data = await asyncio.to_thread(
-            _read_bytes_at_most,
-            native,
-            offset,
-            read_length,
-            self._policy.max_value_bytes,
-        )
+        try:
+            data = await asyncio.to_thread(
+                _read_bytes_at_most,
+                native,
+                offset,
+                read_length,
+                self._policy.max_value_bytes,
+            )
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="read a binary file") from exc
         if len(data) > self._policy.max_value_bytes:
             raise EnvironmentError("Raw read exceeds value limit.", code="environment_too_large")
         return data
@@ -382,15 +404,25 @@ class LocalFileOperator:
         if chunk_size < 1:
             raise EnvironmentError("chunk_size must be positive.", code="environment_request_invalid")
         effective_chunk_size = min(chunk_size, self._policy.max_value_bytes)
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_file():
-            raise EnvironmentError("Raw read source is not a file.", code="environment_request_invalid")
-        file = await asyncio.to_thread(native.open, "rb")
+        native = await asyncio.to_thread(self._resolve_file, path, "Raw read source")
         try:
-            while chunk := await asyncio.to_thread(file.read, effective_chunk_size):
+            file = await asyncio.to_thread(native.open, "rb")
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="open a binary file") from exc
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.to_thread(file.read, effective_chunk_size)
+                except OSError as exc:
+                    raise _environment_error_from_os(exc, action="read a binary file") from exc
+                if not chunk:
+                    break
                 yield chunk
         finally:
-            await asyncio.to_thread(file.close)
+            try:
+                await asyncio.to_thread(file.close)
+            except OSError:
+                pass
 
     async def write_bytes_stream(
         self,
@@ -433,16 +465,17 @@ class LocalFileOperator:
         path: str,
         patch: str,
     ) -> FilePatchResult:
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_file():
-            raise EnvironmentError("Patch source is not a file.", code="environment_request_invalid")
-        data = await asyncio.to_thread(
-            _read_bytes_at_most,
-            native,
-            0,
-            self._policy.max_value_bytes + 1,
-            self._policy.max_value_bytes + 1,
-        )
+        native = await asyncio.to_thread(self._resolve_file, path, "Patch source")
+        try:
+            data = await asyncio.to_thread(
+                _read_bytes_at_most,
+                native,
+                0,
+                self._policy.max_value_bytes + 1,
+                self._policy.max_value_bytes + 1,
+            )
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="read a patch source") from exc
         if len(data) > self._policy.max_value_bytes:
             raise EnvironmentError("Patch source exceeds configured limit.", code="environment_too_large")
         if b"\x00" in data:
@@ -467,22 +500,30 @@ class LocalFileOperator:
         )
 
     async def stat(self, path: str) -> FileMetadata:
-        native = await asyncio.to_thread(self._resolve, path, follow_final=False)
-        if not native.exists() and not native.is_symlink():
-            raise EnvironmentError("File path does not exist.", code="environment_not_found")
-        stat = await asyncio.to_thread(native.lstat)
-        if native.is_symlink():
-            kind = "symlink"
-        elif native.is_file():
+        return await asyncio.to_thread(self._stat_path, path)
+
+    def _stat_path(self, path: str) -> FileMetadata:
+        native = self._resolve(path, follow_final=False)
+        return self._metadata_for_native(native, path)
+
+    def _metadata_for_native(self, native: Path, logical_path: str) -> FileMetadata:
+        try:
+            metadata = native.lstat()
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="inspect file metadata") from exc
+        mode = metadata.st_mode
+        if stat_module.S_ISLNK(mode):
+            kind: FileKind = "symlink"
+        elif stat_module.S_ISREG(mode):
             kind = "file"
-        elif native.is_dir():
+        elif stat_module.S_ISDIR(mode):
             kind = "directory"
         else:
             kind = "other"
         return FileMetadata(
-            path=path,
+            path=logical_path,
             kind=kind,
-            size=stat.st_size if kind == "file" else None,
+            size=metadata.st_size if kind == "file" else None,
             writable=not self._read_only and native != self._root,
         )
 
@@ -496,14 +537,30 @@ class LocalFileOperator:
     ) -> FileEntriesResult:
         if offset < 0 or max_results <= 0:
             raise EnvironmentError("Invalid list range.", code="environment_request_invalid")
-        native = await asyncio.to_thread(self._resolve, path)
-        if not native.is_dir():
-            raise EnvironmentError("List path is not a directory.", code="environment_request_invalid")
-        children = await asyncio.to_thread(lambda: sorted(native.iterdir(), key=lambda item: item.name))
+        return await asyncio.to_thread(
+            self._list_page,
+            path,
+            offset,
+            max_results,
+            include_hidden,
+        )
+
+    def _list_page(
+        self,
+        path: str,
+        offset: int,
+        max_results: int,
+        include_hidden: bool,
+    ) -> FileEntriesResult:
+        native = self._resolve_directory(path, "List path")
+        try:
+            children = sorted(native.iterdir(), key=lambda item: item.name)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="enumerate a directory") from exc
         if not include_hidden:
             children = [item for item in children if not item.name.startswith(".")]
         selected = children[offset : offset + max_results]
-        entries = tuple([await self.stat(self._logical(item)) for item in selected])
+        entries = tuple(self._metadata_for_native(item, self._logical(item)) for item in selected)
         return FileEntriesResult(
             entries=entries,
             offset=offset,
@@ -511,11 +568,11 @@ class LocalFileOperator:
         )
 
     async def query(self, request: FileQueryRequest) -> FileEntriesResult:
-        root = await asyncio.to_thread(self._resolve, request.root)
-        if not root.is_dir():
-            raise EnvironmentError("Query root is not a directory.", code="environment_request_invalid")
-        selected, has_more = await asyncio.to_thread(
-            _collect_query_slice,
+        return await asyncio.to_thread(self._query_page, request)
+
+    def _query_page(self, request: FileQueryRequest) -> FileEntriesResult:
+        root = self._resolve_directory(request.root, "Query root")
+        selected, has_more = _collect_query_slice(
             root,
             request.pattern,
             request.recursive,
@@ -524,13 +581,11 @@ class LocalFileOperator:
             request.offset,
             request.max_results,
         )
-        entries = tuple([await self.stat(self._logical(item)) for item in selected])
+        entries = tuple(self._metadata_for_native(item, self._logical(item)) for item in selected)
         return FileEntriesResult(entries=entries, offset=request.offset, has_more=has_more)
 
     async def search_text(self, request: FileTextSearchRequest) -> FileTextSearchResult:
-        root = await asyncio.to_thread(self._resolve, request.root)
-        if not root.is_dir():
-            raise EnvironmentError("Search root is not a directory.", code="environment_request_invalid")
+        root = await asyncio.to_thread(self._resolve_directory, request.root, "Search root")
         if not request.pattern:
             raise EnvironmentError("Search pattern must not be empty.", code="environment_request_invalid")
         needle = request.pattern if request.case_sensitive else request.pattern.casefold()
@@ -545,7 +600,7 @@ class LocalFileOperator:
         seen = 0
         paths = _iter_native_paths(root, recursive=True, include_hidden=request.include_hidden)
         while (native := await asyncio.to_thread(next, paths, None)) is not None:
-            if native.is_symlink() or not native.is_file():
+            if not await asyncio.to_thread(_is_regular_search_file, native):
                 continue
             try:
                 scanned = await asyncio.to_thread(
@@ -598,9 +653,15 @@ class LocalFileOperator:
         *,
         replace: bool = False,
     ) -> FileMutationResult:
-        source_native = await asyncio.to_thread(self._resolve, source, follow_final=False)
-        destination_native = await asyncio.to_thread(
-            self._resolve,
+        try:
+            await asyncio.to_thread(self._move_native, source, destination, replace)
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="move a file") from exc
+        return FileMutationResult(path=destination, receipt=self._receipt())
+
+    def _move_native(self, source: str, destination: str, replace: bool) -> None:
+        source_native = self._resolve(source, follow_final=False)
+        destination_native = self._resolve(
             destination,
             follow_final=False,
             require_exists=False,
@@ -611,11 +672,7 @@ class LocalFileOperator:
             raise EnvironmentError("Move destination exists.", code="environment_conflict")
         if destination_native.is_symlink():
             raise EnvironmentError("Move destination symlink is denied.", code="environment_denied")
-        try:
-            await asyncio.to_thread(os.replace if replace else os.rename, source_native, destination_native)
-        except OSError as exc:
-            raise _environment_error_from_os(exc, action="move a file") from exc
-        return FileMutationResult(path=destination, receipt=self._receipt())
+        (os.replace if replace else os.rename)(source_native, destination_native)
 
     async def remove(
         self,
@@ -623,21 +680,24 @@ class LocalFileOperator:
         *,
         recursive: bool = False,
     ) -> FileMutationResult:
-        native = await asyncio.to_thread(self._resolve, path, follow_final=False)
-        self._require_writable(native)
         try:
-            if native.is_symlink() or native.is_file():
-                await asyncio.to_thread(native.unlink)
-            elif native.is_dir():
-                if recursive:
-                    await asyncio.to_thread(shutil.rmtree, native)
-                else:
-                    await asyncio.to_thread(native.rmdir)
-            else:
-                raise EnvironmentError("Unsupported file kind.", code="environment_unsupported")
+            await asyncio.to_thread(self._remove_native, path, recursive)
         except OSError as exc:
             raise _environment_error_from_os(exc, action="remove a file") from exc
         return FileMutationResult(path=path, receipt=self._receipt())
+
+    def _remove_native(self, path: str, recursive: bool) -> None:
+        native = self._resolve(path, follow_final=False)
+        self._require_writable(native)
+        if native.is_symlink() or native.is_file():
+            native.unlink()
+        elif native.is_dir():
+            if recursive:
+                shutil.rmtree(native)
+            else:
+                native.rmdir()
+        else:
+            raise EnvironmentError("Unsupported file kind.", code="environment_unsupported")
 
     @asynccontextmanager
     async def _open_writer(
@@ -922,6 +982,16 @@ def _native_kind(path: Path) -> str:
     if path.is_dir():
         return "directory"
     return "other"
+
+
+def _is_regular_search_file(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _environment_error_from_os(exc, action="inspect a search candidate") from exc
+    return stat_module.S_ISREG(metadata.st_mode)
 
 
 def _iter_lf_lines(text: str) -> Iterator[str]:

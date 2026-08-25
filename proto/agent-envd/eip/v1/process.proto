@@ -77,7 +77,8 @@ message CommandRequest {
   optional CommandLimits limits = 5 [(eip_field).default_message = true];
   optional EncodedBytes initial_stdin = 6;
   optional bool keep_stdin_open = 7 [(eip_field).default_bool = false];
-  optional OutputPolicy output_policy = 8;
+  reserved 8;
+  reserved "output_policy";
 }
 
 enum ProcessPhase {
@@ -132,20 +133,9 @@ message ProcessStatus {
   CleanupOutcome cleanup = 7;
 }
 
-enum ProcessStream {
-  PROCESS_STREAM_UNSPECIFIED = 0;
-  PROCESS_STREAM_STDOUT = 1 [(eip_enum_value).json_name = "stdout"];
-  PROCESS_STREAM_STDERR = 2 [(eip_enum_value).json_name = "stderr"];
-}
-
-message ProcessStreamSnapshot {
-  ProcessStream stream = 1;
-  OutputCapture capture = 2;
-}
-
-message ProcessOutputSnapshot {
-  ProcessStreamSnapshot stdout = 1;
-  ProcessStreamSnapshot stderr = 2;
+message ProcessOutput {
+  OutputInfo stdout = 1;
+  OutputInfo stderr = 2;
 }
 
 message ProcessInfo {
@@ -157,7 +147,7 @@ message ProcessInfo {
   uint64 generation = 3 [(eip_field).minimum = 1];
   ProcessStatus status = 4;
   bool stdin_open = 5;
-  ProcessOutputSnapshot output = 6;
+  ProcessOutput output = 6;
 }
 
 message ShellProfileDescriptor {
@@ -174,7 +164,7 @@ message ShellExecParams {
 
 message ShellExecResult {
   ProcessStatus status = 1;
-  ProcessOutputSnapshot output = 2;
+  ProcessOutput output = 2;
   OperationReceipt receipt = 3;
 }
 
@@ -195,33 +185,6 @@ message ProcessInspectParams {
 
 message ProcessInspectResult {
   ProcessInfo process = 1;
-}
-
-message ProcessReadOutputParams {
-  reserved 3, 4;
-  reserved "stdout_cursor", "stderr_cursor";
-
-  EIPCallContext context = 1;
-  ProcessHandle handle = 2;
-  optional uint64 wait_ms = 5 [(eip_field).default_uint = 0];
-  optional OutputPolicy output_policy = 6;
-  uint64 stdout_offset = 7;
-  uint64 stderr_offset = 8;
-}
-
-message ProcessStreamRead {
-  reserved 2;
-  reserved "next_cursor";
-
-  repeated OutputSegment chunks = 1;
-  OutputCapture capture = 3;
-  uint64 next_offset = 4;
-}
-
-message ProcessReadOutputResult {
-  ProcessInfo process = 1;
-  ProcessStreamRead stdout = 2;
-  ProcessStreamRead stderr = 3;
 }
 
 message ProcessWriteStdinParams {

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+from converge_agent_envd_client.eip.v1 import EIP_DESCRIPTOR_SHA256
 
 from scripts.eip_codegen.__main__ import (
     ARTIFACT_PATH,
@@ -31,6 +33,7 @@ def write_generated_tree(root: Path) -> None:
     manifest_files = sorted([*(path.as_posix() for path in files), MANIFEST_PATH.as_posix()])
     manifest = {
         "generated": True,
+        "descriptor_sha256": hashlib.sha256(descriptor).hexdigest(),
         "files": manifest_files,
     }
     files[MANIFEST_PATH] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -78,7 +81,15 @@ def test_checked_inspection_artifacts_follow_eip_json_profile() -> None:
     assert receipt_get["x-eip-params-schema"] == {"$ref": "schema.json#/$defs/ReceiptGetParams"}
 
     methods = json.loads(METHODS_PATH.read_text(encoding="utf-8"))
-    assert methods["method_count"] == 35
+    assert methods["method_count"] == 34
+    assert sum(method["replay_class"] == "active_only" for method in methods["methods"]) == 18
+    assert sum(method["replay_class"] == "terminal_evidence" for method in methods["methods"]) == 15
+    assert sum(method["replay_class"] == "ledger_external" for method in methods["methods"]) == 1
+    descriptor = (REPOSITORY_ROOT / DESCRIPTOR_PATH).read_bytes()
+    manifest = json.loads((REPOSITORY_ROOT / MANIFEST_PATH).read_text(encoding="utf-8"))
+    descriptor_sha256 = hashlib.sha256(descriptor).hexdigest()
+    assert manifest["descriptor_sha256"] == descriptor_sha256
+    assert EIP_DESCRIPTOR_SHA256 == descriptor_sha256
     transfers = [method for method in methods["methods"] if method["transfer_action"] is not None]
     assert {method["jsonrpc_method"] for method in transfers} == {
         "file.open_reader",

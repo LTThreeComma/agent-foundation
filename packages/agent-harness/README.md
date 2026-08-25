@@ -35,13 +35,17 @@ capabilities = (
 )
 ```
 
-Embedding code supplies current Environment and provider collaborators through `RunBindings`. Media, document, and Web implementations stay behind their typed run collaborators rather than becoming dependencies of the Harness core. Static callers may import reusable Toolsets from `converge_agent_harness.toolsets`; their model-facing JSON results use named `TypedDict` contracts in the corresponding Toolset modules.
+Embedding code supplies current Environment and provider collaborators through `RunBindings`. Media, document, and Web implementations stay behind their typed run collaborators rather than becoming dependencies of the Harness core. Static callers may import reusable Toolsets from `converge_agent_harness.toolsets`; their model-facing JSON results use named `TypedDict` contracts in the corresponding Toolset modules. Managed invocation policy and client-tool contracts are available from `converge_agent_harness.tools`.
 
 ## Execution boundary and filters
 
-Every built Agent includes one outer `ToolExecutionBoundaryCapability` and one innermost `MessageIntegrityFilterCapability`. The execution boundary preserves ordinary Pydantic dispatch while applying the code-owned redaction, size, and spill policy to locally executable function-tool text/JSON results. Complete trusted `HarnessToolMetadata` additionally selects managed authorization, credentials, grants, retry, and invocation events.
+Every built Agent includes one outer `ToolExecutionBoundaryCapability` and one innermost `MessageIntegrityFilterCapability`; application definitions do not install either boundary manually. First-party Toolsets own semantic progressive disclosure and can use the shared typed helper to save a fuller redacted result in a run-private model-readable file. The execution boundary preserves ordinary Pydantic dispatch and remains the sole mandatory final validation, redaction, and larger hard-size fallback for locally executable function-tool text/JSON results. Complete trusted `HarnessToolMetadata` additionally selects managed authorization, credentials, grants, retry, and invocation events.
 
 Request/history filters live in `converge_agent_harness.filters`. Message integrity is mandatory; `ContentFilterCapability` and `ColdStartFilterCapability` are optional definition-selected filters for native multimodal request compatibility and cold-cache reduction of already-consumed tool-result strings. Model-specific one-shot history repair remains in `SelfHealingModel`, and interrupted-stream semantic retry remains in Harness recovery rather than either filter.
+
+## Runnable local example
+
+The [Local Agent example](../../examples/local-agent/README.md) builds an offline Agent, executes a managed file tool through a Direct Local Environment, records working state, suspends for structured input, and resumes with fresh bindings. The [Agent Harness user guide](../../docs/agent-harness/index.md) covers installation, first-party feature families, filters, Environments, results, resume, and usage.
 
 ## Versioning
 

@@ -722,15 +722,13 @@ fn validate_private_runtime_separation(
     config: &Config,
     mounts: &[PreparedMount],
 ) -> Result<(), MountInitError> {
-    let Some(command) = &config.command else {
+    let Some(runtime) = &config.runtime else {
         return Ok(());
     };
     for mount in mounts {
-        if overlaps(&mount.native_root, &command.private_home)
-            || overlaps(&mount.native_root, &command.private_temp)
-        {
+        if overlaps(&mount.native_root, runtime.parent()) {
             return Err(MountInitError::new(
-                "native mount roots must not overlap protected command runtime directories",
+                "native mount roots must not overlap the protected envd runtime parent",
             ));
         }
     }

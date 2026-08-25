@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import converge_agent_harness.environment.local.retention as local_retention_module
 import converge_agent_harness.execution as execution_module
 import converge_agent_harness.toolsets.files as file_toolset_module
 import pytest
@@ -39,10 +40,11 @@ from converge_agent_harness import (
     create_noop_environment_run_binding,
 )
 from converge_agent_harness.environment.dynamic import _DynamicEnvironmentRunCapability
-from converge_agent_harness.environment.files import FileWriteResult
+from converge_agent_harness.environment.files import FileEntriesResult, FileMetadata, FileWriteResult
 from converge_agent_harness.environment.local.binding import DirectLocalFilePolicy
 from converge_agent_harness.environment.local.files import LocalFileOperator
 from converge_agent_harness.environment.models import EnvironmentOperationReceipt
+from converge_agent_harness.environment.providers import FileScopeSelection
 from converge_agent_harness.environment.virtual_files import VirtualFileOperator, _PreparedFile
 from converge_agent_harness.plugins import (
     AbstractHarnessPlugin,
@@ -61,7 +63,8 @@ from converge_agent_harness.tools import (
     ToolOutputPolicy,
 )
 from converge_agent_harness.toolsets.files import FileToolset
-from converge_agent_harness.toolsets.shell import ShellToolset, _CompactReferenceTable
+from converge_agent_harness.toolsets.output import DEFAULT_TOOL_OUTPUT_CHARS, tool_output_size
+from converge_agent_harness.toolsets.shell import ShellToolset, _CompactReferenceTable, _fit_stream_prefixes
 from pydantic_ai import BinaryContent
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import Capability
@@ -70,6 +73,16 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls
 
 pytestmark = pytest.mark.anyio
 _PROCESS_EXECUTABLE = Path(sys.executable).resolve()
+
+
+def test_stream_prefixes_do_not_split_valid_utf8_characters() -> None:
+    output = ("界" * 10).encode()
+
+    stdout, stderr = _fit_stream_prefixes(output, b"", 10)
+
+    assert stderr == b""
+    assert stdout.decode() == "界" * 3
+    assert stdout + output[len(stdout) :] == output
 
 
 def _configuration(**updates: Any) -> DynamicEnvironmentConfiguration:
@@ -1012,7 +1025,11 @@ async def test_model_error_projection_omits_internal_environment_details() -> No
             },
         )
 
-    result = await FileToolset(cast(Any, SimpleNamespace()))._execute(fail, lambda value: {})
+    result = await FileToolset(cast(Any, SimpleNamespace()))._execute(
+        "/failure",
+        lambda files: fail(),
+        lambda value: {},
+    )
     assert result["ok"] is False
     assert result["error"]["details"] == {"timeout_seconds": 3, "missing": ["files"]}
 
@@ -1541,7 +1558,7 @@ async def test_dynamic_file_operations_accept_non_virtual_file_operator(tmp_path
     )
     environment = SimpleNamespace(files=files)
     toolset = FileToolset(files)
-    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=environment)))
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=environment), capabilities={}))
 
     result = await toolset.view(ctx, "/sample.txt")
 
@@ -1554,6 +1571,41 @@ async def test_dynamic_file_operations_accept_non_virtual_file_operator(tmp_path
         "has_more": False,
         "truncated_lines": [],
     }
+
+
+async def test_file_toolset_list_continues_after_a_fully_filtered_raw_page() -> None:
+    class PagingFiles:
+        async def list(self, path: str, *, offset: int, max_results: int, include_hidden: bool):
+            del path, max_results, include_hidden
+            if offset == 0:
+                entries = tuple(
+                    FileMetadata(
+                        path=f"/ignored-{index}.tmp",
+                        kind="file",
+                        size=1,
+                        writable=False,
+                    )
+                    for index in range(1_000)
+                )
+                return FileEntriesResult(entries=entries, offset=0, has_more=True)
+            assert offset == 1_000
+            return FileEntriesResult(
+                entries=(FileMetadata(path="/visible.txt", kind="file", size=1, writable=False),),
+                offset=offset,
+                has_more=False,
+            )
+
+    toolset = FileToolset(cast(Any, PagingFiles()))
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace()))
+
+    first = await toolset.ls(ctx, "/", ignore=("*.tmp",), max_results=-1)
+    second = await toolset.ls(ctx, "/", ignore=("*.tmp",), offset=first["next_offset"], max_results=-1)
+
+    assert first["entries"] == []
+    assert first["has_more"] is True
+    assert first["next_offset"] == 1_000
+    assert second["entries"] == [{"path": "/visible.txt", "kind": "file", "size": 1, "writable": False}]
+    assert second["next_offset"] is None
 
 
 async def test_process_output_is_drained_once_without_model_output_references(tmp_path: Path) -> None:
@@ -1595,6 +1647,130 @@ async def test_process_output_is_drained_once_without_model_output_references(tm
         assert released == {"ok": True, "released": True}
 
 
+async def test_process_output_offsets_advance_only_for_delivered_bytes(tmp_path: Path) -> None:
+    aggregate = _local_binding(tmp_path, process_output=True)
+    async with aggregate.bind(run_id="run-offset", instance=RunBindings.local().instance) as environment:
+        toolset = ShellToolset(processes=environment.processes, outputs=environment.outputs)
+        ctx = cast(Any, SimpleNamespace())
+        started = await toolset.environment_process_start(
+            ctx,
+            ArgvCommand(
+                executable=str(_PROCESS_EXECUTABLE),
+                arguments=("-c", "import sys,time; time.sleep(0.05); sys.stdout.write('abcdefghij')"),
+            ),
+            max_inline_bytes=1,
+            max_output_bytes=10,
+        )
+        assert started["ok"] is True
+        process = cast(str, started["process"])
+
+        first = await toolset.environment_process_wait(
+            ctx,
+            process,
+            timeout_seconds=5,
+            max_inline_bytes=1,
+            max_output_bytes=10,
+        )
+        second = await toolset.environment_process_read_output(
+            ctx,
+            process,
+            max_inline_bytes=1,
+            max_output_bytes=10,
+        )
+
+        assert first["stdout"]["text"] == "a"
+        assert second["stdout"]["text"] == "b"
+        assert first["disclosure"]["truncated"] is True
+        await toolset.environment_process_release(ctx, process)
+
+
+async def test_process_output_projection_budgets_serialized_replacement_text(tmp_path: Path) -> None:
+    aggregate = _local_binding(tmp_path, process_output=True)
+    async with aggregate.bind(run_id="run-invalid-output", instance=RunBindings.local().instance) as environment:
+        toolset = ShellToolset(processes=environment.processes, outputs=environment.outputs)
+        ctx = cast(Any, SimpleNamespace())
+        started = await toolset.environment_process_start(
+            ctx,
+            ArgvCommand(
+                executable=str(_PROCESS_EXECUTABLE),
+                arguments=(
+                    "-c",
+                    "import sys,time; time.sleep(0.05); sys.stdout.buffer.write(b'\\xff' * 32768)",
+                ),
+            ),
+            max_inline_bytes=32_768,
+            max_output_bytes=65_536,
+        )
+        assert started["ok"] is True
+        process = cast(str, started["process"])
+
+        waited = await toolset.environment_process_wait(
+            ctx,
+            process,
+            timeout_seconds=5,
+            max_inline_bytes=32_768,
+            max_output_bytes=65_536,
+        )
+
+        assert tool_output_size(cast(Any, waited)) <= DEFAULT_TOOL_OUTPUT_CHARS
+        assert waited["stdout"]["captured_bytes"] < 32_768
+        assert waited["stdout"]["text"] == "\ufffd" * waited["stdout"]["captured_bytes"]
+        assert waited["disclosure"]["truncated"] is True
+        await toolset.environment_process_release(ctx, process)
+
+
+async def test_model_process_release_retries_after_partial_output_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aggregate = _local_binding(tmp_path, process_output=True)
+    original_release = local_retention_module.LocalRetentionStore.release
+    second_release = asyncio.Event()
+    never = asyncio.Event()
+    calls = 0
+
+    async def cancel_second(store, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_release.set()
+            await never.wait()
+        return await original_release(store, **kwargs)
+
+    monkeypatch.setattr(local_retention_module.LocalRetentionStore, "release", cancel_second)
+    async with aggregate.bind(run_id="run-release", instance=RunBindings.local().instance) as environment:
+        toolset = ShellToolset(processes=environment.processes, outputs=environment.outputs)
+        ctx = cast(Any, SimpleNamespace())
+        started = await toolset.environment_process_start(
+            ctx,
+            ArgvCommand(
+                executable=str(_PROCESS_EXECUTABLE),
+                arguments=(
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'x' * 20); sys.stderr.buffer.write(b'y' * 20)",
+                ),
+            ),
+            max_inline_bytes=4,
+            max_output_bytes=64,
+        )
+        assert started["ok"] is True
+        process = cast(str, started["process"])
+        waited = await toolset.environment_process_wait(ctx, process, timeout_seconds=5)
+        assert waited["ok"] is True
+
+        release_task = asyncio.create_task(toolset.environment_process_release(ctx, process))
+        await asyncio.wait_for(second_release.wait(), timeout=1)
+        release_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await release_task
+
+        released = await toolset.environment_process_release(ctx, process)
+        assert released == {"ok": True, "released": True}
+        missing = await toolset.environment_process_inspect(ctx, process)
+        assert missing["ok"] is False
+        assert missing["error"]["code"] == "environment_reference_stale"
+
+
 async def test_shell_toolset_composes_directly_over_bound_provider_ports(tmp_path: Path) -> None:
     aggregate = _local_binding(tmp_path)
     run_bindings = RunBindings.local(environment=aggregate)
@@ -1628,7 +1804,7 @@ async def test_file_toolset_creates_nested_parents_and_returns_stable_missing_er
         generation="generation-1",
     )
     toolset = FileToolset(files)
-    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files)), capabilities={}))
 
     written = await toolset.write(ctx, "/one/two/value.txt", "written")
     created = await toolset.edit(ctx, "/three/four/value.txt", "", "created")
@@ -1681,6 +1857,66 @@ async def test_file_toolset_rechecks_authorization_between_compound_operations(t
     assert not (tmp_path / "nested" / "value.txt").exists()
 
 
+async def test_file_toolset_pins_one_revision_across_compound_write() -> None:
+    writes: list[tuple[int, str]] = []
+    current_revision = 1
+
+    class RevisionFiles:
+        def __init__(self, revision: int) -> None:
+            self.revision = revision
+
+        async def mkdir(self, path: str, *, parents: bool, exist_ok: bool):
+            nonlocal current_revision
+            del path, parents, exist_ok
+            if self.revision == 1:
+                current_revision = 2
+            return SimpleNamespace()
+
+        async def write_text(self, path: str, text: str, *, mode: str):
+            del mode
+            writes.append((self.revision, path))
+            return FileWriteResult(
+                path=path,
+                bytes_written=len(text.encode()),
+                receipt=EnvironmentOperationReceipt(
+                    binding_id="binding-1",
+                    binding_revision=self.revision,
+                    observed_generation=f"generation-{self.revision}",
+                    operation_id=f"operation-{len(writes)}",
+                    stage="completed",
+                    outcome="succeeded",
+                ),
+            )
+
+    revisions = {1: RevisionFiles(1), 2: RevisionFiles(2)}
+
+    class Scopes:
+        def select_files(self, path: str) -> FileScopeSelection:
+            return FileScopeSelection(
+                logical_path=path,
+                resolved_path=EnvironmentPath(
+                    binding_id="binding-1",
+                    binding_revision=current_revision,
+                    path=path,
+                ),
+                observed_generation=f"generation-{current_revision}",
+            )
+
+        @asynccontextmanager
+        async def open_files(self, selection: FileScopeSelection):
+            yield revisions[selection.resolved_path.binding_revision]
+
+    toolset = FileToolset(cast(Any, revisions[1]), file_scopes=Scopes())
+    ctx = cast(Any, SimpleNamespace())
+
+    first = await toolset.write(ctx, "/nested/first.txt", "first")
+    second = await toolset.write(ctx, "/nested/second.txt", "second")
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert writes == [(1, "/nested/first.txt"), (2, "/nested/second.txt")]
+
+
 async def test_file_toolset_serializes_concurrent_exact_edits(tmp_path: Path) -> None:
     target = tmp_path / "value.txt"
     target.write_text("first\nsecond\n")
@@ -1693,7 +1929,7 @@ async def test_file_toolset_serializes_concurrent_exact_edits(tmp_path: Path) ->
         generation="generation-1",
     )
     toolset = FileToolset(files)
-    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files)), capabilities={}))
 
     first, second = await asyncio.gather(
         toolset.edit(ctx, "/value.txt", "first", "FIRST"),
@@ -1745,7 +1981,7 @@ async def test_large_exact_edit_transformation_runs_off_event_loop(
         generation="generation-1",
     )
     toolset = FileToolset(files)
-    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files))))
+    ctx = cast(Any, SimpleNamespace(deps=SimpleNamespace(environment=SimpleNamespace(files=files)), capabilities={}))
     started = threading.Event()
     original = file_toolset_module._apply_text_edits
 

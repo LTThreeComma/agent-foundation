@@ -211,14 +211,9 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
         retention_root: Path | None = None
         try:
             if owned:
-                await asyncio.to_thread(configured.mkdir, parents=True, exist_ok=False)
-                root = configured.resolve(strict=True)
+                root = await asyncio.to_thread(_create_owned_root, configured)
             else:
-                root = configured.resolve(strict=True)
-                if not root.is_dir():
-                    raise EnvironmentError(
-                        "Direct Local caller root is not a directory.", code="environment_request_invalid"
-                    )
+                root = await asyncio.to_thread(_resolve_caller_root, configured)
             generation = f"generation-{uuid4().hex[:16]}"
             files = LocalFileOperator(
                 root=root,
@@ -252,8 +247,17 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
                 )
             shell = LocalShell(processes) if processes is not None else None
             ports = LocalPortOperator(self.configuration.ports) if self.configuration.ports.allowed_ports else None
+            read_file_actions = {
+                EnvironmentAction.FILE_STAT,
+                EnvironmentAction.FILE_READ_TEXT,
+                EnvironmentAction.FILE_READ_BYTES,
+                EnvironmentAction.FILE_LIST,
+                EnvironmentAction.FILE_QUERY,
+                EnvironmentAction.FILE_SEARCH_TEXT,
+                EnvironmentAction.FILE_COPY_SOURCE,
+            }
             file_actions = {action for action in EnvironmentAction if action.value.startswith("environment.file.")}
-            permissions = set(file_actions)
+            permissions = set(read_file_actions if self.configuration.root.read_only else file_actions)
             families: set[EnvironmentOperationFamily] = {"files"}
             if shell is not None:
                 permissions.add(EnvironmentAction.SHELL_EXEC)
@@ -319,3 +323,32 @@ class DirectLocalEnvironmentProviderBinding(EnvironmentProviderBinding):
 
     async def discard(self) -> None:
         self._discarded = True
+
+
+def _create_owned_root(path: Path) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=False)
+        return path.resolve(strict=True)
+    except FileExistsError as exc:
+        raise EnvironmentError("Direct Local owned root already exists.", code="environment_conflict") from exc
+    except OSError as exc:
+        raise EnvironmentError(
+            "Direct Local could not create its owned root.", code="environment_provider_failure"
+        ) from exc
+
+
+def _resolve_caller_root(path: Path) -> Path:
+    try:
+        root = path.resolve(strict=True)
+        is_directory = root.is_dir()
+    except FileNotFoundError as exc:
+        raise EnvironmentError("Direct Local caller root does not exist.", code="environment_not_found") from exc
+    except PermissionError as exc:
+        raise EnvironmentError("Direct Local caller root is not accessible.", code="environment_denied") from exc
+    except OSError as exc:
+        raise EnvironmentError(
+            "Direct Local could not inspect the caller root.", code="environment_provider_failure"
+        ) from exc
+    if not is_directory:
+        raise EnvironmentError("Direct Local caller root is not a directory.", code="environment_request_invalid")
+    return root

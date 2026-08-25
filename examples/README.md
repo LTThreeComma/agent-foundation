@@ -8,12 +8,13 @@ This directory contains runnable, tested examples of public Agent Foundation ext
 | ------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | Publish and compose an Environment provider | [Integration package examples](plugins/README.md#environment-provider-factory) | Selected entry-point and explicit factory modes, Host JSON configuration, provider bindings, and multi-environment routing |
 | Wrap the complete Harness run               | [Integration package examples](plugins/README.md#harness-plugin)               | Preferred YAML/JSON auto configuration, call-site enable override, direct objects, parameters, and per-run isolation       |
+| Run a local Agent through first-party tools | [Local Agent example](local-agent/README.md)                                   | Offline model, Direct Local files, working state, structured suspension, fresh bindings, and resume                        |
 | Persist and resume a Harness run            | [Host persistence example](hosting/README.md)                                  | Host-owned Execution/Attempt fencing, selected `HarnessState`, fresh bindings, replacement runs, and terminal commit       |
 
 Run every integration package example and its focused checks from the repository root:
 
 ```bash
-make examples-check
+make examples-check-all
 ```
 
 Or enter the project and run one path at a time:
@@ -30,6 +31,11 @@ uv run pytest
 cd ../hosting
 uv sync --locked
 uv run host-persistence-example
+uv run pytest
+
+cd ../local-agent
+uv sync --locked
+uv run local-agent-example
 uv run pytest
 ```
 

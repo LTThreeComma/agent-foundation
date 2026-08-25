@@ -7,6 +7,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
+    "converge-agent-envd-client",
     "pydantic>=2.12,<3",
     "pydantic-ai-slim>=2.31.1,<2.32",
     "pydantic-core>=2.41,<3",

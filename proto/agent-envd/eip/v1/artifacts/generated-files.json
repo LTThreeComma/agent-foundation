@@ -1,4 +1,5 @@
 {
+  "descriptor_sha256": "181ad55f22cf28e2e7fd1b48650f155a0383c078363c146c3edcbdb6c60b7b05",
   "files": [
     "crates/agent-envd/protocol/eip/v1/descriptor.pb",
     "packages/agent-envd-client/converge_agent_envd_client/eip/v1/__init__.py",

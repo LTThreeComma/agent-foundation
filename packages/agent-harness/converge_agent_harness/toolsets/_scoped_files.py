@@ -76,11 +76,16 @@ class ScopedFileAccess:
             )
 
     @asynccontextmanager
-    async def scope(self, path: str) -> AsyncIterator[FileOperator]:
+    async def scope(
+        self,
+        path: str,
+        *,
+        prefer_authorized_selection: bool = True,
+    ) -> AsyncIterator[FileOperator]:
         if self._scopes is None:
             yield self._files
             return
-        selection = self._selection.get()
+        selection = self._selection.get() if prefer_authorized_selection else None
         if selection is None or selection.logical_path != path:
             selection = self._scopes.select_files(path)
             self._selection.set(selection)

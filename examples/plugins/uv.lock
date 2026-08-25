@@ -42,10 +42,25 @@ wheels = [
 ]
 
 [[package]]
+name = "converge-agent-envd-client"
+version = "0.0.0"
+source = { editable = "../../packages/agent-envd-client" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.12,<3" }]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest", specifier = ">=9,<10" }]
+
+[[package]]
 name = "converge-agent-harness"
 version = "0.0.0"
 source = { editable = "../../packages/agent-harness" }
 dependencies = [
+    { name = "converge-agent-envd-client" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
     { name = "pydantic-core" },
@@ -55,6 +70,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "converge-agent-envd-client", editable = "../../packages/agent-envd-client" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-slim", specifier = ">=2.31.1,<2.32" },
     { name = "pydantic-core", specifier = ">=2.41,<3" },

@@ -103,6 +103,7 @@ class _DynamicEnvironmentRunCapability(DynamicEnvironmentCapability):
             environment.files,
             resource_resolver=self._dynamic_context._resource_resolver,
             execution_guard=self._dynamic_context._assert_authorized_fence,
+            file_scopes=environment,
         )
 
         toolsets: list[AbstractToolset[AgentContext]] = []

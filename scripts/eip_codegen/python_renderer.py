@@ -18,7 +18,7 @@ TOOLING_MESSAGES = {
 }
 TOOLING_ENUMS = {
     "MethodKind",
-    "IdempotencyClass",
+    "ReplayClass",
     "ErrorFamily",
     "EIPStringFormat",
     "TransferAction",
@@ -31,7 +31,6 @@ NO_REBUILD_MODELS = {
     "FileReaderHandle",
     "FileWriterHandle",
     "OutputReference",
-    "OutputCursor",
     "ReceiptRef",
 }
 
@@ -416,54 +415,16 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "        return self",
                 ]
             )
-        if message.name == "OutputPolicy":
+        if message.name == "OutputInfo":
             lines.extend(
                 [
                     "",
                     "    @model_validator(mode='after')",
-                    "    def _validate_output_bounds(self) -> OutputPolicy:",
-                    "        if self.max_inline_bytes > self.max_output_bytes:",
-                    "            raise ValueError('max_inline_bytes cannot exceed max_output_bytes')",
-                    "        return self",
-                ]
-            )
-        if message.name == "OutputCapture":
-            lines.extend(
-                [
-                    "",
-                    "    @model_validator(mode='after')",
-                    "    def _validate_capture_structure(self) -> OutputCapture:",
-                    "        if self.available_start > self.available_end:",
-                    "            raise ValueError('available_start cannot exceed available_end')",
-                    "        if self.kind is OutputKind.EMPTY:",
-                    "            if (",
-                    "                self.produced_bytes != 0",
-                    "                or self.captured_bytes != 0",
-                    "                or self.dropped_bytes != 0",
-                    "                or self.available_start != 0",
-                    "                or self.available_end != 0",
-                    "                or any(",
-                    "                    value is not None",
-                    "                    for value in (",
-                    "                        self.inline,",
-                    "                        self.preview,",
-                    "                        self.reference,",
-                    "                        self.expires_at,                    )",
-                    "                )",
-                    "            ):",
-                    "                raise ValueError('empty output must contain no bytes or retained state')",
-                    "        elif self.kind is OutputKind.INLINE:",
-                    "            if self.inline is None or any(",
-                    "                value is not None",
-                    "                for value in (self.preview, self.reference, self.expires_at)            ):",
-                    "                raise ValueError('inline output requires only inline data')",
-                    "        elif self.kind is OutputKind.RETAINED:",
-                    "            if self.reference is None or self.inline is not None or self.expires_at is None:",
-                    "                raise ValueError('retained output requires a reference and expiry')",
-                    "        elif self.kind is OutputKind.TRUNCATED and any(",
-                    "            value is not None",
-                    "            for value in (self.inline, self.reference, self.expires_at)        ):",
-                    "            raise ValueError('truncated output cannot contain retained or inline state')",
+                    "    def _validate_output_counts(self) -> OutputInfo:",
+                    "        if self.retained_bytes > self.produced_bytes:",
+                    "            raise ValueError('retained_bytes cannot exceed produced_bytes')",
+                    "        if self.content_complete and self.retained_bytes != self.produced_bytes:",
+                    "            raise ValueError('complete output must retain every produced byte')",
                     "        return self",
                 ]
             )
@@ -473,31 +434,8 @@ def render_models(index: SchemaIndex, options: OptionReader) -> str:
                     "",
                     "    @model_validator(mode='after')",
                     "    def _validate_limit_relationships(self) -> EIPLimits:",
-                    "        if self.max_inline_output_bytes > self.max_output_bytes:",
-                    "            raise ValueError('max_inline_output_bytes cannot exceed max_output_bytes')",
-                    "        return self",
-                ]
-            )
-        if message.name == "EIPErrorData":
-            lines.extend(
-                [
-                    "",
-                    "    @model_validator(mode='after')",
-                    "    def _validate_retention_gap_bounds(self) -> EIPErrorData:",
-                    "        available_start = self.available_start",
-                    "        available_end = self.available_end",
-                    "        has_start = available_start is not None",
-                    "        has_end = available_end is not None",
-                    "        if has_start != has_end:",
-                    "            raise ValueError('available_start and available_end must be present together')",
-                    "        if self.error_type is ErrorType.RETENTION_GAP and not has_start:",
-                    "            raise ValueError('retention_gap requires available bounds')",
-                    "        if (",
-                    "            available_start is not None",
-                    "            and available_end is not None",
-                    "            and available_start > available_end",
-                    "        ):",
-                    "            raise ValueError('available_start cannot exceed available_end')",
+                    "        if self.max_output_preview_bytes > self.max_output_bytes_per_stream:",
+                    "            raise ValueError('max_output_preview_bytes cannot exceed max_output_bytes_per_stream')",
                     "        return self",
                 ]
             )
@@ -528,9 +466,7 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
     for method in index.methods:
         option = options.method(method)
         kind = options.enum_name("MethodKind", option.kind).removeprefix("METHOD_KIND_").lower()
-        idempotency = (
-            options.enum_name("IdempotencyClass", option.idempotency).removeprefix("IDEMPOTENCY_CLASS_").lower()
-        )
+        replay_class = options.enum_name("ReplayClass", option.replay_class).removeprefix("REPLAY_CLASS_").lower()
         error_family = options.enum_name("ErrorFamily", option.error_family).removeprefix("ERROR_FAMILY_").lower()
         transfer_action_value = (
             options.enum_name("TransferAction", option.transfer_action).removeprefix("TRANSFER_ACTION_").lower()
@@ -548,7 +484,7 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
                 "rpc_name": method.name,
                 "jsonrpc_method": option.jsonrpc_method,
                 "kind": kind,
-                "idempotency": idempotency,
+                "replay_class": replay_class,
                 "introduced": f"{option.introduced_major}.{option.introduced_minor}",
                 "error_family": error_family,
                 "transfer_action": transfer_action,
@@ -567,8 +503,8 @@ def method_records(index: SchemaIndex, options: OptionReader) -> list[dict[str, 
         names.add(name)
         if record["kind"] != "request_response":
             raise ValueError(f"EIP 1.0 method {name} must use correlated request-response")
-        if record["idempotency"] == "unspecified":
-            raise ValueError(f"EIP method {name} has unspecified idempotency")
+        if record["replay_class"] == "unspecified":
+            raise ValueError(f"EIP method {name} has unspecified replay class")
         if record["error_family"] == "unspecified":
             raise ValueError(f"EIP method {name} has unspecified error family")
         if record["introduced"].startswith("0."):
@@ -610,7 +546,7 @@ def render_methods(records: list[dict[str, Any]]) -> str:
         "class MethodSpec[P, R]:",
         "    name: str",
         "    kind: Literal['request_response']",
-        "    idempotency: str",
+        "    replay_class: str",
         "    introduced: str",
         "    error_family: str",
         "    params_type: type[P]",
@@ -629,7 +565,7 @@ def render_methods(records: list[dict[str, Any]]) -> str:
                 f"{constant} = MethodSpec(",
                 f"    name={record['jsonrpc_method']!r},",
                 f"    kind={record['kind']!r},",
-                f"    idempotency={record['idempotency']!r},",
+                f"    replay_class={record['replay_class']!r},"
                 f"    introduced={record['introduced']!r},    error_family={record['error_family']!r},",
                 f"    transfer_action={record['transfer_action']!r},",
                 f"    transfer_direction={record['transfer_direction']!r},",
@@ -870,8 +806,8 @@ def decode_data_frame(payload: bytes, *, max_frame_bytes: int) -> DataFrame:
     )
 
 
-def render_protocol() -> str:
-    return (
+def render_protocol(descriptor_sha256: str) -> str:
+    rendered = (
         GENERATED_HEADER
         + """from __future__ import annotations
 
@@ -885,6 +821,7 @@ EIP_PROTOCOL_VERSION: Final = "1.0"
 EIP_PROTOCOL_MAJOR: Final = 1
 EIP_PROTOCOL_MINOR: Final = 0
 EIP_PROTO_PACKAGE: Final = "converge.agent_envd.eip.v1"
+EIP_DESCRIPTOR_SHA256: Final = "__DESCRIPTOR_SHA256__"
 
 type JsonRpcId = StrictStr | Annotated[StrictInt, Field(ge=-(2**63), le=2**63 - 1)]
 
@@ -922,6 +859,7 @@ class JsonRpcErrorResponse(JsonRpcEnvelope):
     error: EIPError
 """
     )
+    return rendered.replace("__DESCRIPTOR_SHA256__", descriptor_sha256)
 
 
 def render_init(index: SchemaIndex, options: OptionReader) -> str:
@@ -951,6 +889,7 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         "from .methods import METHODS, MethodSpec",
         f"from .models import EIP_ERROR_CODES, {', '.join(public_models)}",
         "from .protocol import (",
+        "    EIP_DESCRIPTOR_SHA256,",
         "    EIP_PROTOCOL_MAJOR,",
         "    EIP_PROTOCOL_MINOR,",
         "    EIP_PROTOCOL_VERSION,",
@@ -981,6 +920,7 @@ def render_init(index: SchemaIndex, options: OptionReader) -> str:
         "    'EIP_DATA_FRAME_MAX_HANDLE_BYTES',",
         "    'EIP_DATA_FRAME_MAX_PAYLOAD_BYTES',",
         "    'EIP_DATA_FRAME_PROFILE_VERSION',",
+        "    'EIP_DESCRIPTOR_SHA256',",
         "    'EIP_PROTOCOL_MAJOR',",
         "    'EIP_PROTOCOL_MINOR',",
         "    'EIP_PROTOCOL_VERSION',",
@@ -1002,6 +942,7 @@ def write_python_surface(
     index: SchemaIndex,
     options: OptionReader,
     data_frame_profile: DataFrameProfile,
+    descriptor_sha256: str,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     records = method_records(index, options)
@@ -1011,7 +952,7 @@ def write_python_surface(
         "client.py": render_client(records),
         "codec.py": render_codec(),
         "data_frame.py": render_data_frame(data_frame_profile),
-        "protocol.py": render_protocol(),
+        "protocol.py": render_protocol(descriptor_sha256),
         "__init__.py": render_init(index, options),
     }
     paths: list[Path] = []

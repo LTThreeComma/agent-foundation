@@ -86,6 +86,10 @@ class BoundShellOperations(Protocol):
 
     async def exec(self, request: CommandRequest, *, alias: str | None = None) -> ShellExecResult: ...
 
+    async def exec_captured(self, request: CommandRequest, *, alias: str | None = None) -> ShellExecResult:
+        """Execute and materialize output under one exact binding-revision lease."""
+        ...
+
 
 class BoundProcessOperations(Protocol):
     """Revision-fenced process operations routed by one BoundEnvironment."""

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from converge_agent_harness.models import ModelRunBinding
     from converge_agent_harness.plugins import BoundPluginContext
     from converge_agent_harness.tools.deferred import DeferredToolResume
-    from converge_agent_harness.usage import ProviderUsage, ProviderUsageRecord, UsageRecord, _RunUsageLedger
+    from converge_agent_harness.usage import ProviderUsage, ProviderUsageRecord, RunUsageLedger, UsageRecord
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -153,7 +153,7 @@ class AgentContext:
     plugins: BoundPluginContext
     subagents: SubagentCollection
     events: HarnessEventEmitter
-    _usage_attribution: _RunUsageLedger = field(repr=False)
+    usage_attribution: RunUsageLedger = field(repr=False)
     deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
     _capability_provenance: _CapabilityProvenance = field(default_factory=_CapabilityProvenance, repr=False)
@@ -235,7 +235,7 @@ class AgentContext:
     @property
     def usage_records(self) -> tuple[UsageRecord, ...]:
         """Return a detached snapshot of mixed run-local usage attribution."""
-        return self._usage_attribution._snapshot()
+        return self.usage_attribution.records
 
     async def record_provider_usage(
         self,
@@ -246,7 +246,7 @@ class AgentContext:
         tool_call_id: str | None = None,
     ) -> ProviderUsageRecord:
         """Record one stable non-model usage receipt for the next reporting boundary."""
-        return await self._usage_attribution._record_provider(
+        return await self.usage_attribution._record_provider(
             usage,
             source=source,
             tool_id=tool_id,

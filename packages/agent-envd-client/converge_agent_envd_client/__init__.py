@@ -13,6 +13,7 @@ from .errors import (
     EIPTransportError,
 )
 from .file_transfer import EIPFileReader, EIPFileWriter
+from .output import EIPOutputPage, EIPOutputReader
 from .requester import RequestCoordinator
 from .session import EIPSession
 from .stdio import StdioTransport
@@ -29,6 +30,8 @@ __all__ = [
     "EIPFileReader",
     "EIPFileWriter",
     "EIPMethodError",
+    "EIPOutputPage",
+    "EIPOutputReader",
     "EIPProtocolError",
     "EIPRequestTimeoutError",
     "EIPSession",

@@ -7,11 +7,11 @@ import mimetypes
 import posixpath
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Annotated, Literal, NotRequired, Protocol, TypedDict, cast, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 from pydantic_ai import BinaryContent, RunContext, ToolReturn
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -28,6 +28,7 @@ from converge_agent_harness.usage import ProviderUsage
 
 from ._results import ToolError, ToolFailure
 from ._scoped_files import ScopedFileAccess
+from .output import ToolOutputDisclosure, disclose_sequence_field, disclose_text_fields
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _AMBIGUOUS_MEDIA_TYPES = frozenset({"", "application/octet-stream", "binary/octet-stream"})
@@ -250,6 +251,8 @@ class WebSearchItem(TypedDict):
 class WebSearchSuccess(TypedDict):
     ok: Literal[True]
     results: list[WebSearchItem]
+    showing: int
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 class WebScrapeSuccess(TypedDict):
@@ -257,6 +260,7 @@ class WebScrapeSuccess(TypedDict):
     markdown: str
     final_url: str
     bytes: int
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 class WebHeadSuccess(TypedDict):
@@ -276,6 +280,7 @@ class WebTextSuccess(TypedDict):
     max_bytes: int
     bytes: int
     final_url: str
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 class WebStatusFailure(ToolFailure):
@@ -422,17 +427,30 @@ class WebToolset:
             if len(response.results) > limit:
                 raise WebProviderError("web_search_response_invalid")
             results = [WebSearchResult.model_validate(item) for item in response.results]
-            return {
+            projected: dict[str, JsonValue] = {
                 "ok": True,
-                "results": [
-                    {
-                        "title": item.title,
-                        "url": _safe_url(item.url),
-                        "snippet": item.snippet,
-                    }
-                    for item in results
-                ],
+                "results": cast(
+                    JsonValue,
+                    [
+                        {
+                            "title": item.title,
+                            "url": _safe_url(item.url),
+                            "snippet": item.snippet,
+                        }
+                        for item in results
+                    ],
+                ),
+                "showing": len(results),
             }
+            disclosed, showing = await disclose_sequence_field(
+                ctx.deps,
+                projected,
+                field="results",
+                content_complete=True,
+                noun="web search results",
+            )
+            disclosed["showing"] = showing
+            return cast(WebSearchSuccess, disclosed)
         except TimeoutError:
             return _web_error("web_timeout", retry_hint="retry")
         except RunError:
@@ -478,12 +496,22 @@ class WebToolset:
                 return _web_error("web_body_too_large", max_bytes=self.configuration.max_scrape_bytes)
             async with asyncio.timeout(_remaining_seconds(deadline)):
                 await attachment.policy.authorize(result.final_url, purpose="scrape")
-            return {
+            projected: dict[str, JsonValue] = {
                 "ok": True,
                 "markdown": result.markdown,
                 "final_url": result.canonical_url,
                 "bytes": len(encoded),
             }
+            return cast(
+                WebScrapeSuccess,
+                await disclose_text_fields(
+                    ctx.deps,
+                    projected,
+                    text_fields=("markdown",),
+                    content_complete=True,
+                    noun="scraped page",
+                ),
+            )
         except TimeoutError:
             return _web_error("web_timeout", retry_hint="retry")
         except RunError:
@@ -531,7 +559,7 @@ class WebToolset:
                     )
                 if textual:
                     text = data.decode(_text_charset(_header(response.headers, "content-type")), errors="replace")
-                    return {
+                    projected: dict[str, JsonValue] = {
                         "ok": True,
                         "content": text,
                         "truncated": truncated,
@@ -539,6 +567,16 @@ class WebToolset:
                         "bytes": len(data),
                         "final_url": response.canonical_url,
                     }
+                    return cast(
+                        WebTextSuccess,
+                        await disclose_text_fields(
+                            ctx.deps,
+                            projected,
+                            text_fields=("content",),
+                            content_complete=not truncated,
+                            noun="fetched text",
+                        ),
+                    )
                 if truncated:
                     raise WebProviderError("web_body_too_large")
                 media_type = content_type or "application/octet-stream"

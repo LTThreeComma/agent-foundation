@@ -178,17 +178,6 @@
         "network": {
           "$ref": "#/$defs/CommandNetwork",
           "default": "configured"
-        },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "required": [
@@ -332,64 +321,8 @@
     "EIPErrorData": {
       "additionalProperties": false,
       "properties": {
-        "available_end": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Available End"
-        },
-        "available_start": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Available Start"
-        },
-        "captured_bytes": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Captured Bytes"
-        },
         "dispatch_stage": {
           "$ref": "#/$defs/DispatchStage"
-        },
-        "dropped_bytes": {
-          "anyOf": [
-            {
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Dropped Bytes"
         },
         "dropped_items": {
           "anyOf": [
@@ -487,6 +420,28 @@
           "default": null,
           "title": "Operation Id"
         },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessOutput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProcessInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "process_status": {
           "anyOf": [
             {
@@ -568,22 +523,22 @@
           "title": "Max File Transfer Bytes",
           "type": "integer"
         },
-        "max_inline_output_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Inline Output Bytes",
-          "type": "integer"
-        },
         "max_operation_duration_ms": {
           "maximum": 18446744073709551615,
           "minimum": 1,
           "title": "Max Operation Duration Ms",
           "type": "integer"
         },
-        "max_output_bytes": {
+        "max_output_bytes_per_stream": {
           "maximum": 18446744073709551615,
           "minimum": 1,
-          "title": "Max Output Bytes",
+          "title": "Max Output Bytes Per Stream",
+          "type": "integer"
+        },
+        "max_output_preview_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "title": "Max Output Preview Bytes",
           "type": "integer"
         },
         "max_processes": {
@@ -617,8 +572,8 @@
         "max_concurrent_operations",
         "max_processes",
         "max_operation_duration_ms",
-        "max_inline_output_bytes",
-        "max_output_bytes",
+        "max_output_preview_bytes",
+        "max_output_bytes_per_stream",
         "max_transfer_frame_bytes",
         "max_concurrent_file_transfers",
         "max_file_transfer_bytes"
@@ -800,7 +755,6 @@
         "unsupported",
         "stale_generation",
         "invalid_handle",
-        "retention_gap",
         "busy",
         "quota_exceeded",
         "output_limit_exceeded",
@@ -2334,74 +2288,15 @@
       "title": "OperationReceipt",
       "type": "object"
     },
-    "OutputCapture": {
+    "OutputInfo": {
       "additionalProperties": false,
       "properties": {
-        "available_end": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Available End",
-          "type": "integer"
-        },
-        "available_start": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Available Start",
-          "type": "integer"
-        },
-        "captured_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Captured Bytes",
-          "type": "integer"
-        },
         "content_complete": {
           "title": "Content Complete",
           "type": "boolean"
         },
-        "dropped_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Dropped Bytes",
-          "type": "integer"
-        },
-        "expires_at": {
-          "anyOf": [
-            {
-              "format": "date-time",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Expires At"
-        },
-        "inline": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EncodedBytes"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "kind": {
-          "$ref": "#/$defs/OutputKind"
-        },
         "preview": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPreview"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/EncodedBytes"
         },
         "produced_bytes": {
           "maximum": 18446744073709551615,
@@ -2414,98 +2309,24 @@
           "type": "boolean"
         },
         "reference": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputReference"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/OutputReference"
+        },
+        "retained_bytes": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Retained Bytes",
+          "type": "integer"
         }
       },
       "required": [
-        "kind",
+        "reference",
         "producer_complete",
         "content_complete",
         "produced_bytes",
-        "captured_bytes",
-        "dropped_bytes",
-        "available_start",
-        "available_end"
+        "retained_bytes",
+        "preview"
       ],
-      "title": "OutputCapture",
-      "type": "object"
-    },
-    "OutputKind": {
-      "enum": [
-        "empty",
-        "inline",
-        "retained",
-        "truncated"
-      ],
-      "title": "OutputKind",
-      "type": "string"
-    },
-    "OutputOverflow": {
-      "enum": [
-        "fail",
-        "truncate",
-        "retain"
-      ],
-      "title": "OutputOverflow",
-      "type": "string"
-    },
-    "OutputPolicy": {
-      "additionalProperties": false,
-      "properties": {
-        "max_inline_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Inline Bytes",
-          "type": "integer"
-        },
-        "max_output_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 1,
-          "title": "Max Output Bytes",
-          "type": "integer"
-        },
-        "overflow": {
-          "$ref": "#/$defs/OutputOverflow"
-        }
-      },
-      "required": [
-        "max_inline_bytes",
-        "max_output_bytes",
-        "overflow"
-      ],
-      "title": "OutputPolicy",
-      "type": "object"
-    },
-    "OutputPreview": {
-      "additionalProperties": false,
-      "properties": {
-        "represented_bytes": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Represented Bytes",
-          "type": "integer"
-        },
-        "segments": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/OutputSegment"
-          },
-          "title": "Segments",
-          "type": "array"
-        }
-      },
-      "required": [
-        "represented_bytes"
-      ],
-      "title": "OutputPreview",
+      "title": "OutputInfo",
       "type": "object"
     },
     "OutputReadParams": {
@@ -2514,17 +2335,6 @@
         "context": {
           "$ref": "#/$defs/EIPCallContext"
         },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "reference": {
           "$ref": "#/$defs/OutputReference"
         },
@@ -2532,6 +2342,13 @@
           "maximum": 18446744073709551615,
           "minimum": 0,
           "title": "Start Offset",
+          "type": "integer"
+        },
+        "wait_ms": {
+          "default": 0,
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Wait Ms",
           "type": "integer"
         }
       },
@@ -2546,27 +2363,30 @@
     "OutputReadResult": {
       "additionalProperties": false,
       "properties": {
-        "capture": {
-          "$ref": "#/$defs/OutputCapture"
-        },
-        "chunks": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/OutputSegment"
-          },
-          "title": "Chunks",
-          "type": "array"
+        "data": {
+          "$ref": "#/$defs/EncodedBytes"
         },
         "next_offset": {
           "maximum": 18446744073709551615,
           "minimum": 0,
           "title": "Next Offset",
           "type": "integer"
+        },
+        "output": {
+          "$ref": "#/$defs/OutputInfo"
+        },
+        "start_offset": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "title": "Start Offset",
+          "type": "integer"
         }
       },
       "required": [
-        "capture",
-        "next_offset"
+        "next_offset",
+        "start_offset",
+        "data",
+        "output"
       ],
       "title": "OutputReadResult",
       "type": "object"
@@ -2609,26 +2429,6 @@
         "receipt"
       ],
       "title": "OutputReleaseResult",
-      "type": "object"
-    },
-    "OutputSegment": {
-      "additionalProperties": false,
-      "properties": {
-        "data": {
-          "$ref": "#/$defs/EncodedBytes"
-        },
-        "start_offset": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Start Offset",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "start_offset",
-        "data"
-      ],
-      "title": "OutputSegment",
       "type": "object"
     },
     "PortAddress": {
@@ -2831,7 +2631,7 @@
           "$ref": "#/$defs/ProcessHandle"
         },
         "output": {
-          "$ref": "#/$defs/ProcessOutputSnapshot"
+          "$ref": "#/$defs/ProcessOutput"
         },
         "status": {
           "$ref": "#/$defs/ProcessStatus"
@@ -2916,21 +2716,21 @@
       "title": "ProcessKillResult",
       "type": "object"
     },
-    "ProcessOutputSnapshot": {
+    "ProcessOutput": {
       "additionalProperties": false,
       "properties": {
         "stderr": {
-          "$ref": "#/$defs/ProcessStreamSnapshot"
+          "$ref": "#/$defs/OutputInfo"
         },
         "stdout": {
-          "$ref": "#/$defs/ProcessStreamSnapshot"
+          "$ref": "#/$defs/OutputInfo"
         }
       },
       "required": [
         "stdout",
         "stderr"
       ],
-      "title": "ProcessOutputSnapshot",
+      "title": "ProcessOutput",
       "type": "object"
     },
     "ProcessPhase": {
@@ -2945,76 +2745,6 @@
       ],
       "title": "ProcessPhase",
       "type": "string"
-    },
-    "ProcessReadOutputParams": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/EIPCallContext"
-        },
-        "handle": {
-          "$ref": "#/$defs/ProcessHandle"
-        },
-        "output_policy": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OutputPolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "stderr_offset": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Stderr Offset",
-          "type": "integer"
-        },
-        "stdout_offset": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Stdout Offset",
-          "type": "integer"
-        },
-        "wait_ms": {
-          "default": 0,
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Wait Ms",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "context",
-        "handle",
-        "stdout_offset",
-        "stderr_offset"
-      ],
-      "title": "ProcessReadOutputParams",
-      "type": "object"
-    },
-    "ProcessReadOutputResult": {
-      "additionalProperties": false,
-      "properties": {
-        "process": {
-          "$ref": "#/$defs/ProcessInfo"
-        },
-        "stderr": {
-          "$ref": "#/$defs/ProcessStreamRead"
-        },
-        "stdout": {
-          "$ref": "#/$defs/ProcessStreamRead"
-        }
-      },
-      "required": [
-        "process",
-        "stdout",
-        "stderr"
-      ],
-      "title": "ProcessReadOutputResult",
-      "type": "object"
     },
     "ProcessReleaseParams": {
       "additionalProperties": false,
@@ -3214,59 +2944,6 @@
         "cleanup"
       ],
       "title": "ProcessStatus",
-      "type": "object"
-    },
-    "ProcessStream": {
-      "enum": [
-        "stdout",
-        "stderr"
-      ],
-      "title": "ProcessStream",
-      "type": "string"
-    },
-    "ProcessStreamRead": {
-      "additionalProperties": false,
-      "properties": {
-        "capture": {
-          "$ref": "#/$defs/OutputCapture"
-        },
-        "chunks": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/OutputSegment"
-          },
-          "title": "Chunks",
-          "type": "array"
-        },
-        "next_offset": {
-          "maximum": 18446744073709551615,
-          "minimum": 0,
-          "title": "Next Offset",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "capture",
-        "next_offset"
-      ],
-      "title": "ProcessStreamRead",
-      "type": "object"
-    },
-    "ProcessStreamSnapshot": {
-      "additionalProperties": false,
-      "properties": {
-        "capture": {
-          "$ref": "#/$defs/OutputCapture"
-        },
-        "stream": {
-          "$ref": "#/$defs/ProcessStream"
-        }
-      },
-      "required": [
-        "stream",
-        "capture"
-      ],
-      "title": "ProcessStreamSnapshot",
       "type": "object"
     },
     "ProcessWaitCondition": {
@@ -3524,7 +3201,7 @@
       "additionalProperties": false,
       "properties": {
         "output": {
-          "$ref": "#/$defs/ProcessOutputSnapshot"
+          "$ref": "#/$defs/ProcessOutput"
         },
         "receipt": {
           "$ref": "#/$defs/OperationReceipt"

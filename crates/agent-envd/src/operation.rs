@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -10,6 +11,14 @@ use sha2::{Digest, Sha256};
 use crate::eip::{
     EIPCallContext, EIPError, OperationCancelStatus, OperationReceipt, ReceiptOutcome, ReceiptStage,
 };
+
+tokio::task_local! {
+    static CARRIER_ATTEMPT: u64;
+}
+
+pub(crate) async fn scope_carrier_attempt<F: Future>(attempt: u64, future: F) -> F::Output {
+    CARRIER_ATTEMPT.scope(attempt, future).await
+}
 
 #[derive(Clone)]
 pub(crate) struct OperationRegistry {
@@ -35,17 +44,29 @@ struct RegistryInner {
 struct RegistryState {
     records: BTreeMap<String, OperationRecord>,
     terminal_order: VecDeque<String>,
+    next_attempt: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplayClass {
+    ActiveOnly,
+    TerminalEvidence,
 }
 
 struct OperationRecord {
     method: String,
     request_digest: String,
+    replay_class: ReplayClass,
+    reconciliation: bool,
+    attempt: u64,
+    carrier_attempt: Option<u64>,
     status: RecordStatus,
     cancellation_requested: bool,
     deadline: Instant,
     receipt: Option<OperationReceipt>,
     result: Option<serde_json::Value>,
     failure: Option<EIPError>,
+    pins: BTreeSet<String>,
 }
 
 enum RecordStatus {
@@ -63,8 +84,16 @@ pub(crate) enum BeginOutcome {
 pub(crate) struct OperationLease {
     registry: OperationRegistry,
     operation_id: String,
+    replay_class: ReplayClass,
     failure_on_drop: Option<Box<(OperationReceipt, EIPError)>>,
     finished: bool,
+}
+
+pub(crate) struct ActiveResponseHandoff {
+    registry: OperationRegistry,
+    operation_id: String,
+    attempt: u64,
+    completed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,23 +137,9 @@ impl OperationRegistry {
         method: &str,
         context: &EIPCallContext,
         params: &P,
-        _key_allowed: bool,
     ) -> Result<BeginOutcome, RegistryError> {
-        self.begin_with_replay_validation(method, context, params, _key_allowed, |_| true)
-    }
-
-    pub(crate) fn begin_with_replay_validation<P, F>(
-        &self,
-        method: &str,
-        context: &EIPCallContext,
-        params: &P,
-        _key_allowed: bool,
-        replay_is_valid: F,
-    ) -> Result<BeginOutcome, RegistryError>
-    where
-        P: Serialize,
-        F: FnOnce(&serde_json::Value) -> bool,
-    {
+        let replay_class = replay_class(method)?;
+        let reconciliation = is_reconciliation_method(method);
         let request_digest = canonical_request_digest(method, params)?;
         let now = Instant::now();
         let deadline = operation_deadline(context.timeout_ms, now, self.inner.max_duration)?;
@@ -141,12 +156,11 @@ impl OperationRegistry {
             return match &record.status {
                 RecordStatus::Active | RecordStatus::Completing => Err(RegistryError::InProgress),
                 RecordStatus::Terminal { .. } => {
+                    if record.replay_class != ReplayClass::TerminalEvidence {
+                        return Err(RegistryError::TerminalFailure);
+                    }
                     if let Some(result) = &record.result {
-                        if replay_is_valid(result) {
-                            Ok(BeginOutcome::Replay(result.clone()))
-                        } else {
-                            Err(RegistryError::TerminalFailure)
-                        }
+                        Ok(BeginOutcome::Replay(result.clone()))
                     } else if let Some(failure) = &record.failure {
                         Ok(BeginOutcome::ReplayFailure(Box::new(failure.clone())))
                     } else {
@@ -155,27 +169,49 @@ impl OperationRegistry {
                 }
             };
         }
-        while state.records.len() >= self.inner.max_records {
-            if !state.reclaim_oldest_terminal() {
+        let capacity = if reconciliation {
+            1
+        } else {
+            self.inner.max_records
+        };
+        while state
+            .records
+            .values()
+            .filter(|record| record.reconciliation == reconciliation)
+            .count()
+            >= capacity
+        {
+            if !state.reclaim_oldest_terminal(reconciliation) {
                 return Err(RegistryError::Capacity);
             }
         }
+        state.next_attempt = state
+            .next_attempt
+            .checked_add(1)
+            .ok_or(RegistryError::Capacity)?;
+        let attempt = state.next_attempt;
         state.records.insert(
             context.operation_id.clone(),
             OperationRecord {
                 method: method.to_owned(),
                 request_digest,
+                replay_class,
+                reconciliation,
+                attempt,
+                carrier_attempt: CARRIER_ATTEMPT.try_with(|attempt| *attempt).ok(),
                 status: RecordStatus::Active,
                 cancellation_requested: false,
                 deadline,
                 receipt: None,
                 result: None,
                 failure: None,
+                pins: BTreeSet::new(),
             },
         );
         Ok(BeginOutcome::New(OperationLease {
             registry: self.clone(),
             operation_id: context.operation_id.clone(),
+            replay_class,
             failure_on_drop: None,
             finished: false,
         }))
@@ -265,6 +301,7 @@ impl OperationRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut pins = selector_pins_from_failure(method, &failure);
         let published = if let Some(record) = state.records.get_mut(operation_id) {
             if record.method == method
                 && record.request_digest == request_digest
@@ -272,12 +309,17 @@ impl OperationRegistry {
                 && record.result.is_none()
                 && record.failure.is_none()
             {
-                record.status = RecordStatus::Terminal {
-                    completed_at: Instant::now(),
-                };
-                record.receipt = failure.data.receipt.clone();
-                record.failure = Some(failure);
-                true
+                if record.replay_class == ReplayClass::TerminalEvidence {
+                    record.status = RecordStatus::Terminal {
+                        completed_at: Instant::now(),
+                    };
+                    record.receipt = failure.data.receipt.clone();
+                    record.failure = Some(failure);
+                    record.pins = std::mem::take(&mut pins);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -286,6 +328,79 @@ impl OperationRegistry {
         };
         if published {
             state.terminal_order.push_back(operation_id.to_owned());
+        }
+    }
+
+    pub(crate) fn active_response_handoff<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Option<ActiveResponseHandoff> {
+        let params_value = serde_json::to_value(params).ok()?;
+        let operation_id = operation_id_from_params(&params_value)?;
+        let request_digest = canonical_request_digest(method, params).ok()?;
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let record = state.records.get(operation_id)?;
+        if record.method != method
+            || record.request_digest != request_digest
+            || record.replay_class != ReplayClass::ActiveOnly
+            || record.carrier_attempt != CARRIER_ATTEMPT.try_with(|attempt| *attempt).ok()
+            || !matches!(record.status, RecordStatus::Completing)
+        {
+            return None;
+        }
+        Some(ActiveResponseHandoff {
+            registry: self.clone(),
+            operation_id: operation_id.to_owned(),
+            attempt: record.attempt,
+            completed: false,
+        })
+    }
+
+    pub(crate) fn release_selector(&self, kind: &str, value: &str) {
+        let selector = format!("{kind}:{value}");
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for record in state.records.values_mut() {
+            record.pins.remove(&selector);
+        }
+    }
+
+    fn complete_active_handoff(&self, operation_id: &str, attempt: u64) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let should_remove = state.records.get(operation_id).is_some_and(|record| {
+            record.attempt == attempt
+                && record.replay_class == ReplayClass::ActiveOnly
+                && matches!(record.status, RecordStatus::Completing)
+        });
+        if should_remove {
+            state.remove_record(operation_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_active_for_test(&self, operation_id: &str) {
+        let attempt = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .records
+            .get(operation_id)
+            .map(|record| record.attempt);
+        if let Some(attempt) = attempt {
+            self.complete_active_handoff(operation_id, attempt);
         }
     }
 
@@ -358,13 +473,37 @@ impl OperationLease {
         result: &T,
         receipt: Option<OperationReceipt>,
     ) -> Result<(), RegistryError> {
+        if self.replay_class == ReplayClass::ActiveOnly {
+            self.finish_active();
+            return Ok(());
+        }
         let result = serde_json::to_value(result).map_err(|_| RegistryError::Encoding)?;
         self.finish_value(Some(result), None, receipt);
         Ok(())
     }
 
     pub(crate) fn finish_failure(mut self, receipt: OperationReceipt, failure: EIPError) {
-        self.finish_value(None, Some(failure), Some(receipt));
+        if self.replay_class == ReplayClass::ActiveOnly {
+            self.finish_active();
+        } else {
+            self.finish_value(None, Some(failure), Some(receipt));
+        }
+    }
+
+    fn finish_active(&mut self) {
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(record) = state.records.get_mut(&self.operation_id) {
+            record.status = RecordStatus::Completing;
+            record.receipt = None;
+            record.result = None;
+            record.failure = None;
+        }
+        self.finished = true;
     }
 
     fn finish_value(
@@ -380,14 +519,40 @@ impl OperationLease {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let method = state
+            .records
+            .get(&self.operation_id)
+            .map(|record| record.method.clone());
+        let pins = method.as_deref().map_or_else(BTreeSet::new, |method| {
+            selector_pins(method, result.as_ref(), failure.as_ref())
+        });
         if let Some(record) = state.records.get_mut(&self.operation_id) {
             record.status = RecordStatus::Terminal { completed_at: now };
             record.result = result;
             record.failure = failure;
             record.receipt = receipt;
+            record.pins = pins;
             state.terminal_order.push_back(self.operation_id.clone());
         }
         self.finished = true;
+    }
+}
+
+impl ActiveResponseHandoff {
+    pub(crate) fn complete(mut self) {
+        self.registry
+            .complete_active_handoff(&self.operation_id, self.attempt);
+        self.completed = true;
+    }
+}
+
+impl Drop for ActiveResponseHandoff {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.registry
+                .complete_active_handoff(&self.operation_id, self.attempt);
+            self.completed = true;
+        }
     }
 }
 
@@ -418,30 +583,141 @@ impl Drop for OperationLease {
 
 impl RegistryState {
     fn prune(&mut self, now: Instant, ttl: Duration) {
-        while let Some(operation_id) = self.terminal_order.front() {
-            let expired = self.records.get(operation_id).is_none_or(|record| {
-                matches!(
-                    record.status,
-                    RecordStatus::Terminal { completed_at }
-                        if now.duration_since(completed_at) >= ttl
-                )
+        let mut retained = VecDeque::with_capacity(self.terminal_order.len());
+        while let Some(operation_id) = self.terminal_order.pop_front() {
+            let expired = self.records.get(&operation_id).is_some_and(|record| {
+                record.pins.is_empty()
+                    && matches!(
+                        record.status,
+                        RecordStatus::Terminal { completed_at }
+                            if now.duration_since(completed_at) >= ttl
+                    )
             });
-            if !expired {
-                break;
-            }
-            if let Some(operation_id) = self.terminal_order.pop_front() {
-                self.records.remove(&operation_id);
+            if expired {
+                self.remove_record(&operation_id);
+            } else if self.records.contains_key(&operation_id) {
+                retained.push_back(operation_id);
             }
         }
+        self.terminal_order = retained;
     }
 
-    fn reclaim_oldest_terminal(&mut self) -> bool {
+    fn reclaim_oldest_terminal(&mut self, reconciliation: bool) -> bool {
+        let mut retained = VecDeque::with_capacity(self.terminal_order.len());
+        let mut reclaimed = false;
         while let Some(operation_id) = self.terminal_order.pop_front() {
-            if self.records.remove(&operation_id).is_some() {
-                return true;
+            let eligible = !reclaimed
+                && self.records.get(&operation_id).is_some_and(|record| {
+                    record.reconciliation == reconciliation
+                        && record.pins.is_empty()
+                        && matches!(record.status, RecordStatus::Terminal { .. })
+                });
+            if eligible {
+                self.remove_record(&operation_id);
+                reclaimed = true;
+            } else if self.records.contains_key(&operation_id) {
+                retained.push_back(operation_id);
             }
         }
-        false
+        self.terminal_order = retained;
+        reclaimed
+    }
+
+    fn remove_record(&mut self, operation_id: &str) -> Option<OperationRecord> {
+        self.records.remove(operation_id)
+    }
+}
+
+fn replay_class(method: &str) -> Result<ReplayClass, RegistryError> {
+    let metadata = crate::eip::METHODS
+        .iter()
+        .find(|metadata| metadata.name == method)
+        .ok_or(RegistryError::Encoding)?;
+    match metadata.replay_class {
+        "active_only" => Ok(ReplayClass::ActiveOnly),
+        "terminal_evidence" => Ok(ReplayClass::TerminalEvidence),
+        _ => Err(RegistryError::Encoding),
+    }
+}
+
+fn is_reconciliation_method(method: &str) -> bool {
+    matches!(
+        method,
+        "operation.cancel"
+            | "receipt.get"
+            | "process.inspect"
+            | "process.kill"
+            | "process.release"
+            | "output.read"
+            | "output.release"
+    )
+}
+
+fn operation_id_from_params(params: &serde_json::Value) -> Option<&str> {
+    params
+        .as_object()?
+        .get("context")?
+        .as_object()?
+        .get("operation_id")?
+        .as_str()
+}
+
+fn selector_pins(
+    method: &str,
+    result: Option<&serde_json::Value>,
+    failure: Option<&EIPError>,
+) -> BTreeSet<String> {
+    if !matches!(method, "process.start" | "shell.exec") {
+        return BTreeSet::new();
+    }
+    let mut pins = BTreeSet::new();
+    if let Some(result) = result {
+        collect_command_pins(method, result, &mut pins);
+    }
+    if let Some(failure) = failure
+        && let Ok(value) = serde_json::to_value(failure)
+    {
+        let data = &value["data"];
+        if let Some(process) = data.get("process") {
+            collect_process_pins(process, &mut pins);
+        }
+        if let Some(output) = data.get("output") {
+            collect_output_pins(output, &mut pins);
+        }
+    }
+    pins
+}
+
+fn selector_pins_from_failure(method: &str, failure: &EIPError) -> BTreeSet<String> {
+    selector_pins(method, None, Some(failure))
+}
+
+fn collect_command_pins(method: &str, value: &serde_json::Value, pins: &mut BTreeSet<String>) {
+    if method == "process.start" {
+        collect_process_pins(&value["process"], pins);
+    } else {
+        collect_output_pins(&value["output"], pins);
+    }
+}
+
+fn collect_process_pins(value: &serde_json::Value, pins: &mut BTreeSet<String>) {
+    if let Some(handle) = value.get("handle").and_then(serde_json::Value::as_str) {
+        pins.insert(format!("process:{handle}"));
+    }
+    if let Some(output) = value.get("output") {
+        collect_output_pins(output, pins);
+    }
+}
+
+fn collect_output_pins(value: &serde_json::Value, pins: &mut BTreeSet<String>) {
+    for stream in ["stdout", "stderr"] {
+        if let Some(reference) = value
+            .get(stream)
+            .and_then(|stream| stream.get("reference"))
+            .and_then(serde_json::Value::as_str)
+        {
+            pins.insert(format!("output:{reference}"));
+        }
     }
 }
 
@@ -595,7 +871,7 @@ mod tests {
             timeout_ms: None,
         };
         let BeginOutcome::New(lease) = registry
-            .begin("method", &context, &params, true)
+            .begin("file.write_text", &context, &params)
             .expect("accepted")
         else {
             panic!("new operation expected")
@@ -606,7 +882,7 @@ mod tests {
 
         assert!(matches!(
             registry
-                .begin("method", &context, &params, true)
+                .begin("file.write_text", &context, &params)
                 .expect("same operation replays"),
             BeginOutcome::Replay(_)
         ));
@@ -615,11 +891,11 @@ mod tests {
             "value": 2
         });
         assert!(matches!(
-            registry.begin("method", &context, &mismatched, true),
+            registry.begin("file.write_text", &context, &mismatched),
             Err(RegistryError::Collision)
         ));
         assert!(matches!(
-            registry.begin("other.method", &context, &params, true),
+            registry.begin("file.mkdir", &context, &params),
             Err(RegistryError::Collision)
         ));
     }
@@ -642,7 +918,7 @@ mod tests {
             timeout_ms: None,
         };
         let BeginOutcome::New(lease) = registry
-            .begin("file.stat", &context, &params, false)
+            .begin("file.write_text", &context, &params)
             .expect("operation begins")
         else {
             panic!("new operation expected")
@@ -650,7 +926,7 @@ mod tests {
         drop(lease);
 
         assert!(matches!(
-            registry.begin("file.stat", &context, &params, false),
+            registry.begin("file.write_text", &context, &params),
             Err(RegistryError::InProgress)
         ));
 
@@ -664,16 +940,199 @@ mod tests {
             }
         }))
         .expect("typed failure");
-        registry.finish_dispatched_failure("file.stat", &params, failure);
+        registry.finish_dispatched_failure("file.write_text", &params, failure);
 
         let BeginOutcome::ReplayFailure(replayed) = registry
-            .begin("file.stat", &context, &params, false)
+            .begin("file.write_text", &context, &params)
             .expect("failure replays")
         else {
             panic!("failure replay expected")
         };
         assert_eq!(replayed.data.error_type, ErrorType::NotFoundOrDenied);
         assert_eq!(replayed.message, "missing");
+    }
+
+    #[test]
+    fn active_only_records_live_until_the_exact_response_handoff() {
+        let registry = OperationRegistry::new(
+            "env".to_owned(),
+            7,
+            2,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let params = serde_json::json!({
+            "context": {"operation_id": "page"},
+            "reference": "output-1",
+            "start_offset": 0
+        });
+        let context = EIPCallContext {
+            operation_id: "page".to_owned(),
+            timeout_ms: None,
+        };
+        let BeginOutcome::New(lease) = registry
+            .begin("output.read", &context, &params)
+            .expect("active-only operation begins")
+        else {
+            panic!("new operation expected")
+        };
+        lease
+            .finish(&serde_json::json!({"next_offset": 0}), None)
+            .expect("active-only operation completes handler work");
+        assert!(matches!(
+            registry.begin("output.read", &context, &params),
+            Err(RegistryError::InProgress)
+        ));
+
+        let first = registry
+            .active_response_handoff("output.read", &params)
+            .expect("handoff token exists");
+        let stale = registry
+            .active_response_handoff("output.read", &params)
+            .expect("duplicate waiter observes the same admission attempt");
+        first.complete();
+
+        let BeginOutcome::New(second) = registry
+            .begin("output.read", &context, &params)
+            .expect("operation ID is reusable after handoff")
+        else {
+            panic!("new operation expected")
+        };
+        second
+            .finish(&serde_json::json!({"next_offset": 0}), None)
+            .expect("second attempt completes handler work");
+        drop(stale);
+        assert!(matches!(
+            registry.begin("output.read", &context, &params),
+            Err(RegistryError::InProgress)
+        ));
+        registry
+            .active_response_handoff("output.read", &params)
+            .expect("second handoff token exists")
+            .complete();
+        assert_eq!(registry.record_stats().1, 0);
+    }
+
+    #[test]
+    fn session_resource_creation_stays_active_until_response_handoff() {
+        let registry = OperationRegistry::new(
+            "env".to_owned(),
+            7,
+            2,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let params = serde_json::json!({
+            "context": {"operation_id": "open-reader"},
+            "path": {"mount_id": "workspace", "path": "/file"}
+        });
+        let context = EIPCallContext {
+            operation_id: "open-reader".to_owned(),
+            timeout_ms: None,
+        };
+        let BeginOutcome::New(lease) = registry
+            .begin("file.open_reader", &context, &params)
+            .expect("session resource operation begins")
+        else {
+            panic!("new operation expected")
+        };
+        lease
+            .finish(&serde_json::json!({"reader": "reader-1"}), None)
+            .expect("session resource handler completes");
+        assert!(matches!(
+            registry.begin("file.open_reader", &context, &params),
+            Err(RegistryError::InProgress)
+        ));
+        registry
+            .active_response_handoff("file.open_reader", &params)
+            .expect("session resource response has a handoff")
+            .complete();
+        assert_eq!(registry.record_stats().1, 0);
+    }
+
+    #[test]
+    fn pinned_command_origin_cannot_consume_the_reconciliation_reserve() {
+        let registry = OperationRegistry::new(
+            "env".to_owned(),
+            7,
+            1,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        let start_params = serde_json::json!({
+            "context": {"operation_id": "start"},
+            "request": {"command": {"kind": "argv"}}
+        });
+        let start_context = EIPCallContext {
+            operation_id: "start".to_owned(),
+            timeout_ms: None,
+        };
+        let BeginOutcome::New(start) = registry
+            .begin("process.start", &start_context, &start_params)
+            .expect("command origin begins")
+        else {
+            panic!("new operation expected")
+        };
+        start
+            .finish(
+                &serde_json::json!({
+                    "process": {
+                        "handle": "process-1",
+                        "output": {
+                            "stdout": {"reference": "output-1"},
+                            "stderr": {"reference": "output-2"}
+                        }
+                    }
+                }),
+                None,
+            )
+            .expect("command origin publishes");
+
+        let ordinary_params = serde_json::json!({
+            "context": {"operation_id": "ordinary"},
+            "path": {"mount_id": "workspace", "path": "/file"},
+            "text": "value"
+        });
+        let ordinary_context = EIPCallContext {
+            operation_id: "ordinary".to_owned(),
+            timeout_ms: None,
+        };
+        assert!(matches!(
+            registry.begin("file.write_text", &ordinary_context, &ordinary_params),
+            Err(RegistryError::Capacity)
+        ));
+
+        let reconcile_params = serde_json::json!({
+            "context": {"operation_id": "inspect"},
+            "handle": "process-1"
+        });
+        let reconcile_context = EIPCallContext {
+            operation_id: "inspect".to_owned(),
+            timeout_ms: None,
+        };
+        let BeginOutcome::New(inspect) = registry
+            .begin("process.inspect", &reconcile_context, &reconcile_params)
+            .expect("reconciliation reserve remains available")
+        else {
+            panic!("new reconciliation operation expected")
+        };
+        inspect
+            .finish(&serde_json::json!({"process": {}}), None)
+            .expect("reconciliation handler completes");
+        registry
+            .active_response_handoff("process.inspect", &reconcile_params)
+            .expect("reconciliation response has a handoff")
+            .complete();
+
+        registry.release_selector("process", "process-1");
+        registry.release_selector("output", "output-1");
+        registry.release_selector("output", "output-2");
+        assert!(matches!(
+            registry
+                .begin("file.write_text", &ordinary_context, &ordinary_params)
+                .expect("unpinned origin becomes reclaimable"),
+            BeginOutcome::New(_)
+        ));
     }
 
     #[test]
@@ -691,7 +1150,7 @@ mod tests {
         };
         let params = serde_json::json!({"context": {"operation_id": "timed"}});
         let _lease = match registry
-            .begin("method", &context, &params, false)
+            .begin("environment.describe", &context, &params)
             .expect("operation begins")
         {
             BeginOutcome::New(lease) => lease,
@@ -710,7 +1169,7 @@ mod tests {
             timeout_ms: Some(0),
         };
         assert!(matches!(
-            registry.begin("method", &expired, &params, false),
+            registry.begin("environment.describe", &expired, &params),
             Err(RegistryError::DeadlineExpired)
         ));
     }

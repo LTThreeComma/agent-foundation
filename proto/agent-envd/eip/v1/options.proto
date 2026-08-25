@@ -12,16 +12,11 @@ enum MethodKind {
   METHOD_KIND_REQUEST_RESPONSE = 1;
 }
 
-enum IdempotencyClass {
-  reserved 3, 6, 7, 8;
-  reserved "IDEMPOTENCY_CLASS_PROVIDER_KEY_REPLAY", "IDEMPOTENCY_CLASS_SESSION_RESOURCE_REPLAY", "IDEMPOTENCY_CLASS_STATE_EXPORT", "IDEMPOTENCY_CLASS_NOTIFICATION";
-
-  IDEMPOTENCY_CLASS_UNSPECIFIED = 0;
-  IDEMPOTENCY_CLASS_INITIALIZATION = 1;
-  IDEMPOTENCY_CLASS_READ_ONLY_RETRY = 2;
-  IDEMPOTENCY_CLASS_STATE_IDEMPOTENT_CONTROL = 4;
-  IDEMPOTENCY_CLASS_SESSION_TERMINAL = 5;
-  IDEMPOTENCY_CLASS_OPERATION_REPLAY = 9;
+enum ReplayClass {
+  REPLAY_CLASS_UNSPECIFIED = 0;
+  REPLAY_CLASS_LEDGER_EXTERNAL = 1;
+  REPLAY_CLASS_ACTIVE_ONLY = 2;
+  REPLAY_CLASS_TERMINAL_EVIDENCE = 3;
 }
 
 enum ErrorFamily {
@@ -58,7 +53,7 @@ message EIPMethodOptions {
 
   string jsonrpc_method = 1;
   MethodKind kind = 3;
-  IdempotencyClass idempotency = 4;
+  ReplayClass replay_class = 4;
   uint32 introduced_major = 6;
   uint32 introduced_minor = 7;
   ErrorFamily error_family = 8;

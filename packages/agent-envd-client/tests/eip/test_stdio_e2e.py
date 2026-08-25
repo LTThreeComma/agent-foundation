@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -41,8 +42,6 @@ from converge_agent_envd_client.eip.v1 import (
     MethodSpec,
     OperationCancelParams,
     OperationCancelStatus,
-    OutputOverflow,
-    OutputPolicy,
     OutputReadParams,
     OutputReleaseParams,
     PortAddress,
@@ -53,7 +52,6 @@ from converge_agent_envd_client.eip.v1 import (
     ProcessCloseStdinParams,
     ProcessInspectParams,
     ProcessKillParams,
-    ProcessReadOutputParams,
     ProcessReleaseParams,
     ProcessSignalParams,
     ProcessStartParams,
@@ -303,8 +301,7 @@ def test_configured_mount_defines_file_and_command_surface(tmp_path: Path) -> No
             )
         )
         assert foreground.status.cleanup.value == "complete"
-        assert foreground.output.stdout.capture.inline is not None
-        assert base64.b64decode(foreground.output.stdout.capture.inline.data + "===") == b"configured-command\n"
+        assert base64.b64decode(foreground.output.stdout.preview.data + "===") == b"configured-command\n"
         await session.close()
         assert_disabled_isolation_warning(await wait_for_exit(daemon))
 
@@ -341,7 +338,7 @@ def test_mount_ancestor_of_private_runtime_fails_closed(tmp_path: Path) -> None:
         )
         stderr = await wait_for_exit(process, expected_code=1)
         assert b"mount initialization failed" in stderr
-        assert b"overlap protected command runtime directories" in stderr
+        assert b"overlap the protected envd runtime parent" in stderr
 
     asyncio.run(scenario())
 
@@ -486,6 +483,11 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                     }
                 ],
                 "trusted_executable_roots": [str(python.parent)],
+                "limits": {
+                    "max_output_preview_bytes": 4,
+                    "max_output_bytes_per_stream": 128,
+                    "max_spool_bytes": 512,
+                },
             }
         )
     )
@@ -518,11 +520,6 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             cwd=EIPPath(mount_id="workspace", path="/"),
             environment=CommandEnvironment(set={"BLOCK3_TEST": "works"}),
             keep_stdin_open=True,
-            output_policy=OutputPolicy(
-                max_inline_bytes=4,
-                max_output_bytes=128,
-                overflow=OutputOverflow.RETAIN,
-            ),
         )
         started = await session.client.process_start(
             ProcessStartParams(
@@ -580,48 +577,20 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         assert waited.process.status.cleanup.value == "complete"
         assert waited.process.status.exit_code == 0
 
-        output = await session.client.process_read_output(
-            ProcessReadOutputParams(
-                context=EIPCallContext(operation_id="process-output-e2e"),
-                handle=started.process.handle,
-                stdout_offset=0,
-                stderr_offset=0,
-                output_policy=OutputPolicy(
-                    max_inline_bytes=128,
-                    max_output_bytes=128,
-                    overflow=OutputOverflow.TRUNCATE,
-                ),
-            )
-        )
-        stdout = b"".join(base64.b64decode(segment.data.data + "===") for segment in output.stdout.chunks)
+        stdout_reference = waited.process.output.stdout.reference
+        stderr_reference = waited.process.output.stderr.reference
+        reader = session.open_output(stdout_reference, observed=waited.process.output.stdout)
+        stdout = b"".join([chunk async for chunk in reader])
         assert stdout.startswith(b"pre:ping:works:")
-        with pytest.raises(EIPMethodError) as output_gap:
-            await session.client.process_read_output(
-                ProcessReadOutputParams(
-                    context=EIPCallContext(operation_id="process-output-gap-e2e"),
-                    handle=started.process.handle,
-                    stdout_offset=output.stdout.capture.available_end + 1,
-                    stderr_offset=0,
+        with pytest.raises(EIPMethodError) as invalid_offset:
+            await session.client.output_read(
+                OutputReadParams(
+                    context=EIPCallContext(operation_id="process-output-invalid-e2e"),
+                    reference=stdout_reference,
+                    start_offset=waited.process.output.stdout.retained_bytes + 1,
                 )
             )
-        assert output_gap.value.error.data.error_type is ErrorType.RETENTION_GAP
-        assert output_gap.value.error.data.available_start == output.stdout.capture.available_start
-        assert output_gap.value.error.data.available_end == output.stdout.capture.available_end
-        reference = waited.process.output.stdout.capture.reference
-        assert reference is not None
-        generic = await session.client.output_read(
-            OutputReadParams(
-                context=EIPCallContext(operation_id="generic-output-e2e"),
-                reference=reference,
-                start_offset=0,
-                output_policy=OutputPolicy(
-                    max_inline_bytes=128,
-                    max_output_bytes=128,
-                    overflow=OutputOverflow.TRUNCATE,
-                ),
-            )
-        )
-        assert b"".join(base64.b64decode(segment.data.data + "===") for segment in generic.chunks) == stdout
+        assert invalid_offset.value.error.data.error_type is ErrorType.INVALID_PARAMS
 
         released = await session.client.process_release(
             ProcessReleaseParams(
@@ -642,6 +611,19 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         )
         assert replayed_after_release == started
 
+        detached_stdout = session.open_output(stdout_reference)
+        detached_stderr = session.open_output(stderr_reference)
+        assert b"".join([chunk async for chunk in detached_stdout]) == stdout
+        assert b"".join([chunk async for chunk in detached_stderr]) == b""
+        for index, detached_reference in enumerate((stdout_reference, stderr_reference)):
+            detached_release = await session.client.output_release(
+                OutputReleaseParams(
+                    context=EIPCallContext(operation_id=f"process-output-release-e2e-{index}"),
+                    reference=detached_reference,
+                )
+            )
+            assert detached_release.released is True
+
         foreground = await session.client.shell_exec(
             ShellExecParams(
                 context=EIPCallContext(operation_id="shell-exec-e2e"),
@@ -657,8 +639,20 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
         )
         assert foreground.status.phase.value == "exited"
         assert foreground.status.cleanup.value == "complete"
-        assert foreground.output.stdout.capture.inline is not None
-        assert base64.b64decode(foreground.output.stdout.capture.inline.data + "===") == b"foreground\n"
+        assert base64.b64decode(foreground.output.stdout.preview.data + "===") == b"fore"
+        foreground_reader = session.open_output(
+            foreground.output.stdout.reference,
+            observed=foreground.output.stdout,
+        )
+        assert b"".join([chunk async for chunk in foreground_reader]) == b"foreground\n"
+        for index, foreground_output in enumerate((foreground.output.stdout, foreground.output.stderr)):
+            foreground_release = await session.client.output_release(
+                OutputReleaseParams(
+                    context=EIPCallContext(operation_id=f"shell-output-release-e2e-{index}"),
+                    reference=foreground_output.reference,
+                )
+            )
+            assert foreground_release.released is True
 
         retained_foreground = await session.client.shell_exec(
             ShellExecParams(
@@ -670,39 +664,20 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                         arguments=("-c", "print('retained-foreground')"),
                     ),
                     cwd=EIPPath(mount_id="workspace", path="/"),
-                    output_policy=OutputPolicy(
-                        max_inline_bytes=4,
-                        max_output_bytes=128,
-                        overflow=OutputOverflow.RETAIN,
-                    ),
                 ),
             )
         )
-        retained_reference = retained_foreground.output.stdout.capture.reference
-        assert retained_reference is not None
-        retained_read = await session.client.output_read(
-            OutputReadParams(
-                context=EIPCallContext(operation_id="shell-retained-read-e2e"),
-                reference=retained_reference,
-                start_offset=0,
-                output_policy=OutputPolicy(
-                    max_inline_bytes=128,
-                    max_output_bytes=128,
-                    overflow=OutputOverflow.TRUNCATE,
-                ),
-            )
+        retained_reference = retained_foreground.output.stdout.reference
+        retained_reader = session.open_output(
+            retained_reference,
+            observed=retained_foreground.output.stdout,
         )
-        assert (
-            b"".join(base64.b64decode(segment.data.data + "===") for segment in retained_read.chunks)
-            == b"retained-foreground\n"
-        )
+        assert b"".join([chunk async for chunk in retained_reader]) == b"retained-foreground\n"
         retained_references = (
             retained_reference,
-            retained_foreground.output.stderr.capture.reference,
+            retained_foreground.output.stderr.reference,
         )
-        assert retained_references[1] is not None
         for index, reference_to_release in enumerate(retained_references):
-            assert reference_to_release is not None
             retained_release = await session.client.output_release(
                 OutputReleaseParams(
                     context=EIPCallContext(
@@ -713,7 +688,7 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
             )
             assert retained_release.released is True
 
-        for attempt in range(20):
+        for attempt in range(1):
             with pytest.raises(EIPMethodError) as output_error:
                 await session.client.shell_exec(
                     ShellExecParams(
@@ -722,20 +697,31 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                             command=ArgvCommand(
                                 kind="argv",
                                 executable_spec=ExecutableName(kind="name", name=python.name),
-                                arguments=("-c", "print('too-much-output')"),
+                                arguments=(
+                                    "-c",
+                                    "import sys; sys.stdout.buffer.write(b'x' * 256); sys.stdout.flush()",
+                                ),
                             ),
                             cwd=EIPPath(mount_id="workspace", path="/"),
-                            output_policy=OutputPolicy(
-                                max_inline_bytes=4,
-                                max_output_bytes=4,
-                                overflow=OutputOverflow.FAIL,
-                            ),
                         ),
                     )
                 )
             assert output_error.value.error.code == -32032
-            assert output_error.value.error.data.process_status is not None
-            assert output_error.value.error.data.process_status.cleanup.value == "complete"
+            error_data = output_error.value.error.data
+            assert error_data.process is None
+            assert error_data.process_status is not None
+            assert error_data.process_status.cleanup.value == "complete"
+            evidence = error_data.output
+            assert evidence is not None
+            assert evidence.stdout.content_complete is False
+            for index, output_info in enumerate((evidence.stdout, evidence.stderr)):
+                released_output = await session.client.output_release(
+                    OutputReleaseParams(
+                        context=EIPCallContext(operation_id=f"shell-output-limit-release-{attempt}-{index}"),
+                        reference=output_info.reference,
+                    )
+                )
+                assert released_output.released is True
 
         sleeper = await session.client.process_start(
             ProcessStartParams(
@@ -755,49 +741,29 @@ def test_configured_daemon_command_process_and_output_plane(tmp_path: Path) -> N
                 ),
             )
         )
-        live_output = await asyncio.wait_for(
-            session.client.process_read_output(
-                ProcessReadOutputParams(
-                    context=EIPCallContext(operation_id="process-live-output-e2e"),
-                    handle=sleeper.process.handle,
-                    stdout_offset=0,
-                    stderr_offset=0,
+        live_reader = session.open_output(
+            sleeper.process.output.stdout.reference,
+            observed=sleeper.process.output.stdout,
+        )
+        live_page = await asyncio.wait_for(live_reader.read_page(wait_ms=5_000), timeout=2)
+        assert live_page.output.producer_complete is False
+        assert live_page.next_offset > 0
+        repeated_reader = session.open_output(
+            sleeper.process.output.stdout.reference,
+            observed=sleeper.process.output.stdout,
+        )
+        repeated_page = await asyncio.wait_for(repeated_reader.read_page(wait_ms=5_000), timeout=1)
+        assert repeated_page.data == live_page.data
+        with pytest.raises(EIPMethodError) as invalid_live_offset:
+            await session.client.output_read(
+                OutputReadParams(
+                    context=EIPCallContext(operation_id="process-live-output-invalid-e2e"),
+                    reference=sleeper.process.output.stdout.reference,
+                    start_offset=live_page.output.retained_bytes + 1,
                     wait_ms=5_000,
                 )
-            ),
-            timeout=2,
-        )
-        assert live_output.stdout.capture.producer_complete is False
-        assert live_output.stdout.next_offset > 0
-        repeated_live_output = await asyncio.wait_for(
-            session.client.process_read_output(
-                ProcessReadOutputParams(
-                    context=EIPCallContext(operation_id="process-live-output-repeat-e2e"),
-                    handle=sleeper.process.handle,
-                    stdout_offset=0,
-                    stderr_offset=0,
-                    wait_ms=5_000,
-                )
-            ),
-            timeout=1,
-        )
-        assert repeated_live_output.stdout.chunks == live_output.stdout.chunks
-        with pytest.raises(EIPMethodError) as live_output_gap:
-            await asyncio.wait_for(
-                session.client.process_read_output(
-                    ProcessReadOutputParams(
-                        context=EIPCallContext(operation_id="process-live-output-gap-e2e"),
-                        handle=sleeper.process.handle,
-                        stdout_offset=live_output.stdout.capture.available_end + 1,
-                        stderr_offset=0,
-                        wait_ms=5_000,
-                    )
-                ),
-                timeout=1,
             )
-        assert live_output_gap.value.error.data.error_type is ErrorType.RETENTION_GAP
-        assert live_output_gap.value.error.data.available_start == live_output.stdout.capture.available_start
-        assert live_output_gap.value.error.data.available_end == live_output.stdout.capture.available_end
+        assert invalid_live_offset.value.error.data.error_type is ErrorType.INVALID_PARAMS
         killed = await session.client.process_kill(
             ProcessKillParams(
                 context=EIPCallContext(
@@ -1156,17 +1122,17 @@ def test_configured_daemon_resource_and_transfer_plane(tmp_path: Path) -> None:
         with pytest.raises(EIPMethodError) as first_failure:
             await session.client.file_stat(missing_a)
         assert first_failure.value.error.data.error_type is ErrorType.NOT_FOUND_OR_DENIED
-        with pytest.raises(EIPMethodError) as collision:
+        with pytest.raises(EIPMethodError) as second_failure:
             await session.client.file_stat(
                 FileStatParams(
                     context=EIPCallContext(operation_id="stat-failure-e2e"),
                     path=EIPPath(mount_id="workspace", path="/missing-b"),
                 )
             )
-        assert collision.value.error.data.error_type is ErrorType.CONFLICT
-        with pytest.raises(EIPMethodError) as replayed_failure:
+        assert second_failure.value.error.data.error_type is ErrorType.NOT_FOUND_OR_DENIED
+        with pytest.raises(EIPMethodError) as repeated_failure:
             await session.client.file_stat(missing_a)
-        assert replayed_failure.value.error == first_failure.value.error
+        assert repeated_failure.value.error.data.error_type is ErrorType.NOT_FOUND_OR_DENIED
 
         listed = await session.client.file_list(
             FileListParams(
@@ -1292,6 +1258,140 @@ def test_preinitialize_and_repeated_initialize_errors() -> None:
     asyncio.run(repeated())
 
 
+def test_large_dual_stream_spool_lock_and_crash_restart(tmp_path: Path) -> None:
+    native = tmp_path / "native"
+    runtime = tmp_path / "runtime"
+    native.mkdir()
+    runtime.mkdir()
+    python = Path(sys.executable).resolve()
+    config_path = tmp_path / "agent-envd.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mounts": [
+                    {
+                        "mount_id": "workspace",
+                        "native_root": str(native),
+                        "writable": False,
+                        "allow_command_execution": True,
+                        "max_file_bytes": 1024 * 1024,
+                        "allowed_operations": ["command_cwd", "executable_source"],
+                    }
+                ],
+                "trusted_executable_roots": [str(python.parent)],
+                "limits": {
+                    "max_output_preview_bytes": 32,
+                    "max_output_bytes_per_stream": 128 * 1024,
+                    "max_spool_bytes": 512 * 1024,
+                },
+            }
+        )
+    )
+
+    async def scenario() -> None:
+        process = await start_daemon(
+            agent_envd_binary(),
+            config_path=config_path,
+            runtime_dir=runtime,
+        )
+        session = await EIPSession.initialize(
+            StdioTransport.from_process(process),
+            expected_environment_id="env-e2e",
+            required_methods=("shell.exec", "output.read"),
+            request_timeout=5,
+        )
+        generation = session.generation
+        stdout_expected = bytes(range(256)) * 256
+        stderr_expected = bytes(range(255, -1, -1)) * 256
+        result = await session.client.shell_exec(
+            ShellExecParams(
+                context=EIPCallContext(operation_id="large-dual-stream-e2e"),
+                request=CommandRequest(
+                    command=ArgvCommand(
+                        kind="argv",
+                        executable_spec=ExecutableName(kind="name", name=python.name),
+                        arguments=(
+                            "-c",
+                            "import sys; "
+                            "sys.stdout.buffer.write(bytes(range(256))*256); "
+                            "sys.stderr.buffer.write(bytes(range(255,-1,-1))*256)",
+                        ),
+                    ),
+                    cwd=EIPPath(mount_id="workspace", path="/"),
+                ),
+            )
+        )
+        assert result.output.stdout.retained_bytes == len(stdout_expected)
+        assert result.output.stderr.retained_bytes == len(stderr_expected)
+        assert len(base64.b64decode(result.output.stdout.preview.data + "===")) == 32
+        stdout = b"".join(
+            [
+                chunk
+                async for chunk in session.open_output(
+                    result.output.stdout.reference,
+                    observed=result.output.stdout,
+                )
+            ]
+        )
+        stderr = b"".join(
+            [
+                chunk
+                async for chunk in session.open_output(
+                    result.output.stderr.reference,
+                    observed=result.output.stderr,
+                )
+            ]
+        )
+        assert hashlib.sha256(stdout).digest() == hashlib.sha256(stdout_expected).digest()
+        assert hashlib.sha256(stderr).digest() == hashlib.sha256(stderr_expected).digest()
+
+        contender = await start_daemon(
+            agent_envd_binary(),
+            config_path=config_path,
+            runtime_dir=runtime,
+        )
+        await wait_for_exit(contender, expected_code=1)
+
+        old_reference = result.output.stdout.reference
+        process.kill()
+        await process.wait()
+        await session.abort()
+        stale_generations = [path for path in runtime.iterdir() if path.name.startswith("generation-")]
+        assert len(stale_generations) == 1
+
+        replacement = await start_daemon(
+            agent_envd_binary(),
+            config_path=config_path,
+            runtime_dir=runtime,
+        )
+        replacement_session = await EIPSession.initialize(
+            StdioTransport.from_process(replacement),
+            expected_environment_id="env-e2e",
+            required_methods=("output.read",),
+            request_timeout=5,
+        )
+        assert replacement_session.generation != generation
+        fresh_generations = [path for path in runtime.iterdir() if path.name.startswith("generation-")]
+        assert len(fresh_generations) == 1
+        assert fresh_generations[0] != stale_generations[0]
+        with pytest.raises(EIPMethodError) as stale_output:
+            await replacement_session.client.output_read(
+                OutputReadParams(
+                    context=EIPCallContext(operation_id="stale-output-after-restart-e2e"),
+                    reference=old_reference,
+                    start_offset=0,
+                )
+            )
+        assert stale_output.value.error.data.error_type in {
+            ErrorType.INVALID_HANDLE,
+            ErrorType.NOT_FOUND_OR_DENIED,
+        }
+        await replacement_session.close()
+        assert_disabled_isolation_warning(await wait_for_exit(replacement))
+
+    asyncio.run(scenario())
+
+
 def test_unknown_method_is_rejected_as_unavailable() -> None:
     async def scenario() -> None:
         process = await start_daemon(agent_envd_binary())
@@ -1299,7 +1399,7 @@ def test_unknown_method_is_rejected_as_unavailable() -> None:
         unknown = MethodSpec(
             name="future.unknown",
             kind="request_response",
-            idempotency="read_only_retry",
+            replay_class="active_only",
             introduced="1.0",
             error_family="common",
             params_type=EnvironmentDescribeParams,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ ALLOWED_ROOTS = (DESCRIPTOR_PATH.parent, PYTHON_PATH, ARTIFACT_PATH)
 
 class GeneratedManifest(TypedDict):
     generated: bool
+    descriptor_sha256: str
     files: list[str]
 
 
@@ -39,11 +41,12 @@ def _safe_generated_path(value: str) -> Path:
     return path
 
 
-def _write_manifest(root: Path, generated: list[Path]) -> None:
+def _write_manifest(root: Path, generated: list[Path], descriptor_sha256: str) -> None:
     relative = sorted(str(path.relative_to(root)) for path in generated)
     relative.append(str(MANIFEST_PATH))
     manifest = {
         "generated": True,
+        "descriptor_sha256": descriptor_sha256,
         "files": sorted(relative),
     }
     path = root / MANIFEST_PATH
@@ -62,8 +65,15 @@ def generate_tree(root: Path) -> None:
     descriptor_target.parent.mkdir(parents=True, exist_ok=True)
     descriptor_target.write_bytes(descriptor_bytes)
 
+    descriptor_sha256 = hashlib.sha256(descriptor_bytes).hexdigest()
     python_target = root / PYTHON_PATH
-    python_paths = write_python_surface(python_target, index, options, frame_profile)
+    python_paths = write_python_surface(
+        python_target,
+        index,
+        options,
+        frame_profile,
+        descriptor_sha256,
+    )
     _format_python(python_target)
 
     artifact_paths = write_artifacts(
@@ -74,7 +84,7 @@ def generate_tree(root: Path) -> None:
         frame_profile,
     )
     generated = [descriptor_target, *python_paths, *artifact_paths]
-    _write_manifest(root, generated)
+    _write_manifest(root, generated, descriptor_sha256)
 
 
 def _read_manifest(root: Path) -> GeneratedManifest:
@@ -84,11 +94,18 @@ def _read_manifest(root: Path) -> GeneratedManifest:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("generated") is not True:
         raise ValueError(f"invalid generated manifest: {MANIFEST_PATH}")
+    descriptor_sha256 = value.get("descriptor_sha256")
+    if not isinstance(descriptor_sha256, str) or len(descriptor_sha256) != 64:
+        raise ValueError(f"invalid generated manifest: {MANIFEST_PATH}")
+    descriptor_path = root / DESCRIPTOR_PATH
+    if not descriptor_path.is_file() or hashlib.sha256(descriptor_path.read_bytes()).hexdigest() != descriptor_sha256:
+        raise ValueError("generated manifest descriptor digest does not match descriptor.pb")
     files = value.get("files")
     if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
         raise ValueError(f"invalid generated manifest: {MANIFEST_PATH}")
     return {
         "generated": True,
+        "descriptor_sha256": descriptor_sha256,
         "files": [item for item in files if isinstance(item, str)],
     }
 
@@ -126,8 +143,8 @@ def install_generated(candidate_root: Path, repository_root: Path) -> None:
     candidate_paths = _manifest_paths(candidate_root)
     try:
         previous_paths = _manifest_paths(repository_root)
-    except FileNotFoundError:
-        previous_paths = set()
+    except (FileNotFoundError, ValueError):
+        previous_paths = _discover_marked_files(repository_root)
     for stale in sorted(previous_paths - candidate_paths):
         target = repository_root / stale
         if target.is_file():

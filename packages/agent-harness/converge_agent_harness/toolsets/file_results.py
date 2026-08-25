@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from pydantic_ai import ToolReturn
 
 from ._results import ToolFailure
+from .output import ToolOutputDisclosure
 
 
 class FileMetadataProjection(TypedDict):
@@ -23,7 +24,9 @@ class FileViewSuccess(TypedDict):
     line_offset: int
     lines_read: int
     has_more: bool
+    next_line_offset: NotRequired[int]
     truncated_lines: list[int]
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type FileViewResult = FileViewSuccess | ToolFailure | ToolReturn
@@ -54,7 +57,10 @@ class FileListSuccess(TypedDict):
     path: str
     entries: list[FileMetadataProjection]
     count: int
+    showing: int
     has_more: bool
+    next_offset: int | None
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type FileListResult = FileListSuccess | ToolFailure
@@ -64,7 +70,10 @@ class FileGlobSuccess(TypedDict):
     ok: Literal[True]
     files: list[str]
     count: int
+    showing: int
     has_more: bool
+    next_offset: int | None
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type FileGlobResult = FileGlobSuccess | ToolFailure
@@ -83,7 +92,10 @@ class FileGrepSuccess(TypedDict):
     ok: Literal[True]
     matches: dict[str, GrepMatchProjection]
     count: int
+    showing: int
     has_more: bool
+    next_offset: int | None
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type FileGrepResult = FileGrepSuccess | ToolFailure

@@ -70,7 +70,7 @@ def redact_json(value: JsonValue) -> JsonValue:
     return value
 
 
-def dump_json_bytes(value: Any, *, sort_keys: bool = False) -> bytes:
+def dump_json_text(value: Any, *, sort_keys: bool = False) -> str:
     """Serialize strict finite JSON with the Harness canonical compact encoding."""
     require_finite_json(value)
     return json.dumps(
@@ -79,4 +79,9 @@ def dump_json_bytes(value: Any, *, sort_keys: bool = False) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
-    ).encode("utf-8")
+    )
+
+
+def dump_json_bytes(value: Any, *, sort_keys: bool = False) -> bytes:
+    """Serialize canonical strict JSON as UTF-8 bytes."""
+    return dump_json_text(value, sort_keys=sort_keys).encode("utf-8")

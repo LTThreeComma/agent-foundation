@@ -25,7 +25,7 @@ Package presence is availability, not authorization. Neither catalog accepts an 
 From the repository root:
 
 ```bash
-make examples-check
+make examples-check-all
 ```
 
 From this directory:
@@ -227,13 +227,13 @@ Harness middleware is trusted in-process code. Behavior inside the Pydantic Agen
 - both complete offline demos;
 - isolated state across concurrent logical runs.
 
-The fast gate validates the lock, style, types, tests, YAML configuration, and all four smoke paths:
+The fast gate validates locks, style, and types:
 
 ```bash
 make examples-check
 ```
 
-The complete gate also builds the wheel and source distribution:
+The complete gate also runs focused tests and every smoke path, then builds each wheel and source distribution:
 
 ```bash
 make examples-check-all

@@ -278,6 +278,63 @@ async def test_file_only_binding_does_not_advertise_or_create_output_operations(
         assert EnvironmentAction.OUTPUT_READ not in entered.descriptor.permissions.operations
 
 
+async def test_read_only_binding_advertises_only_effective_file_permissions(tmp_path: Path) -> None:
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="read-only-permissions",
+            root=DirectLocalRootConfiguration(
+                path=tmp_path,
+                ownership="caller_owned",
+                read_only=True,
+            ),
+        )
+    )
+    async with provider.bind(
+        run_id="run-1",
+        instance=_instance(),
+        binding_id="binding-1",
+        binding_revision=1,
+    ) as entered:
+        permissions = entered.descriptor.permissions.operations
+        assert EnvironmentAction.FILE_READ_TEXT in permissions
+        assert EnvironmentAction.FILE_SEARCH_TEXT in permissions
+        assert EnvironmentAction.FILE_WRITE_TEXT not in permissions
+        assert EnvironmentAction.FILE_MKDIR not in permissions
+        assert EnvironmentAction.FILE_REMOVE not in permissions
+
+
+async def test_direct_local_read_race_returns_environment_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "race.bin"
+    target.write_bytes(b"value")
+    provider = DirectLocalEnvironmentProviderBinding(
+        DirectLocalEnvironmentConfiguration(
+            environment_id="read-race",
+            root=DirectLocalRootConfiguration(path=tmp_path, ownership="caller_owned"),
+        )
+    )
+    original = local_files_module._read_bytes_at_most
+
+    def remove_before_read(path: Path, offset: int, length: int | None, max_bytes: int) -> bytes:
+        path.unlink()
+        return original(path, offset, length, max_bytes)
+
+    monkeypatch.setattr(local_files_module, "_read_bytes_at_most", remove_before_read)
+    async with provider.bind(
+        run_id="run-1",
+        instance=_instance(),
+        binding_id="binding-1",
+        binding_revision=1,
+    ) as entered:
+        files = entered.operations.files
+        assert files is not None
+        with pytest.raises(EnvironmentError) as missing:
+            await files.read_bytes("/race.bin")
+        assert missing.value.code == "environment_not_found"
+
+
 async def test_binding_teardown_attempts_spool_and_owned_root_cleanup_after_process_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -235,6 +236,148 @@ async def test_ordinary_environment_skill_read_emits_usage_observation(tmp_path:
         and payload.get("source_id") == "workspace"
         for payload in extension_payloads
     )
+
+
+async def test_selected_skill_markdown_uses_relaxed_full_read_budget(tmp_path: Path) -> None:
+    skill = tmp_path / ".agents" / "skills" / "review"
+    skill.mkdir(parents=True)
+    content = "---\nname: review\ndescription: Review code.\n---\n\n" + "".join(
+        f"line {index}: {'x' * 60}\n" for index in range(220)
+    )
+    (skill / "SKILL.md").write_text(content, encoding="utf-8")
+    (tmp_path / "notes.md").write_text(content, encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/.agents/skills/review/SKILL.md"}),
+                    tool_call_id="skill-read",
+                ),
+                1: DeltaToolCall(
+                    name="view",
+                    json_args=json.dumps({"file_path": "/workspace/notes.md"}),
+                    tool_call_id="ordinary-read",
+                ),
+            }
+        else:
+            observed.update({part.tool_call_id: part.content for part in returns})
+            yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            DynamicEnvironmentCapability(
+                DynamicEnvironmentConfiguration(
+                    max_topology_bindings=8,
+                    max_topology_bytes=4096,
+                    max_reference_entries=64,
+                )
+            ),
+            SkillsCapability(_manager()),
+        ),
+    )
+    result = await executable.run(
+        "Review",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(InvocationPolicyCapability(evaluator=_Allow()),),
+        ),
+    )
+
+    assert result.output_or_raise() == "done"
+    skill_result = observed["skill-read"]
+    ordinary_result = observed["ordinary-read"]
+    assert isinstance(skill_result, dict)
+    assert skill_result["content"] == content
+    assert skill_result["has_more"] is False
+    assert "disclosure" not in skill_result
+    assert isinstance(ordinary_result, dict)
+    assert ordinary_result["content"] != content
+    assert ordinary_result["disclosure"]["truncated"] is True
+
+
+async def test_large_selected_skill_markdown_continues_without_skipping_lines(tmp_path: Path) -> None:
+    skill = tmp_path / ".agents" / "skills" / "review"
+    skill.mkdir(parents=True)
+    content = "---\nname: review\ndescription: Review code.\n---\n\n" + "".join(
+        f"line {index}: {'x' * (3_000 if index == 300 else 80)}\n" for index in range(520)
+    )
+    (skill / "SKILL.md").write_text(content, encoding="utf-8")
+    pages: list[dict[str, object]] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if returns:
+            latest = returns[-1].content
+            assert isinstance(latest, dict)
+            if len(pages) < len(returns):
+                pages.append(latest)
+            if latest["has_more"] is False:
+                yield "done"
+                return
+            next_offset = latest["next_line_offset"]
+        else:
+            next_offset = None
+        arguments = {"file_path": "/workspace/.agents/skills/review/SKILL.md", "line_limit": 800}
+        if next_offset is not None:
+            arguments["line_offset"] = next_offset
+        yield {
+            0: DeltaToolCall(
+                name="view",
+                json_args=json.dumps(arguments),
+                tool_call_id=f"skill-page-{len(returns) + 1}",
+            )
+        }
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(
+            DynamicEnvironmentCapability(
+                DynamicEnvironmentConfiguration(
+                    max_topology_bindings=8,
+                    max_topology_bytes=4096,
+                    max_reference_entries=64,
+                )
+            ),
+            SkillsCapability(_manager()),
+        ),
+    )
+    result = await executable.run(
+        "Review",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(InvocationPolicyCapability(evaluator=_Allow()),),
+        ),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert len(pages) >= 2
+    assert "".join(str(page["content"]) for page in pages) == content
+    for previous, current in pairwise(pages):
+        assert current["line_offset"] == previous["next_line_offset"]
+    assert all(str(page["content"]).endswith("\n") for page in pages[:-1])
 
 
 async def test_skill_source_cannot_escape_its_declared_logical_roots(tmp_path: Path) -> None:

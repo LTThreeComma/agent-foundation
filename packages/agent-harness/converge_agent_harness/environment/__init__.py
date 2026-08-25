@@ -30,6 +30,7 @@ from .coordinator import (
     create_environment_run_binding,
     create_noop_environment_run_binding,
 )
+from .eip import EIPEnvironmentProviderBinding, EIPSessionFactory
 from .files import (
     FileCopyResult,
     FileEntriesResult,
@@ -157,6 +158,8 @@ __all__ = [
     "DirectLocalShellProfile",
     "DynamicEnvironmentCapability",
     "DynamicEnvironmentConfiguration",
+    "EIPEnvironmentProviderBinding",
+    "EIPSessionFactory",
     "EnvironmentAction",
     "EnvironmentActionDispatch",
     "EnvironmentAvailability",

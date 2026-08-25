@@ -158,8 +158,8 @@ from converge_agent_harness.usage import (
     MODEL_COST_RUN_CAPABILITY_ID,
     USAGE_CAPABILITY_ID,
     ModelCostRunCapability,
+    RunUsageLedger,
     UsageCapability,
-    _RunUsageLedger,
 )
 
 _AGENT_EVENT_ADAPTER = TypeAdapter(AgentStreamEvent)
@@ -805,7 +805,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                     raise RunError("Run input factory failed.", code="input_factory_failed") from exc
             semantic_input = normalize_input(input_value)
             plugin_context = BoundPluginContext()
-            usage_attribution = _RunUsageLedger(
+            usage_attribution = RunUsageLedger(
                 run_id=self.run_id,
                 instance=self._bindings.instance,
                 events=self._emitter,
@@ -819,7 +819,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 plugins=plugin_context,
                 subagents=self._executable.subagents,
                 events=self._emitter,
-                _usage_attribution=usage_attribution,
+                usage_attribution=usage_attribution,
                 deferred_resume=self._deferred_resume,
                 metadata=self._bindings.metadata,
                 _capability_provenance=_CapabilityProvenance(
@@ -1306,7 +1306,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamItem[OutputT]]):
                 continue
             if terminal:
                 self._install_terminal_fence()
-                await self.context._usage_attribution._flush(reason="terminal")
+                await self.context.usage_attribution._flush(reason="terminal")
                 item = self._validate_result_candidate(item.replace(usage_records=self.context.usage_records))
             target_version = self.context.environment.topology.topology_version
             async for event in self._drain_emitter_through(target_version, terminal=terminal):

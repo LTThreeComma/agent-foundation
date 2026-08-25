@@ -22,6 +22,7 @@ from converge_agent_harness import (
     ProviderUsage,
     ProviderUsageRecord,
     RunBindings,
+    RunUsageLedger,
     UsageMeasure,
 )
 from converge_agent_harness.tools import (
@@ -124,7 +125,9 @@ async def test_each_model_request_reports_mixed_usage_once() -> None:
         "go",
         bindings=RunBindings.local(capabilities=(InvocationPolicyCapability(evaluator=_allow),)),
     ) as stream:
+        assert isinstance(stream.context.usage_attribution, RunUsageLedger)
         items = [item async for item in stream]
+        ledger_records = stream.context.usage_attribution.records
 
     reports = [
         item.event.payload
@@ -138,6 +141,7 @@ async def test_each_model_request_reports_mixed_usage_once() -> None:
     assert [report["reason"] for report in reports] == ["model_request", "model_request"]
     assert [len(report["records"]) for report in reports] == [1, 2]
     assert len(result.usage_records) == 3
+    assert ledger_records == result.usage_records
     assert [record.kind for record in result.usage_records] == ["model", "provider", "model"]
     provider = result.usage_records[1]
     assert isinstance(provider, ProviderUsageRecord)

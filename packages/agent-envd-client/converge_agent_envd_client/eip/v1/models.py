@@ -148,7 +148,6 @@ class ErrorType(StrEnum):
     UNSUPPORTED = "unsupported"
     STALE_GENERATION = "stale_generation"
     INVALID_HANDLE = "invalid_handle"
-    RETENTION_GAP = "retention_gap"
     BUSY = "busy"
     QUOTA_EXCEEDED = "quota_exceeded"
     OUTPUT_LIMIT_EXCEEDED = "output_limit_exceeded"
@@ -216,19 +215,6 @@ class OperationCancelStatus(StrEnum):
     NOT_CANCELLABLE = "not_cancellable"
 
 
-class OutputKind(StrEnum):
-    EMPTY = "empty"
-    INLINE = "inline"
-    RETAINED = "retained"
-    TRUNCATED = "truncated"
-
-
-class OutputOverflow(StrEnum):
-    FAIL = "fail"
-    TRUNCATE = "truncate"
-    RETAIN = "retain"
-
-
 class PortAddress(StrEnum):
     LOOPBACK = "loopback"
     ANY = "any"
@@ -254,11 +240,6 @@ class ProcessSignal(StrEnum):
     INTERRUPT = "interrupt"
     TERMINATE = "terminate"
     KILL = "kill"
-
-
-class ProcessStream(StrEnum):
-    STDOUT = "stdout"
-    STDERR = "stderr"
 
 
 class ProcessWaitCondition(StrEnum):
@@ -324,7 +305,6 @@ EIP_ERROR_CODES: Final[Mapping[ErrorType, int]] = MappingProxyType(
         ErrorType.UNSUPPORTED: -32012,
         ErrorType.STALE_GENERATION: -32020,
         ErrorType.INVALID_HANDLE: -32021,
-        ErrorType.RETENTION_GAP: -32022,
         ErrorType.BUSY: -32030,
         ErrorType.QUOTA_EXCEEDED: -32031,
         ErrorType.OUTPUT_LIMIT_EXCEEDED: -32032,
@@ -376,16 +356,16 @@ class EIPLimits(EIPModel):
     max_concurrent_operations: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     max_processes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     max_operation_duration_ms: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    max_inline_output_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    max_output_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_output_preview_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    max_output_bytes_per_stream: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     max_transfer_frame_bytes: Annotated[StrictInt, Field(ge=25, le=18446744073709551615)]
     max_concurrent_file_transfers: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
     max_file_transfer_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
 
     @model_validator(mode="after")
     def _validate_limit_relationships(self) -> EIPLimits:
-        if self.max_inline_output_bytes > self.max_output_bytes:
-            raise ValueError("max_inline_output_bytes cannot exceed max_output_bytes")
+        if self.max_output_preview_bytes > self.max_output_bytes_per_stream:
+            raise ValueError("max_output_preview_bytes cannot exceed max_output_bytes_per_stream")
         return self
 
 
@@ -670,18 +650,6 @@ class OperationReceipt(EIPModel):
     observed_at: EIPTimestamp
 
 
-class OutputPolicy(EIPModel):
-    max_inline_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    max_output_bytes: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    overflow: OutputOverflow
-
-    @model_validator(mode="after")
-    def _validate_output_bounds(self) -> OutputPolicy:
-        if self.max_inline_bytes > self.max_output_bytes:
-            raise ValueError("max_inline_bytes cannot exceed max_output_bytes")
-        return self
-
-
 class OutputReference(RootModel[Identifier]):
     model_config = ConfigDict(frozen=True)
     root: Identifier
@@ -695,11 +663,6 @@ class OutputReleaseParams(EIPModel):
 class OutputReleaseResult(EIPModel):
     released: StrictBool
     receipt: OperationReceipt
-
-
-class OutputSegment(EIPModel):
-    start_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    data: EncodedBytes
 
 
 class PortTarget(EIPModel):
@@ -732,15 +695,6 @@ class ProcessInspectParams(EIPModel):
 class ProcessKillParams(EIPModel):
     context: EIPCallContext
     handle: ProcessHandle
-
-
-class ProcessReadOutputParams(EIPModel):
-    context: EIPCallContext
-    handle: ProcessHandle
-    wait_ms: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
-    output_policy: OutputPolicy | None = None
-    stdout_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    stderr_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
 
 
 class ProcessReleaseParams(EIPModel):
@@ -831,41 +785,6 @@ type CommandSpec = Annotated[
 ]
 
 
-class EIPErrorData(EIPModel):
-    error_type: ErrorType
-    retry_hint: RetryHint
-    dispatch_stage: DispatchStage
-    operation_id: Annotated[Identifier, Field(max_length=128)] | None = None
-    environment_id: Identifier | None = None
-    generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
-    field: StrictStr | None = None
-    handle_kind: StrictStr | None = None
-    produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    captured_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    dropped_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    emitted_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    dropped_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    process_status: ProcessStatus | None = None
-    receipt: OperationReceipt | None = None
-    safe_detail: StrictStr | None = None
-    available_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-    available_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
-
-    @model_validator(mode="after")
-    def _validate_retention_gap_bounds(self) -> EIPErrorData:
-        available_start = self.available_start
-        available_end = self.available_end
-        has_start = available_start is not None
-        has_end = available_end is not None
-        if has_start != has_end:
-            raise ValueError("available_start and available_end must be present together")
-        if self.error_type is ErrorType.RETENTION_GAP and not has_start:
-            raise ValueError("retention_gap requires available bounds")
-        if available_start is not None and available_end is not None and available_start > available_end:
-            raise ValueError("available_start cannot exceed available_end")
-        return self
-
-
 class EnvironmentDescriptor(EIPModel):
     environment_id: Identifier
     generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
@@ -949,16 +868,35 @@ class InitializeResult(EIPModel):
     descriptor: EnvironmentDescriptor
 
 
-class OutputPreview(EIPModel):
-    segments: tuple[OutputSegment, ...] = ()
-    represented_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+class OutputInfo(EIPModel):
+    reference: OutputReference
+    producer_complete: StrictBool
+    content_complete: StrictBool
+    produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    retained_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    preview: EncodedBytes
+
+    @model_validator(mode="after")
+    def _validate_output_counts(self) -> OutputInfo:
+        if self.retained_bytes > self.produced_bytes:
+            raise ValueError("retained_bytes cannot exceed produced_bytes")
+        if self.content_complete and self.retained_bytes != self.produced_bytes:
+            raise ValueError("complete output must retain every produced byte")
+        return self
 
 
 class OutputReadParams(EIPModel):
     context: EIPCallContext
     reference: OutputReference
     start_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    output_policy: OutputPolicy | None = None
+    wait_ms: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] = 0
+
+
+class OutputReadResult(EIPModel):
+    next_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    start_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
+    data: EncodedBytes
+    output: OutputInfo
 
 
 class PortInspectParams(EIPModel):
@@ -982,6 +920,17 @@ class ProcessCloseStdinParams(EIPModel):
     handle: ProcessHandle
 
 
+class ProcessOutput(EIPModel):
+    stdout: OutputInfo
+    stderr: OutputInfo
+
+
+class ShellExecResult(EIPModel):
+    status: ProcessStatus
+    output: ProcessOutput
+    receipt: OperationReceipt
+
+
 class CommandRequest(EIPModel):
     command: CommandSpec
     cwd: EIPPath
@@ -990,7 +939,76 @@ class CommandRequest(EIPModel):
     limits: CommandLimits = Field(default_factory=CommandLimits)
     initial_stdin: EncodedBytes | None = None
     keep_stdin_open: StrictBool = False
-    output_policy: OutputPolicy | None = None
+
+
+class EnvironmentDescribeResult(EIPModel):
+    descriptor: EnvironmentDescriptor
+
+
+class PortInspectResult(EIPModel):
+    observation: PortObservation
+
+
+class ProcessInfo(EIPModel):
+    handle: ProcessHandle
+    environment_id: Identifier
+    generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
+    status: ProcessStatus
+    stdin_open: StrictBool
+    output: ProcessOutput
+
+
+class ProcessInspectResult(EIPModel):
+    process: ProcessInfo
+
+
+class ProcessKillResult(EIPModel):
+    process: ProcessInfo
+    receipt: OperationReceipt
+
+
+class ProcessSignalResult(EIPModel):
+    accepted: StrictBool
+    process: ProcessInfo
+    receipt: OperationReceipt
+
+
+class ProcessStartParams(EIPModel):
+    context: EIPCallContext
+    request: CommandRequest
+
+
+class ProcessStartResult(EIPModel):
+    process: ProcessInfo
+    receipt: OperationReceipt
+
+
+class ProcessWaitResult(EIPModel):
+    process: ProcessInfo
+
+
+class ShellExecParams(EIPModel):
+    context: EIPCallContext
+    request: CommandRequest
+
+
+class EIPErrorData(EIPModel):
+    error_type: ErrorType
+    retry_hint: RetryHint
+    dispatch_stage: DispatchStage
+    operation_id: Annotated[Identifier, Field(max_length=128)] | None = None
+    environment_id: Identifier | None = None
+    generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)] | None = None
+    field: StrictStr | None = None
+    handle_kind: StrictStr | None = None
+    produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    emitted_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    dropped_items: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)] | None = None
+    process_status: ProcessStatus | None = None
+    receipt: OperationReceipt | None = None
+    safe_detail: StrictStr | None = None
+    process: ProcessInfo | None = None
+    output: ProcessOutput | None = None
 
 
 class EIPError(EIPModel):
@@ -1003,142 +1021,6 @@ class EIPError(EIPModel):
         if self.code != EIP_ERROR_CODES[self.data.error_type]:
             raise ValueError("JSON-RPC code does not match error_type")
         return self
-
-
-class EnvironmentDescribeResult(EIPModel):
-    descriptor: EnvironmentDescriptor
-
-
-class OutputCapture(EIPModel):
-    kind: OutputKind
-    producer_complete: StrictBool
-    content_complete: StrictBool
-    produced_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    captured_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    dropped_bytes: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    inline: EncodedBytes | None = None
-    preview: OutputPreview | None = None
-    reference: OutputReference | None = None
-    available_start: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    available_end: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-    expires_at: EIPTimestamp | None = None
-
-    @model_validator(mode="after")
-    def _validate_capture_structure(self) -> OutputCapture:
-        if self.available_start > self.available_end:
-            raise ValueError("available_start cannot exceed available_end")
-        if self.kind is OutputKind.EMPTY:
-            if (
-                self.produced_bytes != 0
-                or self.captured_bytes != 0
-                or self.dropped_bytes != 0
-                or self.available_start != 0
-                or self.available_end != 0
-                or any(
-                    value is not None
-                    for value in (
-                        self.inline,
-                        self.preview,
-                        self.reference,
-                        self.expires_at,
-                    )
-                )
-            ):
-                raise ValueError("empty output must contain no bytes or retained state")
-        elif self.kind is OutputKind.INLINE:
-            if self.inline is None or any(
-                value is not None for value in (self.preview, self.reference, self.expires_at)
-            ):
-                raise ValueError("inline output requires only inline data")
-        elif self.kind is OutputKind.RETAINED:
-            if self.reference is None or self.inline is not None or self.expires_at is None:
-                raise ValueError("retained output requires a reference and expiry")
-        elif self.kind is OutputKind.TRUNCATED and any(
-            value is not None for value in (self.inline, self.reference, self.expires_at)
-        ):
-            raise ValueError("truncated output cannot contain retained or inline state")
-        return self
-
-
-class OutputReadResult(EIPModel):
-    chunks: tuple[OutputSegment, ...] = ()
-    capture: OutputCapture
-    next_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-
-
-class PortInspectResult(EIPModel):
-    observation: PortObservation
-
-
-class ProcessStartParams(EIPModel):
-    context: EIPCallContext
-    request: CommandRequest
-
-
-class ProcessStreamRead(EIPModel):
-    chunks: tuple[OutputSegment, ...] = ()
-    capture: OutputCapture
-    next_offset: Annotated[StrictInt, Field(ge=0, le=18446744073709551615)]
-
-
-class ProcessStreamSnapshot(EIPModel):
-    stream: ProcessStream
-    capture: OutputCapture
-
-
-class ShellExecParams(EIPModel):
-    context: EIPCallContext
-    request: CommandRequest
-
-
-class ProcessOutputSnapshot(EIPModel):
-    stdout: ProcessStreamSnapshot
-    stderr: ProcessStreamSnapshot
-
-
-class ShellExecResult(EIPModel):
-    status: ProcessStatus
-    output: ProcessOutputSnapshot
-    receipt: OperationReceipt
-
-
-class ProcessInfo(EIPModel):
-    handle: ProcessHandle
-    environment_id: Identifier
-    generation: Annotated[StrictInt, Field(ge=1, le=18446744073709551615)]
-    status: ProcessStatus
-    stdin_open: StrictBool
-    output: ProcessOutputSnapshot
-
-
-class ProcessInspectResult(EIPModel):
-    process: ProcessInfo
-
-
-class ProcessKillResult(EIPModel):
-    process: ProcessInfo
-    receipt: OperationReceipt
-
-
-class ProcessReadOutputResult(EIPModel):
-    process: ProcessInfo
-    stdout: ProcessStreamRead
-    stderr: ProcessStreamRead
-
-
-class ProcessSignalResult(EIPModel):
-    accepted: StrictBool
-    process: ProcessInfo
-    receipt: OperationReceipt
-
-
-class ProcessStartResult(EIPModel):
-    process: ProcessInfo
-    receipt: OperationReceipt
-
-
-class ProcessWaitResult(EIPModel):
-    process: ProcessInfo
 
 
 CommandEnvironment.model_rebuild()
@@ -1186,16 +1068,13 @@ MountDescriptor.model_rebuild()
 OperationCancelParams.model_rebuild()
 OperationCancelResult.model_rebuild()
 OperationReceipt.model_rebuild()
-OutputPolicy.model_rebuild()
 OutputReleaseParams.model_rebuild()
 OutputReleaseResult.model_rebuild()
-OutputSegment.model_rebuild()
 PortTarget.model_rebuild()
 PortWaitParams.model_rebuild()
 ProcessCloseStdinResult.model_rebuild()
 ProcessInspectParams.model_rebuild()
 ProcessKillParams.model_rebuild()
-ProcessReadOutputParams.model_rebuild()
 ProcessReleaseParams.model_rebuild()
 ProcessReleaseResult.model_rebuild()
 ProcessSignalParams.model_rebuild()
@@ -1210,7 +1089,6 @@ SessionCloseResult.model_rebuild()
 ShellCommand.model_rebuild()
 ShellProfileDescriptor.model_rebuild()
 ArgvCommand.model_rebuild()
-EIPErrorData.model_rebuild()
 EnvironmentDescriptor.model_rebuild()
 FileCopyResult.model_rebuild()
 FileFindResult.model_rebuild()
@@ -1224,31 +1102,28 @@ FileWriterAbortParams.model_rebuild()
 FileWriterCommitParams.model_rebuild()
 FileWriterCommitResult.model_rebuild()
 InitializeResult.model_rebuild()
-OutputPreview.model_rebuild()
+OutputInfo.model_rebuild()
 OutputReadParams.model_rebuild()
+OutputReadResult.model_rebuild()
 PortInspectParams.model_rebuild()
 PortObservation.model_rebuild()
 PortWaitResult.model_rebuild()
 ProcessCloseStdinParams.model_rebuild()
-CommandRequest.model_rebuild()
-EIPError.model_rebuild()
-EnvironmentDescribeResult.model_rebuild()
-OutputCapture.model_rebuild()
-OutputReadResult.model_rebuild()
-PortInspectResult.model_rebuild()
-ProcessStartParams.model_rebuild()
-ProcessStreamRead.model_rebuild()
-ProcessStreamSnapshot.model_rebuild()
-ShellExecParams.model_rebuild()
-ProcessOutputSnapshot.model_rebuild()
+ProcessOutput.model_rebuild()
 ShellExecResult.model_rebuild()
+CommandRequest.model_rebuild()
+EnvironmentDescribeResult.model_rebuild()
+PortInspectResult.model_rebuild()
 ProcessInfo.model_rebuild()
 ProcessInspectResult.model_rebuild()
 ProcessKillResult.model_rebuild()
-ProcessReadOutputResult.model_rebuild()
 ProcessSignalResult.model_rebuild()
+ProcessStartParams.model_rebuild()
 ProcessStartResult.model_rebuild()
 ProcessWaitResult.model_rebuild()
+ShellExecParams.model_rebuild()
+EIPErrorData.model_rebuild()
+EIPError.model_rebuild()
 
 __all__ = [
     "EIP_ERROR_CODES",
@@ -1332,17 +1207,12 @@ __all__ = [
     "OperationCancelResult",
     "OperationCancelStatus",
     "OperationReceipt",
-    "OutputCapture",
-    "OutputKind",
-    "OutputOverflow",
-    "OutputPolicy",
-    "OutputPreview",
+    "OutputInfo",
     "OutputReadParams",
     "OutputReadResult",
     "OutputReference",
     "OutputReleaseParams",
     "OutputReleaseResult",
-    "OutputSegment",
     "PortAddress",
     "PortInspectParams",
     "PortInspectResult",
@@ -1359,10 +1229,8 @@ __all__ = [
     "ProcessInspectResult",
     "ProcessKillParams",
     "ProcessKillResult",
-    "ProcessOutputSnapshot",
+    "ProcessOutput",
     "ProcessPhase",
-    "ProcessReadOutputParams",
-    "ProcessReadOutputResult",
     "ProcessReleaseParams",
     "ProcessReleaseResult",
     "ProcessSignal",
@@ -1371,9 +1239,6 @@ __all__ = [
     "ProcessStartParams",
     "ProcessStartResult",
     "ProcessStatus",
-    "ProcessStream",
-    "ProcessStreamRead",
-    "ProcessStreamSnapshot",
     "ProcessWaitCondition",
     "ProcessWaitParams",
     "ProcessWaitResult",

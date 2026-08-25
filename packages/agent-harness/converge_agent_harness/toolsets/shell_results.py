@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from pydantic import JsonValue
 
 from ._results import ToolFailure
+from .output import ToolOutputDisclosure
 
 
 class ProcessStatusProjection(TypedDict):
@@ -35,6 +36,7 @@ class ProcessProjection(TypedDict):
     stdin_open: bool
     stdout: OutputCaptureProjection
     stderr: OutputCaptureProjection
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 class ProcessSuccess(ProcessProjection):
@@ -49,6 +51,7 @@ class ShellExecSuccess(TypedDict):
     status: ProcessStatusProjection
     stdout: OutputCaptureProjection
     stderr: OutputCaptureProjection
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type ShellExecToolResult = ShellExecSuccess | ToolFailure
@@ -91,6 +94,7 @@ class ProcessReadOutputSuccess(TypedDict):
     process: ProcessProjection
     stdout: OutputCaptureProjection
     stderr: OutputCaptureProjection
+    disclosure: NotRequired[ToolOutputDisclosure]
 
 
 type ProcessReadOutputResult = ProcessReadOutputSuccess | ToolFailure

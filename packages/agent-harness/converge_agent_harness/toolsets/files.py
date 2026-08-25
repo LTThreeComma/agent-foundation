@@ -6,12 +6,14 @@ import asyncio
 import fnmatch
 import posixpath
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic_ai import BinaryContent, RunContext, ToolReturn
 from pydantic_ai.toolsets import FunctionToolset
 
+from converge_agent_harness._json import redact_json
 from converge_agent_harness.context import AgentContext
 from converge_agent_harness.environment.files import (
     FileMetadata,
@@ -20,6 +22,7 @@ from converge_agent_harness.environment.files import (
     FileTextSearchRequest,
 )
 from converge_agent_harness.environment.models import EnvironmentError
+from converge_agent_harness.environment.providers import FileScopeProvider
 from converge_agent_harness.tools.metadata import (
     HarnessTool,
     HarnessToolMetadata,
@@ -29,6 +32,7 @@ from converge_agent_harness.tools.metadata import (
 )
 
 from ._results import ToolFailure
+from ._scoped_files import ScopedFileAccess
 from .file_results import (
     FileEditResult,
     FileGlobResult,
@@ -38,11 +42,24 @@ from .file_results import (
     FileViewResult,
     FileWriteResult,
 )
+from .output import (
+    FINAL_TOOL_OUTPUT_HARD_CHARS,
+    acknowledge_tool_output,
+    continuation_disclosure,
+    disclose_mapping_field,
+    disclose_sequence_field,
+    disclose_text_fields,
+    tool_output_size,
+)
 
 _MAX_MODEL_TEXT_BYTES = 256 * 1024
+_MAX_MODEL_TEXT_PAGE_BYTES = 4 * 1024 * 1024
 _MAX_MODEL_EDIT_BYTES = 16 * 1024 * 1024
 _MAX_MODEL_RESULTS = 1_000
 _MAX_MODEL_MEDIA_BYTES = 16 * 1024 * 1024
+_MAX_SKILL_MARKDOWN_PAGE_BYTES = 16 * 1024 * 1024
+_SKILL_MARKDOWN_LINE_LIMIT = 800
+_SKILL_MARKDOWN_MAX_LINE_LENGTH = 20_000
 
 type _UnlimitedOrPositiveResults = Literal[-1] | Annotated[int, Field(gt=0, le=_MAX_MODEL_RESULTS)]
 
@@ -82,8 +99,11 @@ class FileToolset:
         *,
         resource_resolver: Callable[[str], ToolResourceResolver] | None = None,
         execution_guard: Callable[[], None] | None = None,
+        file_scopes: FileScopeProvider | None = None,
     ) -> None:
         self._files = files
+        self._file_access = ScopedFileAccess(files, file_scopes)
+        self._has_file_scopes = file_scopes is not None
         self._resource_resolver = resource_resolver
         self._execution_guard = execution_guard
         self._mutation_lock = asyncio.Lock()
@@ -195,6 +215,20 @@ class FileToolset:
         ] = None,
     ) -> FileViewResult:
         """Read bounded text or attach a common media file natively."""
+        selected_skill_markdown = _is_selected_skill_markdown(ctx, file_path)
+        full_skill_markdown_read = line_offset in {None, 0} and selected_skill_markdown
+        effective_line_limit = max(line_limit, _SKILL_MARKDOWN_LINE_LIMIT) if full_skill_markdown_read else line_limit
+        effective_max_line_length = (
+            max(max_line_length, _SKILL_MARKDOWN_MAX_LINE_LENGTH) if selected_skill_markdown else max_line_length
+        )
+        page_limit = _MAX_SKILL_MARKDOWN_PAGE_BYTES if selected_skill_markdown else _MAX_MODEL_TEXT_PAGE_BYTES
+        if effective_line_limit * (effective_max_line_length + 1) > page_limit:
+            return _environment_error_result(
+                EnvironmentError(
+                    "Requested text page exceeds the model view limit.",
+                    code="environment_too_large",
+                )
+            )
         extension = posixpath.splitext(file_path)[1].casefold()
         if extension == ".pdf":
             return {
@@ -208,35 +242,60 @@ class FileToolset:
         media_type = _MEDIA_TYPES.get(extension)
         if media_type is not None:
             try:
-                self._guard_execution()
-                metadata = await self._files.stat(file_path)
-                if metadata.kind != "file":
-                    raise EnvironmentError(
-                        "Media view source is not a file.",
-                        code="environment_request_invalid",
+                async with self._file_access.scope(
+                    file_path,
+                    prefer_authorized_selection=False,
+                ) as files:
+                    self._guard_execution()
+                    metadata = await files.stat(file_path)
+                    if metadata.kind != "file":
+                        raise EnvironmentError(
+                            "Media view source is not a file.",
+                            code="environment_request_invalid",
+                        )
+                    if metadata.size is not None and metadata.size > _MAX_MODEL_MEDIA_BYTES:
+                        raise EnvironmentError(
+                            "Media file exceeds the model view limit.",
+                            code="environment_too_large",
+                        )
+                    self._guard_unscoped_step()
+                    data = await files.read_bytes(
+                        file_path,
+                        length=_MAX_MODEL_MEDIA_BYTES + 1,
                     )
-                if metadata.size is not None and metadata.size > _MAX_MODEL_MEDIA_BYTES:
-                    raise EnvironmentError(
-                        "Media file exceeds the model view limit.",
-                        code="environment_too_large",
+                    if len(data) > _MAX_MODEL_MEDIA_BYTES:
+                        raise EnvironmentError(
+                            "Media file exceeds the model view limit.",
+                            code="environment_too_large",
+                        )
+                    message = f"The {media_type} file {file_path} is attached in the user message."
+                    if instructions is not None and instructions.strip():
+                        message = f"{message}\n\nAnalysis instructions:\n{instructions.strip()}"
+                    return ToolReturn(
+                        return_value=message,
+                        content=[BinaryContent(data=data, media_type=media_type)],
                     )
-                self._guard_execution()
-                data = await self._files.read_bytes(file_path)
-                message = f"The {media_type} file {file_path} is attached in the user message."
-                if instructions is not None and instructions.strip():
-                    message = f"{message}\n\nAnalysis instructions:\n{instructions.strip()}"
-                return ToolReturn(
-                    return_value=message,
-                    content=[BinaryContent(data=data, media_type=media_type)],
-                )
             except EnvironmentError as exc:
                 return _environment_error_result(exc)
+
+        async def disclose(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+            if selected_skill_markdown:
+                return await _disclose_skill_markdown_page(ctx.deps, value)
+            return await disclose_text_fields(
+                ctx.deps,
+                value,
+                text_fields=("content",),
+                content_complete=not bool(value.get("has_more")),
+                noun="file page",
+            )
+
         return await self._execute(
-            lambda: self._files.read_text(
+            file_path,
+            lambda files: files.read_text(
                 file_path,
                 line_offset=line_offset or 0,
-                line_limit=line_limit,
-                max_line_length=max_line_length,
+                line_limit=effective_line_limit,
+                max_line_length=effective_max_line_length,
             ),
             lambda result: {
                 "file_path": result.path,
@@ -246,6 +305,7 @@ class FileToolset:
                 "has_more": result.has_more,
                 "truncated_lines": list(result.truncated_lines),
             },
+            disclose=disclose,
         )
 
     async def write(
@@ -257,18 +317,19 @@ class FileToolset:
     ) -> FileWriteResult:
         """Write or append text, creating parent directories when needed."""
 
-        async def operation():
+        async def operation(files: FileOperator):
             async with self._mutation_lock:
                 self._guard_execution()
-                await self._ensure_parent(file_path)
-                self._guard_execution()
-                return await self._files.write_text(
+                await self._ensure_parent(files, file_path)
+                self._guard_unscoped_step()
+                return await files.write_text(
                     file_path,
                     content,
                     mode="append" if mode == "a" else "upsert",
                 )
 
         return await self._execute(
+            file_path,
             operation,
             lambda result: {"file_path": result.path, "bytes_written": result.bytes_written},
         )
@@ -308,10 +369,22 @@ class FileToolset:
         ctx: RunContext[AgentContext],
         path: Annotated[str, Field(description="Logical directory path")],
         ignore: Annotated[Sequence[str] | None, Field(default=None)] = None,
+        offset: Annotated[int, Field(default=0, ge=0)] = 0,
         max_results: _UnlimitedOrPositiveResults = 500,
     ) -> FileListResult:
         """List one directory and optionally omit matching entry names."""
         limit = _MAX_MODEL_RESULTS if max_results == -1 else max_results
+
+        async def disclose(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+            bounded, showing = await disclose_sequence_field(
+                ctx.deps,
+                value,
+                field="entries",
+                content_complete=not bool(value.get("has_more")),
+                noun="directory page",
+            )
+            bounded["showing"] = showing
+            return bounded
 
         def project(result) -> Mapping[str, JsonValue]:
             entries = [
@@ -319,21 +392,26 @@ class FileToolset:
                 for entry in result.entries
                 if not ignore or not any(fnmatch.fnmatch(posixpath.basename(entry.path), pattern) for pattern in ignore)
             ]
+            next_offset = result.offset + len(result.entries) if result.has_more else None
             return {
                 "path": path,
                 "entries": cast(JsonValue, entries),
                 "count": len(entries),
+                "showing": len(entries),
                 "has_more": result.has_more,
+                "next_offset": next_offset,
             }
 
         return await self._execute(
-            lambda: self._files.list(
+            path,
+            lambda files: files.list(
                 path,
-                offset=0,
+                offset=offset,
                 max_results=limit,
                 include_hidden=False,
             ),
             project,
+            disclose=disclose,
         )
 
     async def glob(
@@ -351,6 +429,7 @@ class FileToolset:
             ),
         ] = False,
         include_hidden: Annotated[bool, Field(default=False)] = False,
+        offset: Annotated[int, Field(default=0, ge=0)] = 0,
         max_results: _UnlimitedOrPositiveResults = 500,
     ) -> FileGlobResult:
         """Find matching paths through the provider-neutral Environment query operation."""
@@ -361,16 +440,32 @@ class FileToolset:
             pattern=pattern,
             recursive=True,
             include_hidden=include_hidden,
-            offset=0,
+            offset=offset,
             max_results=limit,
         )
+
+        async def disclose(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+            bounded, showing = await disclose_sequence_field(
+                ctx.deps,
+                value,
+                field="files",
+                content_complete=not bool(value.get("has_more")),
+                noun="glob page",
+            )
+            bounded["showing"] = showing
+            return bounded
+
         return await self._execute(
-            lambda: self._files.query(request),
+            root,
+            lambda files: files.query(request),
             lambda result: {
                 "files": [entry.path for entry in result.entries],
                 "count": len(result.entries),
+                "showing": len(result.entries),
                 "has_more": result.has_more,
+                "next_offset": result.offset + len(result.entries) if result.has_more else None,
             },
+            disclose=disclose,
         )
 
     async def grep(
@@ -390,6 +485,7 @@ class FileToolset:
         ] = False,
         include_hidden: Annotated[bool, Field(default=False)] = False,
         context_lines: Annotated[int, Field(default=2, ge=0, le=20)] = 2,
+        offset: Annotated[int, Field(default=0, ge=0)] = 0,
         max_results: _UnlimitedOrPositiveResults = 100,
         max_matches_per_file: _UnlimitedOrPositiveResults = 20,
         max_files: _UnlimitedOrPositiveResults = 50,
@@ -403,27 +499,29 @@ class FileToolset:
             regex=True,
             case_sensitive=True,
             include_hidden=include_hidden,
-            offset=0,
+            offset=offset,
             max_matches=_MAX_MODEL_RESULTS,
             max_line_length=2_000,
         )
 
-        async def operation():
-            result = await self._files.search_text(request)
+        async def operation(files: FileOperator):
+            result = await files.search_text(request)
             selected = []
+            consumed = 0
             per_file: dict[str, int] = {}
-            files: set[str] = set()
+            selected_files: set[str] = set()
             for match in result.matches:
+                if len(selected) >= result_limit:
+                    break
+                consumed += 1
                 if not _matches_file_glob(match.path, root=root, pattern=include):
                     continue
-                if max_files != -1 and match.path not in files and len(files) >= max_files:
+                if max_files != -1 and match.path not in selected_files and len(selected_files) >= max_files:
                     continue
                 count = per_file.get(match.path, 0)
                 if max_matches_per_file != -1 and count >= max_matches_per_file:
                     continue
-                if len(selected) >= result_limit:
-                    break
-                files.add(match.path)
+                selected_files.add(match.path)
                 per_file[match.path] = count + 1
                 selected.append(match)
 
@@ -439,18 +537,20 @@ class FileToolset:
             for match in selected:
                 context_start_line = max(1, match.line - context_lines)
                 context_end_line = match.line + context_lines
-                self._guard_execution()
-                context = await self._files.read_text(
+                self._guard_unscoped_step()
+                context = await files.read_text(
                     match.path,
                     line_offset=context_start_line - 1,
                     line_limit=context_end_line - context_start_line + 1,
                     max_line_length=max_context_line_length,
                 )
                 projected.append((match, context, context_start_line))
-            return result, projected
+            has_more = result.has_more or consumed < len(result.matches)
+            next_offset = result.offset + consumed if has_more else None
+            return projected, next_offset, has_more
 
         def project(value) -> Mapping[str, JsonValue]:
-            result, projected = value
+            projected, next_offset, has_more = value
             matches: dict[str, JsonValue] = {}
             for match, context, context_start_line in projected:
                 key = f"{match.path}:{match.line}"
@@ -468,10 +568,28 @@ class FileToolset:
             return {
                 "matches": cast(JsonValue, matches),
                 "count": len(matches),
-                "has_more": result.has_more or len(matches) >= result_limit,
+                "showing": len(matches),
+                "has_more": has_more,
+                "next_offset": next_offset,
             }
 
-        return await self._execute(operation, project)
+        async def disclose(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+            bounded, showing = await disclose_mapping_field(
+                ctx.deps,
+                value,
+                field="matches",
+                content_complete=not bool(value.get("has_more")),
+                noun="grep page",
+            )
+            bounded["showing"] = showing
+            return bounded
+
+        return await self._execute(
+            root,
+            operation,
+            project,
+            disclose=disclose,
+        )
 
     async def _apply_edits(
         self,
@@ -479,7 +597,7 @@ class FileToolset:
         file_path: str,
         edits: tuple[FileTextEdit, ...],
     ) -> FileEditResult:
-        async def operation():
+        async def operation(files: FileOperator):
             async with self._mutation_lock:
                 self._guard_execution()
                 create = edits[0].old_string == ""
@@ -488,7 +606,15 @@ class FileToolset:
                     pending = edits[1:]
                     write_mode = "create"
                 else:
-                    data = await self._files.read_bytes(file_path)
+                    data = await files.read_bytes(
+                        file_path,
+                        length=_MAX_MODEL_EDIT_BYTES + 1,
+                    )
+                    if len(data) > _MAX_MODEL_EDIT_BYTES:
+                        raise EnvironmentError(
+                            "Edit target exceeds the model edit limit.",
+                            code="environment_too_large",
+                        )
                     try:
                         content = data.decode("utf-8", errors="strict")
                     except UnicodeDecodeError as exc:
@@ -506,11 +632,12 @@ class FileToolset:
                     2 if create else 1,
                 )
                 if create:
-                    await self._ensure_parent(file_path)
-                self._guard_execution()
-                return await self._files.write_text(file_path, content, mode=write_mode)
+                    await self._ensure_parent(files, file_path)
+                self._guard_unscoped_step()
+                return await files.write_text(file_path, content, mode=write_mode)
 
         return await self._execute(
+            file_path,
             operation,
             lambda result: {
                 "file_path": result.path,
@@ -520,13 +647,12 @@ class FileToolset:
             },
         )
 
-    async def _ensure_parent(self, file_path: str) -> None:
+    async def _ensure_parent(self, files: FileOperator, file_path: str) -> None:
         parent = posixpath.dirname(file_path)
         parts = tuple(part for part in parent.split("/") if part)
         is_binding_root = parent == "/workspace" or (len(parts) == 2 and parts[0] == "environment")
         if parent and parent != "." and not is_binding_root:
-            self._guard_execution()
-            await self._files.mkdir(parent, parents=True, exist_ok=True)
+            await files.mkdir(parent, parents=True, exist_ok=True)
 
     @staticmethod
     def _project_metadata(metadata: FileMetadata) -> FileMetadataProjection:
@@ -539,19 +665,144 @@ class FileToolset:
 
     async def _execute(
         self,
-        operation: Callable[[], Awaitable[Any]],
+        path: str,
+        operation: Callable[[FileOperator], Awaitable[Any]],
         project: Callable[[Any], Mapping[str, object]],
+        *,
+        disclose: Callable[[Mapping[str, JsonValue]], Awaitable[Mapping[str, JsonValue]]] | None = None,
     ) -> Any:
         try:
-            self._guard_execution()
-            result = await operation()
-            return {"ok": True, **dict(project(result))}
+            async with self._file_access.scope(
+                path,
+                prefer_authorized_selection=False,
+            ) as files:
+                self._guard_execution()
+                result = await operation(files)
+            projected = cast(dict[str, JsonValue], {"ok": True, **dict(project(result))})
+            if disclose is not None:
+                return await disclose(projected)
+            return projected
         except EnvironmentError as exc:
             return _environment_error_result(exc)
 
     def _guard_execution(self) -> None:
         if self._execution_guard is not None:
             self._execution_guard()
+
+    def _guard_unscoped_step(self) -> None:
+        if not self._has_file_scopes:
+            self._guard_execution()
+
+
+def _is_selected_skill_markdown(ctx: RunContext[AgentContext], file_path: str) -> bool:
+    from converge_agent_harness.capabilities.skills import SKILLS_CAPABILITY_ID, _SkillsRunCapability
+
+    capability = ctx.capabilities.get(SKILLS_CAPABILITY_ID)
+    return isinstance(capability, _SkillsRunCapability) and capability.is_selected_markdown(file_path)
+
+
+async def _disclose_skill_markdown_page(
+    context: AgentContext,
+    value: Mapping[str, JsonValue],
+) -> Mapping[str, JsonValue]:
+    safe_value = redact_json(cast(JsonValue, dict(value)))
+    assert isinstance(safe_value, dict)
+    result = safe_value
+    result_fits = tool_output_size(result) <= FINAL_TOOL_OUTPUT_HARD_CHARS
+    if result_fits and not bool(result.get("has_more")):
+        return acknowledge_tool_output(result)
+    content = result.get("content")
+    line_offset = result.get("line_offset")
+    lines_read = result.get("lines_read")
+    if not isinstance(content, str) or not isinstance(line_offset, int) or not isinstance(lines_read, int):
+        return await disclose_text_fields(
+            context,
+            result,
+            text_fields=("content",),
+            content_complete=not bool(result.get("has_more")),
+            noun="skill Markdown page",
+            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        )
+
+    if result_fits:
+        result["next_line_offset"] = line_offset + lines_read
+        result["disclosure"] = cast(
+            JsonValue,
+            continuation_disclosure(
+                result,
+                hint="Call view again with next_line_offset as line_offset to continue reading this skill Markdown file.",
+            ),
+        )
+        if tool_output_size(result) <= FINAL_TOOL_OUTPUT_HARD_CHARS:
+            return acknowledge_tool_output(result)
+
+    lines = _lf_lines(content)
+    if len(lines) != lines_read:
+        return await disclose_text_fields(
+            context,
+            result,
+            text_fields=("content",),
+            content_complete=not bool(result.get("has_more")),
+            noun="skill Markdown page",
+            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        )
+
+    disclosure = continuation_disclosure(
+        result,
+        hint="Call view again with next_line_offset as line_offset to continue reading this skill Markdown file.",
+    )
+    preview: dict[str, JsonValue] = {
+        **result,
+        "content": "",
+        "lines_read": 0,
+        "has_more": True,
+        "next_line_offset": line_offset,
+        "truncated_lines": [],
+        "disclosure": cast(JsonValue, disclosure),
+    }
+    shown = 0
+    selected_content = ""
+    for line in lines:
+        candidate_content = f"{selected_content}{line}"
+        preview["content"] = candidate_content
+        preview["lines_read"] = shown + 1
+        preview["next_line_offset"] = line_offset + shown + 1
+        if tool_output_size(preview) > FINAL_TOOL_OUTPUT_HARD_CHARS:
+            preview["content"] = selected_content
+            preview["lines_read"] = shown
+            preview["next_line_offset"] = line_offset + shown
+            break
+        selected_content = candidate_content
+        shown += 1
+
+    if shown == 0:
+        return await disclose_text_fields(
+            context,
+            result,
+            text_fields=("content",),
+            content_complete=not bool(result.get("has_more")),
+            noun="skill Markdown page",
+            limit=FINAL_TOOL_OUTPUT_HARD_CHARS,
+        )
+    preview["truncated_lines"] = cast(
+        JsonValue,
+        [
+            item
+            for item in cast(list[JsonValue], result.get("truncated_lines", []))
+            if isinstance(item, int) and line_offset < item <= line_offset + shown
+        ],
+    )
+    return acknowledge_tool_output(preview)
+
+
+def _lf_lines(content: str) -> list[str]:
+    if not content:
+        return []
+    parts = content.split("\n")
+    lines = [f"{part}\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
 
 
 def _environment_error_result(exc: EnvironmentError) -> ToolFailure:
@@ -614,15 +865,18 @@ def _apply_text_edits(
 
 
 def _matches_file_glob(path: str, *, root: str, pattern: str) -> bool:
-    normalized_path = path.removeprefix("/")
+    normalized_path = path.strip("/")
     normalized_root = root.strip("/")
-    if normalized_root and normalized_path.startswith(f"{normalized_root}/"):
-        normalized_path = normalized_path[len(normalized_root) + 1 :]
+    if normalized_root not in {"", "."}:
+        if normalized_path == normalized_root:
+            normalized_path = ""
+        elif normalized_path.startswith(f"{normalized_root}/"):
+            normalized_path = normalized_path[len(normalized_root) + 1 :]
     if pattern in {"*", "**", "**/*"}:
         return True
     if "/" not in pattern:
-        return fnmatch.fnmatch(posixpath.basename(normalized_path), pattern)
-    return fnmatch.fnmatch(normalized_path, pattern)
+        return fnmatch.fnmatchcase(posixpath.basename(normalized_path), pattern)
+    return PurePosixPath(normalized_path).full_match(pattern)
 
 
 __all__ = ["FileTextEdit", "FileToolset"]

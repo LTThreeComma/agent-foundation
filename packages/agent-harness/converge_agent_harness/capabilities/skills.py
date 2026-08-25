@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
+from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -394,10 +395,23 @@ class _SkillsRunCapability(SkillsCapability):
         self._catalog = tuple(item.model_copy(deep=True) for item in catalog)
         self._context = context
         keys: dict[tuple[str, int, str], SkillCatalogItem] = {}
+        directories: list[EnvironmentPath] = []
         for item in self._catalog:
+            directories.append(context.environment.resolve_path(item.path))
             selected = context.environment.resolve_path(_join_logical_path(item.path, _SKILL_FILE_NAME))
             keys[(selected.binding_id, selected.binding_revision, selected.path)] = item
         self._access_keys = MappingProxyType(keys)
+        self._selected_directories = tuple(directories)
+
+    def is_selected_markdown(self, path: str) -> bool:
+        """Return whether a logical path is Markdown beneath one selected skill directory."""
+        try:
+            selected = self._context.environment.resolve_path(path)
+        except EnvironmentError:
+            return False
+        if PurePosixPath(selected.path).suffix.casefold() != ".md":
+            return False
+        return any(_is_within_root(selected, directory) for directory in self._selected_directories)
 
     async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
         if ctx.deps is not self._context:

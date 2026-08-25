@@ -11,6 +11,7 @@ use crate::{
     config::Config,
     daemon::Daemon,
     eip::{DataFrame, DataFrameKind, DataResetStatus, decode_data_frame, encode_data_frame},
+    operation::ActiveResponseHandoff,
     transfer::TransferError,
 };
 
@@ -23,6 +24,11 @@ const MAX_CONTROL_BURST: usize = 8;
 enum InboundFrame {
     Control(Vec<u8>),
     Data(DataFrame),
+}
+
+struct ControlResponse {
+    payload: Vec<u8>,
+    handoff: Option<ActiveResponseHandoff>,
 }
 
 pub(crate) async fn serve(daemon: Arc<Daemon>, config: &Config) -> io::Result<()> {
@@ -54,7 +60,7 @@ where
     let max_transfers = usize::try_from(config.limits.max_concurrent_file_transfers)
         .map_err(|_| invalid_data("max_concurrent_file_transfers does not fit this platform"))?;
 
-    let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(max_concurrency);
+    let (control_tx, control_rx) = mpsc::channel::<ControlResponse>(max_concurrency);
     let data_capacity = max_transfers.saturating_mul(2).max(2);
     let (data_tx, data_rx) = mpsc::channel::<DataFrame>(data_capacity);
     let (inbound_data_tx, mut inbound_data_rx) = mpsc::channel::<DataFrame>(data_capacity);
@@ -166,8 +172,13 @@ where
             first_frame = false;
             let payload = String::from_utf8(frame)
                 .map_err(|_| invalid_data("stdio control body must be UTF-8 JSON"))?;
-            let response = daemon.handle_payload(&payload).await;
-            if control_tx.send(response).await.is_err() {
+            let response = daemon.handle_payload_for_carrier(&payload).await;
+            let (payload, handoff) = response.into_parts();
+            if control_tx
+                .send(ControlResponse { payload, handoff })
+                .await
+                .is_err()
+            {
                 break;
             }
             continue;
@@ -205,8 +216,9 @@ where
                 let responses = control_tx.clone();
                 requests.spawn(async move {
                     let _pending_operation = pending_operation;
-                    let response = daemon.handle_payload(&payload).await;
-                    let _ = responses.send(response).await;
+                    let response = daemon.handle_payload_for_carrier(&payload).await;
+                    let (payload, handoff) = response.into_parts();
+                    let _ = responses.send(ControlResponse { payload, handoff }).await;
                     drop(permit);
                 });
             }
@@ -300,7 +312,7 @@ where
 
 async fn writer_loop<W>(
     mut writer: W,
-    mut controls: mpsc::Receiver<Vec<u8>>,
+    mut controls: mpsc::Receiver<ControlResponse>,
     mut data: mpsc::Receiver<DataFrame>,
     max_control_bytes: usize,
     max_data_bytes: usize,
@@ -330,8 +342,17 @@ where
             biased;
             control = controls.recv(), if control_open => {
                 match control {
-                    Some(payload) => {
-                        write_outer_frame(&mut writer, JSON_CONTENT_TYPE, &payload, max_control_bytes).await?;
+                    Some(response) => {
+                        write_outer_frame(
+                            &mut writer,
+                            JSON_CONTENT_TYPE,
+                            &response.payload,
+                            max_control_bytes,
+                        )
+                        .await?;
+                        if let Some(handoff) = response.handoff {
+                            handoff.complete();
+                        }
                         control_burst = control_burst.saturating_add(1);
                     }
                     None => control_open = false,

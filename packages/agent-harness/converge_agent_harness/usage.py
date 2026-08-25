@@ -255,8 +255,8 @@ class _PricingOutcome:
     response: ModelResponse
 
 
-class _RunUsageLedger:
-    """Append-only mixed-usage records and bounded report checkpoints for one run."""
+class RunUsageLedger:
+    """Append-only mixed-usage attribution ledger for one logical Harness run."""
 
     def __init__(
         self,
@@ -274,7 +274,8 @@ class _RunUsageLedger:
         self._model_ordinal = 0
         self._flush_lock = asyncio.Lock()
 
-    def _snapshot(self) -> tuple[UsageRecord, ...]:
+    @property
+    def records(self) -> tuple[UsageRecord, ...]:
         """Return a detached complete run-local attribution snapshot."""
         return tuple(record.model_copy(deep=True) for record in self._records)
 
@@ -502,7 +503,7 @@ class _UsageActiveCapability(UsageCapability):
                 response = tail
         if response is None:
             return
-        await ctx.deps._usage_attribution._record_model(
+        await ctx.deps.usage_attribution._record_model(
             response,
             pricing=_pricing_for_committed_response(pricing, response),
         )
@@ -644,6 +645,7 @@ __all__ = [
     "ModelUsageRecord",
     "ProviderUsage",
     "ProviderUsageRecord",
+    "RunUsageLedger",
     "UsageMeasure",
     "UsageRecord",
 ]

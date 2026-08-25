@@ -18,10 +18,13 @@ from converge_agent_envd_client.eip.v1 import (
     FileByteRange,
     FileWriteMode,
     InitializeParams,
+    OutputInfo,
+    OutputReference,
     SessionCloseParams,
 )
 from converge_agent_envd_client.errors import EIPProtocolError, EIPSessionStateError
 from converge_agent_envd_client.file_transfer import EIPFileReader, EIPFileWriter
+from converge_agent_envd_client.output import EIPOutputReader
 from converge_agent_envd_client.requester import RequestCoordinator
 from converge_agent_envd_client.transport import EIPTransport
 
@@ -146,6 +149,24 @@ class EIPSession:
             executable=executable,
             transfer_timeout_ms=transfer_timeout_ms,
             max_transfer_frame_bytes=self._descriptor.limits.max_transfer_frame_bytes,
+        )
+
+    def open_output(
+        self,
+        reference: OutputReference | str,
+        *,
+        start_offset: int = 0,
+        observed: OutputInfo | None = None,
+    ) -> EIPOutputReader:
+        self._ensure_open()
+        self._require_method("output.read")
+        resolved_reference = reference if isinstance(reference, OutputReference) else OutputReference(reference)
+        return EIPOutputReader(
+            self._requester,
+            self._client,
+            resolved_reference,
+            start_offset=start_offset,
+            observed=observed,
         )
 
     async def describe(self) -> EnvironmentDescriptor:
@@ -274,8 +295,8 @@ def _validate_descriptor_refresh(
         or refreshed.max_concurrent_operations > current.max_concurrent_operations
         or refreshed.max_processes > current.max_processes
         or refreshed.max_operation_duration_ms > current.max_operation_duration_ms
-        or refreshed.max_inline_output_bytes > current.max_inline_output_bytes
-        or refreshed.max_output_bytes > current.max_output_bytes
+        or refreshed.max_output_preview_bytes > current.max_output_preview_bytes
+        or refreshed.max_output_bytes_per_stream > current.max_output_bytes_per_stream
         or refreshed.max_transfer_frame_bytes > current.max_transfer_frame_bytes
         or refreshed.max_concurrent_file_transfers > current.max_concurrent_file_transfers
         or refreshed.max_file_transfer_bytes > current.max_file_transfer_bytes

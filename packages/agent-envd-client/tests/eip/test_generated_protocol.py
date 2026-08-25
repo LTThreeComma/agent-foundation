@@ -35,7 +35,7 @@ from converge_agent_envd_client.eip.v1.models import (
     FileStatParams,
     FileStatResult,
     InitializeParams,
-    OutputCapture,
+    OutputInfo,
     OutputReadParams,
     ProcessWriteStdinParams,
     ReceiptGetParams,
@@ -55,8 +55,8 @@ def valid_eip_limits() -> dict[str, int]:
         "max_concurrent_operations": 1,
         "max_processes": 1,
         "max_operation_duration_ms": 1,
-        "max_inline_output_bytes": 1,
-        "max_output_bytes": 1,
+        "max_output_preview_bytes": 1,
+        "max_output_bytes_per_stream": 1,
         "max_transfer_frame_bytes": 25,
         "max_concurrent_file_transfers": 1,
         "max_file_transfer_bytes": 1,
@@ -79,13 +79,15 @@ MODEL_TYPES: dict[str, type[BaseModel]] = {
 def test_generated_surface_covers_eip_v1() -> None:
     assert EIP_PROTOCOL_VERSION == "1.0"
     assert EIP_PROTO_PACKAGE == "converge.agent_envd.eip.v1"
-    assert len(METHODS) == 35
+    assert len(METHODS) == 34
     assert len(set(METHODS)) == len(METHODS)
     assert all(method.kind == "request_response" for method in METHODS.values())
     assert all(method.name == name for name, method in METHODS.items())
     assert all(method.introduced == "1.0" for method in METHODS.values())
-    assert EIP_ERROR_CODES[ErrorType.RETENTION_GAP] == -32022
     assert EIP_ERROR_CODES[ErrorType.INTEGRITY_MISMATCH] == -32061
+    assert sum(method.replay_class == "active_only" for method in METHODS.values()) == 18
+    assert sum(method.replay_class == "terminal_evidence" for method in METHODS.values()) == 15
+    assert [method.name for method in METHODS.values() if method.replay_class == "ledger_external"] == ["initialize"]
     transfer_methods = [method for method in METHODS.values() if method.transfer_action is not None]
     assert len(transfer_methods) == 5
     assert all(method.transfer_direction is not None for method in transfer_methods)
@@ -175,7 +177,6 @@ def test_explicit_wire_defaults_are_applied_but_omitted_canonically() -> None:
     assert params.request.environment.set == {}
     assert params.request.environment.unset == ()
     assert params.request.limits.wall_time_ms is None
-    assert params.request.output_policy is None
     encoded_request = json.loads(encode_model(params))["request"]
     assert encoded_request["command"] == {
         "executable_spec": {"kind": "name", "name": "true"},
@@ -185,17 +186,16 @@ def test_explicit_wire_defaults_are_applied_but_omitted_canonically() -> None:
     assert "environment" not in encoded_request
     assert "limits" not in encoded_request
     assert "keep_stdin_open" not in encoded_request
-    assert "output_policy" not in encoded_request
 
 
-def test_eip_limits_define_a_valid_omitted_output_policy() -> None:
+def test_eip_limits_define_valid_output_bounds() -> None:
     limits = valid_eip_limits()
-    assert EIPLimits.model_validate(limits).max_output_bytes == 1
+    assert EIPLimits.model_validate(limits).max_output_bytes_per_stream == 1
 
     with pytest.raises(ValidationError):
         EIPLimits.model_validate({**limits, "max_request_bytes": 0})
-    with pytest.raises(ValidationError, match="max_inline_output_bytes cannot exceed"):
-        EIPLimits.model_validate({**limits, "max_inline_output_bytes": 2})
+    with pytest.raises(ValidationError, match="max_output_preview_bytes cannot exceed"):
+        EIPLimits.model_validate({**limits, "max_output_preview_bytes": 2})
     with pytest.raises(ValidationError):
         EIPLimits.model_validate({**limits, "max_transfer_frame_bytes": 24})
     with pytest.raises(ValidationError):
@@ -296,7 +296,6 @@ def test_eip_profile_rejects_out_of_range_numbers_and_non_utc_timestamps() -> No
                 "context": {"operation_id": "op"},
                 "reference": "output-1",
                 "start_offset": 2**64,
-                "output_policy": {"max_inline_bytes": 1, "max_output_bytes": 1, "overflow": "truncate"},
             }
         )
     with pytest.raises(ValidationError):
@@ -345,39 +344,22 @@ def test_sha256_digest_profile_is_exact_and_lowercase() -> None:
         ContentDigest(algorithm="sha256", value="a" * 63)
 
 
-def test_output_capture_rejects_unusable_structural_states() -> None:
+def test_output_info_rejects_unusable_structural_states() -> None:
     base = {
-        "kind": "retained",
         "producer_complete": True,
         "content_complete": True,
         "produced_bytes": 1,
-        "captured_bytes": 1,
-        "dropped_bytes": 0,
-        "available_start": 0,
-        "available_end": 1,
+        "retained_bytes": 1,
+        "preview": {"encoding": "base64", "data": "YQ"},
     }
-    with pytest.raises(ValidationError, match="requires a reference"):
-        OutputCapture.model_validate(base)
-    retained = OutputCapture.model_validate(
-        {
-            **base,
-            "reference": "output-1",
-            "expires_at": "2026-08-20T14:00:00Z",
-        }
-    )
-    assert retained.reference is not None
-    with pytest.raises(ValidationError, match="empty output"):
-        OutputCapture.model_validate(
-            {
-                **base,
-                "kind": "empty",
-                "produced_bytes": 1,
-                "captured_bytes": 0,
-                "available_end": 0,
-            }
-        )
-    with pytest.raises(ValidationError, match="available_start cannot exceed"):
-        OutputCapture.model_validate({**base, "available_start": 2, "available_end": 1})
+    with pytest.raises(ValidationError):
+        OutputInfo.model_validate(base)
+    output = OutputInfo.model_validate({**base, "reference": "output-1"})
+    assert output.reference.root == "output-1"
+    with pytest.raises(ValidationError, match="complete output must retain every produced byte"):
+        OutputInfo.model_validate({**base, "reference": "output-1", "produced_bytes": 2})
+    with pytest.raises(ValidationError):
+        OutputInfo.model_validate({**base, "reference": "output-1", "captured_bytes": 1})
 
 
 def test_receipt_lookup_requires_an_operation_id() -> None:
@@ -390,24 +372,22 @@ def test_receipt_lookup_requires_an_operation_id() -> None:
     assert ReceiptGetParams.model_validate({**base, "operation_id": "op-target"}).operation_id == "op-target"
 
 
-def test_error_code_and_retention_gap_bounds_are_structural() -> None:
+def test_error_rejects_removed_retention_fields_and_identity() -> None:
     common = {"retry_hint": "never", "dispatch_stage": "completed"}
-    with pytest.raises(ValidationError, match="does not match error_type"):
-        EIPError.model_validate(
-            {
-                "code": -32060,
-                "message": "wrong",
-                "data": {**common, "error_type": "retention_gap", "available_start": 0, "available_end": 1},
-            }
-        )
-    with pytest.raises(ValidationError, match="requires available bounds"):
-        EIPError.model_validate({"code": -32022, "message": "gap", "data": {**common, "error_type": "retention_gap"}})
-    with pytest.raises(ValidationError, match="cannot exceed"):
+    with pytest.raises(ValidationError):
         EIPError.model_validate(
             {
                 "code": -32022,
                 "message": "gap",
-                "data": {**common, "error_type": "retention_gap", "available_start": 2, "available_end": 1},
+                "data": {**common, "error_type": "retention_gap"},
+            }
+        )
+    with pytest.raises(ValidationError):
+        EIPError.model_validate(
+            {
+                "code": -32603,
+                "message": "wrong",
+                "data": {**common, "error_type": "internal_error", "available_start": 0},
             }
         )
 
@@ -416,7 +396,6 @@ def test_output_read_requires_an_explicit_offset() -> None:
     base = {
         "context": {"operation_id": "op"},
         "reference": "output-1",
-        "output_policy": {"max_inline_bytes": 1, "max_output_bytes": 1, "overflow": "truncate"},
     }
     with pytest.raises(ValidationError):
         OutputReadParams.model_validate(base)

@@ -11,12 +11,13 @@ mod tests {
     use serde::{Serialize, de::DeserializeOwned};
 
     use super::{
-        CommandNetwork, DataFrame, DataFrameKind, DataResetStatus, EIP_PROTO_PACKAGE,
-        EIP_PROTOCOL_VERSION, EIPCallContext, EIPError, EIPLimits, EIPServerInfo, EipValidate,
-        ErrorType, FileFindParams, FileStatParams, FileStatResult, InitializeParams,
-        JsonRpcErrorResponse, JsonRpcRequest, JsonRpcSuccessResponse, METHODS, OutputCapture,
-        OutputOverflow, OutputPolicy, OutputReadParams, ProcessWriteStdinParams, ReceiptGetParams,
-        ShellExecParams, decode, decode_data_frame, encode, encode_data_frame,
+        CommandNetwork, DataFrame, DataFrameKind, DataResetStatus, EIP_DESCRIPTOR_SHA256,
+        EIP_PROTO_PACKAGE, EIP_PROTOCOL_VERSION, EIPCallContext, EIPError, EIPLimits,
+        EIPServerInfo, EipValidate, EncodedBytes, ErrorType, FileFindParams, FileStatParams,
+        FileStatResult, InitializeParams, JsonRpcErrorResponse, JsonRpcRequest,
+        JsonRpcSuccessResponse, METHODS, OutputInfo, OutputReadParams, OutputReference,
+        ProcessWriteStdinParams, ReceiptGetParams, ShellExecParams, decode, decode_data_frame,
+        encode, encode_data_frame,
     };
 
     fn assert_golden<T>(value: serde_json::Value)
@@ -40,14 +41,35 @@ mod tests {
     fn generated_registry_has_complete_v1_surface() {
         assert_eq!(EIP_PROTOCOL_VERSION, "1.0");
         assert_eq!(EIP_PROTO_PACKAGE, "converge.agent_envd.eip.v1");
-        assert_eq!(METHODS.len(), 35);
+        assert_eq!(METHODS.len(), 34);
         assert!(
             METHODS
                 .iter()
                 .all(|method| method.kind == "request_response")
         );
-        assert_eq!(ErrorType::RetentionGap.code(), -32022);
         assert_eq!(ErrorType::IntegrityMismatch.code(), -32061);
+        assert_eq!(
+            METHODS
+                .iter()
+                .filter(|method| method.replay_class == "active_only")
+                .count(),
+            18
+        );
+        assert_eq!(
+            METHODS
+                .iter()
+                .filter(|method| method.replay_class == "terminal_evidence")
+                .count(),
+            15
+        );
+        assert_eq!(
+            METHODS
+                .iter()
+                .filter(|method| method.replay_class == "ledger_external")
+                .map(|method| method.name)
+                .collect::<Vec<_>>(),
+            vec!["initialize"]
+        );
         let transfer_methods = METHODS
             .iter()
             .filter(|method| method.transfer_action.is_some())
@@ -57,6 +79,17 @@ mod tests {
             transfer_methods
                 .iter()
                 .all(|method| method.transfer_direction.is_some())
+        );
+    }
+
+    #[test]
+    fn generated_descriptor_digest_matches_checked_descriptor() {
+        use sha2::{Digest, Sha256};
+
+        let descriptor = include_bytes!("../../protocol/eip/v1/descriptor.pb");
+        assert_eq!(
+            EIP_DESCRIPTOR_SHA256,
+            format!("{:x}", Sha256::digest(descriptor))
         );
     }
 
@@ -137,8 +170,8 @@ mod tests {
             "max_concurrent_operations": 1,
             "max_processes": 1,
             "max_operation_duration_ms": 1,
-            "max_inline_output_bytes": 1,
-            "max_output_bytes": 1,
+            "max_output_preview_bytes": 1,
+            "max_output_bytes_per_stream": 1,
             "max_transfer_frame_bytes": 25,
             "max_concurrent_file_transfers": 1,
             "max_file_transfer_bytes": 1
@@ -146,13 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn rust_eip_limits_define_a_valid_omitted_output_policy() {
+    fn rust_eip_limits_define_valid_output_bounds() {
         let limits = valid_eip_limits();
         assert!(decode::<EIPLimits>(&limits.to_string()).is_ok());
 
         for (field, value) in [
             ("max_request_bytes", 0),
-            ("max_inline_output_bytes", 2),
+            ("max_output_preview_bytes", 2),
             ("max_transfer_frame_bytes", 24),
             ("max_file_transfer_bytes", 0),
         ] {
@@ -198,15 +231,12 @@ mod tests {
     }
 
     #[test]
-    fn rust_error_code_and_retention_bounds_are_structural() {
-        let wrong_code = r#"{"code":-32060,"message":"wrong","data":{"error_type":"retention_gap","retry_hint":"never","dispatch_stage":"completed","available_start":0,"available_end":1}}"#;
-        assert!(decode::<EIPError>(wrong_code).is_err());
+    fn rust_error_rejects_removed_retention_fields_and_identity() {
+        let removed_identity = r#"{"code":-32022,"message":"gap","data":{"error_type":"retention_gap","retry_hint":"never","dispatch_stage":"completed"}}"#;
+        assert!(decode::<EIPError>(removed_identity).is_err());
 
-        let missing_bounds = r#"{"code":-32022,"message":"gap","data":{"error_type":"retention_gap","retry_hint":"never","dispatch_stage":"completed"}}"#;
-        assert!(decode::<EIPError>(missing_bounds).is_err());
-
-        let reversed_bounds = r#"{"code":-32022,"message":"gap","data":{"error_type":"retention_gap","retry_hint":"never","dispatch_stage":"completed","available_start":2,"available_end":1}}"#;
-        assert!(decode::<EIPError>(reversed_bounds).is_err());
+        let removed_bounds = r#"{"code":-32603,"message":"wrong","data":{"error_type":"internal_error","retry_hint":"never","dispatch_stage":"completed","available_start":0,"available_end":1}}"#;
+        assert!(decode::<EIPError>(removed_bounds).is_err());
     }
 
     #[test]
@@ -219,10 +249,16 @@ mod tests {
             .is_err()
         );
         assert!(
-            encode(&OutputPolicy {
-                max_inline_bytes: 2,
-                max_output_bytes: 1,
-                overflow: OutputOverflow::Truncate,
+            encode(&OutputInfo {
+                reference: OutputReference("output-1".to_owned()),
+                producer_complete: true,
+                content_complete: true,
+                produced_bytes: 2,
+                retained_bytes: 1,
+                preview: EncodedBytes {
+                    encoding: "base64".to_owned(),
+                    data: "YQ".to_owned(),
+                },
             })
             .is_err()
         );
@@ -249,14 +285,14 @@ mod tests {
         let invalid_path = r#"{"context":{"operation_id":"op"},"path":{"mount_id":"workspace","path":"/repo/../secret"}}"#;
         assert!(decode::<FileStatParams>(invalid_path).is_err());
 
-        let retained_without_reference = r#"{"kind":"retained","producer_complete":true,"content_complete":true,"produced_bytes":1,"captured_bytes":1,"dropped_bytes":0,"available_start":0,"available_end":1}"#;
-        assert!(decode::<OutputCapture>(retained_without_reference).is_err());
-        let valid_retained = r#"{"kind":"retained","producer_complete":true,"content_complete":true,"produced_bytes":1,"captured_bytes":1,"dropped_bytes":0,"reference":"output-1","available_start":0,"available_end":1,"expires_at":"2026-08-20T14:00:00Z"}"#;
-        assert!(decode::<OutputCapture>(valid_retained).is_ok());
-        let empty_with_bytes = r#"{"kind":"empty","producer_complete":true,"content_complete":true,"produced_bytes":1,"captured_bytes":0,"dropped_bytes":1,"available_start":0,"available_end":0}"#;
-        assert!(decode::<OutputCapture>(empty_with_bytes).is_err());
-        let reversed_available = r#"{"kind":"retained","producer_complete":true,"content_complete":true,"produced_bytes":1,"captured_bytes":1,"dropped_bytes":0,"available_start":2,"available_end":1}"#;
-        assert!(decode::<OutputCapture>(reversed_available).is_err());
+        let missing_reference = r#"{"producer_complete":true,"content_complete":true,"produced_bytes":1,"retained_bytes":1,"preview":{"encoding":"base64","data":"YQ"}}"#;
+        assert!(decode::<OutputInfo>(missing_reference).is_err());
+        let valid_output = r#"{"reference":"output-1","producer_complete":true,"content_complete":true,"produced_bytes":1,"retained_bytes":1,"preview":{"encoding":"base64","data":"YQ"}}"#;
+        assert!(decode::<OutputInfo>(valid_output).is_ok());
+        let incomplete_claim = r#"{"reference":"output-1","producer_complete":true,"content_complete":true,"produced_bytes":2,"retained_bytes":1,"preview":{"encoding":"base64","data":"YQ"}}"#;
+        assert!(decode::<OutputInfo>(incomplete_claim).is_err());
+        let removed_capture_field = r#"{"reference":"output-1","producer_complete":true,"content_complete":true,"produced_bytes":1,"retained_bytes":1,"captured_bytes":1,"preview":{"encoding":"base64","data":"YQ"}}"#;
+        assert!(decode::<OutputInfo>(removed_capture_field).is_err());
 
         let missing_position = r#"{"context":{"operation_id":"op"},"reference":"output-1"}"#;
         assert!(decode::<OutputReadParams>(missing_position).is_err());
@@ -266,7 +302,7 @@ mod tests {
         let duplicate_receipt_selector = r#"{"context":{"operation_id":"op-query"},"receipt_ref":"receipt-1","operation_id":"op-target"}"#;
         assert!(decode::<ReceiptGetParams>(duplicate_receipt_selector).is_err());
 
-        let duplicate_map_key = r#"{"context":{"operation_id":"op"},"request":{"command":{"kind":"argv","executable_spec":{"kind":"name","name":"true"}},"cwd":{"mount_id":"workspace","path":"/repo"},"environment":{"set":{"PATH":"one","PATH":"two"}},"output_policy":{"max_inline_bytes":1,"max_output_bytes":1,"overflow":"truncate"}}}"#;
+        let duplicate_map_key = r#"{"context":{"operation_id":"op"},"request":{"command":{"kind":"argv","executable_spec":{"kind":"name","name":"true"}},"cwd":{"mount_id":"workspace","path":"/repo"},"environment":{"set":{"PATH":"one","PATH":"two"}}}}"#;
         assert!(decode::<ShellExecParams>(duplicate_map_key).is_err());
     }
 
