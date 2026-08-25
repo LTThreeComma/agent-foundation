@@ -4,13 +4,14 @@
 
 This directory defines `foundation-service`, the optional hosted control and execution service that embeds `agent-harness`.
 
-Foundation owns durable Agent authoring schemas, typed Presets, immutable definition revisions and dependency locks, process-local reconstruction adapters, Environment provider registry integration and desired topology, durable root and asynchronous child Execution lifecycles, worker `ExecutionAttempt` generations, scheduling, continuation selection, client-tool delivery, service APIs, durable events, and usage records.
+Foundation owns durable managed Secrets, Agent authoring schemas, typed Presets, immutable definition revisions and dependency locks, process-local reconstruction adapters, Environment provider registry integration and desired topology, durable root and asynchronous child Execution lifecycles, worker `ExecutionAttempt` generations, scheduling, continuation selection, client-tool delivery, service APIs, durable events, and usage records.
 
 It does not redefine the code-first Harness `AgentDefinition`, plugin lifecycle, Pydantic Agent loop, Harness result/state semantics, or provider-native Environment state. Platform-owned data and service APIs follow [Platform Data Conventions](../data-conventions.md) and [Platform API Conventions](../api-conventions.md).
 
 ## Authority Rules
 
 - The control plane owns source acceptance, typed Presets, model-integration revisions, immutable definition revisions, dependency locks, and durable Executions.
+- The Secret management plane accepts opaque values under enum-typed polymorphic owners, persists only AES-256-GCM ciphertext encrypted by one configured master key, and never returns a configured value through its public API.
 - Foundation definition records contain only Foundation-owned serializable data. They contain no Python class, plugin instance, Model, Toolset, Capability, callable, client, or credential.
 - The worker verifies Host locks and uses trusted installed adapters to reconstruct a process-local Harness `AgentDefinition`.
 - Every logical run receives fresh `RunBindings`, including an Environment aggregate materialized from current desired topology and an explicit `ModelRunBinding` when hosted model aliases must fail closed rather than delegate to native inference.
@@ -29,6 +30,18 @@ Session -> Thread -> Turn -> Execution -> ExecutionAttempt -> Harness Run -> Mod
 ```
 
 An interactive Execution records `session_id`, `thread_id`, and `turn_id`. A standalone webhook or scheduled Execution can omit Session and Turn; it records `thread_id` only when Harness continuation is required. Worker recovery creates a new `ExecutionAttempt` and Harness Run while preserving the selected Thread identity. An Execution ID, `execution_attempt_id`, or `run_id` never replaces `thread_id`.
+
+## Reading Paths
+
+- Read the shared [platform interaction model](../interaction-model.md) before defining Foundation Session, Thread, Turn, or Item mappings.
+- Read [Secret Management](01-secret-management.md) for enum-typed ownership, metadata-only APIs, value CAS, relational persistence, configured-key encryption, deletion, and disclosure rules.
+- Read the platform [API conventions](../api-conventions.md) and [data conventions](../data-conventions.md) before defining another Foundation-owned resource or route.
+
+## Specification Catalog
+
+| Document                                     | Owns                                                                                                                                                     |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Secret Management](01-secret-management.md) | Managed Secret identity, polymorphic ownership, API, versioning, durable storage, encryption, mutation flows, failure semantics, and disclosure controls |
 
 ## Specification Conventions
 
