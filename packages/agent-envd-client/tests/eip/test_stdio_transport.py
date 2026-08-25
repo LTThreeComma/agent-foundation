@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import cast
 
+import converge_agent_envd_client.stdio as stdio_module
 import pytest
 from converge_agent_envd_client import ControlFrame, EIPProtocolError, StdioTransport
 from converge_agent_envd_client.eip.v1 import (
@@ -43,6 +44,24 @@ class BlockingWriter:
     async def wait_closed(self) -> None:
         self.wait_started.set()
         await self.allow_wait.wait()
+
+
+def test_stdio_close_is_finite_when_writer_never_confirms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stdio_module, "_CLOSE_GRACE_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        writer = BlockingWriter()
+        transport = StdioTransport(
+            asyncio.StreamReader(),
+            cast(asyncio.StreamWriter, writer),
+        )
+
+        await asyncio.wait_for(transport.close(), timeout=0.1)
+        assert writer.closed
+
+    asyncio.run(scenario())
 
 
 def test_stdio_close_finishes_before_propagating_repeated_cancellation() -> None:
@@ -125,6 +144,52 @@ def test_stdio_rejects_malformed_binary_body_without_treating_it_as_json() -> No
         )
         with pytest.raises(EIPProtocolError, match="invalid EIP stdio data frame"):
             await transport.receive()
+        await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_stdio_rejects_header_line_before_waiting_for_terminator() -> None:
+    async def scenario() -> None:
+        reader = asyncio.StreamReader()
+        writer = CapturingWriter()
+        reader.feed_data(b"X" * (4 * 1024 + 1))
+        transport = StdioTransport(reader, cast(asyncio.StreamWriter, writer))
+
+        with pytest.raises(EIPProtocolError, match="header line exceeds"):
+            await asyncio.wait_for(transport.receive(), timeout=0.1)
+        await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_stdio_rejects_excessive_header_count_while_reading() -> None:
+    async def scenario() -> None:
+        reader = asyncio.StreamReader()
+        writer = CapturingWriter()
+        reader.feed_data(b"".join(f"X-{index}: value\r\n".encode() for index in range(33)))
+        transport = StdioTransport(reader, cast(asyncio.StreamWriter, writer))
+
+        with pytest.raises(EIPProtocolError, match="header count exceeds"):
+            await asyncio.wait_for(transport.receive(), timeout=0.1)
+        await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_stdio_rejects_oversized_declared_body_before_reading_it() -> None:
+    async def scenario() -> None:
+        reader = asyncio.StreamReader()
+        writer = CapturingWriter()
+        reader.feed_data(b"Content-Length: 17\r\n\r\n")
+        transport = StdioTransport(
+            reader,
+            cast(asyncio.StreamWriter, writer),
+            max_response_bytes=16,
+        )
+
+        with pytest.raises(EIPProtocolError, match="body exceeds"):
+            await asyncio.wait_for(transport.receive(), timeout=0.1)
         await transport.close()
 
     asyncio.run(scenario())

@@ -37,7 +37,7 @@ class SemanticRunInput:
     value: str | tuple[UserContent, ...] | None
 ```
 
-`run()` and `stream()` accept either an immediate value or one async factory, never both. The factory runs exactly once after the Environment core has entered initial provider scopes, restored compatible portable Environment data against the fixed initial topology, and activated the Host-retained controller, but before plugin middleware or Pydantic execution. It can use trusted run identity, metadata, scoped readiness, and the entered Environment without depending on `DynamicEnvironmentCapability` or receiving a live Pydantic run handle.
+`run()` and `stream()` accept either an immediate value or one async factory, never both. The factory runs exactly once after the Environment core has entered initial provider scopes, restored compatible portable Environment data against the fixed initial topology, entered ordered Environment run extensions, and activated the Host-retained controller, but before plugin middleware or Pydantic execution. It can use trusted run identity, metadata, scoped readiness, and the entered Environment without depending on `DynamicEnvironmentCapability` or receiving a live Pydantic run handle.
 
 Normalization rules are deliberately small:
 
@@ -93,6 +93,23 @@ Pydantic AI retains the complete layering:
 - Capabilities own reusable Agent-loop behavior.
 
 The Harness does not serialize `ModelProfile`, merge profile keys, copy provider settings into a Host schema, or translate `AgentSpec` field by field. A hosted model-integration adapter may own a durable configuration, but it constructs a native Model before returning from `ModelRunBinding`.
+
+## Model Conversation Affinity
+
+One Agent instance owns one independently advancing Pydantic message history. The root Agent, every inline child instance, every Host-managed child, and every explicit fork are therefore separate model conversations even when a Host groups them under one product conversation or trace. Continuing the same Agent instance from its selected `HarnessState` continues the same model conversation through a fresh logical Harness run.
+
+A selected model integration can map that stable conversation identity to provider-specific routing, session, thread, or prompt-cache settings. For example, an OpenAI-compatible integration can set `openai_prompt_cache_key`, which the provider renders as `prompt_cache_key`. These values are provider integration details rather than Harness fields or a portable wire schema.
+
+The mapping follows these rules:
+
+1. Distinct independently advancing message histories receive distinct provider model-session and prompt-cache affinity. A child never inherits its parent's value, and sibling children never share one merely because they have the same definition, product conversation, Host Execution, or Environment.
+2. A continuation of the same `AgentInstanceRef` preserves the same affinity on a best-effort basis across fresh Harness runs, worker replacement, and reconstructed model bindings. Every internal semantic attempt in one logical run uses that same affinity.
+3. A transient Harness `run_id`, Pydantic inner run ID, tool-call ID, or parent product-conversation ID is not the default affinity source. Those values rotate too often or group distinct message histories and would reduce cache reuse or mix unrelated cache/session scopes.
+4. The fresh `ModelRunBinding` derives or looks up the value from the stable `AgentInstanceRef`, selected model/provider namespace, and Host policy. A provider that needs an opaque non-derivable continuation selector keeps it in the Host's provider-specific envelope and reattaches it when constructing the fresh binding.
+5. `HarnessState`, `AgentContextState`, and Delegation State store messages and portable continuation data, not a provider session, route, credential, or prompt-cache key. Restoring state supplies the conversation data; fresh trusted bindings restore the same Agent instance and reconstruct current provider affinity.
+6. Affinity improves provider cache locality and best-effort continuation or retry behavior. It grants no authority, does not select a checkpoint, and cannot make an interrupted request or side effect exactly once.
+
+A concrete build-time Model remains valid for embedded use. When one reusable executable can serve several Agent instances and the provider supports conversation affinity, trusted composition supplies request-dynamic native settings or uses a logical model with `ModelRunBinding`; one static cache or session value cannot be shared across those independent histories. Native explicit setting precedence remains owned by Pydantic and the provider integration, but the resulting value must preserve the conversation isolation above.
 
 ## Request and History Filters
 
@@ -236,15 +253,16 @@ Trusted plugins may replace the complete result candidate, including output, usa
 
 ## Boundaries
 
-| Concern                              | Owner                           |
-| ------------------------------------ | ------------------------------- |
-| Native input, Model, profile, output | Pydantic AI                     |
-| Semantic input and thin resolution   | Harness                         |
-| Exact one-shot history repair        | `SelfHealingModel`              |
-| Interrupted semantic attempt loop    | Harness run coordinator         |
-| Provider transport retry             | Provider/client and Pydantic AI |
-| Hosted model catalog and policy      | Host adapter                    |
-| Durable deferred execution           | Host                            |
+| Concern                                  | Owner                                              |
+| ---------------------------------------- | -------------------------------------------------- |
+| Native input, Model, profile, output     | Pydantic AI                                        |
+| Semantic input and thin resolution       | Harness                                            |
+| Model-conversation and provider affinity | Stable Agent instance, Host, and model integration |
+| Exact one-shot history repair            | `SelfHealingModel`                                 |
+| Interrupted semantic attempt loop        | Harness run coordinator                            |
+| Provider transport retry                 | Provider/client and Pydantic AI                    |
+| Hosted model catalog and policy          | Host adapter                                       |
+| Durable deferred execution               | Host                                               |
 
 ## Trade-offs
 

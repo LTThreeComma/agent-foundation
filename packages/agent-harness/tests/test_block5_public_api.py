@@ -122,8 +122,18 @@ def test_block_five_environment_and_managed_tool_import_routes_are_public() -> N
         "DirectLocalRootConfiguration",
         "DirectLocalShellProfile",
         "DynamicEnvironmentCapability",
+        "ENVIRONMENT_RUN_EXTENSION_ENTRY_POINT_GROUP",
         "EnvironmentRunBinding",
+        "EnvironmentRunExtension",
+        "EnvironmentRunExtensionContext",
+        "EnvironmentRunExtensionFactory",
+        "EnvironmentRunExtensionFactoryCatalog",
+        "EnvironmentRunExtensionFactoryContext",
+        "EnvironmentRunExtensionFactoryReference",
+        "EnvironmentRunExtensionFactoryRegistration",
+        "build_environment_run_extension_factory_catalog",
         "create_environment_run_binding",
+        "discover_environment_run_extension_factory_references",
     }
     expected_tools = {
         "ClientToolDefinition",

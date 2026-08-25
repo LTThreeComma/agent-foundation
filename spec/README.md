@@ -228,13 +228,15 @@ flowchart LR
     Adapter --> Native[Model, tool, or Toolset]
     RunAuthority[Fresh RunBindings] --> Capability
     RunAuthority --> Environment[Environment lifecycle resource]
+    Adapter --> RunExtension[Environment run extension]
+    RunExtension --> Environment
     DirectPlugin & ConfiguredPlugin --> Harness[Harness run]
     Capability & Native --> Agent[Pydantic Agent]
     Environment --> Harness
     Agent --> Provider[Feature provider]
 ```
 
-Installed plugins and native objects are trusted in-process code. Harness plugin and Environment package presence is only availability; an operator explicitly enables or selects the relevant key before import/use. Factory-produced Harness plugins and directly constructed plugins enter the same concrete composition path. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
+Installed plugins and native objects are trusted in-process code. Harness plugin, Environment provider, and Environment run-extension package presence is only availability; an operator explicitly enables or selects the relevant key before import/use. Factory-produced and directly constructed objects enter the same concrete composition path for their extension kind. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or package-installation system.
 
 ## Observability and Cost
 

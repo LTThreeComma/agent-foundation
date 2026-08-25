@@ -14,6 +14,7 @@ from converge_agent_envd_client import (
     EIPRequestTimeoutError,
     EIPSession,
     EIPSessionStateError,
+    EIPTransportClosedError,
     EIPTransportFrame,
     RequestCoordinator,
 )
@@ -216,7 +217,7 @@ def test_unknown_response_id_terminates_requester() -> None:
     asyncio.run(scenario())
 
 
-def test_cancelled_wait_keeps_correlation_until_late_response() -> None:
+def test_cancelled_wait_releases_admission_and_discards_late_response() -> None:
     async def scenario() -> None:
         transport = FakeTransport()
         requester = RequestCoordinator(transport, max_in_flight=1, request_timeout=None)
@@ -232,14 +233,46 @@ def test_cancelled_wait_keeps_correlation_until_late_response() -> None:
         next_call = asyncio.create_task(
             client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="next")))
         )
-        await asyncio.sleep(0)
-        assert transport.sent.empty()
-
-        await transport.responses.put(success_response(first_request.id, 1))
         second_request = decode_sent_request(await transport.sent.get())
         await transport.responses.put(success_response(second_request.id, 2))
         assert (await next_call).descriptor.generation == 2
+
+        await transport.responses.put(success_response(first_request.id, 1))
+        await asyncio.sleep(0)
+        assert requester._abandoned_ids == set()
+        assert requester._terminal_error is None
         await requester.close()
+
+    asyncio.run(scenario())
+
+
+def test_repeated_abandonment_closes_before_correlation_can_grow() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport, max_in_flight=1, request_timeout=None)
+        client = EIPClient(requester)
+
+        first = asyncio.create_task(
+            client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="first")))
+        )
+        await transport.sent.get()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert len(requester._abandoned_ids) == 1
+
+        second = asyncio.create_task(
+            client.environment_describe(EnvironmentDescribeParams(context=EIPCallContext(operation_id="second")))
+        )
+        await transport.sent.get()
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        await requester.close()
+
+        assert transport.closed
+        assert isinstance(requester._terminal_error, EIPProtocolError)
+        assert requester._abandoned_ids == set()
 
     asyncio.run(scenario())
 
@@ -525,6 +558,63 @@ def test_peer_reset_bypasses_a_full_transfer_inbox() -> None:
 
         requester.unregister_transfer(channel)
         await requester.close()
+
+    asyncio.run(scenario())
+
+
+def test_missing_reset_acknowledgement_closes_the_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(requester_module, "_TRANSFER_TEARDOWN_TIMEOUT", 0.01)
+
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        channel = requester.register_transfer("reader-silent")
+        await requester.reset_transfer(
+            channel,
+            DataFrame(
+                kind=DataFrameKind.RESET,
+                handle=channel.handle,
+                reset_status=DataResetStatus.CANCELLED,
+            ),
+        )
+
+        await asyncio.sleep(0.02)
+        await requester.close()
+        assert transport.closed
+        assert isinstance(requester._terminal_error, EIPProtocolError)
+
+    asyncio.run(scenario())
+
+
+def test_retired_transfer_capacity_exhaustion_closes_the_carrier() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        requester = RequestCoordinator(transport)
+        requester.configure_limits(
+            max_in_flight=1,
+            max_request_bytes=1024,
+            max_response_bytes=1024,
+            max_transfer_frame_bytes=1024,
+            max_concurrent_file_transfers=1,
+        )
+        first = requester.register_transfer("reader-first")
+        requester.retire_transfer(first)
+        second = requester.register_transfer("reader-second")
+
+        with pytest.raises(EIPTransportClosedError, match="teardown stalled"):
+            requester.retire_transfer(second)
+        await requester.close()
+        assert transport.closed
+        assert isinstance(requester._terminal_error, EIPProtocolError)
 
     asyncio.run(scenario())
 

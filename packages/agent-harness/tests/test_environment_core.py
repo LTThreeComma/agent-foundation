@@ -20,6 +20,7 @@ from converge_agent_harness import (
     EnvironmentProviderBinding,
     EnvironmentProviderOperations,
     EnvironmentReadinessRequirement,
+    EnvironmentRunExtensionContext,
     EnvironmentState,
     EnvironmentStateLimits,
     EnvironmentTopologyLimits,
@@ -50,8 +51,8 @@ pytestmark = pytest.mark.anyio
 
 
 class _Files:
-    async def stat(self, path: str) -> dict[str, str]:
-        return {"path": path}
+    async def stat(self, path: str) -> FileMetadata:
+        return FileMetadata(path=path, kind="file", size=0, writable=True)
 
 
 @dataclass
@@ -140,6 +141,42 @@ class _Binding(EnvironmentProviderBinding):
         self.discarded += 1
 
 
+class _RunExtension:
+    def __init__(
+        self,
+        extension_id: str,
+        events: list[str],
+        *,
+        fail_entry: bool = False,
+        fail_exit: bool = False,
+        provider: _Binding | None = None,
+    ) -> None:
+        self._extension_id = extension_id
+        self._events = events
+        self._fail_entry = fail_entry
+        self._fail_exit = fail_exit
+        self._provider = provider
+
+    @property
+    def extension_id(self) -> str:
+        return self._extension_id
+
+    @asynccontextmanager
+    async def bind(self, *, context: EnvironmentRunExtensionContext):
+        self._events.append(f"enter:{self.extension_id}:{context.environment.restored_state_topology_version}")
+        if self._fail_entry:
+            raise RuntimeError("secret extension entry failure")
+        try:
+            yield
+        finally:
+            if self._provider is not None:
+                observation = await context.environment.files.stat("/workspace/extension.txt")
+                self._events.append(f"open:{observation.path}:{self._provider.exited}")
+            self._events.append(f"exit:{self.extension_id}")
+            if self._fail_exit:
+                raise RuntimeError("secret extension exit failure")
+
+
 def _instance() -> AgentInstanceContext:
     return AgentInstanceContext(
         identity=AgentIdentityRef(issuer="test", subject="agent"),
@@ -222,6 +259,142 @@ async def test_static_aggregate_intersects_permissions_and_scopes_readiness() ->
         assert (await environment.describe("binding-2")).availability.status == "available"
     assert first.exited == second.exited == 1
     assert first.discarded == second.discarded == 0
+
+
+async def test_environment_run_extensions_follow_aggregate_lifecycle_and_remain_open_on_exit() -> None:
+    events: list[str] = []
+    provider = _Binding("extensions")
+    first = _RunExtension("first", events, provider=provider)
+    second = _RunExtension("second", events)
+    binding = create_environment_run_binding(
+        initial_topology=_request(provider),
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+        extensions=(first, second),
+    )
+
+    async with binding.bind(run_id="run-extensions", instance=_instance()) as environment:
+        await environment.restore_state(EnvironmentState(observed_topology_version=9))
+        await environment.activate()
+        assert events == ["enter:first:9", "enter:second:9"]
+        retained = _binding_request(
+            None,
+            binding_id="binding-1",
+            revision=1,
+            alias="workspace-1",
+        )
+        await binding.controller.apply(
+            EnvironmentTopologyRequest(
+                topology_version=2,
+                bindings=(retained,),
+                default_binding_id="binding-1",
+            )
+        )
+        assert environment.topology.topology_version == 2
+        assert events == ["enter:first:9", "enter:second:9"]
+
+    assert events == [
+        "enter:first:9",
+        "enter:second:9",
+        "exit:second",
+        "open:/workspace/extension.txt:0",
+        "exit:first",
+    ]
+    assert provider.exited == 1
+
+
+async def test_environment_run_extension_entry_failure_unwinds_and_keeps_controller_inactive() -> None:
+    events: list[str] = []
+    provider = _Binding("extension-entry-failure")
+    binding = create_environment_run_binding(
+        initial_topology=_request(provider),
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+        extensions=(
+            _RunExtension("first", events),
+            _RunExtension("failing", events, fail_entry=True),
+        ),
+    )
+
+    async with binding.bind(run_id="run-extension-failure", instance=_instance()) as environment:
+        with pytest.raises(EnvironmentError) as exc_info:
+            await environment.activate()
+        assert exc_info.value.code == "environment_extension_bind_failed"
+        assert events == ["enter:first:None", "enter:failing:None", "exit:first"]
+        with pytest.raises(EnvironmentError) as repeated:
+            await environment.activate()
+        assert repeated.value.code == "environment_extension_bind_failed"
+        assert binding.controller.can_apply is False
+
+    assert provider.exited == 1
+
+
+async def test_environment_run_extension_cleanup_continues_after_failure() -> None:
+    events: list[str] = []
+    provider = _Binding("extension-exit-failure")
+    binding = create_environment_run_binding(
+        initial_topology=_request(provider),
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+        extensions=(
+            _RunExtension("first", events),
+            _RunExtension("failing", events, fail_exit=True),
+        ),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        async with binding.bind(run_id="run-extension-cleanup", instance=_instance()) as environment:
+            await environment.activate()
+
+    assert "Environment entered-resource cleanup failed" in str(exc_info.value)
+    assert events == [
+        "enter:first:None",
+        "enter:failing:None",
+        "exit:failing",
+        "exit:first",
+    ]
+    assert provider.exited == 1
+
+
+@pytest.mark.parametrize("extension_id", ["", " spaced", "x" * 201])
+def test_environment_run_extension_ids_are_validated(extension_id: str) -> None:
+    with pytest.raises(EnvironmentError) as exc_info:
+        create_environment_run_binding(
+            initial_topology=_request(),
+            topology_limits=EnvironmentTopologyLimits(),
+            state_limits=EnvironmentStateLimits(),
+            extensions=(_RunExtension(extension_id, []),),
+        )
+
+    assert exc_info.value.code == "environment_extension_id_invalid"
+
+
+def test_environment_run_extension_ids_must_be_unique() -> None:
+    with pytest.raises(EnvironmentError) as exc_info:
+        create_environment_run_binding(
+            initial_topology=_request(),
+            topology_limits=EnvironmentTopologyLimits(),
+            state_limits=EnvironmentStateLimits(),
+            extensions=(_RunExtension("same", []), _RunExtension("same", [])),
+        )
+
+    assert exc_info.value.code == "environment_extension_duplicate"
+
+
+async def test_environment_state_restore_is_rejected_after_extension_activation_begins() -> None:
+    binding = create_environment_run_binding(
+        initial_topology=_request(),
+        topology_limits=EnvironmentTopologyLimits(),
+        state_limits=EnvironmentStateLimits(),
+        extensions=(_RunExtension("extension", []),),
+    )
+
+    async with binding.bind(run_id="run-late-restore", instance=_instance()) as environment:
+        await environment.activate()
+        with pytest.raises(EnvironmentError) as exc_info:
+            await environment.restore_state(EnvironmentState(observed_topology_version=1))
+
+    assert exc_info.value.code == "state_invalid"
 
 
 async def test_readiness_is_reacquired_after_live_availability_regresses() -> None:

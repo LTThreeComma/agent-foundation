@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io, path::PathBuf, process::Stdio, time::Durati
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::mpsc,
 };
@@ -125,6 +125,30 @@ struct StdinDeliveryResult {
     complete: bool,
 }
 
+struct BoundedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl io::Write for BoundedBuffer {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "supervisor message exceeds its byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct StreamClosures {
     stdout: bool,
@@ -147,7 +171,7 @@ impl StreamClosures {
 
 pub(crate) async fn run_internal() -> io::Result<()> {
     let stdin = tokio::io::stdin();
-    let mut requests = BufReader::new(stdin).lines();
+    let mut requests = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
     write_event(
         &mut stdout,
@@ -176,7 +200,7 @@ pub(crate) async fn run_internal() -> io::Result<()> {
 
 async fn run_payload(
     plan: LaunchPlan,
-    mut requests: Lines<BufReader<tokio::io::Stdin>>,
+    mut requests: BufReader<tokio::io::Stdin>,
     mut stdout: tokio::io::Stdout,
 ) -> io::Result<()> {
     let mut command = Command::new(&plan.executable);
@@ -572,27 +596,25 @@ async fn close_payload_stdin(stdin: &mut Option<ChildStdin>) {
     }
 }
 
-async fn read_request(
-    lines: &mut Lines<BufReader<tokio::io::Stdin>>,
-) -> io::Result<SupervisorRequest> {
-    read_optional_request(lines)
+async fn read_request<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<SupervisorRequest> {
+    read_optional_request(reader)
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "supervisor control EOF"))
 }
 
-async fn read_optional_request(
-    lines: &mut Lines<BufReader<tokio::io::Stdin>>,
+async fn read_optional_request<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
 ) -> io::Result<Option<SupervisorRequest>> {
-    let Some(line) = lines.next_line().await? else {
+    let Some(line) = read_bounded_line(
+        reader,
+        MAX_PROTOCOL_LINE_BYTES,
+        "supervisor request exceeds its byte limit",
+    )
+    .await?
+    else {
         return Ok(None);
     };
-    if line.len() > MAX_PROTOCOL_LINE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "supervisor request exceeds its byte limit",
-        ));
-    }
-    serde_json::from_str(&line)
+    serde_json::from_slice(&line)
         .map(Some)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor request"))
 }
@@ -604,23 +626,66 @@ pub(crate) async fn write_request<W: AsyncWriteExt + Unpin>(
     write_json_line(writer, request).await
 }
 
-pub(crate) async fn read_event<R: AsyncBufReadExt + Unpin>(
+pub(crate) async fn read_event<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> io::Result<Option<SupervisorEvent>> {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line).await?;
-    if read == 0 {
+    let Some(line) = read_bounded_line(
+        reader,
+        MAX_PROTOCOL_LINE_BYTES,
+        "supervisor event exceeds its byte limit",
+    )
+    .await?
+    else {
         return Ok(None);
-    }
-    if line.len() > MAX_PROTOCOL_LINE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "supervisor event exceeds its byte limit",
-        ));
-    }
-    serde_json::from_str(line.trim_end())
+    };
+    serde_json::from_slice(&line)
         .map(Some)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor event"))
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_payload_bytes: usize,
+    limit_message: &'static str,
+) -> io::Result<Option<Vec<u8>>> {
+    let max_wire_bytes = max_payload_bytes
+        .checked_add(2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid line byte limit"))?;
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        if line.len().saturating_add(consumed) > max_wire_bytes {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, limit_message));
+        }
+        line.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+        if line.len() > max_payload_bytes
+            && !(line.len() == max_payload_bytes + 1 && line.last() == Some(&b'\r'))
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, limit_message));
+        }
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+    }
+    if line.len() > max_payload_bytes {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, limit_message));
+    }
+    Ok(Some(line))
 }
 
 async fn write_event<W: AsyncWriteExt + Unpin>(
@@ -635,17 +700,27 @@ where
     W: AsyncWriteExt + Unpin,
     T: Serialize,
 {
-    let mut encoded = serde_json::to_vec(value)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "supervisor encoding failed"))?;
-    if encoded.len() > MAX_PROTOCOL_LINE_BYTES {
+    let mut encoded = encode_bounded_json(value, MAX_PROTOCOL_LINE_BYTES)?;
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await?;
+    writer.flush().await
+}
+
+fn encode_bounded_json<T: Serialize>(value: &T, limit: usize) -> io::Result<Vec<u8>> {
+    let mut output = BoundedBuffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut output, value);
+    if output.exceeded {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "supervisor message exceeds its byte limit",
         ));
     }
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await?;
-    writer.flush().await
+    result.map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "supervisor encoding failed"))?;
+    Ok(output.bytes)
 }
 
 async fn protocol_failure<W: AsyncWriteExt + Unpin>(
@@ -800,4 +875,39 @@ fn portable_exit_status(status: std::process::ExitStatus) -> (Option<i32>, Optio
 #[cfg(not(unix))]
 fn portable_exit_status(status: std::process::ExitStatus) -> (Option<i32>, Option<ControlSignal>) {
     (status.code(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_line_rejects_a_silent_overlong_peer() {
+        let (mut writer, reader) = tokio::io::duplex(32);
+        writer
+            .write_all(b"012345678")
+            .await
+            .expect("writes overlong line without closing the peer");
+        let mut reader = BufReader::new(reader);
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            read_bounded_line(&mut reader, 8, "line too long"),
+        )
+        .await
+        .expect("line limit is enforced without waiting for EOF")
+        .expect_err("overlong line is rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "line too long");
+    }
+
+    #[test]
+    fn bounded_json_encoding_rejects_before_growing_past_its_limit() {
+        let error = encode_bounded_json(&"oversized", 4).expect_err("encoding exceeds limit");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "supervisor message exceeds its byte limit"
+        );
+    }
 }

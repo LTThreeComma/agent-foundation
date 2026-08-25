@@ -13,6 +13,9 @@ from converge_agent_envd_client.errors import EIPProtocolError, EIPTransportClos
 from converge_agent_envd_client.transport import ControlFrame, EIPTransportFrame
 
 _MAX_HEADER_BYTES = 8 * 1024
+_MAX_HEADER_LINE_BYTES = 4 * 1024
+_MAX_HEADER_COUNT = 32
+_CLOSE_GRACE_SECONDS = 1.0
 _JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 _DATA_CONTENT_TYPE = "application/vnd.converge.eip-data"
 _SECURITY_SENSITIVE_HEADERS = {"authorization", "content-encoding", "eip-session", "transfer-encoding"}
@@ -104,8 +107,13 @@ class StdioTransport:
             if not task.done():
                 self._closed = True
                 self._writer.close()
+                done, _ = await asyncio.wait({task}, timeout=_CLOSE_GRACE_SECONDS)
+                if task not in done:
+                    task.cancel()
+                    task.add_done_callback(_consume_task_exception)
+                    raise
             try:
-                await task
+                task.result()
             except Exception as error:
                 # A concrete transport failure takes precedence over cancellation so
                 # the requester can terminate every pending correlation.
@@ -150,11 +158,15 @@ class StdioTransport:
         await _await_shared_close(close_task)
 
     async def _finish_close(self) -> None:
-        async with self._write_lock:
-            try:
-                await self._writer.wait_closed()
-            except (BrokenPipeError, ConnectionError, OSError):
-                pass
+        try:
+            async with asyncio.timeout(_CLOSE_GRACE_SECONDS):
+                async with self._write_lock:
+                    try:
+                        await self._writer.wait_closed()
+                    except (BrokenPipeError, ConnectionError, OSError):
+                        pass
+        except TimeoutError:
+            pass
 
     async def _send_frame(self, content_type: str, payload: bytes) -> None:
         async with self._write_lock:
@@ -183,10 +195,22 @@ class StdioTransport:
 
     async def _read_headers(self) -> bytes:
         header = bytearray()
+        line_bytes = 0
+        header_count = 0
         while not header.endswith(b"\r\n\r\n"):
             if len(header) == _MAX_HEADER_BYTES:
                 raise EIPProtocolError("stdio response header exceeds its byte limit")
+            if line_bytes == _MAX_HEADER_LINE_BYTES:
+                raise EIPProtocolError("stdio response header line exceeds its byte limit")
             header.extend(await self._reader.readexactly(1))
+            line_bytes += 1
+            if header.endswith(b"\r\n"):
+                if header.endswith(b"\r\n\r\n"):
+                    break
+                header_count += 1
+                if header_count > _MAX_HEADER_COUNT:
+                    raise EIPProtocolError("stdio response header count exceeds its limit")
+                line_bytes = 0
         return bytes(header)
 
 
@@ -262,6 +286,11 @@ async def _await_shared_close(close_task: asyncio.Task[None]) -> None:
         break
     if cancelled:
         raise asyncio.CancelledError
+
+
+def _consume_task_exception(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def _validate_limit(name: str, value: int) -> None:

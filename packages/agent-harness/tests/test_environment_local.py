@@ -335,6 +335,33 @@ async def test_direct_local_read_race_returns_environment_error(
         assert missing.value.code == "environment_not_found"
 
 
+async def test_write_destination_inspection_errors_are_normalized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "blocked.txt"
+    original_lstat = Path.lstat
+
+    def deny_target_lstat(path: Path) -> object:
+        if path == target:
+            raise PermissionError(13, "permission denied", str(target))
+        return original_lstat(path)
+
+    binding = _aggregate(tmp_path)
+    monkeypatch.setattr(Path, "lstat", deny_target_lstat)
+    async with binding.bind(run_id="run-1", instance=_instance()) as environment:
+        with pytest.raises(EnvironmentError) as denied:
+            await environment.files.write_text(
+                "/workspace/blocked.txt",
+                "value",
+                mode="create",
+            )
+        assert denied.value.code == "environment_denied"
+
+    assert not target.exists()
+    assert not tuple(tmp_path.glob(".converge-write-*"))
+
+
 async def test_binding_teardown_attempts_spool_and_owned_root_cleanup_after_process_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

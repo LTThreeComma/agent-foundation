@@ -126,7 +126,7 @@ One operation has one owning span path. Harness code enriches upstream spans rat
 
 The default profile emits standard OpenTelemetry and has no vendor SDK dependency. A vendor Capability can configure an exporter and propagate vendor attributes without replacing Pydantic instrumentation.
 
-The Langfuse profile maps host-approved values to Langfuse `user_id`, `session_id`, tags, metadata, version, environment, and trace naming through the Langfuse OTel-native SDK or equivalent documented attributes. The mapping occurs on the enclosing run observation so Pydantic child spans inherit it.
+The Langfuse profile maps host-approved values to Langfuse `user_id`, `session_id`, tags, metadata, version, environment, and trace naming through the Langfuse OTel-native SDK or equivalent documented attributes. The mapping occurs on the enclosing run observation so Pydantic child spans inherit it. This telemetry `session_id` is an observability grouping value: it does not define or override the distinct provider model-session and prompt-cache affinity owned by each root or child Agent instance.
 
 Inline subagent executions are represented as nested `agent` observations containing their model and tool spans. A visible child Agent does not also receive a sibling dispatch span for the same work. Host-managed asynchronous submission has only a dispatch observation in the parent trace; the independently scheduled child starts its own trace and is correlated by safe Host metadata.
 

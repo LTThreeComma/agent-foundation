@@ -109,17 +109,18 @@ The same context is supplied to every Pydantic attempt inside one logical Harnes
 
 ## Run Flow
 
-01. Enter the fresh Environment aggregate and activate its paired controller.
+01. Enter the fresh Environment aggregate with its paired controller non-active.
 02. Restore compatible portable Environment data into already selected bindings.
-03. Invoke an optional input factory once and normalize input.
-04. Create `AgentContext` from fresh bindings and copied Capability state.
-05. Bind run plugins and freeze `BoundPluginContext`.
-06. Start the plugin chain lazily on first iteration.
-07. Run one Pydantic attempt with a unique inner run ID.
-08. On a recoverable model interruption, normalize public history and repeat within the total attempt budget while the Environment controller remains active.
-09. On output, deferred work, cancellation, failure, or hard stop, build one terminal candidate.
-10. Unwind trusted result middleware.
-11. Establish the terminal fence and close all run resources before terminal delivery.
+03. Enter ordered Environment run extensions and activate the paired controller.
+04. Invoke an optional input factory once and normalize input.
+05. Create `AgentContext` from fresh bindings and copied Capability state.
+06. Bind run plugins and freeze `BoundPluginContext`.
+07. Start the plugin chain lazily on first iteration.
+08. Run one Pydantic attempt with a unique inner run ID.
+09. On a recoverable model interruption, normalize public history and repeat within the total attempt budget while the Environment controller remains active.
+10. On output, deferred work, cancellation, failure, or hard stop, build one terminal candidate.
+11. Unwind trusted result middleware.
+12. Establish the terminal fence and close all run resources before terminal delivery.
 
 Provider-suspended continuation and deferred/HITL values are native Pydantic boundaries and never trigger the Harness semantic attempt loop.
 

@@ -31,6 +31,7 @@ from converge_agent_envd_client.errors import (
 from converge_agent_envd_client.transport import ControlFrame, EIPTransport
 
 _MAX_JSONRPC_ID = 2**63 - 1
+_TRANSFER_TEARDOWN_TIMEOUT = 5.0
 _RESPONSE_TYPE = cast(
     type[JsonRpcSuccessResponse | JsonRpcErrorResponse],
     JsonRpcSuccessResponse | JsonRpcErrorResponse,
@@ -41,7 +42,6 @@ _RESPONSE_TYPE = cast(
 class _PendingRequest:
     method: MethodSpec[Any, Any]
     future: asyncio.Future[object]
-    abandoned: bool = False
 
 
 class TransferChannel:
@@ -172,8 +172,10 @@ class RequestCoordinator(EIPRequester):
         self._admission = _AdmissionLimiter(max_in_flight)
         self._request_timeout = request_timeout
         self._pending: dict[str | int, _PendingRequest] = {}
+        self._abandoned_ids: set[str | int] = set()
+        self._max_abandoned_ids = max_in_flight
         self._transfers: dict[str, TransferChannel] = {}
-        self._retired_transfers: set[str] = set()
+        self._retired_transfers: dict[str, asyncio.Task[None]] = {}
         self._max_transfer_channels = 1
         self._next_id = 1
         self._reader_task: asyncio.Task[None] | None = None
@@ -233,19 +235,19 @@ class RequestCoordinator(EIPRequester):
         try:
             await _wait_until(self._transport.send(ControlFrame(payload)), timeout_at)
         except TimeoutError as error:
-            pending.abandoned = True
+            self._abandon_request(request_id, pending)
             raise EIPRequestTimeoutError(
                 "timed out sending an EIP request; operation outcome is not implied",
                 dispatched=True,
             ) from error
         except asyncio.CancelledError:
-            pending.abandoned = True
+            self._abandon_request(request_id, pending)
             raise
         except Exception as error:
-            pending.abandoned = True
             transport_error = (
                 error if isinstance(error, EIPClientError) else EIPTransportError("failed to send EIP request")
             )
+            self._remove_pending(request_id, pending)
             self._terminate(transport_error)
             await self._transport.close()
             raise transport_error from error
@@ -253,13 +255,13 @@ class RequestCoordinator(EIPRequester):
         try:
             return cast(R, await _wait_until(asyncio.shield(future), timeout_at))
         except TimeoutError as error:
-            pending.abandoned = True
+            self._abandon_request(request_id, pending)
             raise EIPRequestTimeoutError(
                 "timed out waiting for an EIP response; operation outcome is not implied",
                 dispatched=True,
             ) from error
         except asyncio.CancelledError:
-            pending.abandoned = True
+            self._abandon_request(request_id, pending)
             raise
 
     def configure_limits(
@@ -271,11 +273,12 @@ class RequestCoordinator(EIPRequester):
         max_transfer_frame_bytes: int,
         max_concurrent_file_transfers: int,
     ) -> None:
-        if self._pending or self._transfers:
+        if self._pending or self._abandoned_ids or self._transfers or self._retired_transfers:
             raise RuntimeError("cannot reconfigure requester limits with active work")
         _validate_positive_integer("max_in_flight", max_in_flight)
         _validate_positive_integer("max_concurrent_file_transfers", max_concurrent_file_transfers)
         self._admission.set_limit(max_in_flight)
+        self._max_abandoned_ids = max_in_flight
         self._max_transfer_channels = max_concurrent_file_transfers
         self._transport.set_limits(
             max_request_bytes=max_request_bytes,
@@ -295,6 +298,7 @@ class RequestCoordinator(EIPRequester):
         _validate_positive_integer("max_in_flight", max_in_flight)
         _validate_positive_integer("max_concurrent_file_transfers", max_concurrent_file_transfers)
         self._admission.narrow_limit(max_in_flight)
+        self._max_abandoned_ids = min(self._max_abandoned_ids, max_in_flight)
         self._max_transfer_channels = min(
             self._max_transfer_channels,
             max_concurrent_file_transfers,
@@ -310,6 +314,11 @@ class RequestCoordinator(EIPRequester):
             raise EIPTransportClosedError("EIP requester is closed") from self._terminal_error
         if handle in self._transfers:
             raise EIPSessionStateError("transfer handle is already attached locally")
+        if handle in self._retired_transfers:
+            error = EIPProtocolError("peer reused a transfer handle before RESET acknowledgement")
+            self._terminate(error)
+            self._start_close()
+            raise EIPTransportClosedError("EIP carrier closed after ambiguous transfer handle reuse") from error
         if len(self._transfers) >= self._max_transfer_channels:
             raise EIPSessionStateError("negotiated concurrent transfer limit is exhausted")
         channel = TransferChannel(handle, inbound_frames=inbound_frames)
@@ -329,14 +338,15 @@ class RequestCoordinator(EIPRequester):
         return channel.handle in self._retired_transfers and channel.handle not in self._transfers
 
     def complete_retired_transfer(self, handle: str) -> None:
-        self._retired_transfers.discard(handle)
+        self._complete_retired_transfer(handle)
 
     async def reset_transfer(self, channel: TransferChannel, frame: DataFrame) -> None:
         if frame.handle != channel.handle or frame.kind is not DataFrameKind.RESET:
             raise ValueError("reset frame does not match its transfer channel")
         self._retire_transfer(channel)
         try:
-            await self._transport.send(frame)
+            async with asyncio.timeout(_TRANSFER_TEARDOWN_TIMEOUT):
+                await self._transport.send(frame)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -344,7 +354,7 @@ class RequestCoordinator(EIPRequester):
                 error if isinstance(error, EIPClientError) else EIPTransportError("failed to reset EIP transfer")
             )
             self._terminate(transport_error)
-            await self._transport.close()
+            self._start_close()
             raise transport_error from error
 
     async def send_data_frame(self, channel: TransferChannel, frame: DataFrame) -> None:
@@ -369,10 +379,9 @@ class RequestCoordinator(EIPRequester):
         await self.close()
 
     async def close(self) -> None:
-        if self._close_task is None:
-            self._closed = True
-            self._close_task = asyncio.create_task(self._close(), name="eip-requester-close")
+        self._start_close()
         close_task = self._close_task
+        assert close_task is not None
         await _await_shared_close(close_task)
 
     async def _close(self) -> None:
@@ -386,17 +395,19 @@ class RequestCoordinator(EIPRequester):
                 await asyncio.gather(reader_task, return_exceptions=True)
             closed = EIPTransportClosedError("EIP requester closed")
             self._fail_pending(closed)
+            self._abandoned_ids.clear()
             self._fail_transfers(closed)
+            self._clear_retired_transfers()
 
     def _ensure_reader(self) -> None:
         if self._reader_task is None:
             self._reader_task = asyncio.create_task(self._reader_loop(), name="eip-response-reader")
 
     def _allocate_id(self) -> int:
-        for _ in range(len(self._pending) + 1):
+        for _ in range(len(self._pending) + len(self._abandoned_ids) + 1):
             request_id = self._next_id
             self._next_id = 1 if request_id == _MAX_JSONRPC_ID else request_id + 1
-            if request_id not in self._pending:
+            if request_id not in self._pending and request_id not in self._abandoned_ids:
                 return request_id
         raise RuntimeError("no JSON-RPC request ID is available")
 
@@ -422,14 +433,16 @@ class RequestCoordinator(EIPRequester):
         response = decode_model(frame.payload, _RESPONSE_TYPE)
         if response.id is None:
             raise EIPProtocolError("received an uncorrelated JSON-RPC error response")
+        if response.id in self._abandoned_ids:
+            self._abandoned_ids.remove(response.id)
+            return
         pending = self._pending.pop(response.id, None)
         if pending is None:
             raise EIPProtocolError("received an unknown or duplicate JSON-RPC response ID")
         self._admission.release()
 
         if isinstance(response, JsonRpcErrorResponse):
-            if not pending.abandoned:
-                pending.future.set_exception(EIPMethodError(response.error))
+            pending.future.set_exception(EIPMethodError(response.error))
             return
 
         try:
@@ -443,11 +456,9 @@ class RequestCoordinator(EIPRequester):
             result = decode_model(result_payload, pending.method.result_type)
         except Exception as error:
             protocol_error = EIPProtocolError(f"invalid {pending.method.name} result from EIP peer")
-            if not pending.abandoned:
-                pending.future.set_exception(protocol_error)
+            pending.future.set_exception(protocol_error)
             raise protocol_error from error
-        if not pending.abandoned:
-            pending.future.set_result(result)
+        pending.future.set_result(result)
 
     async def _handle_data_frame(self, frame: DataFrame) -> None:
         channel = self._transfers.get(frame.handle)
@@ -456,7 +467,7 @@ class RequestCoordinator(EIPRequester):
             return
         if frame.handle in self._retired_transfers:
             if frame.kind is DataFrameKind.RESET:
-                self._retired_transfers.discard(frame.handle)
+                self._complete_retired_transfer(frame.handle)
             return
         raise EIPProtocolError("received an EIP data frame for an unknown transfer handle")
 
@@ -464,10 +475,59 @@ class RequestCoordinator(EIPRequester):
         if self._transfers.get(channel.handle) is not channel:
             raise EIPSessionStateError("transfer channel is not registered")
         if len(self._retired_transfers) >= self._max_transfer_channels:
-            raise EIPSessionStateError("retired transfer capacity is awaiting RESET acknowledgements")
+            error = EIPProtocolError("retired transfer capacity exhausted before RESET acknowledgement")
+            self._terminate(error)
+            self._start_close()
+            raise EIPTransportClosedError("EIP carrier closed after transfer teardown stalled") from error
         channel.discard()
         del self._transfers[channel.handle]
-        self._retired_transfers.add(channel.handle)
+        self._retired_transfers[channel.handle] = asyncio.create_task(
+            self._expire_retired_transfer(channel.handle),
+            name=f"eip-transfer-teardown-{channel.handle}",
+        )
+
+    async def _expire_retired_transfer(self, handle: str) -> None:
+        await asyncio.sleep(_TRANSFER_TEARDOWN_TIMEOUT)
+        if self._retired_transfers.get(handle) is not asyncio.current_task():
+            return
+        error = EIPProtocolError("transfer RESET acknowledgement timed out")
+        self._terminate(error)
+        self._start_close()
+
+    def _complete_retired_transfer(self, handle: str) -> None:
+        task = self._retired_transfers.pop(handle, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _clear_retired_transfers(self) -> None:
+        current = asyncio.current_task()
+        tasks = tuple(self._retired_transfers.values())
+        self._retired_transfers.clear()
+        for task in tasks:
+            if task is not current:
+                task.cancel()
+
+    def _remove_pending(self, request_id: str | int, pending: _PendingRequest) -> bool:
+        if self._pending.get(request_id) is not pending:
+            return False
+        del self._pending[request_id]
+        self._admission.release()
+        return True
+
+    def _abandon_request(self, request_id: str | int, pending: _PendingRequest) -> None:
+        if not self._remove_pending(request_id, pending):
+            return
+        if len(self._abandoned_ids) >= self._max_abandoned_ids:
+            error = EIPProtocolError("abandoned request correlation capacity is exhausted")
+            self._terminate(error)
+            self._start_close()
+            return
+        self._abandoned_ids.add(request_id)
+
+    def _start_close(self) -> None:
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close(), name="eip-requester-close")
 
     def _terminate(self, error: BaseException) -> None:
         if self._terminal_error is None:
@@ -480,7 +540,7 @@ class RequestCoordinator(EIPRequester):
         self._pending.clear()
         for pending in pending_requests:
             self._admission.release()
-            if not pending.abandoned and not pending.future.done():
+            if not pending.future.done():
                 pending.future.set_exception(error)
 
     def _fail_transfers(self, error: BaseException) -> None:

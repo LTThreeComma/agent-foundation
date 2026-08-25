@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import sys
-from collections.abc import AsyncGenerator, Coroutine, Mapping
+from collections.abc import AsyncGenerator, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -31,6 +31,7 @@ from .commands import (
     ProcessWriteStdinResult,
     ShellExecResult,
 )
+from .extensions import EnvironmentRunExtension, EnvironmentRunExtensionContext
 from .files import FileOperator
 from .models import (
     DEFAULT_ENVIRONMENT_CLEANUP_TIMEOUT_SECONDS,
@@ -80,6 +81,8 @@ from .retention import (
 )
 from .topology import DynamicTopologyController, DynamicTopologyObserver
 from .virtual_files import VirtualFileOperator, _PreparedFile
+
+_MAX_ENVIRONMENT_EXTENSION_ID_LENGTH = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +496,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
         state_limits: EnvironmentStateLimits,
         observer: DynamicTopologyObserver,
         controller: DynamicTopologyController,
+        extensions: tuple[tuple[str, EnvironmentRunExtension], ...],
     ) -> None:
         self._run_id = run_id
         self._instance = instance
@@ -506,6 +510,9 @@ class CompositeBoundEnvironment(BoundEnvironment):
         self._state_limits = state_limits
         self._observer = observer
         self._controller = controller
+        self._extensions = extensions
+        self._extension_scopes: list[tuple[str, AbstractAsyncContextManager[None]]] = []
+        self._activation_state = "not_started"
         self._restored_state_topology_version: int | None = None
         self._readiness_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
@@ -625,7 +632,50 @@ class CompositeBoundEnvironment(BoundEnvironment):
 
     async def activate(self) -> None:
         self._assert_open()
+        if self._activation_state == "active":
+            return
+        if self._activation_state == "failed":
+            raise EnvironmentError(
+                "Environment run extension activation previously failed.",
+                code="environment_extension_bind_failed",
+            )
+        if self._activation_state != "not_started":
+            raise EnvironmentError("The Environment is closing.", code="environment_closed")
+        self._activation_state = "activating"
+        context = EnvironmentRunExtensionContext(
+            run_id=self._run_id,
+            instance=self._instance,
+            environment=self,
+        )
+        try:
+            for extension_id, extension in self._extensions:
+                try:
+                    scope = extension.bind(context=context)
+                    if not isinstance(scope, AbstractAsyncContextManager):
+                        raise TypeError("extension bind did not return an async context manager")
+                    await scope.__aenter__()
+                except Exception:
+                    raise EnvironmentError(
+                        "Environment run extension setup failed.",
+                        code="environment_extension_bind_failed",
+                        details={"extension_id": extension_id},
+                    ) from None
+                self._extension_scopes.append((extension_id, scope))
+        except BaseException as primary:
+            self._activation_state = "failed"
+            extension_scopes = tuple(self._extension_scopes)
+            self._extension_scopes.clear()
+            try:
+                await _await_cleanup_shielded(_close_extension_scopes(extension_scopes))
+            except BaseException as cleanup_error:
+                if cleanup_error is not primary:
+                    raise BaseExceptionGroup(
+                        "Environment run extension activation and cleanup failed",
+                        [primary, cleanup_error],
+                    ) from None
+            raise
         self._controller.activate()
+        self._activation_state = "active"
 
     @staticmethod
     def _revision_key(entered: _EnteredBinding) -> _RevisionKey:
@@ -1513,7 +1563,14 @@ class CompositeBoundEnvironment(BoundEnvironment):
     async def _close(self) -> None:
         current = asyncio.current_task()
         failures: list[BaseException] = []
+        self._activation_state = "closing"
+        extension_scopes = tuple(self._extension_scopes)
+        self._extension_scopes.clear()
         async with self._topology_apply_lock:
+            try:
+                await _close_extension_scopes(extension_scopes)
+            except BaseException as exc:
+                failures.append(exc)
             async with self._operation_lock:
                 self._closed = True
                 operation_tasks = tuple(task for task in self._operation_tasks if task is not current)
@@ -1555,7 +1612,7 @@ class CompositeBoundEnvironment(BoundEnvironment):
                 failures.append(exc)
         failures.extend(self._retirement_failures)
         if failures:
-            raise BaseExceptionGroup("Environment provider retirement cleanup failed", failures)
+            raise BaseExceptionGroup("Environment aggregate cleanup failed", failures)
 
     async def export_state(self) -> EnvironmentState:
         self._assert_open()
@@ -1616,6 +1673,11 @@ class CompositeBoundEnvironment(BoundEnvironment):
 
     async def restore_state(self, state: EnvironmentState) -> None:
         self._assert_open()
+        if self._activation_state != "not_started":
+            raise EnvironmentError(
+                "Environment state must be restored before activation begins.",
+                code="state_invalid",
+            )
         if self._restored_state_topology_version is not None:
             raise EnvironmentError("Environment state was already restored.", code="state_invalid")
         try:
@@ -1670,6 +1732,7 @@ class CompositeEnvironmentRunBinding(EnvironmentRunBinding):
     _initial_topology: EnvironmentTopologyRequest
     _topology_limits: EnvironmentTopologyLimits
     _state_limits: EnvironmentStateLimits
+    _extensions: tuple[tuple[str, EnvironmentRunExtension], ...] = ()
     _noop: bool = False
     _controller: DynamicTopologyController = field(default_factory=DynamicTopologyController, init=False)
     _used: bool = field(default=False, init=False, repr=False)
@@ -1765,6 +1828,7 @@ class CompositeEnvironmentRunBinding(EnvironmentRunBinding):
                 state_limits=self._state_limits,
                 observer=observer,
                 controller=self._controller,
+                extensions=self._extensions,
             )
             self._controller.attach(bound)
             scopes.clear()
@@ -1832,6 +1896,7 @@ class NoopEnvironmentRunBinding(CompositeEnvironmentRunBinding):
             _initial_topology=request,
             _topology_limits=limits.model_copy(deep=True),
             _state_limits=state.model_copy(deep=True),
+            _extensions=(),
             _noop=True,
         )
 
@@ -2003,6 +2068,25 @@ async def _teardown_entered_environment(
         failures.append(exc)
     if failures:
         raise BaseExceptionGroup("Environment entered-resource cleanup failed", failures)
+
+
+async def _close_extension_scopes(
+    scopes: tuple[tuple[str, AbstractAsyncContextManager[None]], ...],
+) -> None:
+    failures: list[BaseException] = []
+    for extension_id, scope in reversed(scopes):
+        try:
+            await scope.__aexit__(None, None, None)
+        except BaseException:
+            failures.append(
+                EnvironmentError(
+                    "Environment run extension cleanup failed.",
+                    code="environment_extension_cleanup_failed",
+                    details={"extension_id": extension_id},
+                )
+            )
+    if failures:
+        raise BaseExceptionGroup("Environment run extension cleanup failed", failures)
 
 
 async def _close_provider_scopes_after_tasks(
@@ -2221,19 +2305,68 @@ def _topology_change(
     )
 
 
+def _normalize_environment_run_extensions(
+    extensions: Sequence[EnvironmentRunExtension],
+) -> tuple[tuple[str, EnvironmentRunExtension], ...]:
+    try:
+        supplied = tuple(extensions)
+    except TypeError:
+        raise EnvironmentError(
+            "Environment run extensions must be a finite sequence.",
+            code="environment_extension_id_invalid",
+        ) from None
+    seen: set[str] = set()
+    captured: list[tuple[str, EnvironmentRunExtension]] = []
+    for extension in supplied:
+        if not isinstance(extension, EnvironmentRunExtension):
+            raise EnvironmentError(
+                "Environment run extensions must implement EnvironmentRunExtension.",
+                code="environment_extension_id_invalid",
+            )
+        try:
+            extension_id = extension.extension_id
+        except Exception:
+            raise EnvironmentError(
+                "Environment run extension ID could not be read.",
+                code="environment_extension_id_invalid",
+            ) from None
+        if (
+            not isinstance(extension_id, str)
+            or not extension_id
+            or extension_id != extension_id.strip()
+            or len(extension_id) > _MAX_ENVIRONMENT_EXTENSION_ID_LENGTH
+        ):
+            raise EnvironmentError(
+                "Environment run extension IDs must be bounded non-blank strings without surrounding whitespace.",
+                code="environment_extension_id_invalid",
+            )
+        if extension_id in seen:
+            raise EnvironmentError(
+                "Environment run extension IDs must be unique.",
+                code="environment_extension_duplicate",
+                details={"extension_id": extension_id},
+            )
+        seen.add(extension_id)
+        captured.append((extension_id, extension))
+    return tuple(captured)
+
+
 def create_environment_run_binding(
     *,
     initial_topology: EnvironmentTopologyRequest,
     topology_limits: EnvironmentTopologyLimits,
     state_limits: EnvironmentStateLimits,
+    extensions: Sequence[EnvironmentRunExtension] = (),
 ) -> EnvironmentRunBinding:
     """Capture one initial complete topology in a fresh single-use aggregate."""
     captured = _normalize_topology_request(initial_topology)
+    captured_extensions = _normalize_environment_run_extensions(extensions)
     _validate_request(captured, topology_limits)
     return CompositeEnvironmentRunBinding(
         _initial_topology=captured,
         _topology_limits=topology_limits.model_copy(deep=True),
         _state_limits=state_limits.model_copy(deep=True),
+        _extensions=captured_extensions,
     )
 
 

@@ -141,16 +141,19 @@ A new run receives `previous_state` separately from fresh `RunBindings`. Stream 
 
 1. binds and enters the new Environment from fresh Host authority, publishing its initial topology while the paired controller remains non-active;
 2. restores a present `environment_state` only into compatible, already selected bindings;
-3. activates the controller after successful restore or confirmation that no Environment state was supplied;
-4. invokes the optional `RunInputFactory` against that entered Environment;
-5. creates one `AgentContextState` initialized from the imported Capability snapshot;
-6. creates the fresh `AgentContext` and plugin graph;
-7. passes imported messages to the first Pydantic attempt;
-8. lets each Capability read and validate only the namespaces it understands.
+3. enters ordered Environment run extensions after successful restore or confirmation that no Environment state was supplied;
+4. activates the controller after every extension enters successfully;
+5. invokes the optional `RunInputFactory` against that entered Environment;
+6. creates one `AgentContextState` initialized from the imported Capability snapshot;
+7. creates the fresh `AgentContext` and plugin graph;
+8. passes imported messages to the first Pydantic attempt;
+9. lets each Capability read and validate only the namespaces it understands.
 
-Environment restore finishes before controller activation and input production, never overlaps `apply()`, and never creates a binding, chooses topology, consumes Host launch state, or grants access. An unmatched saved binding is ignored with a bounded diagnostic; an incompatible selected binding fails according to the Environment codec contract. The Harness does not require every Capability entry to be consumed before model work. A stateful Capability that requires validation before its own behavior must perform that validation in its Pydantic lifecycle or before invoking the dependent operation.
+Environment restore and ordered run-extension entry finish before controller activation and input production, never overlap `apply()`, and never create a binding, choose topology, consume Host launch state, or grant access. An unmatched saved binding is ignored with a bounded diagnostic; an incompatible selected binding fails according to the Environment codec contract. The Harness does not require every Capability entry to be consumed before model work. A stateful Capability that requires validation before its own behavior must perform that validation in its Pydantic lifecycle or before invoking the dependent operation.
 
 Identity, policy, credentials, model resolution, Environment authority, topology, tool grants, provider sessions, and Host ownership always come from fresh trusted bindings. Message metadata, Capability state, and portable Environment state grant none of them.
+
+State restores the independently advancing message history but does not carry its provider model-session or prompt-cache affinity. The Host supplies the same stable `AgentInstanceRef` when it continues that history, and the fresh model integration derives or restores the matching affinity under [the model-conversation contract](16-input-model-and-output.md#model-conversation-affinity). If a provider uses an opaque selector that cannot be derived, the Host retains it beside `HarnessState`; transient Harness and inner run IDs never replace it.
 
 Omitting new input is valid when the selected message history is sufficient for native Pydantic continuation. Supplying deferred tool results uses Pydantic AI's own input contract and the exact pending call or approval correlation owned by the integrating Host.
 
@@ -168,7 +171,7 @@ class HostExecutionState(BaseModel):
 
 This is an ownership illustration, not a Harness API. Definition selection, desired Environment topology, Attempt generation, artifact locks, provider provisioning and attachment, provider launch-state codecs, client-tool pending state, asynchronous child lifecycle, and delivery fencing remain Host-owned. `HostLaunchState` is separate from `HarnessState.environment_state`: the former makes a provider resource reachable, while the latter can restore only portable backend-local data after fresh reachability and authority already exist.
 
-The Harness does not define or require a provider route pin. Provider-specific continuation facts that are not public Pydantic messages belong to the selected model integration or Host envelope, not to a generic Harness schema.
+The Harness does not define or require a generic provider route pin. Provider-specific continuation facts that are not public Pydantic messages, including an opaque model-session selector when derivation from the stable Agent instance is impossible, belong to the selected model integration or Host envelope rather than the Harness schema. A broader product-conversation routing key does not replace the distinct prompt-cache affinity required for each independently advancing Agent message history.
 
 ## External Effects
 

@@ -58,22 +58,25 @@ class AgentInstanceContext(BaseModel):
 
 The trusted Host supplies `AgentInstanceContext`. Identity names the workload principal but contains no credential or policy decision. Actor, lineage, and Host references are correlation and policy inputs; model content cannot replace them.
 
-A Host can preserve one Agent instance across a durable continuation while every logical Harness run receives a fresh context and bindings. A new root or child receives another instance ID under Host policy.
+A Host can preserve one Agent instance across a durable continuation while every logical Harness run receives a fresh context and bindings. A new root, child, or explicit fork receives another instance ID under Host policy. One Agent instance owns one independently advancing Pydantic message history; preserving that instance across continuation preserves the identity of that model conversation without preserving a live run.
 
 ## Execution Identities
 
 The platform distinguishes:
 
-| Identity               | Lifetime and owner                                               |
-| ---------------------- | ---------------------------------------------------------------- |
-| Agent definition ID    | Logical process-local correlation; Host may map its own revision |
-| Agent instance ID      | Stable workload instance selected by the Host                    |
-| Harness run ID         | One logical process-local invocation                             |
-| Pydantic inner run ID  | One semantic attempt inside the logical run                      |
-| Host Execution/Attempt | Durable work and worker generation outside the Harness           |
-| Tool call ID           | Pydantic call correlation                                        |
+| Identity                    | Lifetime and owner                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------- |
+| Agent definition ID         | Logical process-local correlation; Host may map its own revision                    |
+| Agent instance ID           | Stable workload and model-conversation instance selected by the Host                |
+| Model-conversation affinity | Provider-facing cache/session correlation derived by the selected model integration |
+| Harness run ID              | One logical process-local invocation                                                |
+| Pydantic inner run ID       | One semantic attempt inside the logical run                                         |
+| Host Execution/Attempt      | Durable work and worker generation outside the Harness                              |
+| Tool call ID                | Pydantic call correlation                                                           |
 
-No identifier grants authority by itself.
+A model conversation is the independently advancing message history owned by one Agent instance. A root, every inline child instance, every Host-managed child, and every explicit fork therefore have distinct model-conversation affinity. Continuing the same Agent instance across a new Harness run preserves that affinity even though its Harness and inner run IDs change. The selected model integration derives or looks up the provider-facing value; [Input, Model, and Output Boundaries](16-input-model-and-output.md#model-conversation-affinity) owns the detailed cache and session rules.
+
+No identifier or affinity value grants authority by itself.
 
 ## Model-facing References
 
@@ -113,12 +116,13 @@ These versions evolve independently.
 
 1. `AgentDefinition` is process-local and code-first.
 2. A logical Harness run has one public run ID and may have several unique inner Pydantic run IDs.
-3. `AgentContext` is fresh per logical run and shared only by that run's internal attempts.
-4. `HarnessState` restores data, not authority, desired Environment topology, provider launch state, controllers, or live resources.
-5. Trusted plugins may intentionally transform complete result state; the Harness does not infer provenance.
-6. A process-local terminal result does not commit a Host Execution or external delivery.
-7. Events and usage snapshots are observations until their owning Host subsystem persists them.
-8. A compact model-facing reference is scoped, non-authoritative, collision-checked, and never substitutes for its internal or durable identity.
+3. One Agent instance owns one independently advancing model conversation; its provider affinity survives continuation and is never derived by default from a transient Harness or inner run ID.
+4. `AgentContext` is fresh per logical run and shared only by that run's internal attempts.
+5. `HarnessState` restores data, not authority, desired Environment topology, provider launch state, controllers, or live resources.
+6. Trusted plugins may intentionally transform complete result state; the Harness does not infer provenance.
+7. A process-local terminal result does not commit a Host Execution or external delivery.
+8. Events and usage snapshots are observations until their owning Host subsystem persists them.
+9. A compact model-facing reference is scoped, non-authoritative, collision-checked, and never substitutes for its internal or durable identity.
 
 ## Trade-offs
 

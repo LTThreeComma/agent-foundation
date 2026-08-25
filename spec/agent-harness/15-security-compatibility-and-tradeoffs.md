@@ -4,7 +4,7 @@
 
 The Harness executes model-controlled work inside a trusted Python process. Security comes from fresh trusted run context, explicit typed policy and provider adapters, metadata-aware managed-tool dispatch, provider-side enforcement, action-scoped credentials, bounded output, and Host-controlled durable state.
 
-Concrete Harness plugins, native Models, tools, Toolsets, and Capabilities are trusted in-process code. Type checks and schemas protect composition mistakes; they do not sandbox Python. Untrusted or separately governed behavior stays behind a tool, model, Environment, or other feature-specific protocol.
+Concrete Harness plugins, Environment run extensions, native Models, tools, Toolsets, and Capabilities are trusted in-process code. Type checks and schemas protect composition mistakes; they do not sandbox Python. Untrusted or separately governed behavior stays behind a tool, model, Environment, or other feature-specific protocol.
 
 ## Trust Boundaries
 
@@ -58,11 +58,11 @@ A native unmanaged tool does not acquire these guarantees merely because it can 
 
 ## Code-first Build Trust
 
-A Host owns its durable Agent definition schemas and artifact locks. The worker verifies those locks and uses trusted adapters to reconstruct native Python values. The Harness does not deserialize import paths or compile Agent specs. Its narrow plugin document contains only IDs, installed entry-point keys, enable state, and bounded JSON. An explicit or opted-in ambient Build Context loads only enabled keys and produces concrete plugins before Pydantic Agent composition. The separate Environment catalog remains Host-selected because run topology and lifecycle require current authority. The narrow custom Capability catalog contains only exact Host-trusted classes and performs no package discovery.
+A Host owns its durable Agent definition schemas and artifact locks. The worker verifies those locks and uses trusted adapters to reconstruct native Python values. The Harness does not deserialize import paths or compile Agent specs. Its narrow plugin document contains only IDs, installed entry-point keys, enable state, and bounded JSON. An explicit or opted-in ambient Build Context loads only enabled keys and produces concrete plugins before Pydantic Agent composition. The separate Environment provider and run-extension catalogs remain Host-selected because run topology and aggregate lifecycle require current authority. The narrow custom Capability catalog contains only exact Host-trusted classes and performs no package discovery.
 
 A mismatch between Host revision and installed adapter fails before the Host calls `HarnessBuilder`. Invalid plugin configuration or an incompatible installed package fails during context or builder construction before model work. Installed, enabled, loaded, and deployment-trusted are separate states: package presence alone imports no code and grants no behavior. Missing, duplicate, colliding, wrongly typed, lock-incompatible, factory-invalid, or ID-mismatched entries fail closed. Factory configuration and extensions are detached, bounded JSON but remain untrusted input to trusted in-process package code. Configuration, metadata, import, constructor, and factory failures suppress raw standard exception chaining so normal traceback logging cannot disclose those inputs or private installation paths. An API request, model value, durable row, state payload, plugin configuration, extension map, or provider parameter map cannot name an arbitrary import target.
 
-Once supplied or loaded, concrete Python objects execute with process authority. Enabling an ambient plugin document therefore trusts the deployment-controlled installed key selection, not merely valid YAML or JSON syntax. A hostile plugin can bypass managed tool policy by performing direct Python I/O; deployments that do not trust it must isolate it outside the process.
+Once supplied or loaded, concrete Python objects execute with process authority. Enabling an ambient plugin document or selecting an Environment extension factory therefore trusts the deployment-controlled installed key selection, not merely valid JSON shape. A hostile plugin or Environment run extension can bypass managed tool policy by performing direct Python I/O; deployments that do not trust it must isolate it outside the process.
 
 ## Plugin Result and State Trust
 
@@ -123,6 +123,8 @@ State restores no Identity, credential, policy decision, desired topology, Envir
 ## Model and Recovery Safety
 
 A concrete Model bypasses logical-ID resolution. A string model reaches the thin `ResolveModelId`; a fresh `ModelRunBinding` returns a native Model or raises. When no binding exists, the Harness deliberately returns `None` and Pydantic native inference continues. A hosted profile that requires fail-closed aliases must enforce presence of its binding during worker setup.
+
+Provider model-session and prompt-cache affinity are correlation and performance inputs, not authority. The model integration isolates every independently advancing root, child, or fork history and preserves the same affinity only when fresh bindings continue the same stable `AgentInstanceRef`. It does not use transient run IDs as the continuation key or reuse a broader product-conversation key across parent and child histories. Provider affinity remains absent from `HarnessState`; a non-derivable opaque selector is protected and retained by the Host like other provider-specific continuation data.
 
 Recovery layers remain bounded and separate:
 

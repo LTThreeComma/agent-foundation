@@ -1,7 +1,7 @@
 [project]
 name = "converge-plugin-examples"
 version = "0.0.0"
-description = "Runnable Environment provider factory and Harness plugin examples for Agent Foundation"
+description = "Runnable Environment provider, Environment run-extension, and Harness plugin examples for Agent Foundation"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -14,12 +14,17 @@ dependencies = [
 [project.entry-points."converge_agent_harness.environments"]
 "example.workspace" = "converge_plugin_examples.environment:WorkspaceEnvironmentProviderFactory"
 
+[project.entry-points."converge_agent_harness.environment_run_extensions"]
+"example.workspace-marker" = "converge_plugin_examples.environment_extension:WorkspaceMarkerExtensionFactory"
+
 [project.entry-points."converge_agent_harness.plugins"]
 "example.run-recorder" = "converge_plugin_examples.harness:RunRecorderPluginFactory"
 
 [project.scripts]
 plugin-example-environment-entrypoint = "converge_plugin_examples.demo_environment:main_entrypoint"
 plugin-example-environment-code = "converge_plugin_examples.demo_environment:main_code"
+plugin-example-environment-extension-entrypoint = "converge_plugin_examples.demo_environment_extension:main_entrypoint"
+plugin-example-environment-extension-code = "converge_plugin_examples.demo_environment_extension:main_code"
 plugin-example-harness-entrypoint = "converge_plugin_examples.demo_harness:main_entrypoint"
 plugin-example-harness-code = "converge_plugin_examples.demo_harness:main_code"
 

@@ -37,17 +37,20 @@ class RunBindings:
 
 The trusted caller supplies fresh bindings for every logical run. The Harness:
 
-1. allocates the public Harness `run_id`;
-2. binds and enters `EnvironmentRunBinding` with that ID and Agent instance, publishing the initial topology while its paired controller remains non-active;
-3. restores present portable Environment state into that fixed set of already selected compatible bindings;
-4. activates the paired controller only after restore succeeds or no state was supplied;
-5. invokes an optional `RunInputFactory` exactly once;
-6. normalizes semantic input;
-7. creates one `AgentContext` with imported `AgentContextState`, the entered Environment, optional model binding, immutable metadata, and executable-owned child collection;
-8. binds fresh run plugin replacements and freezes `BoundPluginContext`;
-9. creates the outer plugin response.
+01. allocates the public Harness `run_id`;
+02. binds and enters `EnvironmentRunBinding` with that ID and Agent instance, publishing the initial topology while its paired controller remains non-active;
+03. restores present portable Environment state into that fixed set of already selected compatible bindings;
+04. enters ordered Environment run extensions only after restore succeeds or no state was supplied;
+05. activates the paired controller only after every extension enters successfully;
+06. invokes an optional `RunInputFactory` exactly once;
+07. normalizes semantic input;
+08. creates one `AgentContext` with imported `AgentContextState`, the entered Environment, optional model binding, immutable metadata, and executable-owned child collection;
+09. binds fresh run plugin replacements and freezes `BoundPluginContext`;
+10. creates the outer plugin response.
 
 The same context and entered Environment aggregate are reused by every internal Pydantic attempt. Current Identity, Environment facade, controller lifetime, plugins, Capability-state coordinator, model binding, and metadata therefore remain stable across recovery. The Host can apply topology changes during input preparation, an active attempt, tool work, or recovery backoff; publication changes immutable routing snapshots without replacing the facade or context. `RunBindings.capabilities` are passed to every Pydantic attempt and follow upstream per-run Capability binding semantics.
+
+The logical run and each internal attempt receive transient run IDs, but they do not define the provider model session or prompt-cache scope. All attempts for one Agent instance's message history use the stable model-conversation affinity reconstructed by the selected model integration. A later continuation creates a new Harness run and fresh binding while preserving that affinity for the same `AgentInstanceRef`; a new root, child, or fork uses a distinct value. [Input, Model, and Output Boundaries](16-input-model-and-output.md#model-conversation-affinity) owns the detailed contract.
 
 `RunBindings.local()` creates a process-local Agent instance, uses a zero-binding no-operation Environment aggregate when none is supplied, and accepts the same optional model binding, Capabilities, and metadata. It does not create a model registry or hidden provider configuration.
 
@@ -56,7 +59,7 @@ The same context and entered Environment aggregate are reused by every internal 
 ```mermaid
 stateDiagram-v2
     [*] --> created
-    created --> active: Environment entered, state restored, and controller activated
+    created --> active: Environment entered, state restored, extensions entered, and controller activated
     active --> active: model attempt or topology update
     active --> completed: validated output
     active --> suspended: native deferred or approval boundary
@@ -81,7 +84,7 @@ sequenceDiagram
     participant Provider
 
     Caller->>Harness: enter stream with input, bindings, and optional state
-    Harness->>Harness: enter Environment, restore portable state, activate controller, and create context
+    Harness->>Harness: enter Environment, restore portable state, enter extensions, activate controller, and create context
     Harness->>Plugins: bind one fresh middleware chain
     Caller->>Harness: request first item
     loop total semantic attempt budget
@@ -197,15 +200,16 @@ Every registered response is closed at most once. Cleanup continues after an ind
 
 ## Invariants
 
-1. One public Harness `run_id`, context, Environment aggregate/controller pair, plugin graph, and usage accumulator span the complete logical run.
-2. Every internal Pydantic attempt has a unique upstream run ID.
-3. Recovery never creates a new Host execution fact or rebinds current authority; dynamic topology uses the existing Host-retained controller.
-4. Events already delivered by an earlier attempt remain observations and are never retracted.
-5. Explicit cancellation, usage limits, output retry exhaustion, tool failures, and deferred/HITL boundaries stop semantic recovery.
-6. Interrupted tool history records uncertainty rather than exactly-once claims.
-7. A terminal event is delivered only after successful cleanup.
-8. External async cancellation cannot be converted into success or suppressed by cleanup.
-9. Environment topology mutation is accepted only before the logical terminal fence and never depends on a Pydantic Capability being present.
+01. One public Harness `run_id`, context, Environment aggregate/controller pair, plugin graph, and usage accumulator span the complete logical run.
+02. Every internal Pydantic attempt has a unique upstream run ID.
+03. Harness and inner run IDs are transient execution correlation, never the default provider model-session or prompt-cache affinity for a continuable Agent instance.
+04. Recovery never creates a new Host execution fact or rebinds current authority; dynamic topology uses the existing Host-retained controller.
+05. Events already delivered by an earlier attempt remain observations and are never retracted.
+06. Explicit cancellation, usage limits, output retry exhaustion, tool failures, and deferred/HITL boundaries stop semantic recovery.
+07. Interrupted tool history records uncertainty rather than exactly-once claims.
+08. A terminal event is delivered only after successful cleanup.
+09. External async cancellation cannot be converted into success or suppressed by cleanup.
+10. Environment topology mutation is accepted only before the logical terminal fence and never depends on a Pydantic Capability being present.
 
 ## Trade-offs
 

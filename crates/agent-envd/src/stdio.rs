@@ -16,6 +16,8 @@ use crate::{
 };
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
+const MAX_HEADER_LINE_BYTES: usize = 4 * 1024;
+const MAX_HEADER_COUNT: usize = 32;
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const DATA_CONTENT_TYPE: &str = "application/vnd.converge.eip-data";
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -59,6 +61,7 @@ where
         .map_err(|_| invalid_data("max_concurrent_operations does not fit this platform"))?;
     let max_transfers = usize::try_from(config.limits.max_concurrent_file_transfers)
         .map_err(|_| invalid_data("max_concurrent_file_transfers does not fit this platform"))?;
+    let transfer_timeout = Duration::from_millis(config.limits.max_file_transfer_duration_ms);
 
     let (control_tx, control_rx) = mpsc::channel::<ControlResponse>(max_concurrency);
     let data_capacity = max_transfers.saturating_mul(2).max(2);
@@ -84,21 +87,47 @@ where
 
     let inbound_daemon = Arc::clone(&daemon);
     let inbound_responses = data_tx.clone();
+    let (inbound_stopped, mut inbound_stopped_rx) = watch::channel(false);
     let mut inbound_data_task = tokio::spawn(async move {
-        while let Some(frame) = inbound_data_rx.recv().await {
-            if let Err(error) = inbound_daemon.handle_data_frame(frame.clone()).await {
-                let reset = DataFrame {
-                    kind: DataFrameKind::Reset,
-                    handle: frame.handle,
-                    offset: frame.offset,
-                    payload: Vec::new(),
-                    reset_status: Some(reset_status(error)),
-                };
-                if inbound_responses.send(reset).await.is_err() {
-                    break;
+        let result = async {
+            while let Some(frame) = inbound_data_rx.recv().await {
+                let handled = timeout(
+                    transfer_timeout,
+                    inbound_daemon.handle_data_frame(frame.clone()),
+                )
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "stdio transfer handling exceeded its deadline",
+                    )
+                })?;
+                if let Err(error) = handled {
+                    let reset = DataFrame {
+                        kind: DataFrameKind::Reset,
+                        handle: frame.handle,
+                        offset: frame.offset,
+                        payload: Vec::new(),
+                        reset_status: Some(reset_status(error)),
+                    };
+                    timeout(SHUTDOWN_DRAIN_TIMEOUT, inbound_responses.send(reset))
+                        .await
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "stdio transfer RESET enqueue exceeded its deadline",
+                            )
+                        })?
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, "stdio data writer stopped")
+                        })?;
                 }
             }
+            Ok(())
         }
+        .await;
+        inbound_stopped.send_replace(true);
+        result
     });
 
     let maintenance_daemon = Arc::clone(&daemon);
@@ -143,6 +172,11 @@ where
                 }
             }
             changed = writer_stopped_rx.changed() => {
+                match changed {
+                    Ok(()) | Err(_) => break,
+                }
+            }
+            changed = inbound_stopped_rx.changed() => {
                 match changed {
                     Ok(()) | Err(_) => break,
                 }
@@ -223,7 +257,8 @@ where
                 });
             }
             InboundFrame::Data(frame) => {
-                if inbound_data_tx.send(frame).await.is_err() {
+                let sent = timeout(transfer_timeout, inbound_data_tx.send(frame)).await;
+                if !matches!(sent, Ok(Ok(()))) {
                     break;
                 }
             }
@@ -234,9 +269,8 @@ where
     let _ = maintenance_task.await;
     drop(inbound_data_tx);
     let inbound_data_result = match timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut inbound_data_task).await {
-        Ok(result) => {
-            result.map_err(|error| io::Error::other(format!("stdio data task failed: {error}")))
-        }
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(io::Error::other(format!("stdio data task failed: {error}"))),
         Err(_) => {
             inbound_data_task.abort();
             Err(io::Error::new(
@@ -381,6 +415,8 @@ where
     R: AsyncRead + Unpin,
 {
     let mut header = Vec::with_capacity(256);
+    let mut line_bytes = 0_usize;
+    let mut header_count = 0_usize;
     let mut byte = [0_u8; 1];
     loop {
         let read = reader.read(&mut byte).await?;
@@ -396,9 +432,22 @@ where
         if header.len() == MAX_HEADER_BYTES {
             return Err(invalid_data("stdio frame header exceeds its byte limit"));
         }
+        if line_bytes == MAX_HEADER_LINE_BYTES {
+            return Err(invalid_data(
+                "stdio frame header line exceeds its byte limit",
+            ));
+        }
         header.push(byte[0]);
-        if header.ends_with(b"\r\n\r\n") {
-            break;
+        line_bytes += 1;
+        if header.ends_with(b"\r\n") {
+            if header.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            header_count += 1;
+            if header_count > MAX_HEADER_COUNT {
+                return Err(invalid_data("stdio frame header count exceeds its limit"));
+            }
+            line_bytes = 0;
         }
     }
 
@@ -675,6 +724,44 @@ mod tests {
             .await
             .expect("fixture writes");
         assert!(read_frame(&mut server, 128, 64).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_overlong_header_line_without_waiting_for_eof() {
+        let (mut client, mut server) = duplex(8 * 1024);
+        client
+            .write_all(&vec![b'X'; super::MAX_HEADER_LINE_BYTES + 1])
+            .await
+            .expect("fixture writes");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_frame(&mut server, 16, 64),
+        )
+        .await
+        .expect("line limit is enforced before EOF");
+        let Err(error) = result else {
+            panic!("overlong line is rejected");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn rejects_excessive_header_count_while_reading() {
+        let (mut client, mut server) = duplex(8 * 1024);
+        let headers = (0..=super::MAX_HEADER_COUNT)
+            .map(|index| format!("X-{index}: value\r\n"))
+            .collect::<String>();
+        client
+            .write_all(headers.as_bytes())
+            .await
+            .expect("fixture writes");
+
+        let result = read_frame(&mut server, 16, 64).await;
+        let Err(error) = result else {
+            panic!("excessive header count is rejected");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

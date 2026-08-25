@@ -31,6 +31,17 @@ from .coordinator import (
     create_noop_environment_run_binding,
 )
 from .eip import EIPEnvironmentProviderBinding, EIPSessionFactory
+from .extension_factories import (
+    ENVIRONMENT_RUN_EXTENSION_ENTRY_POINT_GROUP,
+    EnvironmentRunExtensionFactory,
+    EnvironmentRunExtensionFactoryCatalog,
+    EnvironmentRunExtensionFactoryContext,
+    EnvironmentRunExtensionFactoryReference,
+    EnvironmentRunExtensionFactoryRegistration,
+    build_environment_run_extension_factory_catalog,
+    discover_environment_run_extension_factory_references,
+)
+from .extensions import EnvironmentRunExtension, EnvironmentRunExtensionContext
 from .files import (
     FileCopyResult,
     FileEntriesResult,
@@ -137,6 +148,7 @@ __all__ = [
     "ENVIRONMENT_ACTION_CATALOG_VERSION",
     "ENVIRONMENT_ACTION_DISPATCH",
     "ENVIRONMENT_PROVIDER_ENTRY_POINT_GROUP",
+    "ENVIRONMENT_RUN_EXTENSION_ENTRY_POINT_GROUP",
     "ArgvCommand",
     "BoundEnvironment",
     "BoundEnvironmentProvider",
@@ -185,6 +197,13 @@ __all__ = [
     "EnvironmentProviderOperations",
     "EnvironmentReadinessRequirement",
     "EnvironmentRunBinding",
+    "EnvironmentRunExtension",
+    "EnvironmentRunExtensionContext",
+    "EnvironmentRunExtensionFactory",
+    "EnvironmentRunExtensionFactoryCatalog",
+    "EnvironmentRunExtensionFactoryContext",
+    "EnvironmentRunExtensionFactoryReference",
+    "EnvironmentRunExtensionFactoryRegistration",
     "EnvironmentState",
     "EnvironmentStateLimits",
     "EnvironmentTopology",
@@ -229,7 +248,9 @@ __all__ = [
     "ShellExecResult",
     "VirtualFileOperator",
     "build_environment_provider_factory_catalog",
+    "build_environment_run_extension_factory_catalog",
     "create_environment_run_binding",
     "create_noop_environment_run_binding",
     "discover_environment_provider_factory_references",
+    "discover_environment_run_extension_factory_references",
 ]

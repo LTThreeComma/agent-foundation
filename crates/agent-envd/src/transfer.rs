@@ -44,7 +44,13 @@ struct TransferInner {
 struct TransferState {
     records: BTreeMap<String, TransferRecord>,
     terminal_order: VecDeque<(String, Instant)>,
+    reservations: usize,
     session_closed: bool,
+}
+
+struct TransferReservation {
+    registry: TransferRegistry,
+    active: bool,
 }
 
 #[derive(Clone)]
@@ -204,7 +210,7 @@ impl TransferRegistry {
         params: &FileReaderOpenParams,
     ) -> Result<FileReaderOpenResult, TransferError> {
         self.expire().await;
-        self.reserve_record()?;
+        let reservation = self.reserve_record()?;
         let mount = mounts
             .get(&params.path.mount_id)
             .ok_or(TransferError::Denied)?;
@@ -245,7 +251,7 @@ impl TransferRegistry {
             cancellation,
             close_result: None,
         }));
-        self.insert_record(handle.clone(), TransferRecord::Reader(record))?;
+        reservation.insert(handle.clone(), TransferRecord::Reader(record))?;
         Ok(FileReaderOpenResult {
             reader: FileReaderHandle(handle),
             info,
@@ -294,7 +300,7 @@ impl TransferRegistry {
         params: &FileWriterOpenParams,
     ) -> Result<FileWriterOpenResult, TransferError> {
         self.expire().await;
-        self.reserve_record()?;
+        let reservation = self.reserve_record()?;
         let mount = match mounts.get(&params.path.mount_id) {
             Some(mount) if mount.writable && mount.allows("open_writer") => mount,
             _ => return Err(TransferError::Denied),
@@ -395,7 +401,7 @@ impl TransferRegistry {
             expires_at,
             last_progress: Instant::now(),
         }));
-        self.insert_record(handle.clone(), TransferRecord::Writer(record))?;
+        reservation.insert(handle.clone(), TransferRecord::Writer(record))?;
         Ok(FileWriterOpenResult {
             writer: FileWriterHandle(handle),
             max_transfer_bytes,
@@ -464,9 +470,18 @@ impl TransferRegistry {
             self.mark_terminal(&params.writer.0);
             return Err(TransferError::IntegrityMismatch);
         }
-        writer.phase = WriterPhase::Committing;
-        writer.file.take();
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.session_closed {
+            return Err(TransferError::SessionClosed);
+        }
         let candidate = writer.candidate.take().ok_or(TransferError::Internal)?;
+        writer.file.take();
+        writer.phase = WriterPhase::Committing;
+        drop(state);
         Ok(WriterCommit {
             registry: self.clone(),
             record: Arc::clone(&record),
@@ -993,7 +1008,7 @@ impl TransferRegistry {
             .map_err(|_| TransferError::Internal)
     }
 
-    fn reserve_record(&self) -> Result<(), TransferError> {
+    fn reserve_record(&self) -> Result<TransferReservation, TransferError> {
         let now = Instant::now();
         let mut state = self
             .inner
@@ -1005,44 +1020,27 @@ impl TransferRegistry {
             return Err(TransferError::SessionClosed);
         }
         let terminal = state.terminal_order.len();
-        let active = state.records.len().saturating_sub(terminal);
+        let active = state
+            .records
+            .len()
+            .saturating_sub(terminal)
+            .saturating_add(state.reservations);
         if active >= self.inner.max_active {
             return Err(TransferError::Busy);
         }
-        while state.records.len() >= self.inner.max_records {
+        while state.records.len().saturating_add(state.reservations) >= self.inner.max_records {
             if !state.reclaim_terminal() {
                 return Err(TransferError::Busy);
             }
         }
-        Ok(())
-    }
-
-    fn insert_record(&self, handle: String, record: TransferRecord) -> Result<(), TransferError> {
-        let now = Instant::now();
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.prune(now, self.inner.terminal_ttl);
-        if state.session_closed {
-            return Err(TransferError::SessionClosed);
-        }
-        if state.records.contains_key(&handle) {
-            return Err(TransferError::Conflict);
-        }
-        let terminal = state.terminal_order.len();
-        let active = state.records.len().saturating_sub(terminal);
-        if active >= self.inner.max_active {
-            return Err(TransferError::Busy);
-        }
-        while state.records.len() >= self.inner.max_records {
-            if !state.reclaim_terminal() {
-                return Err(TransferError::Busy);
-            }
-        }
-        state.records.insert(handle, record);
-        Ok(())
+        state.reservations = state
+            .reservations
+            .checked_add(1)
+            .ok_or(TransferError::Internal)?;
+        Ok(TransferReservation {
+            registry: self.clone(),
+            active: true,
+        })
     }
 
     fn record(&self, handle: &str) -> Result<TransferRecord, TransferError> {
@@ -1062,7 +1060,7 @@ impl TransferRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        state.records.len() > state.terminal_order.len()
+        state.records.len() > state.terminal_order.len() || state.reservations > 0
     }
 
     fn mark_terminal(&self, handle: &str) {
@@ -1081,6 +1079,48 @@ impl TransferRegistry {
                 .terminal_order
                 .push_back((handle.to_owned(), Instant::now()));
         }
+    }
+}
+
+impl TransferReservation {
+    fn insert(mut self, handle: String, record: TransferRecord) -> Result<(), TransferError> {
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.session_closed {
+            return Err(TransferError::SessionClosed);
+        }
+        if state.records.contains_key(&handle) {
+            return Err(TransferError::Conflict);
+        }
+        state.reservations = state
+            .reservations
+            .checked_sub(1)
+            .expect("active transfer reservation is consumed exactly once");
+        state.records.insert(handle, record);
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TransferReservation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.reservations = state
+            .reservations
+            .checked_sub(1)
+            .expect("active transfer reservation is released exactly once");
     }
 }
 
@@ -1493,6 +1533,7 @@ mod tests {
         fs::create_dir(&native_root).expect("creates native root");
         let mut config = Config::for_test("env-transfer-test");
         config.limits.max_staged_file_objects = 1;
+        config.limits.max_concurrent_file_transfers = 1;
         config.limits.file_transfer_idle_ttl_ms = idle_ttl_ms;
         config.mounts.push(TrustedMountConfig {
             mount_id: "workspace".to_owned(),
@@ -1513,6 +1554,25 @@ mod tests {
             .install_outbound(sender)
             .expect("installs outbound data sender");
         (tree, config, mounts, transfers, receiver)
+    }
+
+    #[tokio::test]
+    async fn transfer_reservation_is_atomic_and_rolls_back_on_drop() {
+        let (_tree, _config, _mounts, transfers, _outbound) = setup(false, 60_000);
+        let reservation = transfers.reserve_record().expect("reserves transfer slot");
+        assert!(transfers.has_active());
+        assert!(matches!(
+            transfers.reserve_record(),
+            Err(TransferError::Busy)
+        ));
+
+        drop(reservation);
+        assert!(!transfers.has_active());
+        let replacement = transfers
+            .reserve_record()
+            .expect("released reservation admits later work");
+        drop(replacement);
+        assert!(!transfers.has_active());
     }
 
     #[tokio::test]
@@ -1907,6 +1967,80 @@ mod tests {
                 )
                 .await,
             Err(TransferError::SessionClosed)
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn session_close_wins_candidate_handoff_when_it_locks_the_writer_first() {
+        let (tree, _config, mounts, transfers, _outbound) = setup(true, 60_000);
+        let opened = transfers
+            .open_writer(
+                &mounts,
+                &FileWriterOpenParams {
+                    context: context("close-wins-open"),
+                    path: path("/close-wins.bin"),
+                    mode: FileWriteMode::Create,
+                    executable: None,
+                    transfer_timeout_ms: None,
+                },
+            )
+            .await
+            .expect("opens writer");
+        let digest = ContentDigest {
+            algorithm: "sha256".to_owned(),
+            value: format!("{:x}", Sha256::digest(b"")),
+        };
+        let record = match transfers
+            .record(&opened.writer.0)
+            .expect("writer record exists")
+        {
+            TransferRecord::Writer(record) => record,
+            TransferRecord::Reader(_) => panic!("writer record expected"),
+        };
+        let mut held = record.lock().await;
+        held.phase = WriterPhase::Sealed;
+        held.digest = Some(digest.clone());
+
+        let close_registry = transfers.clone();
+        let closing = tokio::spawn(async move {
+            close_registry.close_session().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!closing.is_finished());
+
+        let prepare_registry = transfers.clone();
+        let writer = opened.writer.clone();
+        let preparing = tokio::spawn(async move {
+            prepare_registry
+                .prepare_commit(&FileWriterCommitParams {
+                    context: context("close-wins-commit"),
+                    writer,
+                    transferred_bytes: 0,
+                    transfer_digest: digest,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        drop(held);
+
+        closing.await.expect("session close finishes");
+        assert!(matches!(
+            preparing.await.expect("prepare task finishes"),
+            Err(TransferError::WrongState)
+        ));
+        assert!(!transfers.has_active());
+        assert!(!tree.child("native/close-wins.bin").exists());
+        assert_eq!(
+            fs::read_dir(tree.child("native"))
+                .expect("native directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".eip-stage-"))
+                .count(),
+            0
         );
     }
 

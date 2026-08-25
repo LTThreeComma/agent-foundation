@@ -786,14 +786,13 @@ impl EipHandler for Daemon {
         params: eip::FileReaderOpenParams,
     ) -> Result<eip::FileReaderOpenResult, EIPError> {
         self.transfers.expire().await;
-        let work = self.session.admit_work().ok_or_else(|| {
+        let _work = self.session.admit_work().ok_or_else(|| {
             protocol_error(ErrorType::NotInitialized, "session is not initialized")
         })?;
         let operation = self
             .operations
             .begin("file.open_reader", &params.context, &params)
             .map_err(map_ledger_error)?;
-        drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),
@@ -833,14 +832,13 @@ impl EipHandler for Daemon {
         params: eip::FileWriterOpenParams,
     ) -> Result<eip::FileWriterOpenResult, EIPError> {
         self.transfers.expire().await;
-        let work = self.session.admit_work().ok_or_else(|| {
+        let _work = self.session.admit_work().ok_or_else(|| {
             protocol_error(ErrorType::NotInitialized, "session is not initialized")
         })?;
         let operation = self
             .operations
             .begin("file.open_writer", &params.context, &params)
             .map_err(map_ledger_error)?;
-        drop(work);
         let operation = match operation {
             BeginOutcome::Replay(value) => return self.decode_replay(value),
             BeginOutcome::ReplayFailure(error) => return Err(*error),

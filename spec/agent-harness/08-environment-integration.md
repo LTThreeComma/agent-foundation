@@ -4,6 +4,8 @@
 
 Environment is a Harness-owned, run-scoped lifecycle resource. It is not a Pydantic Capability. A trusted Host supplies one single-use `EnvironmentRunBinding` in `RunBindings`; the Harness enters that aggregate before input production, publishes one stable `BoundEnvironment` through `AgentContext.environment`, and closes it after the logical run reaches its terminal fence and all owned scopes unwind.
 
+A trusted Host may register ordered `EnvironmentRunExtension` objects when constructing the aggregate. Each extension enters once after portable Environment state restoration and before controller activation, receives the complete stable `BoundEnvironment`, and exits in reverse order while that Environment remains open. This is the narrow process-local lifecycle seam for resources that span the complete Environment aggregate rather than one provider binding.
+
 The aggregate can contain zero, one, or several provider bindings. Each provider binding establishes trustworthy Environment identity, generation, descriptor, routing, and an enforceable readiness path before publication. Concrete file, shell, process, or port resources may continue preparing asynchronously inside the entered binding scope. Operations wait only for their selected operation family and fail with typed availability rather than relying on a global `ping()` or requiring every backend resource to be ready at run entry.
 
 A Host retains the paired `EnvironmentTopologyController` for the complete entered logical Harness run. It can add, refresh, or remove bindings without replacing `AgentContext.environment`, rebuilding the Agent, changing tool schemas, or waiting for another Harness run. The controller accepts only trusted process-local provider bindings. It prepares replacements before atomic publication, fences stale handles, drains operation leases, and retires removed resources under the same aggregate lifecycle.
@@ -18,6 +20,8 @@ Environment operations are provider-neutral. The Direct Local binding is the pub
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Desired topology, provider selection, logical resource identity, and lifecycle policy                                                                               | Host                                                                                                                                  |
 | Installed Environment package metadata, explicit entry-point loading, and validated process-local provider factory catalog                                          | Harness Environment provider factory boundary and selecting Host                                                                      |
+| Installed Environment run-extension metadata, explicit entry-point loading, and validated process-local extension factory catalog                                   | Harness Environment run-extension factory boundary and selecting Host                                                                 |
+| Ordered aggregate-wide extension selection and extension-specific resource ownership                                                                                | Host and entered `EnvironmentRunExtension`                                                                                            |
 | Run-scoped aggregate binding, immutable topology, virtual routing, readiness coordination, operation leases, retirement, and portable Environment-state aggregation | Harness Environment core                                                                                                              |
 | Model-visible tools, stable guidance, bounded topology context, and topology-change notices                                                                         | Optional `DynamicEnvironmentCapability`                                                                                               |
 | Monitored-process waiting, wake-up, accepted completion retention, and later delivery                                                                               | Fresh Host collaborator selected by the monitored-process Capability                                                                  |
@@ -374,6 +378,25 @@ class BoundEnvironment(Protocol):
     async def restore_state(self, state: EnvironmentState) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class EnvironmentRunExtensionContext:
+    run_id: str
+    instance: AgentInstanceContext
+    environment: BoundEnvironment
+
+
+@runtime_checkable
+class EnvironmentRunExtension(Protocol):
+    @property
+    def extension_id(self) -> str: ...
+
+    def bind(
+        self,
+        *,
+        context: EnvironmentRunExtensionContext,
+    ) -> AbstractAsyncContextManager[None]: ...
+
+
 class EnvironmentRunBinding(Protocol):
     @property
     def controller(self) -> EnvironmentTopologyController: ...
@@ -435,6 +458,7 @@ def create_environment_run_binding(
     initial_topology: EnvironmentTopologyRequest,
     topology_limits: EnvironmentTopologyLimits,
     state_limits: EnvironmentStateLimits,
+    extensions: Sequence[EnvironmentRunExtension] = (),
 ) -> EnvironmentRunBinding: ...
 
 
@@ -446,7 +470,7 @@ def create_noop_environment_run_binding(
 ) -> EnvironmentRunBinding: ...
 ```
 
-`create_environment_run_binding()` is the public constructible aggregate boundary. It validates and defensively captures one complete initial request and positive finite limits, returns a fresh single-use `CompositeEnvironmentRunBinding`, and exposes its paired controller through the `EnvironmentRunBinding` protocol. An embedding Host can therefore assemble zero, one, or many provider bindings without constructing coordinator internals.
+`create_environment_run_binding()` is the public constructible aggregate boundary. It validates and defensively captures one complete initial request, positive finite limits, and an ordered tuple of uniquely identified Environment run extensions; returns a fresh single-use `CompositeEnvironmentRunBinding`; and exposes its paired controller through the `EnvironmentRunBinding` protocol. An embedding Host can therefore assemble zero, one, or many provider bindings plus aggregate-wide lifecycle extensions without constructing coordinator internals.
 
 `create_noop_environment_run_binding()` returns the public `NoopEnvironmentRunBinding`, whose entered value is `NoopBoundEnvironment`. It uses the same aggregate coordinator and complete facade with an initially empty binding tuple, deterministic typed selection/unsupported failures, an empty state contribution, and a full paired controller until run close; it is not a second execution path. A Host can later publish a binding through that controller, after which the same stable facade is no longer empty. Omitted limits select finite package defaults, while explicit values can only narrow them. `RunBindings.local()` uses this constructor when no Environment is supplied. Callers observe no `is_noop` flag; `bound.topology.bindings == ()` is the canonical test.
 
@@ -465,6 +489,107 @@ Before publication, the aggregate captures one descriptor and one recursively de
 `EnvironmentRunBinding` is a paired single-use aggregate and controller. It captures positive immutable topology and state limits before entry. The aggregate validates the supplied Agent instance, enters initial provider scopes, obtains trustworthy identities and descriptors, intersects requested ceilings with provider capabilities and current policy, and publishes one immutable topology. Initial entry transfers every supplied candidate to the aggregate. Failure closes every scope already opened, discards every other candidate, and publishes nothing. Rebinding the aggregate, reusing a transferred provider binding, or applying through a controller paired with another run fails before publication.
 
 A zero-binding aggregate is the no-operation Environment used by `RunBindings.local()` when no provider is supplied. The same `BoundEnvironment` contract covers zero, one, and many bindings. Its facade objects remain stable for the run and resolve each call through the current immutable topology snapshot.
+
+### Environment Run Extensions
+
+An `EnvironmentRunExtension` is trusted process-local code bound to one complete entered `EnvironmentRunBinding`. The aggregate captures the supplied sequence as an immutable tuple during construction, validates every `extension_id` as a bounded non-blank string without surrounding whitespace, and rejects duplicate IDs before any run begins. The ID is stable process-local correlation and diagnostics, not authority or an ordering dependency.
+
+After initial provider entry and optional `EnvironmentState` restoration complete, aggregate activation creates one `EnvironmentRunExtensionContext` containing the public run ID, immutable Agent instance context, and stable `BoundEnvironment`. It enters extension scopes strictly in registration order and activates the topology controller only after every extension has entered successfully. A dynamic `controller.apply()` changes provider revisions within that already entered aggregate and never rebinds an extension. One logical Harness run therefore enters each registered extension at most once, including across inner model-recovery attempts.
+
+At the terminal fence, extension scopes exit in reverse registration order before the Environment is marked closed, operation leases are drained, or provider scopes are closed. Higher Harness response and run-Capability resources have already stopped using the Environment. Extension cleanup can still use ordinary provider-neutral `BoundEnvironment` operations, but the controller has begun closing and cannot publish new topology. Extension exit is not part of portable state export, and mutations performed during exit are not retroactively included in an earlier `HarnessState` value.
+
+Extension setup is fail-fast. If one scope fails to enter, every earlier entered extension exits in reverse order, the controller never activates, and normal aggregate teardown still closes all provider resources. Cleanup attempts every entered extension even when one exit fails, then aggregates those failures with provider and controller cleanup without replacing an active primary failure. Aggregate cleanup is cancellation-shielded and waits for extension scopes in strict nesting order. The Harness imposes no generic extension timeout: trusted extension code owns finite entry, exit, and any domain-specific deadline.
+
+The extension receives no `AgentContext`, model, plugin context, topology controller, arbitrary metadata, or Capability registry. It is not Harness middleware, a model-visible Capability, an Environment provider, or a provider-binding contributor. Provider integrations do not implicitly register extensions: a Host selects each aggregate extension explicitly. Extensions own only the resource scope they enter and cannot widen provider or Host authority merely by receiving the facade.
+
+### Environment Run Extension Factories
+
+A trusted distribution can register a factory class in the distinct entry-point group `converge_agent_harness.environment_run_extensions`:
+
+```toml
+[project.entry-points."converge_agent_harness.environment_run_extensions"]
+"acme.audit" = "acme_environment.run_extension:AuditExtensionFactory"
+```
+
+The entry-point name is the stable Host-facing `extension_key`. A key identifies installed construction code; `extension_id` identifies one configured extension instance, so one selected factory may create several differently configured instances.
+
+```python
+ENVIRONMENT_RUN_EXTENSION_ENTRY_POINT_GROUP = (
+    "converge_agent_harness.environment_run_extensions"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRunExtensionFactoryReference:
+    extension_key: str
+    import_target: str
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRunExtensionFactoryRegistration:
+    extension_key: str
+    class_module: str
+    class_qualname: str
+    import_target: str | None
+    distribution_name: str | None
+    distribution_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRunExtensionFactoryContext:
+    extension_key: str
+    extension_id: str
+    configuration: Mapping[str, JsonValue]
+
+
+class EnvironmentRunExtensionFactory(ABC):
+    @classmethod
+    def extension_key(cls) -> str: ...
+
+    @abstractmethod
+    def create_extension(
+        self,
+        context: EnvironmentRunExtensionFactoryContext,
+    ) -> EnvironmentRunExtension: ...
+
+
+class EnvironmentRunExtensionFactoryCatalog(
+    Mapping[str, EnvironmentRunExtensionFactory]
+):
+    @property
+    def registrations(
+        self,
+    ) -> tuple[EnvironmentRunExtensionFactoryRegistration, ...]: ...
+
+    def require(
+        self,
+        extension_key: str,
+    ) -> EnvironmentRunExtensionFactory: ...
+
+    def create_extension(
+        self,
+        context: EnvironmentRunExtensionFactoryContext,
+    ) -> EnvironmentRunExtension: ...
+
+
+def discover_environment_run_extension_factory_references(
+) -> tuple[EnvironmentRunExtensionFactoryReference, ...]: ...
+
+
+def build_environment_run_extension_factory_catalog(
+    *,
+    extension_keys: Iterable[str] = (),
+    explicit_factories: Iterable[EnvironmentRunExtensionFactory] = (),
+) -> EnvironmentRunExtensionFactoryCatalog: ...
+```
+
+The frozen factory context validates bounded non-blank key and instance ID values and recursively detaches one finite JSON configuration object before package code receives it. The Harness does not impose a generic encoded-size limit on that Host-owned object; the Host schema and package-specific validator own appropriate resource ceilings. The Harness owns no YAML or JSON Environment-extension configuration document; a Host reconstructs these contexts from its own trusted schema. Directly constructed `EnvironmentRunExtension` objects and factory-produced objects enter the same aggregate tuple.
+
+Discovery, selection, provenance, and loading follow the Environment provider factory rules: metadata discovery imports nothing; an empty selection performs no metadata scan; catalog construction preflights collisions, imports only selected entry points, requires safe no-argument factory construction, and supports explicit factory instances. An API or persisted value selects only a Host-approved installed key and never supplies an arbitrary import target. Catalogs are immutable and process-local.
+
+`EnvironmentRunExtensionFactoryCatalog.create_extension()` creates one fresh pre-entry-inert extension and validates its exact `extension_id` against the requested factory context. Factory construction performs no provider operation, network or filesystem I/O, or cleanup-producing acquisition; those actions belong inside `EnvironmentRunExtension.bind()`. Factory, import, metadata, constructor, key, and result failures suppress raw standard exception chaining and expose only bounded key, instance ID, and distribution provenance. Stable codes are `environment_extension_factory_key_invalid`, `environment_extension_factory_context_invalid`, `environment_extension_factory_missing`, `environment_extension_factory_duplicate`, `environment_extension_factory_target_invalid`, `environment_extension_factory_load_failed`, `environment_extension_factory_failed`, and `environment_extension_factory_result_invalid`. Aggregate validation and lifecycle use `environment_extension_id_invalid`, `environment_extension_duplicate`, `environment_extension_bind_failed`, and `environment_extension_cleanup_failed`.
 
 ### Environment Provider Factories
 
@@ -654,7 +779,7 @@ Readiness and live availability are observations, not authority or continuation 
 
 ## Dynamic Topology
 
-Initial aggregate entry publishes its topology but keeps the controller non-active while a present imported `EnvironmentState` is validated and restored against that fixed snapshot. Successful restore, or confirmation that no state was supplied, then activates the controller before `RunInputFactory`. A Host apply therefore never overlaps initial restore, while updates remain possible throughout input factory execution, plugin binding, all inner Pydantic attempts, tool work, recovery backoff, and result middleware. A Host reconciliation task can call `wait_until_active()` before stream entry; it returns when the paired aggregate is ready for apply, returns immediately when already active, and fails if the aggregate closes without becoming active. This gives a Host an explicit non-polling activation seam before `HarnessRunStream.__aenter__()` finishes its input factory. The logical run establishes a terminal fence before cleanup. An apply linearized before that fence can commit; one linearized after it fails with `EnvironmentError(code="run_not_active")`. Aggregate teardown permanently closes the controller, wakes activation waiters with `EnvironmentError(code="environment_closed")`, and makes later calls fail with the same code.
+Initial aggregate entry publishes its topology but keeps the controller non-active while a present imported `EnvironmentState` is validated and restored against that fixed snapshot. Successful restore, or confirmation that no state was supplied, then enters every registered Environment run extension before activating the controller and invoking `RunInputFactory`. A Host apply therefore never overlaps initial restore, while updates remain possible throughout input factory execution, plugin binding, all inner Pydantic attempts, tool work, recovery backoff, and result middleware. A Host reconciliation task can call `wait_until_active()` before stream entry; it returns when the paired aggregate is ready for apply, returns immediately when already active, and fails if the aggregate closes without becoming active. This gives a Host an explicit non-polling activation seam before `HarnessRunStream.__aenter__()` finishes its input factory. The logical run establishes a terminal fence before cleanup. An apply linearized before that fence can commit; one linearized after it fails with `EnvironmentError(code="run_not_active")`. Aggregate teardown permanently closes the controller, wakes activation waiters with `EnvironmentError(code="environment_closed")`, and makes later calls fail with the same code.
 
 `apply()` calls are serialized from request admission through publication. A request is defensively normalized and receives a canonical digest over its complete topology version, binding IDs and revisions, aliases, ceilings, default directories, and default binding. The digest excludes process-local provider-object identity and provider observations. A version lower than current is stale. A request at the current version returns the stored `EnvironmentTopologyChange` receipt only when its digest exactly matches the committed request; the same version with another digest fails with `topology_conflict`. This replay carries no provider object for an already current binding revision.
 
@@ -1599,10 +1724,11 @@ Carrier loss after a mutation is unknown unless `agent-envd` can replay the same
 24. Historical selector extension, topology publication, observer append, and replay-receipt creation are one serialized no-await commit; cancellation can occur before it or after the receipt returns, never between those facts.
 25. Topology changes and portable state obey immutable aggregate limits; observer delivery is non-draining, while state timeout, invalid encoding, or oversize fails explicitly rather than omitting data.
 26. Portable state declares whether it requires the same logical resource or supports cross-resource import, and neither mode grants Host lifecycle authority.
-27. Initial state restore runs against the fixed initial snapshot before controller activation; `apply()` can begin only after successful restore or confirmation that no state was supplied.
-28. Late-bound consumers use the observer's immutable initial version and the aggregate's read-only successfully restored state version; neither observation owns state or grants topology authority.
-29. `process-N` references are concurrency-safe, monotonically allocated model projections within one logical run; they are never persisted, reused, exposed to provider APIs, or resolved without exact-scope and live Environment revalidation.
-30. Each process entry atomically advances independent stdout/stderr next-unread offsets only for bytes delivered through the model surface; completion notices consume no output and later drains never replay delivered bytes.
-31. Provider output references, cursors, and explicit offsets remain trusted programmatic values and never become model references; oversized model text follows the managed tool-return spill contract.
-32. Public aggregate and Direct Local constructors fully determine lifecycle ownership, immutable local authority, finite limits, and no-operation behavior without requiring callers to instantiate coordinator internals.
-33. `environment-actions/2` uses exact catalog values and one action-to-family/facet mapping; unknown actions, prefixes, families, Toolset IDs, and provider capabilities never widen a ceiling or dispatch.
+27. Initial state restore runs against the fixed initial snapshot before ordered Environment run-extension entry and controller activation; `apply()` can begin only after successful restore and extension entry, or confirmation that no state was supplied followed by extension entry.
+28. Environment run extensions enter once in registration order and exit in reverse order before aggregate operations and provider scopes close; dynamic topology changes never rebind them.
+29. Late-bound consumers use the observer's immutable initial version and the aggregate's read-only successfully restored state version; neither observation owns state or grants topology authority.
+30. `process-N` references are concurrency-safe, monotonically allocated model projections within one logical run; they are never persisted, reused, exposed to provider APIs, or resolved without exact-scope and live Environment revalidation.
+31. Each process entry atomically advances independent stdout/stderr next-unread offsets only for bytes delivered through the model surface; completion notices consume no output and later drains never replay delivered bytes.
+32. Provider output references, cursors, and explicit offsets remain trusted programmatic values and never become model references; oversized model text follows the managed tool-return spill contract.
+33. Public aggregate and Direct Local constructors fully determine lifecycle ownership, immutable local authority, finite limits, and no-operation behavior without requiring callers to instantiate coordinator internals.
+34. `environment-actions/2` uses exact catalog values and one action-to-family/facet mapping; unknown actions, prefixes, families, Toolset IDs, and provider capabilities never widen a ceiling or dispatch.

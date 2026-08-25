@@ -4,17 +4,18 @@ This standalone project demonstrates the supported configuration and direct-code
 
 ## Composition Matrix
 
-| Boundary    | Installed entry-point mode                                                                                                                     | Explicit code mode                                                                                            |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Environment | Select an `EnvironmentProviderFactory` from `converge_agent_harness.environments`, then call `create_provider_binding()`                       | Supply an `EnvironmentProviderFactory` object directly, then call the same `create_provider_binding()` method |
-| Harness     | Let a `HarnessBuildContext` load preferred YAML or JSON, select enabled `HarnessPluginFactory` entries, and apply fresh instances during build | Construct an `AbstractHarnessPlugin` directly and place it in `AgentDefinition.plugins`                       |
+| Boundary                  | Installed entry-point mode                                                                                                                     | Explicit code mode                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Environment provider      | Select an `EnvironmentProviderFactory` from `converge_agent_harness.environments`, then call `create_provider_binding()`                       | Supply an `EnvironmentProviderFactory` object directly, then call the same `create_provider_binding()` method |
+| Environment run extension | Select an `EnvironmentRunExtensionFactory` from `converge_agent_harness.environment_run_extensions`, then call `create_extension()`            | Supply an `EnvironmentRunExtensionFactory` object directly, then call the same `create_extension()` method    |
+| Harness middleware        | Let a `HarnessBuildContext` load preferred YAML or JSON, select enabled `HarnessPluginFactory` entries, and apply fresh instances during build | Construct an `AbstractHarnessPlugin` directly and place it in `AgentDefinition.plugins`                       |
 
 Entry-point metadata provides only a stable key and import target. Harness middleware configuration uses the Harness-owned versioned envelope; YAML is preferred for files, JSON is supported for files and inline environment values, and each plugin package owns only the typed `configuration` payload.
 
 Both entry-point paths are explicit and lazy:
 
 1. metadata discovery does not import target modules;
-2. Environment callers select an exact stable key, while the Harness builder selects only enabled document keys;
+2. Environment callers select exact provider or run-extension keys, while the Harness builder selects only enabled document keys;
 3. catalog construction imports only those selected targets;
 4. factory output enters the same ordinary concrete-object path used by code mode.
 
@@ -34,6 +35,8 @@ From this directory:
 uv sync --locked
 uv run plugin-example-environment-entrypoint
 uv run plugin-example-environment-code
+uv run plugin-example-environment-extension-entrypoint
+uv run plugin-example-environment-extension-code
 uv run plugin-example-harness-entrypoint
 uv run plugin-example-harness-code
 uv run pytest
@@ -105,6 +108,64 @@ Code mode prints the same result with `selection mode: code`.
 - Resolve current credentials through a fresh provider or Host boundary rather than persisting them in configuration.
 
 The example delegates operations to `DirectLocalEnvironmentProviderBinding` to stay focused on packaging and selection. A remote provider implements its own binding and entered-provider contracts.
+
+## Environment Run Extension
+
+The distribution registers a separate aggregate-lifecycle factory:
+
+```toml
+[project.entry-points."converge_agent_harness.environment_run_extensions"]
+"example.workspace-marker" = "converge_plugin_examples.environment_extension:WorkspaceMarkerExtensionFactory"
+```
+
+[`environment_extension.py`](src/converge_plugin_examples/environment_extension.py) contains:
+
+- strict package-owned `WorkspaceMarkerConfiguration` validation;
+- a no-argument, side-effect-free `WorkspaceMarkerExtensionFactory`;
+- `WorkspaceMarkerExtension`, which creates a provider-neutral workspace marker after Environment state restoration and removes it before provider teardown.
+
+The factory receives an `EnvironmentRunExtensionFactoryContext` with separate `extension_key`, `extension_id`, and detached JSON configuration. It returns a fresh pre-entry-inert extension. All file I/O occurs only inside `EnvironmentRunExtension.bind()`.
+
+### Installed entry-point mode
+
+[`run_environment_extension_entrypoint_demo()`](src/converge_plugin_examples/demo_environment_extension.py) discovers metadata, selects only `example.workspace-marker`, creates one configured instance, registers it on `create_environment_run_binding()`, and exercises the complete scope:
+
+```bash
+uv run plugin-example-environment-extension-entrypoint
+```
+
+### Explicit code mode
+
+[`run_environment_extension_code_demo()`](src/converge_plugin_examples/demo_environment_extension.py) supplies `WorkspaceMarkerExtensionFactory()` directly without scanning installed metadata, then calls the same catalog method:
+
+```bash
+uv run plugin-example-environment-extension-code
+```
+
+Both paths verify that the marker is available after aggregate activation and absent after aggregate close:
+
+```text
+selection mode: entrypoint
+selected extension: example.workspace-marker
+extension id: marker-entrypoint
+marker content: entrypoint:run-extension-example
+marker removed: True
+```
+
+Code mode reports `selection mode: code` and `extension id: marker-code`.
+
+A run extension spans the complete Environment aggregate, not one provider revision. It enters once in registration order after state restore, does not re-enter for dynamic topology updates, and exits in reverse order while provider-neutral Environment operations are still available. It receives no model, `AgentContext`, Harness plugin context, or topology controller.
+
+### Real run-extension checklist
+
+- Give every aggregate instance a unique, stable, non-blank `extension_id`.
+- Keep factory construction and `create_extension()` side-effect free.
+- Validate the package-owned JSON configuration with a strict schema.
+- Acquire all cleanup-producing resources inside `bind()`.
+- Use only provider-neutral `BoundEnvironment` operations when touching Environment resources.
+- Make exit finite and clean every owned resource even when the run failed.
+- Do not expect dynamic `controller.apply()` to rebind the extension.
+- Use a Harness plugin for input/result middleware and a Capability for Agent-loop behavior instead.
 
 ## Harness Plugin
 
@@ -243,6 +304,13 @@ Harness middleware is trusted in-process code. Behavior inside the Pydantic Agen
 - pre-entry factory inertness;
 - package configuration validation;
 - real two-binding routing through both modes.
+
+[`test_environment_extension.py`](tests/test_environment_extension.py) verifies:
+
+- metadata-only discovery and selected-only import;
+- installed and explicit factory modes;
+- package configuration validation;
+- marker availability during the aggregate scope and cleanup before provider teardown.
 
 [`test_harness.py`](tests/test_harness.py) verifies:
 

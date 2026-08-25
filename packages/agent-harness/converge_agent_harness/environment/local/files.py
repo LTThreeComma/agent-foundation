@@ -249,8 +249,6 @@ class LocalFileOperator:
             resolved.relative_to(self._root)
         except ValueError:
             raise EnvironmentError("File path escapes the configured root.", code="environment_denied") from None
-        if not follow_final and resolved != self._root and resolved.is_symlink():
-            return resolved
         return resolved
 
     async def resolve_native_directory(self, path: str) -> Path:
@@ -282,6 +280,19 @@ class LocalFileOperator:
             raise EnvironmentError("Direct Local root is read-only.", code="environment_denied")
         if path == self._root:
             raise EnvironmentError("The provider root cannot be mutated.", code="environment_denied")
+
+    @staticmethod
+    def _validate_writer_destination(path: Path) -> None:
+        try:
+            destination = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise _environment_error_from_os(exc, action="inspect a write destination") from exc
+        if stat_module.S_ISLNK(destination.st_mode):
+            raise EnvironmentError("Writing through a symlink is denied.", code="environment_denied")
+        if not stat_module.S_ISREG(destination.st_mode):
+            raise EnvironmentError("Destination is not a regular file.", code="environment_request_invalid")
 
     def _publish_staged(
         self,
@@ -711,6 +722,7 @@ class LocalFileOperator:
     ) -> AsyncGenerator[_LocalWriter]:
         native = await asyncio.to_thread(self._resolve, path, follow_final=False, require_exists=False)
         self._require_writable(native)
+        await asyncio.to_thread(self._validate_writer_destination, native)
         writer = _LocalWriter(
             self,
             path,

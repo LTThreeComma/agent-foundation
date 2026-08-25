@@ -52,6 +52,8 @@ examples-test: examples-sync ## Run focused example tests
 examples-smoke: examples-sync ## Run every offline example path
 	@(cd examples/plugins && uv run --locked plugin-example-environment-entrypoint)
 	@(cd examples/plugins && uv run --locked plugin-example-environment-code)
+	@(cd examples/plugins && uv run --locked plugin-example-environment-extension-entrypoint)
+	@(cd examples/plugins && uv run --locked plugin-example-environment-extension-code)
 	@(cd examples/plugins && uv run --locked plugin-example-harness-entrypoint)
 	@(cd examples/plugins && uv run --locked plugin-example-harness-code)
 	@(cd examples/hosting && uv run --locked host-persistence-example)
