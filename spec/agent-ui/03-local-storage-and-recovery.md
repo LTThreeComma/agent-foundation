@@ -71,7 +71,7 @@ Conceptual table groups are:
 | Async-subagent jobs and input | accepted work, exact child node, process generation, steering/deferred/delivery state           | SQLite-owned lifecycle and selection; child state/deferred payloads file-owned    |
 | Event segment index           | Session sequence ranges, segment digest/path, previous segment, projection watermark            | Rebuildable from verified event headers except mutable cursor/retention selection |
 | Item and search projection    | messages, tools, child observations, previews, bounded searchable text                          | Rebuildable from AG-UI event files                                                |
-| Store maintenance             | schema version, leases, recovery/quarantine records, GC watermarks                              | SQLite-owned control state                                                        |
+| Store maintenance             | schema version, leases, and recovery/quarantine records                                         | SQLite-owned control state                                                        |
 
 A single integer does not pretend to serialize every concern. The store uses distinct revisions:
 
@@ -107,7 +107,7 @@ Publication follows one contract:
 6. synchronize the containing directory when required by the durability profile;
 7. only then commit a SQLite reference.
 
-If the final object already exists, the store verifies exact logical identity and reuses it. A collision or incompatible object at the same digest fails closed. A failure before SQLite selection leaves an unreferenced object eligible for later garbage collection; it does not become a selected checkpoint or provider state.
+If the final object already exists, the store verifies exact logical identity and reuses it. A collision or incompatible object at the same digest fails closed. A failure before SQLite selection leaves an unreferenced object eligible for automatic retention cleanup after the configured orphan-retention period; it does not become a selected checkpoint or provider state.
 
 ## Skill Package Objects
 
@@ -115,7 +115,7 @@ Each imported Skill revision publishes one compressed immutable package object b
 
 The logical digest covers the complete canonical manifest and payload. A package object is source content, not a runnable extension: it contains no Python object, executable plugin grant, credential, Environment selector, or native Host path. Runtime reconstruction reads the verified object and a trusted Agent UI `SkillMaterializer` writes its exact files through the selected Environment's public `FileOperator`. The destination and current write authority remain run-scoped.
 
-Changing a managed package publishes another immutable object and Skill resource revision. Agent snapshots retain every referenced package object after the editable source changes or disappears. Unreferenced package objects follow ordinary grace-period garbage collection.
+Changing a managed package publishes another immutable object and Skill resource revision. Agent snapshots retain every referenced package object after the editable source changes or disappears. Unreferenced package objects follow ordinary orphan retention.
 
 ## Harness State Objects
 
@@ -273,12 +273,13 @@ Startup recovery proceeds before command acceptance:
 2. open SQLite, validate schema, apply owned migrations, and verify integrity needed for authoritative tables;
 3. validate the latest accepted configuration generation or accept a newer complete file generation;
 4. reconcile staging files and quarantine malformed objects;
-5. verify every selected Agent snapshot, managed Skill package, Environment snapshot, provider-state reference needed for lifecycle, selected root/child checkpoint, and pending deferred-request object;
-6. scan registered AG-UI segment chains and repair rebuildable projection lag;
-7. mark prior-process `accepted` or `running` Turns and `accepted`, `queued`, or `running` async jobs interrupted, while preserving a root Turn or child job in `waiting` only when its complete checkpoint and exact deferred correlations validate;
-8. publish the recovered application view.
+5. remove immutable objects whose file age exceeds the configured orphan-retention period and which have no durable reference;
+6. verify every selected Agent snapshot, managed Skill package, Environment snapshot, provider-state reference needed for lifecycle, selected root/child checkpoint, and pending deferred-request object;
+7. scan registered AG-UI segment chains and repair rebuildable projection lag;
+8. mark prior-process `accepted` or `running` Turns and `accepted`, `queued`, or `running` async jobs interrupted, while preserving a root Turn or child job in `waiting` only when its complete checkpoint and exact deferred correlations validate;
+9. publish the recovered application view.
 
-Unreferenced valid immutable objects survive a grace period before garbage collection so a failed SQLite commit or interrupted publication cannot race immediate deletion. Referenced missing or corrupt objects have type-specific outcomes:
+Startup retention cleanup removes an immutable object only when no durable reference retains it and its file age exceeds the configured orphan-retention period. Recent unreferenced publications remain available across interruption, while referenced objects never expire merely because of age. Referenced missing or corrupt objects have type-specific outcomes:
 
 | Missing or corrupt value                     | Recovery outcome                                                                                                                   |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -307,11 +308,11 @@ Reclaiming an abandoned lease authorizes recovery inspection. It does not prove 
 
 Archive is SQLite-owned display/control metadata and does not weaken state or event references. Implementations can move compressed event trees for storage management only through a staged move plus SQLite path update and compensation/reconciliation on failure; logical identity uses digest rather than location.
 
-Retention can delete only objects and event segments with no retained Session, Agent-snapshot/Skill-package reference, fork, selected root or child checkpoint, unconsumed pending-deferred reference, provider lifecycle, async-child result/delivery, or export reference. Because AG-UI segments are compressed and supply complete presentation replay, lossy compaction is explicit: it creates a new retention generation and a complete semantic snapshot plus gap metadata before removing detailed prior segments. It never changes `HarnessState` or claims byte-for-byte replay after compaction.
+Retention can delete only objects and event segments with no retained Session, Agent-snapshot/Skill-package reference, fork, selected root or child checkpoint, unconsumed pending-deferred reference, provider lifecycle, async-child result/delivery, or export reference. Startup automatically deletes unreferenced immutable objects after the configured orphan-retention period. Business retention first removes the owning reference; the same orphan cleanup later reclaims the file. Because AG-UI segments are compressed and supply complete presentation replay, lossy compaction is explicit: it creates a new retention generation and a complete semantic snapshot plus gap metadata before removing detailed prior segments. It never changes `HarnessState` or claims byte-for-byte replay after compaction.
 
 Export copies a consistent SQLite projection plus referenced safe Agent/Environment snapshots, every referenced managed Skill package, selected root and child `HarnessState` objects, every selected unconsumed root or child deferred-request object, retained async-child outcomes/delivery ledgers, and AG-UI segments according to export policy. Deferred objects receive the same integrity, codec, Agent/tool-surface lock, and content-protection checks as local resume; omitting one makes a waiting Session export invalid rather than history-only. Provider resource state, credentials, browser capabilities, and live authority are excluded by default. Import validates all envelopes and references and creates new local control records rather than trusting source paths.
 
-Hard delete conflicts with active work, marks deletion intent, performs provider-resource cleanup according to [Session Environment ownership](04-sessions-environments-and-state.md), removes SQLite references, and later garbage-collects unreferenced files. Local deletion does not roll back external effects.
+Hard delete conflicts with active work, marks deletion intent, performs provider-resource cleanup according to the [Session Environment lifecycle policy](04-sessions-environments-and-state.md), and removes SQLite references. The ordinary orphan-retention cleanup later removes the unreferenced files. Local deletion does not roll back external effects.
 
 ## OpenTelemetry Separation
 
@@ -342,7 +343,7 @@ None substitutes for another.
 | Failure                                                    | Outcome                                                                                                            |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | Compression or object validation fails                     | No SQLite reference is committed                                                                                   |
-| Object publishes but SQLite commit fails                   | Object is orphaned and cleanup-safe; prior selected metadata remains                                               |
+| Object publishes but SQLite commit fails                   | Object remains unreferenced and is removed after orphan retention; prior selected metadata remains                 |
 | SQLite selects a reference but later file loss is detected | Type-specific corruption outcome; no fallback fabrication                                                          |
 | AG-UI projection update fails                              | Event file remains durable; projection catches up later                                                            |
 | AG-UI event file fails after live delivery                 | Replay contains an explicit gap; live delivery does not become durable history                                     |
@@ -362,7 +363,7 @@ A migration never rewrites content under an existing logical digest. It writes a
 
 ### SQLite metadata and compressed payload files
 
-SQLite provides efficient mutation, conflict detection, pagination, and search without storing large evolving state or event payloads in database pages. File publication introduces ordered multi-store commits and orphan cleanup, but state and history remain inspectable with standard Zstandard and JSON tooling.
+SQLite provides efficient mutation, conflict detection, pagination, and search without storing large evolving state or event payloads in database pages. File publication introduces ordered multi-store commits and automatic orphan-retention cleanup, but state and history remain inspectable with standard Zstandard and JSON tooling.
 
 ### Immutable segments instead of one append file
 
@@ -383,4 +384,4 @@ Separating telemetry prevents diagnostic volume or exporter failure from corrupt
 07. SQLite-owned mutable control facts are never guessed from AG-UI or state files after corruption.
 08. OpenTelemetry and ordinary logs remain outside SQLite, state objects, and AG-UI files and never determine product completion.
 09. No transaction or database session remains open across Harness execution, provider I/O, async-subagent waits, or a streaming response.
-10. Retention never deletes an object referenced by a retained Session, Agent snapshot, Skill package, selected root/child checkpoint, provider lifecycle, fork, or async-child outcome/delivery.
+10. Retention deletes an immutable object only when no durable reference retains it and its file age exceeds the configured orphan-retention period.

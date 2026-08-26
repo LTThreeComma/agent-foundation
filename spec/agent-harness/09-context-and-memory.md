@@ -43,10 +43,10 @@ Instruction and context-middleware ordering both inherit Pydantic AI's finalized
 The standard Capability set performs the following semantic work without creating a global stage API:
 
 1. validate imported message structure and apply the mandatory message-integrity Filter without rewriting provider semantics;
-2. apply handoff, accepted enqueue content, completed background work, and explicit file references;
-3. compact history when the configured budget requires it;
-4. resolve current Environment projection, working-state, memory, and skill guidance;
-5. finalize media and verify tool-call/result integrity before provider dispatch.
+1. apply handoff, accepted enqueue content, completed background work, and explicit file references;
+1. compact history when the configured budget requires it;
+1. resolve current Environment projection, working-state, memory, and skill guidance;
+1. finalize media and verify tool-call/result integrity before provider dispatch.
 
 The list defines expected ordering relationships for first-party Capabilities. Native model adapters and `ModelProfile` own ordinary provider reasoning, tool-argument, and history projection compatibility. Only while the latest upstream lacks a required public seam may an exact-model-integration-scoped Capability apply a tested public-hook repair; it carries typed configuration and an upstream-removal condition and never becomes a standard global normalization stage. Third-party Capabilities compose through Pydantic ordering constraints rather than registering a named stage.
 
@@ -122,8 +122,8 @@ A model-context Capability normally awaits `handler(request)` and returns a tran
 Pydantic's finalized run Capability mapping is the only source of middleware order. The coordinator selects values with `isinstance(value, AbstractModelContextCapability)` without dynamic method discovery, preserves that finalized order, and constructs the native wrapper nesting. The fixed semantic chain is:
 
 1. fresh Host binding, when present;
-2. finalized model-context Capabilities in native wrapper order;
-3. `AgentContext.project_model_context(request)` as the terminal projection.
+1. finalized model-context Capabilities in native wrapper order;
+1. `AgentContext.project_model_context(request)` as the terminal projection.
 
 The terminal projection calls `BoundEnvironment.project_model_context(request)` and combines its ordered blocks with the bounded default Agent run/conversation projection. Environment contributes `INPUT_PREAMBLE` blocks only for an `INPUT` request. Agent run/conversation context contributes one `REQUEST_EPILOGUE` block for both `INPUT` and ordinary `TOOL_RESULTS` requests, using a more compact tool-results form. Current time, request usage, selected Host metadata, working tasks, notes, and other Capability-owned state remain projected by their owning model-context Capabilities rather than exposing opaque `AgentContextState` namespaces to the terminal source.
 
@@ -173,15 +173,23 @@ Messages are appended only at complete semantic boundaries. Tool calls and resul
 
 `HarnessState.message_history` uses the public Pydantic message codec. Imported metadata never restores Identity, approval, provider ownership, or Capability state.
 
-## Runtime Context, File References, and Handoff
+## Runtime Context, Workspace Outline, File Context, and Handoff
 
-Runtime context and file context are optional definition-selected Capability contributions. Authored guidance remains in stable instructions, while values that can change between logical runs enter as bounded request context. File context reads only explicitly selected files through an authorized source such as the current `BoundEnvironment`; package installation or the process working directory does not grant ambient discovery authority.
+Runtime context, workspace outline, and file context are optional definition-selected model-context Capability contributions. Authored guidance remains in stable instructions, while values that can change between logical runs enter as bounded request context. Each Capability owns its immutable configuration and projection switch; the Host enables, omits, and composes Capabilities rather than configuring a Harness-global context switch.
+
+`WorkspaceOutlineCapability` projects a metadata-only file outline at `INPUT_PREAMBLE` on `INPUT` requests and contributes nothing to `TOOL_RESULTS`. Its default logical root is `.` and therefore resolves through the default binding and that binding's default working directory, never the Harness process working directory. Configuration bounds traversal depth, returned entries, UTF-8 bytes, provider calls, hidden-file inclusion, and whether an unavailable root is fatal. One projection uses `BoundEnvironment.select_files()` and `open_files()` to hold one exact binding revision for the compound scan, traverses directories in deterministic breadth-first order, stops as soon as any configured budget is reached, and marks the result truncated. It includes only logical path, file kind, and available size metadata; it never reads or embeds file content. A relevant route or generation change during the scan fails as stale rather than publishing a mixed-revision outline.
+
+`FileContextCapability` projects bounded file contents at `REQUEST_EPILOGUE` on `INPUT` requests and contributes nothing to `TOOL_RESULTS`. By default it best-effort reads `AGENTS.md` relative to the default binding's default working directory. Its configuration can disable that conventional file and can add an ordered tuple of other logical paths; explicit paths continue to resolve through `BoundEnvironment`, including `/workspace`, `/environment/{alias}`, and relative forms. The conventional `AGENTS.md` is optional when absent, while `required=True` makes every explicit path mandatory. Files are materialized once in `for_run()`, detached and bounded before the first model request, and frozen for that logical run. Package installation and the Harness process working directory grant no ambient discovery authority.
 
 An explicit file reference carries only a model-facing logical path and a bounded inspection reminder. It carries no file bytes, revision, digest, native path, provider handle, or claim that the file still exists. Pending references can use one versioned Capability namespace so replacement runs can remind the Agent to inspect them through the fresh Environment. Inspection never restores access that the new binding does not authorize.
 
+`RuntimeContextCapability` emits one bounded `REQUEST_EPILOGUE` block on eligible requests. Its tool-results form is deliberately lightweight and can include elapsed logical-run time, configured model context-window size, and latest model-request token usage. The context-window size is explicit Runtime Capability configuration because the Harness has no provider-neutral guarantee that a native Model profile exposes it. Current time, cumulative run usage, and selected Host metadata remain independently configurable fields for input projections. Runtime context reports context facts only; it does not own summary-tool guidance.
+
+`HandoffCapability` owns both the `summarize` tool guidance and its concise `TOOL_RESULTS` reminder. Its frozen configuration can disable that reminder or defer it until latest model-request usage reaches an explicit token threshold selected by the Host; a zero threshold reminds after every ordinary tool-result batch. The reminder neither triggers compaction nor implies that the provider has accepted a larger request. Keeping this policy with the summary tool avoids coupling generic runtime projection to one optional context-management behavior.
+
 Compaction and explicit `summarize` requests use the same validated history-replacement path. A handoff preserves current user intent, relevant file references, and enough provenance to distinguish summarized history from new input. A pending `DeferredToolRequests` boundary is not part of the replaceable prefix: its exact suspended message tail, call IDs, categories, and message identity remain unchanged through authoritative resume validation until matching results are incorporated. Provider-suspended continuation receives the same protection. Only after those exact continuations advance can a validated replacement become ordinary active messages and reintroduce pending handoff guidance once.
 
-Context-window estimates guide compaction but never replace provider enforcement. A configured recent-turn tail is protected continuation context, not an optional trimming pool. If validated compaction cannot produce a provider-valid request within the configured budget while retaining that tail, the request fails explicitly rather than silently dropping current intent or unresolved work. [`Events, Observability, and Usage`](12-events-observability-and-usage.md#first-party-event-contracts) owns the bounded context snapshots and operation observations for this path.
+Context-window estimates guide reminders and compaction but never replace provider enforcement. A configured recent-turn tail is protected continuation context, not an optional trimming pool. If validated compaction cannot produce a provider-valid request within the configured budget while retaining that tail, the request fails explicitly rather than silently dropping current intent or unresolved work. [`Events, Observability, and Usage`](12-events-observability-and-usage.md#first-party-event-contracts) owns the bounded context snapshots and operation observations for this path.
 
 ## Working State Capability
 
@@ -211,6 +219,7 @@ Small operational behaviors remain separate when their state and lifecycle diffe
 | Enqueue/messaging   | Uses Pydantic enqueue to deliver accepted steering or follow-up input    | Delivery acceptance stays with Host; incorporated IDs only when needed for duplicate suppression |
 | Monitored process   | Starts through `BoundEnvironment` and delivers a bounded completion      | Live observation and completion routing stay with a fresh Host collaborator                      |
 | File reference      | Tells the Agent which explicit files require inspection                  | Bounded pending logical paths only                                                               |
+| Workspace outline   | Projects a bounded metadata-only view of one Environment file root       | Recomputed from one revision-pinned `BoundEnvironment` scan; no continuation state               |
 | Dynamic Environment | Composes File/Shell tools with current topology context and live notices | Recomputed from `BoundEnvironment`; owns no continuation namespace                               |
 | Skill               | Supplies selected skill instructions and resources                       | Loaded skill IDs only when needed for continuation                                               |
 | Media               | Normalizes media count, size, format, and provider representation        | No raw provider URL credential state                                                             |

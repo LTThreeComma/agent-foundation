@@ -165,7 +165,7 @@ Environment application commands provide full local product control:
 - inspect safe lifecycle and provider observations;
 - resume or pause one binding under its supported mode;
 - reset by explicit destroy-and-create after authoritative absence;
-- detach caller-owned resources;
+- retain or explicitly destroy unreferenced provider resources according to lifecycle policy;
 - release Session assignments and destroy eligible Host resources only after their final assignment;
 - reconcile `unknown` operations with provider-specific evidence;
 - subscribe to safe topology/lifecycle changes.

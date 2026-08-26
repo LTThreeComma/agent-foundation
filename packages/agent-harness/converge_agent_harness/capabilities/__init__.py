@@ -7,8 +7,11 @@ from .context import (
     FileContextCapability,
     FileContextConfiguration,
     HandoffCapability,
+    HandoffConfiguration,
     RuntimeContextCapability,
     RuntimeContextConfiguration,
+    WorkspaceOutlineCapability,
+    WorkspaceOutlineConfiguration,
 )
 from .delegation import (
     DelegationCapability,
@@ -125,6 +128,7 @@ __all__ = [
     "FileContextConfiguration",
     "FileSkillSource",
     "HandoffCapability",
+    "HandoffConfiguration",
     "InProcessMonitoredProcessMonitor",
     "InlineDelegationBinder",
     "InlineSubagentState",
@@ -179,4 +183,6 @@ __all__ = [
     "WorkingState",
     "WorkingStateCapability",
     "WorkingStateConfiguration",
+    "WorkspaceOutlineCapability",
+    "WorkspaceOutlineConfiguration",
 ]

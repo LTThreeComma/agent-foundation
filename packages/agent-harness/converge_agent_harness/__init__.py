@@ -29,6 +29,7 @@ from converge_agent_harness.capabilities import (
     FileContextConfiguration,
     FileSkillSource,
     HandoffCapability,
+    HandoffConfiguration,
     InlineDelegationBinder,
     InlineSubagentState,
     InProcessMonitoredProcessMonitor,
@@ -83,6 +84,8 @@ from converge_agent_harness.capabilities import (
     WorkingState,
     WorkingStateCapability,
     WorkingStateConfiguration,
+    WorkspaceOutlineCapability,
+    WorkspaceOutlineConfiguration,
 )
 from converge_agent_harness.capability_types import CapabilityTypeCatalog, CapabilityTypeRegistration
 from converge_agent_harness.context import (
@@ -478,6 +481,7 @@ __all__ = [
     "FileWriteMode",
     "FileWriteResult",
     "HandoffCapability",
+    "HandoffConfiguration",
     "HandoffToolset",
     "HarnessBuildContext",
     "HarnessBuilder",
@@ -624,6 +628,8 @@ __all__ = [
     "WorkingStateCapability",
     "WorkingStateConfiguration",
     "WorkingStateToolset",
+    "WorkspaceOutlineCapability",
+    "WorkspaceOutlineConfiguration",
     "__version__",
     "build_environment_provider_factory_catalog",
     "build_environment_run_extension_factory_catalog",

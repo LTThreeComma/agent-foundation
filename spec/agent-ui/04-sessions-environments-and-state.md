@@ -47,11 +47,10 @@ class EnvironmentBindingDefinition(BaseModel):
 class SessionEnvironmentLifecyclePolicy(BaseModel):
     provision: Literal["eager", "on_first_run"]
     idle: Literal["keep_running", "pause_full", "pause_filesystem"]
-    ownership: Literal["session_owned", "caller_owned"]
-    delete: Literal["destroy", "detach"]
+    release: Literal["retain", "destroy_when_unreferenced"]
 ```
 
-`EnvironmentProviderSpec` and its provider-owned configuration schema are defined by the [Environment Provider catalog](../agent-environment-provider/01-provider-specs-and-catalog.md). Agent UI validates every selected provider key, schema, parameter set, permission ceiling, topology alias, and lifecycle capability while accepting a configuration generation.
+`EnvironmentProviderSpec` and its provider-owned configuration schema are defined by the [Environment Provider catalog](../agent-environment-provider/01-provider-specs-and-catalog.md). Agent UI validates every selected provider key, schema, parameter set, permission ceiling, topology alias, and lifecycle capability while accepting a configuration generation. Lifecycle policy describes what the Host does after the final assignment releases a provider resource; it does not assign that Environment to an Agent or Session owner. `retain` detaches the assignment and keeps provider state available, while `destroy_when_unreferenced` selects explicit Manager destroy only after no retained assignment or active attachment remains.
 
 `binding_name` is a Host identity; `model_alias` is the bounded alias published through Harness topology. Names are unique in one Environment. `default_binding` is absent only for an empty topology and otherwise names one binding. The Environment definition contains no credential, provider resource ID, container/sandbox ID, endpoint resolved at runtime, attachment, EIP session, live provider object, or `HarnessState`.
 
@@ -130,27 +129,29 @@ stateDiagram-v2
 
 ## Environment Resource Assignment
 
-One Environment binding can own several durable provider resource instances with distinct execution scopes:
+One Environment binding can have several assignments to durable provider resource instances across distinct execution scopes:
 
 ```python
-class RootEnvironmentOwner(BaseModel):
+class RootEnvironmentExecutionScope(BaseModel):
     kind: Literal["root"]
 
 
-class AsyncChildEnvironmentOwner(BaseModel):
+class AsyncChildEnvironmentExecutionScope(BaseModel):
     kind: Literal["async_child"]
     subagent_job_id: str
     child_thread_id: str | None
 
 
-type EnvironmentResourceOwner = RootEnvironmentOwner | AsyncChildEnvironmentOwner
+type EnvironmentExecutionScope = (
+    RootEnvironmentExecutionScope | AsyncChildEnvironmentExecutionScope
+)
 
 
 class SessionEnvironmentAssignment(BaseModel):
     assignment_id: str
     session_id: str
     binding_name: str
-    owner: EnvironmentResourceOwner
+    scope: EnvironmentExecutionScope
     host_resource_id: str
     created_at: datetime
 
@@ -182,7 +183,7 @@ class HostEnvironmentResource(BaseModel):
     updated_at: datetime
 ```
 
-A Session assignment owns binding and execution scope; the Host resource record is the only provider lifecycle and fencing authority. Async-child ownership uses the already persisted subagent job ID before provider dispatch. `child_thread_id` is optional post-entry correlation filled only after the Harness creates or restores the child baseline, and it never replaces the assignment identity.
+A Session assignment references one binding and execution scope; it does not own the underlying Environment resource. The Host resource record is the provider lifecycle and fencing authority. Async-child work correlation uses the already persisted subagent job ID before provider dispatch. `child_thread_id` is optional post-entry correlation filled only after the Harness creates or restores the child baseline, and it never replaces the assignment identity.
 
 For `SINGLE_FROM_SPEC`, Agent UI resolves one canonical `host_resource_id` from provider key, exact provider-spec digest, and provider-owned logical resource identity. Every Session using that specification references the same Host resource record and operation fence. For `MULTIPLE_FROM_SPEC`, each independent allocation receives a new Host resource record and provider state. Repeated Session assignments never manufacture another lifecycle authority for a single underlying resource.
 
@@ -224,7 +225,7 @@ stateDiagram-v2
 
 A transition such as `creating` is a durable intent/fence, not proof that provider dispatch occurred. Agent UI commits the intent in SQLite, performs the async Manager operation without a database transaction, publishes the returned provider-state object, and then commits the terminal lifecycle transition if the fence still matches.
 
-Failure after possible dispatch becomes `unknown`. Another create, resume, pause, or destroy is denied until `EnvironmentManager.reconcile()` returns exact-operation running, paused, or absent evidence, or the user explicitly chooses a recorded orphaning outcome. Reconciliation maps `ABSENT` by prior action: create returns to `unprovisioned`, destroy becomes `destroyed`, and resume/pause becomes `missing`. A required `missing` resource blocks the Session until explicit reset provisions a new resource under a higher fence or delete accepts authoritative absence. A missing resource on `resume()` never silently creates a replacement. Caller-owned Direct Local resources are detached rather than removed even when the Session is deleted.
+Failure after possible dispatch becomes `unknown`. Another create, resume, pause, or destroy is denied until `EnvironmentManager.reconcile()` returns exact-operation running, paused, or absent evidence, or the user explicitly chooses a recorded orphaning outcome. Reconciliation maps `ABSENT` by prior action: create returns to `unprovisioned`, destroy becomes `destroyed`, and resume/pause becomes `missing`. A required `missing` resource blocks the Session until explicit reset provisions a new resource under a higher fence or delete accepts authoritative absence. A missing resource on `resume()` never silently creates a replacement. Direct Local release never removes its configured shared Host directory, regardless of Session deletion policy.
 
 ### Provision and Resume
 
@@ -236,10 +237,11 @@ Before a Run, Agent UI makes every required binding available:
 2. construct a fresh provider runtime with current credentials;
 3. create or resume the exact resource through its Manager;
 4. publish and select any updated provider resource state;
-5. enter the `ManagedEnvironment` and acquire one fresh single-use attachment;
-6. supply all attachments as one complete Harness Environment topology in fresh `RunBindings`.
+5. enter the `ManagedEnvironment` and open one fresh single-use attachment-acquisition scope;
+6. adapt and supply all attachments as one complete Harness Environment topology in fresh `RunBindings`;
+7. keep every acquisition scope open until its Harness binding has closed, then release the scope before pause or resource disconnect.
 
-A `ManagedEnvironment` can remain entered across sequential Runs owned by the same application-service lifetime, subject to provider concurrency and Host policy. `dedicated` concurrent async children use distinct Host resource records only for providers advertising `MULTIPLE_FROM_SPEC`; every record has its own provider state, operation fence, pause/resume, recovery, and cleanup lifecycle. `shared_root` uses the existing root resource record but acquires a distinct attachment only from providers advertising `SHARED`. `serialized_root` keeps the accepted async job queued until root instances have no active attachment and then reuses them sequentially. `none` supplies no child topology. A child never inherits the parent's attachment or credential, even when it intentionally shares the underlying resource.
+A `ManagedEnvironment` can remain entered across sequential Runs within the same application-service lifetime, subject to provider concurrency and Host policy. `dedicated` concurrent async children use distinct Host resource records only for providers advertising `MULTIPLE_FROM_SPEC`; every record has its own provider state, operation fence, pause/resume, recovery, and cleanup lifecycle. `shared_root` uses the existing root resource record but acquires a distinct attachment only from providers advertising `SHARED`. `serialized_root` keeps the accepted async job queued until root instances have no active attachment and then reuses them sequentially. `none` supplies no child topology. A child never inherits the parent's attachment or credential, even when it intentionally shares the underlying resource.
 
 ### Idle, Restart, and Cleanup
 
@@ -247,7 +249,7 @@ After a root or async-child activity scope becomes idle, the Session lifecycle p
 
 On application restart, SQLite lifecycle and provider-state references remain. No socket, client, `ManagedEnvironment`, attachment, or Harness binding is restored. A later operation constructs a fresh Manager and calls `resume()` on the selected resource state.
 
-Deleting a Session first moves it to `deleting`, blocks new work, drains or interrupts live work, and releases every root and child assignment. A Host resource can be destroyed only after no retained Session assignment or active attachment references it. Session-owned `MULTIPLE_FROM_SPEC` resources normally become destroy-eligible with their final assignment; a shared `SINGLE_FROM_SPEC` manager-owned resource remains under its one Host fence until the last authorized assignment releases it. Caller-owned resources detach and are never removed. Destroy-eligible resources retain cleanup records until authoritative absence or an explicit unresolved outcome is committed. An unknown cleanup moves the Session to `cleanup_pending`. Metadata and history are not physically removed while required resource cleanup remains retryable unless the user explicitly chooses an orphaning operation that records the external-resource risk.
+Deleting a Session first moves it to `deleting`, blocks new work, drains or interrupts live work, and releases every root and child assignment. A Host can select Provider Manager destroy only after no retained Session assignment or active attachment references that resource. A `MULTIPLE_FROM_SPEC` resource with `release="destroy_when_unreferenced"` normally becomes destroy-eligible after its final assignment; a shared `SINGLE_FROM_SPEC` resource remains under one Host fence until the final authorized assignment releases it. `release="retain"` detaches without a destroy operation. Direct Local destroy is logical detach and never removes its configured directory. Destroy-eligible resources retain cleanup records until authoritative absence or an explicit unresolved outcome is committed. An unknown cleanup moves the Session to `cleanup_pending`. Metadata and history are not physically removed while required resource cleanup remains retryable unless the user explicitly chooses an orphaning operation that records the external-resource risk.
 
 ## Turn and Checkpoint Model
 
@@ -391,7 +393,7 @@ The new Session receives independent Agent and Environment snapshot selections, 
 
 When the new Session selects the same compatible logical Agent snapshot, Agent UI uses `HarnessState.fork()` on the complete source checkpoint. Selecting a different Agent snapshot requires explicit compatibility validation. Private Capability state never enters an incompatible definition merely because message history is readable. When compatibility is not established, the Host can create a history-seeded fork with a fresh `HarnessState`; the lineage records that no private continuation state transferred.
 
-Environment provider resources are never copied by `HarnessState.fork()`. The fork creates new assignments under its selected Environment lifecycle. A compatible `SINGLE_FROM_SPEC` resource can receive another assignment under the same Host lifecycle authority; a `MULTIPLE_FROM_SPEC` resource assigned exclusively to the new Session is newly provisioned unless an explicit provider-supported attach policy selects an existing resource. Caller-owned workspace sharing remains explicit.
+Environment provider resources are never copied by `HarnessState.fork()`. The fork creates new assignments under its selected Environment lifecycle. A compatible `SINGLE_FROM_SPEC` resource can receive another assignment under the same Host lifecycle authority; a `MULTIPLE_FROM_SPEC` resource assigned exclusively to the new Session is newly provisioned unless an explicit provider-supported attach policy selects an existing resource. Direct Local workspace sharing remains explicit.
 
 ## Presentation and Item State
 
@@ -465,9 +467,9 @@ A newer Agent UI resumes a Session only when it can validate both pinned snapsho
 
 Separating behavior from runtime resources allows the same Agent to run in local, container, or remote Environments and the same Environment to host different Agents. Session creation must validate cross-product requirements and manage two immutable snapshots.
 
-### Session-owned provider lifecycle
+### Reference-aware provider lifecycle
 
-Binding provider resource state to the Session makes restart, pause, cleanup, and cost policy explicit. Provider operations remain outside SQLite transactions, so unknown outcomes require reconciliation rather than fictitious atomicity.
+Associating provider resource state and release policy with Session assignments makes restart, pause, cleanup, sharing, and cost policy explicit without assigning an Environment owner. Provider operations remain outside SQLite transactions, so unknown outcomes require reconciliation rather than fictitious atomicity.
 
 ### Single-writer Thread advancement
 

@@ -35,7 +35,7 @@ Structured definitions use strict versioned YAML or its exact JSON equivalent. P
 
 Source layers are ordered from lowest to highest precedence. Built-in resources form the lowest layer, followed by configured user roots and then an explicitly selected project root. A higher layer can replace one lower-layer resource only by the same stable resource ID and compatible resource kind. Replacement selects different content in the candidate generation; it does not mutate or delete the lower revision. Two definitions of the same identity at the same precedence are an error.
 
-The process settings document selects the data root, definition roots, project-root policy, credential backends, provider/plugin allowlists, logging and telemetry exporters, concurrency limits, retention policy, and Web transport settings. Settings are classified as:
+The process settings document selects the data root, definition roots, project-root policy, credential backends, provider/plugin allowlists, logging and telemetry exporters, concurrency limits, retention policy, and Web transport settings. The retention policy includes the positive orphan-retention period used by automatic startup cleanup; age never expires an object that still has a durable reference. Settings are classified as:
 
 - **reloadable**, when a new accepted value can affect later commands without replacing process-owned infrastructure;
 - **restart-bound**, when the value owns already-open infrastructure such as the data root, SQLite location, listener address, TLS mode, or credential-store implementation.
@@ -175,7 +175,7 @@ class LocalSkillDiscoverySettings(BaseModel):
     max_skills: int
 ```
 
-Every `ordered_sources` entry names a `skill_source` resource exactly once. `directory` is a credential-free local directory selector authorized by current Host policy. Each configured directory is entered as a caller-owned Direct Local Environment binding; `roots` are normalized beneath that binding and exposed as `/environment/{source-alias}/...` logical paths. Agent UI then constructs explicit ordered Harness `FileSkillSource` values and calls `SkillManager.scan_environment(environment=...)` against the entered topology. That operation captures every configured root, scans and materializes through exact revision-pinned `FileOperator` scopes, and reselects every configured root before returning a `BoundSkillCatalog`. The catalog carries exact binding revisions and observed provider generations for its discovered items; Agent UI calls `require_current()` before consuming a bound logical path. It never reads a native path through a second Skill scanner.
+Every `ordered_sources` entry names a `skill_source` resource exactly once. `directory` is a credential-free local directory selector authorized by current Host policy. Each configured existing directory is entered through a shared Direct Local Environment binding; `roots` are normalized beneath that binding and exposed as `/environment/{source-alias}/...` logical paths. Agent UI then constructs explicit ordered Harness `FileSkillSource` values and calls `SkillManager.scan_environment(environment=...)` against the entered topology. That operation captures every configured root, scans and materializes through exact revision-pinned `FileOperator` scopes, and reselects every configured root before returning a `BoundSkillCatalog`. The catalog carries exact binding revisions and observed provider generations for its discovered items; Agent UI calls `require_current()` before consuming a bound logical path. It never reads a native path through a second Skill scanner.
 
 `BoundSkillCatalog`, `BoundSkillCatalogItem`, their bound `EnvironmentPath` values, observed generations, and topology version are process-local evidence about one entered Environment. Agent UI never persists them as package, resource-revision, snapshot, or Session authority. Only the copied package manifest, payloads, and content digest become durable Agent UI authority; safe source provenance retained for refresh remains a non-authoritative hint.
 
@@ -289,19 +289,19 @@ A configuration listing, export, diagnostic, snapshot, Session, AG-UI event, mod
 
 ## Failure Semantics
 
-| Failure                                                                    | Outcome                                                                                          |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Malformed, oversized, or unstable source                                   | Candidate rejected; last accepted generation remains active                                      |
-| Duplicate identity at equal precedence                                     | Entire candidate generation rejected                                                             |
-| Missing or wrong-kind reference                                            | Entire candidate generation rejected with bounded dependency diagnostics                         |
-| Agent cycle, invalid plugin, unavailable adapter, or invalid provider spec | Candidate generation rejected before publication                                                 |
-| Immutable snapshot publication failure                                     | No generation metadata points to the incomplete object                                           |
-| SQLite generation commit failure                                           | Published unreferenced objects remain cleanup-safe; old generation remains active                |
-| External edit races a UI edit                                              | Revision conflict or later reload; no silent merge                                               |
-| Multi-file manifest is incomplete or mismatched                            | Transaction candidate rejected; previous accepted generation remains active                      |
-| Restart-bound setting changes                                              | Desired generation accepted with `restart_required`; active infrastructure is unchanged          |
-| Credential lookup fails                                                    | Current runtime operation fails; configuration remains accepted                                  |
-| File watcher loses events                                                  | Periodic reconciliation or explicit reload detects divergence; watcher delivery is not authority |
+| Failure                                                                    | Outcome                                                                                                                |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Malformed, oversized, or unstable source                                   | Candidate rejected; last accepted generation remains active                                                            |
+| Duplicate identity at equal precedence                                     | Entire candidate generation rejected                                                                                   |
+| Missing or wrong-kind reference                                            | Entire candidate generation rejected with bounded dependency diagnostics                                               |
+| Agent cycle, invalid plugin, unavailable adapter, or invalid provider spec | Candidate generation rejected before publication                                                                       |
+| Immutable snapshot publication failure                                     | No generation metadata points to the incomplete object                                                                 |
+| SQLite generation commit failure                                           | Published unreferenced objects remain cleanup-safe and expire through storage retention; old generation remains active |
+| External edit races a UI edit                                              | Revision conflict or later reload; no silent merge                                                                     |
+| Multi-file manifest is incomplete or mismatched                            | Transaction candidate rejected; previous accepted generation remains active                                            |
+| Restart-bound setting changes                                              | Desired generation accepted with `restart_required`; active infrastructure is unchanged                                |
+| Credential lookup fails                                                    | Current runtime operation fails; configuration remains accepted                                                        |
+| File watcher loses events                                                  | Periodic reconciliation or explicit reload detects divergence; watcher delivery is not authority                       |
 
 ## Compatibility
 
