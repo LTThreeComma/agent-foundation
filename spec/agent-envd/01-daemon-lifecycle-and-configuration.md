@@ -93,7 +93,9 @@ Executable search roots and shell profiles are trusted canonical configuration d
 
 ## Configuration Sources and Secrets
 
-The executable accepts trusted configuration from an operator-selected file, explicit non-secret CLI values, documented process environment, and a provider-created private bootstrap channel. One effective immutable value is computed before owner initialization. Conflicting duplicate authority-bearing values fail startup.
+The executable accepts trusted configuration from an operator-selected file, explicit non-secret CLI values, documented process environment, and a provider-created private bootstrap channel. One effective immutable value is computed before owner initialization. For execution policy, documented environment values override the corresponding strict JSON `execution` fields, which override the defaults; the complete merged policy is canonicalized and validated once before owner initialization.
+
+The optional JSON `execution` object contains `isolation`, `network`, and `extra_read_only_paths` with the same values and defaults as the environment settings below. Unknown fields fail startup. The packaged sandbox container image explicitly sets `AGENT_ENVD_EXECUTION_ISOLATION=disabled` because that image delegates child containment to its outer container boundary; the standalone binary does not change its `required` default.
 
 Stable non-secret environment configuration includes:
 
@@ -207,6 +209,8 @@ Startup order is:
 9. Publish local readiness to the trusted provider lifecycle boundary and begin carrier admission.
 
 No stdio frame is accepted, HTTP listener begins admission, or reverse-WebSocket attempt begins before the required isolation probe succeeds. Only the selected HTTP profile binds an inbound EIP socket.
+
+`agent-envd isolation probe [--config <absolute-json-path>] --json` runs the same selected-backend production probe without admitting a carrier. It reports required containment or explicit outer-Host delegation as bounded JSON and exits unsuccessfully when required isolation cannot establish its configured guarantees.
 
 ## Readiness
 

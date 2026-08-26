@@ -119,6 +119,19 @@ struct FileConfig {
     trusted_executable_roots: Vec<PathBuf>,
     #[serde(default)]
     shell_profiles: Vec<TrustedShellProfileConfig>,
+    #[serde(default)]
+    execution: FileExecutionConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileExecutionConfig {
+    #[serde(default)]
+    isolation: Option<ExecutionIsolationMode>,
+    #[serde(default)]
+    network: Option<ExecutionNetworkMode>,
+    #[serde(default)]
+    extra_read_only_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,6 +186,28 @@ impl DaemonLimits {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionIsolationMode {
+    Required,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionNetworkMode {
+    Host,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionConfig {
+    pub(crate) isolation: ExecutionIsolationMode,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) network: ExecutionNetworkMode,
+    pub(crate) extra_read_only_paths: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum TransportConfig {
     Stdio,
@@ -199,6 +234,8 @@ pub(crate) struct ReverseWebSocketConfig {
 pub(crate) struct Config {
     pub(crate) environment_id: String,
     pub(crate) transport: TransportConfig,
+    pub(crate) execution: ExecutionConfig,
+    pub(crate) config_file: Option<PathBuf>,
     pub(crate) limits: DaemonLimits,
     pub(crate) initialization_timeout: Duration,
     pub(crate) session_idle_timeout: Duration,
@@ -211,7 +248,14 @@ pub(crate) struct Config {
 impl Config {
     pub(crate) fn from_environment() -> Result<Self, ConfigError> {
         reject_unknown_environment_variables()?;
-        let file = load_file_config(config_file_argument()?)?;
+        let config_file = config_file_argument()?;
+        let file = load_file_config(config_file.clone())?;
+        let config_file = config_file
+            .map(fs::canonicalize)
+            .transpose()
+            .map_err(|error| {
+                ConfigError::new(format!("cannot canonicalize config file: {error}"))
+            })?;
 
         if env::var_os("AGENT_ENVD_API_KEY").is_some() {
             return Err(ConfigError::new(
@@ -252,48 +296,7 @@ impl Config {
             }
         };
 
-        let isolation = optional_unicode("AGENT_ENVD_EXECUTION_ISOLATION")?
-            .unwrap_or_else(|| "required".to_owned());
-        match isolation.as_str() {
-            "disabled" => {}
-            "required" => {
-                return Err(ConfigError::new(
-                    "required execution isolation is not available yet; explicitly set AGENT_ENVD_EXECUTION_ISOLATION=disabled only inside an outer sandbox",
-                ));
-            }
-            _ => {
-                return Err(ConfigError::new(
-                    "AGENT_ENVD_EXECUTION_ISOLATION must be required or disabled",
-                ));
-            }
-        }
-
-        if let Some(network) = optional_unicode("AGENT_ENVD_EXECUTION_NETWORK")?
-            && network != "host"
-        {
-            return Err(ConfigError::new(
-                "disabled execution isolation supports only AGENT_ENVD_EXECUTION_NETWORK=host",
-            ));
-        }
-        if let Some(paths) = optional_unicode("AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS")? {
-            let paths = serde_json::from_str::<Vec<String>>(&paths).map_err(|_| {
-                ConfigError::new(
-                    "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS must be a JSON array of strings",
-                )
-            })?;
-            if !paths.is_empty() {
-                return Err(ConfigError::new(
-                    "extra read-only execution paths require native isolation",
-                ));
-            }
-        }
-        if env::var_os("AGENT_ENVD_EXECUTION_UID").is_some()
-            || env::var_os("AGENT_ENVD_EXECUTION_GID").is_some()
-        {
-            return Err(ConfigError::new(
-                "execution UID and GID require native isolation",
-            ));
-        }
+        let execution = prepare_execution_config(file.execution)?;
 
         let runtime_dir = optional_unicode("AGENT_ENVD_RUNTIME_DIR")?.map(PathBuf::from);
         if runtime_dir.as_ref().is_some_and(|path| !path.is_absolute()) {
@@ -328,6 +331,8 @@ impl Config {
         Ok(Self {
             environment_id,
             transport,
+            execution,
+            config_file,
             initialization_timeout: INITIALIZATION_TIMEOUT,
             session_idle_timeout: Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS),
             root_mount_id: file.root_mount_id,
@@ -343,6 +348,12 @@ impl Config {
         Self {
             environment_id: environment_id.to_owned(),
             transport: TransportConfig::Stdio,
+            execution: ExecutionConfig {
+                isolation: ExecutionIsolationMode::Disabled,
+                network: ExecutionNetworkMode::Host,
+                extra_read_only_paths: Vec::new(),
+            },
+            config_file: None,
             limits: default_limits(),
             initialization_timeout: Duration::from_millis(20),
             session_idle_timeout: Duration::from_secs(1),
@@ -521,6 +532,100 @@ fn apply_file_limits(
 
 fn default_allow_command_execution() -> bool {
     true
+}
+
+fn prepare_execution_config(file: FileExecutionConfig) -> Result<ExecutionConfig, ConfigError> {
+    let isolation = match optional_unicode("AGENT_ENVD_EXECUTION_ISOLATION")? {
+        Some(value) => parse_isolation_mode(&value)?,
+        None => file.isolation.unwrap_or(ExecutionIsolationMode::Required),
+    };
+    let network = match optional_unicode("AGENT_ENVD_EXECUTION_NETWORK")? {
+        Some(value) => parse_network_mode(&value)?,
+        None => file.network.unwrap_or(ExecutionNetworkMode::Host),
+    };
+    let paths = match optional_unicode("AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS")? {
+        Some(value) => serde_json::from_str::<Vec<PathBuf>>(&value).map_err(|_| {
+            ConfigError::new(
+                "AGENT_ENVD_EXECUTION_EXTRA_READ_ONLY_PATHS must be a JSON array of strings",
+            )
+        })?,
+        None => file.extra_read_only_paths,
+    };
+
+    if isolation == ExecutionIsolationMode::Disabled {
+        if network != ExecutionNetworkMode::Host {
+            return Err(ConfigError::new(
+                "disabled execution isolation supports only AGENT_ENVD_EXECUTION_NETWORK=host",
+            ));
+        }
+        if !paths.is_empty() {
+            return Err(ConfigError::new(
+                "extra read-only execution paths require native isolation",
+            ));
+        }
+    }
+    if env::var_os("AGENT_ENVD_EXECUTION_UID").is_some()
+        || env::var_os("AGENT_ENVD_EXECUTION_GID").is_some()
+    {
+        return Err(ConfigError::new(
+            "execution UID and GID require the Linux native isolation backend",
+        ));
+    }
+
+    let mut extra_read_only_paths = paths
+        .into_iter()
+        .map(|path| canonical_directory(&path, "execution extra read-only path"))
+        .collect::<Result<Vec<_>, _>>()?;
+    extra_read_only_paths.sort();
+    extra_read_only_paths.dedup();
+    for (index, path) in extra_read_only_paths.iter().enumerate() {
+        if extra_read_only_paths
+            .iter()
+            .skip(index + 1)
+            .any(|other| paths_overlap(path, other))
+        {
+            return Err(ConfigError::new(
+                "execution extra read-only paths must not overlap",
+            ));
+        }
+    }
+    Ok(ExecutionConfig {
+        isolation,
+        network,
+        extra_read_only_paths,
+    })
+}
+
+fn parse_isolation_mode(value: &str) -> Result<ExecutionIsolationMode, ConfigError> {
+    match value {
+        "required" => Ok(ExecutionIsolationMode::Required),
+        "disabled" => Ok(ExecutionIsolationMode::Disabled),
+        _ => Err(ConfigError::new(
+            "AGENT_ENVD_EXECUTION_ISOLATION must be required or disabled",
+        )),
+    }
+}
+
+fn parse_network_mode(value: &str) -> Result<ExecutionNetworkMode, ConfigError> {
+    match value {
+        "host" => Ok(ExecutionNetworkMode::Host),
+        "deny" => Ok(ExecutionNetworkMode::Deny),
+        _ => Err(ConfigError::new(
+            "AGENT_ENVD_EXECUTION_NETWORK must be host or deny",
+        )),
+    }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+pub(crate) fn execution_config_for_probe(
+    config_file: Option<PathBuf>,
+) -> Result<ExecutionConfig, ConfigError> {
+    reject_unknown_environment_variables()?;
+    let file = load_file_config(config_file)?;
+    prepare_execution_config(file.execution)
 }
 
 fn prepare_command_config(

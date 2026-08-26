@@ -8,6 +8,8 @@ use tokio::{
     sync::mpsc,
 };
 
+use crate::isolation::LaunchIsolation;
+
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
 const CLEANUP_GRACE: Duration = Duration::from_secs(2);
@@ -23,6 +25,7 @@ pub(crate) struct LaunchPlan {
     pub(crate) initial_stdin: Option<String>,
     pub(crate) keep_stdin_open: bool,
     pub(crate) wall_time_ms: u64,
+    pub(crate) isolation: LaunchIsolation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -99,12 +102,20 @@ pub(crate) enum SupervisorEvent {
         stop_reason: Option<StopReason>,
     },
     Cleaned {
-        complete: bool,
+        cleanup: SupervisorCleanup,
         output_complete: bool,
     },
     ProtocolError {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SupervisorCleanup {
+    Complete,
+    ResidualConfined,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,14 +492,25 @@ async fn run_payload(
             _ = &mut drain_deadline => break,
         }
     }
+    let cleanup = classify_cleanup(plan.isolation, cleanup_complete);
     write_event(
         &mut stdout,
         &SupervisorEvent::Cleaned {
-            complete: cleanup_complete,
+            cleanup,
             output_complete: stream_closures.complete(),
         },
     )
     .await
+}
+
+fn classify_cleanup(isolation: LaunchIsolation, cleanup_complete: bool) -> SupervisorCleanup {
+    if cleanup_complete {
+        SupervisorCleanup::Complete
+    } else if isolation == LaunchIsolation::MacosSeatbelt {
+        SupervisorCleanup::ResidualConfined
+    } else {
+        SupervisorCleanup::Failed
+    }
 }
 
 fn validate_plan(plan: &LaunchPlan) -> io::Result<()> {
@@ -899,6 +921,26 @@ mod tests {
         .expect_err("overlong line is rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "line too long");
+    }
+
+    #[test]
+    fn macos_cleanup_preserves_residual_confinement_when_group_exit_is_unproven() {
+        assert_eq!(
+            classify_cleanup(LaunchIsolation::MacosSeatbelt, true),
+            SupervisorCleanup::Complete
+        );
+        assert_eq!(
+            classify_cleanup(LaunchIsolation::MacosSeatbelt, false),
+            SupervisorCleanup::ResidualConfined
+        );
+        assert_eq!(
+            classify_cleanup(LaunchIsolation::Disabled, true),
+            SupervisorCleanup::Complete
+        );
+        assert_eq!(
+            classify_cleanup(LaunchIsolation::Disabled, false),
+            SupervisorCleanup::Failed
+        );
     }
 
     #[test]

@@ -14,18 +14,19 @@ The daemon implements the canonical EIP 1.0 protocol over trusted stdio, a dedic
 - bounded operation, process, transfer, candidate, receipt, and retained-output state;
 - correlated concurrent requests, fresh generations, strict framing and envelope validation, finite relative timeouts, cancellation, and typed errors.
 
-Every descriptor reports exact JSON-RPC `available_methods`; initialization checks exact `required_methods` rather than capability families. Typed `execution_features` separately reports optional command-limit, per-command-network-deny, and individual signal-action support. The current outer-host backend reports all optional command/network features false; Unix advertises distinct interrupt/terminate actions, while non-Unix omits `process.signal` until native semantics exist. Availability is derived from configured mounts, command policy, and truthful platform support, so one unavailable method does not hide adjacent methods. Complete-candidate atomic publication is currently available on Linux and macOS. It does not imply exclusive filesystem control or compare-and-swap: commands and external writers can race with envd operations.
+Every descriptor reports exact JSON-RPC `available_methods`; initialization checks exact `required_methods` rather than capability families. Typed `execution_features` separately reports optional command-limit, per-command-network-deny, and individual signal-action support. Required macOS execution uses a probed deny-default Seatbelt backend and supports per-command network narrowing; explicit outer-host mode reports optional command/network containment features false. Unix advertises distinct interrupt/terminate actions, while non-Unix omits `process.signal` until native semantics exist. Availability is derived from configured mounts, command policy, isolation probe, and truthful platform support, so one unavailable method does not hide adjacent methods. Complete-candidate atomic publication is currently available on Linux and macOS. It does not imply exclusive filesystem control or compare-and-swap: commands and external writers can race with envd operations.
 
-When command policy and a command-enabled mount are configured, the descriptor reports the exact available shell, process, and output methods plus its logical shell profiles. Foreground and background execution share one transactional start gate; `process.start` publishes a handle only after requested-executable spawn succeeds. The same owner drains stdout and stderr concurrently, enforces finite limits, targets the backend-managed command lifecycle for control and cleanup, and drains remaining managed commands during daemon shutdown. In explicit `disabled` mode, native cleanup covers the initial Unix process group and a best-effort Windows task tree; descendants outside that platform-native target remain the outer Host's responsibility, as reported by `process_containment=false` and `cleanup_guarantee=outer_host`. The required Linux/macOS/Windows native execution-isolation backends are not implemented yet. Only the HTTP profile binds inbound resources, limited to authenticated `/eip/control` and `/eip/transfer`; envd exposes no inbound WebSocket, generic HTTP, browser, health, or readiness surface.
+When command policy and a command-enabled mount are configured, the descriptor reports the exact available shell, process, and output methods plus its logical shell profiles. Foreground and background execution share one transactional start gate; `process.start` publishes a handle only after requested-executable spawn succeeds. The same owner drains stdout and stderr concurrently, enforces finite limits, targets the backend-managed command lifecycle for control and cleanup, and drains remaining managed commands during daemon shutdown. In explicit `disabled` mode, native cleanup covers the initial Unix process group and a best-effort Windows task tree; descendants outside that platform-native target remain the outer Host's responsibility, as reported by `process_containment=false` and `cleanup_guarantee=outer_host`. Required native isolation is implemented on macOS; Linux and Windows remain fail-closed until their backends are delivered. Only the HTTP profile binds inbound resources, limited to authenticated `/eip/control` and `/eip/transfer`; envd exposes no inbound WebSocket, generic HTTP, browser, health, or readiness surface.
 
 ## Launch configuration
 
-The daemon requires:
+The standalone daemon requires only its Environment identity for the default stdio profile:
 
 ```text
 AGENT_ENVD_ENVIRONMENT_ID=<provider-owned stable identity>
-AGENT_ENVD_EXECUTION_ISOLATION=disabled
 ```
+
+Execution isolation defaults to `required`. On macOS it automatically uses `/usr/bin/sandbox-exec`, private command home and temporary roots, and reviewed system/toolchain runtime roots; no isolation-specific configuration is required. Linux and Windows continue to fail closed in required mode until their native backends are delivered. The packaged sandbox container image explicitly sets `AGENT_ENVD_EXECUTION_ISOLATION=disabled`, delegating inner command containment to the outer container.
 
 Command execution additionally requires an absolute private runtime directory:
 
@@ -35,7 +36,7 @@ AGENT_ENVD_RUNTIME_DIR=/absolute/path/to/private-runtime
 
 `AGENT_ENVD_TRANSPORT` defaults to `stdio` and also accepts `http` or `reverse_websocket`. HTTP requires `AGENT_ENVD_HTTP_BIND`, `AGENT_ENVD_HTTP_CREDENTIAL_FILE`, and either paired native TLS files or `AGENT_ENVD_HTTP_PLAINTEXT_SCOPE=loopback|provider_private_link`. Reverse WebSocket requires `AGENT_ENVD_REVERSE_WS_URL` and `AGENT_ENVD_REVERSE_WS_CREDENTIAL_FILE`; an optional CA file adds deployment trust for `wss`. Configured mounts are the only filesystem roots. Protected runtime roots are subtracted from all overlapping mount lookups.
 
-Native required isolation remains the secure default: omitting `AGENT_ENVD_EXECUTION_ISOLATION`, or setting it to `required`, fails startup until that backend exists. Explicit `disabled` mode delegates containment to the outer Host, emits one structured startup warning on stderr, and must be used only inside an appropriate provider sandbox or test boundary.
+Explicit `disabled` mode delegates containment to the outer Host, emits one structured startup warning on stderr, and must be used only inside an appropriate provider sandbox or test boundary. `agent-envd isolation probe --json` runs the selected backend's production preflight without admitting a carrier.
 
 In stdio mode, stdin and stdout are reserved exclusively for framed EIP traffic; startup and runtime diagnostics use stderr.
 
@@ -50,6 +51,11 @@ A configured writable mount needs only its existing native root. Envd creates a 
 ```json
 {
   "root_mount_id": "workspace",
+  "execution": {
+    "isolation": "required",
+    "network": "host",
+    "extra_read_only_paths": []
+  },
   "mounts": [
     {
       "mount_id": "workspace",

@@ -472,9 +472,9 @@ image-check-foundation-service: ## Smoke-check the existing foundation-service c
 .PHONY: image-check-sandbox
 image-check-sandbox: ## Smoke-check the existing sandbox container image
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(SANDBOX_IMAGE)")" = "sandbox"
+	@docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(SANDBOX_IMAGE)" | grep -qx 'AGENT_ENVD_EXECUTION_ISOLATION=disabled'
 	@docker run --rm \
 		--env AGENT_ENVD_ENVIRONMENT_ID=image-check \
-		--env AGENT_ENVD_EXECUTION_ISOLATION=disabled \
 		--entrypoint agent-envd "$(SANDBOX_IMAGE)"
 
 .PHONY: image-check
