@@ -312,3 +312,6 @@ Turn acceptance, ModelAttempt completion, Harness terminal delivery, Host Turn o
 | EIP architecture and protocol         | [agent-envd/00-overview.md](agent-envd/00-overview.md), [agent-envd/02-eip-protocol.md](agent-envd/02-eip-protocol.md)                               |
 | Foundation Service boundary           | [foundation-service/README.md](foundation-service/README.md)                                                                                         |
 | Foundation Secret management          | [foundation-service/01-secret-management.md](foundation-service/01-secret-management.md)                                                             |
+| Foundation interactions and execution | [foundation-service/06-interactions-executions-and-checkpoints.md](foundation-service/06-interactions-executions-and-checkpoints.md)                 |
+| Foundation scheduling and recovery    | [foundation-service/07-scheduling-workers-and-recovery.md](foundation-service/07-scheduling-workers-and-recovery.md)                                 |
+| Foundation public API                 | [foundation-service/11-management-api.md](foundation-service/11-management-api.md)                                                                   |
