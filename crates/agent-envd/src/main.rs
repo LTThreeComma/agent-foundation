@@ -114,16 +114,17 @@ mod tests {
                 .expect("probe CLI"),
             None
         );
+        let config = std::env::temp_dir().join("envd.json");
         assert_eq!(
             isolation_probe_config(&[
                 "isolation".into(),
                 "probe".into(),
                 "--config".into(),
-                "/tmp/envd.json".into(),
+                config.clone().into_os_string(),
                 "--json".into(),
             ])
             .expect("probe CLI"),
-            Some(PathBuf::from("/tmp/envd.json"))
+            Some(config)
         );
     }
 }
