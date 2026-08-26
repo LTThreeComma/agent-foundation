@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 
 [manifest]
@@ -418,6 +418,7 @@ name = "converge-agent-envd-client"
 version = "0.0.0"
 source = { editable = "packages/agent-envd-client" }
 dependencies = [
+    { name = "httpx2" },
     { name = "pydantic" },
     { name = "websockets" },
 ]
@@ -429,6 +430,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx2", specifier = ">=2.5,<3" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "websockets", specifier = ">=15,<16" },
 ]
@@ -440,6 +442,10 @@ test = [{ name = "pytest", specifier = ">=9,<10" }]
 name = "converge-agent-environment-provider"
 version = "0.0.0"
 source = { editable = "packages/agent-environment-provider" }
+dependencies = [
+    { name = "converge-agent-envd-client" },
+    { name = "websockets" },
+]
 
 [package.dev-dependencies]
 test = [
@@ -447,6 +453,10 @@ test = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "converge-agent-envd-client", editable = "packages/agent-envd-client" },
+    { name = "websockets", specifier = ">=15,<16" },
+]
 
 [package.metadata.requires-dev]
 test = [{ name = "pytest", specifier = ">=9,<10" }]

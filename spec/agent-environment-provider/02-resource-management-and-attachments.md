@@ -191,19 +191,23 @@ class EIPSessionSource(ABC):
         expected_environment_id: str,
         required_methods: frozenset[str],
     ) -> AsyncContextManager[EIPSession]: ...
+
+    async def discard(self) -> None: ...
 ```
 
-Each entry returns a fresh initialized low-level `EIPSession` or fails. The source owns carrier acquisition and transport authentication. Generated methods, initialization validation, operation IDs, transfers, timeout, cancellation, reconciliation, and errors remain owned by `converge-agent-envd-client` and EIP.
+Each entry returns a fresh initialized low-level `EIPSession` or fails. `discard()` releases the unentered source's private subprocess pipes or accepted WebSocket and clears retained HTTP credential material; it is idempotently invoked only through the owning attachment/binding cleanup path. The source owns carrier acquisition and transport authentication. Generated methods, initialization validation, operation IDs, transfers, timeout, cancellation, reconciliation, and errors remain owned by `converge-agent-envd-client` and EIP.
 
 Supported sources are:
 
-| Source                     | Acquisition                                                        | Protocol role                  |
-| -------------------------- | ------------------------------------------------------------------ | ------------------------------ |
-| Trusted process stdio      | Own private `agent-envd` stdin/stdout pipes                        | Client requests; envd responds |
-| Host-dialed HTTP(S)        | Dial the dedicated EIP HTTP listener                               | Client requests; envd responds |
-| Accepted reverse WebSocket | Claim an authenticated envd-initiated carrier from a Host registry | Client requests; envd responds |
+| Public source                       | Acquisition                                                               | Protocol role                  |
+| ----------------------------------- | ------------------------------------------------------------------------- | ------------------------------ |
+| `StdioEIPSessionSource`             | Claim one private asyncio subprocess with `agent-envd` stdin/stdout pipes | Client requests; envd responds |
+| `HttpEIPSessionSource`              | Dial one dedicated authenticated EIP HTTP(S) endpoint                     | Client requests; envd responds |
+| `AcceptedWebSocketEIPSessionSource` | Claim one already-authenticated `websockets.ServerConnection`             | Client requests; envd responds |
 
-For reverse WebSocket, the Host registry authenticates and bounds the accepted socket, then atomically claims the selected candidate. The low-level client wraps it and sends `initialize`. Envd remains the responder even though it opened the carrier.
+Each concrete source is a fresh single-use process-local value. Stdio captures the subprocess and transport bounds; HTTP captures the normalized endpoint, Bearer credential, optional additive CA trust, and finite client/session bounds; accepted reverse WebSocket captures the Host-accepted connection and transport bounds. The common initialization arguments remain the `expected_environment_id` and exact `required_methods` supplied by the Harness binding.
+
+For reverse WebSocket, the Host listener authenticates and bounds the upgrade before constructing the source, then transfers the accepted `ServerConnection` exactly once. `AcceptedWebSocketEIPSessionSource` passes that object to the low-level `AcceptedWebSocketTransport` and sends `initialize`; it does not inspect or repeat the Bearer credential. Envd remains the responder even though it opened the carrier.
 
 A source never shares an initialized session, resumes a transfer, or automatically retries an operation whose dispatch is ambiguous. Same-generation reconnect creates a fresh EIP session. A changed daemon generation requires a fresh Harness binding revision.
 

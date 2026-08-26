@@ -159,6 +159,7 @@ Pydantic AI `RunUsage` remains the sole process-local model-usage accumulator. `
 ## Next Steps
 
 - Run the [Local Agent example](https://github.com/converge-ai-labs/agent-foundation/tree/main/examples/local-agent).
+- [Integrate Skill discovery](skills.md) with a direct FileOperator or a revision-bound Environment catalog.
 - [Publish and load Harness plugins](plugins.md), including from a Host-managed directory without restarting the process.
 - Read the [package README](https://github.com/converge-ai-labs/agent-foundation/tree/main/packages/agent-harness).
 - Consult the [Agent Harness specification](https://github.com/converge-ai-labs/agent-foundation/tree/main/spec/agent-harness) for normative architecture and compatibility contracts.

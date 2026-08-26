@@ -3,6 +3,7 @@ use std::{error::Error, sync::Arc};
 mod config;
 mod daemon;
 pub mod eip;
+mod http;
 mod mount;
 mod operation;
 mod process;
@@ -33,6 +34,9 @@ pub async fn run_from_environment() -> Result<(), Box<dyn Error + Send + Sync>> 
     eprintln!("{warning}");
     match &config.transport {
         config::TransportConfig::Stdio => stdio::serve(daemon, &config).await?,
+        config::TransportConfig::Http(http_config) => {
+            http::serve(daemon, &config, http_config).await?;
+        }
         config::TransportConfig::ReverseWebSocket(websocket_config) => {
             websocket::serve(daemon, &config, websocket_config).await?;
         }

@@ -29,6 +29,11 @@ const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
     "AGENT_ENVD_LISTEN_ADDRESS",
     "AGENT_ENVD_HTTP_ENABLED",
     "AGENT_ENVD_WEBSOCKET_ENABLED",
+    "AGENT_ENVD_HTTP_BIND",
+    "AGENT_ENVD_HTTP_CREDENTIAL_FILE",
+    "AGENT_ENVD_HTTP_TLS_CERT_FILE",
+    "AGENT_ENVD_HTTP_TLS_KEY_FILE",
+    "AGENT_ENVD_HTTP_PLAINTEXT_SCOPE",
     "AGENT_ENVD_REVERSE_WS_URL",
     "AGENT_ENVD_REVERSE_WS_CREDENTIAL_FILE",
     "AGENT_ENVD_REVERSE_WS_CA_FILE",
@@ -45,6 +50,13 @@ const LEGACY_NETWORK_VARIABLES: &[&str] = &[
     "AGENT_ENVD_LISTEN_ADDRESS",
     "AGENT_ENVD_HTTP_ENABLED",
     "AGENT_ENVD_WEBSOCKET_ENABLED",
+];
+const HTTP_VARIABLES: &[&str] = &[
+    "AGENT_ENVD_HTTP_BIND",
+    "AGENT_ENVD_HTTP_CREDENTIAL_FILE",
+    "AGENT_ENVD_HTTP_TLS_CERT_FILE",
+    "AGENT_ENVD_HTTP_TLS_KEY_FILE",
+    "AGENT_ENVD_HTTP_PLAINTEXT_SCOPE",
 ];
 const REVERSE_WEBSOCKET_VARIABLES: &[&str] = &[
     "AGENT_ENVD_REVERSE_WS_URL",
@@ -164,7 +176,16 @@ impl DaemonLimits {
 #[derive(Debug, Clone)]
 pub(crate) enum TransportConfig {
     Stdio,
+    Http(HttpConfig),
     ReverseWebSocket(ReverseWebSocketConfig),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HttpConfig {
+    pub(crate) bind: std::net::SocketAddr,
+    pub(crate) credential_file: PathBuf,
+    pub(crate) tls_certificate_file: Option<PathBuf>,
+    pub(crate) tls_private_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,13 +215,13 @@ impl Config {
 
         if env::var_os("AGENT_ENVD_API_KEY").is_some() {
             return Err(ConfigError::new(
-                "AGENT_ENVD_API_KEY is unsupported; reverse WebSocket uses AGENT_ENVD_REVERSE_WS_CREDENTIAL_FILE",
+                "AGENT_ENVD_API_KEY is unsupported; each network transport uses its profile-specific credential file",
             ));
         }
         for name in LEGACY_NETWORK_VARIABLES {
             if env::var_os(name).is_some() {
                 return Err(ConfigError::new(format!(
-                    "{name} is unsupported because agent-envd never listens for network connections"
+                    "{name} is unsupported; select an explicit AGENT_ENVD_TRANSPORT profile"
                 )));
             }
         }
@@ -208,16 +229,16 @@ impl Config {
             optional_unicode("AGENT_ENVD_TRANSPORT")?.unwrap_or_else(|| "stdio".to_owned());
         let transport = match transport_name.as_str() {
             "stdio" => {
-                for name in REVERSE_WEBSOCKET_VARIABLES {
-                    if env::var_os(name).is_some() {
-                        return Err(ConfigError::new(format!(
-                            "{name} is not valid with stdio transport"
-                        )));
-                    }
-                }
+                reject_transport_variables(HTTP_VARIABLES, "stdio")?;
+                reject_transport_variables(REVERSE_WEBSOCKET_VARIABLES, "stdio")?;
                 TransportConfig::Stdio
             }
+            "http" => {
+                reject_transport_variables(REVERSE_WEBSOCKET_VARIABLES, "http")?;
+                TransportConfig::Http(parse_http_config()?)
+            }
             "reverse_websocket" => {
+                reject_transport_variables(HTTP_VARIABLES, "reverse_websocket")?;
                 TransportConfig::ReverseWebSocket(parse_reverse_websocket_config(
                     required_unicode("AGENT_ENVD_REVERSE_WS_URL")?,
                     PathBuf::from(required_unicode("AGENT_ENVD_REVERSE_WS_CREDENTIAL_FILE")?),
@@ -226,7 +247,7 @@ impl Config {
             }
             _ => {
                 return Err(ConfigError::new(
-                    "AGENT_ENVD_TRANSPORT must be stdio or reverse_websocket",
+                    "AGENT_ENVD_TRANSPORT must be stdio, http, or reverse_websocket",
                 ));
             }
         };
@@ -331,6 +352,82 @@ impl Config {
             runtime: None,
         }
     }
+}
+
+fn reject_transport_variables(names: &[&str], transport: &str) -> Result<(), ConfigError> {
+    for name in names {
+        if env::var_os(name).is_some() {
+            return Err(ConfigError::new(format!(
+                "{name} is not valid with {transport} transport"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_http_config() -> Result<HttpConfig, ConfigError> {
+    let bind_text = required_unicode("AGENT_ENVD_HTTP_BIND")?;
+    let bind = bind_text.parse::<std::net::SocketAddr>().map_err(|_| {
+        ConfigError::new("AGENT_ENVD_HTTP_BIND must be a numeric IP address and port")
+    })?;
+    let credential_file = PathBuf::from(required_unicode("AGENT_ENVD_HTTP_CREDENTIAL_FILE")?);
+    validate_bootstrap_file(&credential_file, "AGENT_ENVD_HTTP_CREDENTIAL_FILE")?;
+    let credential_file = fs::canonicalize(&credential_file).map_err(|error| {
+        ConfigError::new(format!(
+            "cannot canonicalize AGENT_ENVD_HTTP_CREDENTIAL_FILE: {error}"
+        ))
+    })?;
+    let certificate = optional_unicode("AGENT_ENVD_HTTP_TLS_CERT_FILE")?.map(PathBuf::from);
+    let private_key = optional_unicode("AGENT_ENVD_HTTP_TLS_KEY_FILE")?.map(PathBuf::from);
+    if certificate.is_some() != private_key.is_some() {
+        return Err(ConfigError::new(
+            "AGENT_ENVD_HTTP_TLS_CERT_FILE and AGENT_ENVD_HTTP_TLS_KEY_FILE must be configured together",
+        ));
+    }
+    let (tls_certificate_file, tls_private_key_file) = match (certificate, private_key) {
+        (Some(certificate), Some(private_key)) => {
+            validate_bootstrap_file(&certificate, "AGENT_ENVD_HTTP_TLS_CERT_FILE")?;
+            validate_bootstrap_file(&private_key, "AGENT_ENVD_HTTP_TLS_KEY_FILE")?;
+            (
+                Some(fs::canonicalize(certificate).map_err(|error| {
+                    ConfigError::new(format!(
+                        "cannot canonicalize AGENT_ENVD_HTTP_TLS_CERT_FILE: {error}"
+                    ))
+                })?),
+                Some(fs::canonicalize(private_key).map_err(|error| {
+                    ConfigError::new(format!(
+                        "cannot canonicalize AGENT_ENVD_HTTP_TLS_KEY_FILE: {error}"
+                    ))
+                })?),
+            )
+        }
+        (None, None) => {
+            let scope = required_unicode("AGENT_ENVD_HTTP_PLAINTEXT_SCOPE")?;
+            if !matches!(scope.as_str(), "loopback" | "provider_private_link") {
+                return Err(ConfigError::new(
+                    "AGENT_ENVD_HTTP_PLAINTEXT_SCOPE must be loopback or provider_private_link",
+                ));
+            }
+            if scope == "loopback" && !bind.ip().is_loopback() {
+                return Err(ConfigError::new(
+                    "loopback HTTP plaintext scope requires a loopback bind address",
+                ));
+            }
+            (None, None)
+        }
+        _ => unreachable!("paired TLS configuration checked above"),
+    };
+    if tls_certificate_file.is_some() && env::var_os("AGENT_ENVD_HTTP_PLAINTEXT_SCOPE").is_some() {
+        return Err(ConfigError::new(
+            "AGENT_ENVD_HTTP_PLAINTEXT_SCOPE is not valid with native HTTP TLS",
+        ));
+    }
+    Ok(HttpConfig {
+        bind,
+        credential_file,
+        tls_certificate_file,
+        tls_private_key_file,
+    })
 }
 
 fn parse_reverse_websocket_config(

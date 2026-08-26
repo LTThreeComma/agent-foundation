@@ -55,7 +55,9 @@ from .process_monitor import (
     MonitoredProcessRunCapability,
 )
 from .skills import (
-    EnvironmentSkillSource,
+    BoundSkillCatalog,
+    BoundSkillCatalogItem,
+    FileSkillSource,
     SkillCatalogItem,
     SkillManager,
     SkillMaterializer,
@@ -98,6 +100,8 @@ from .working_state import (
 
 __all__ = [
     "AskUserQuestionRequest",
+    "BoundSkillCatalog",
+    "BoundSkillCatalogItem",
     "CodeActCapability",
     "CodeActConfig",
     "CompactionCapability",
@@ -117,9 +121,9 @@ __all__ = [
     "DocumentsConfiguration",
     "DocumentsRunCapability",
     "EmbeddedTaskStateCell",
-    "EnvironmentSkillSource",
     "FileContextCapability",
     "FileContextConfiguration",
+    "FileSkillSource",
     "HandoffCapability",
     "InProcessMonitoredProcessMonitor",
     "InlineDelegationBinder",
