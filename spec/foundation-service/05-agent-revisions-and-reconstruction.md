@@ -8,20 +8,25 @@ An Execution selects exact immutable inputs. It never resolves `latest` after du
 
 ## Authoring Model
 
-An `Agent` is the stable Workspace resource used for collaboration, policy, and invocation. It is an authorization target, not an IAM Principal. Agent metadata and publication pointers are versioned mutable product data. An `AgentPreset` is a reusable typed authoring input; it is not an executable object and does not override an Agent revision after materialization.
+An `Agent` is a stable Workspace-owned resource for authoring, policy, and invocation. It is an authorization target, not an IAM Principal. Its versioned mutable metadata selects one published immutable `AgentRevision`. An `AgentPreset` is a reusable typed authoring input; it is not an executable object and does not override an Agent revision after materialization.
 
 An `AgentRevision` is an immutable executable snapshot associated with one Agent. It contains only Foundation-owned serializable data and exact references, including:
 
 - logical Agent instructions and typed input/output declarations;
 - selected model-integration revision and model settings;
 - Capability, Tool, Skill, Connector, and Environment declarations under their owning Foundation schemas;
+- non-secret Secret requirements that bind an exact Workspace-owned Secret reference or declare an invoking-User Secret key under [Secret Management](01-secret-management.md);
 - direct trusted adapter keys and bounded adapter configuration;
 - optional Harness plugin configuration under the Harness-owned document contract;
-- exact dependency, package, artifact, and schema compatibility locks;
+- exact dependency, package, content-digest, and schema compatibility locks.
 
 A `ModelIntegration` is a stable Workspace or Organization resource describing a trusted model-provider integration. A `ModelIntegrationRevision` is immutable and selects exact provider type, routing configuration, supported model surface, compatibility facts, and non-secret credential references. Hosted profiles that use logical model aliases require an explicit `ModelRunBinding` and fail closed rather than delegating to ambient native inference.
 
+Secret requirements never contain a Secret value. A Workspace-owned requirement stores the exact Secret resource reference. A User-owned requirement stores only the validated key resolved for the active invoking User; a Service Account cannot satisfy it. Current Secret eligibility, values, credentials, RoleBindings, and run grants are resolved freshly rather than captured in the immutable revision.
+
 Changing materialized Agent content, a selected integration revision, or a dependency lock creates another Agent revision. Prior revisions selected by retained Executions remain addressable for their documented retention period.
+
+The revision boundary exists to prevent queued or suspended work from changing underneath the Worker. For example, a Builder can materialize revision `agent-revision-7` from exact Preset, Model Integration, Tool, Skill, Connector, and Environment revisions, submit a Turn, and then change the Agent's authoring head before a Worker claims the Execution. The Worker still reconstructs `agent-revision-7`; it never reads the newer mutable head or resolves a current default.
 
 ## Revision Relationships
 
@@ -31,7 +36,8 @@ flowchart LR
     Agent[Agent] --> Materialize
     Model[ModelIntegrationRevision] --> Materialize
     Resources[Skill, Connector, Tool, and Environment revisions] --> Materialize
-    Locks[Dependency and artifact locks] --> Materialize
+    Secrets[Non-secret Secret requirements] --> Materialize
+    Locks[Dependency and content locks] --> Materialize
     Materialize --> Revision[Immutable AgentRevision]
     Revision --> Execution[Execution exact selection]
     Execution --> Verify[Worker verification]
@@ -39,11 +45,11 @@ flowchart LR
     Adapter --> Definition[Process-local AgentDefinition]
 ```
 
-Materialization validates resource scope, references, schemas, permission to bind each resource, dependency compatibility, and all required locks before committing the immutable revision. The revision records identity and compatibility, not live authority. Current credentials, RoleBindings, run grants, provider availability, and Environment bindings are resolved freshly for every `ExecutionAttempt` and Harness Run.
+Materialization validates resource scope, references, schemas, permission to bind each resource, Secret requirement form, dependency compatibility, and all required locks before committing the immutable revision. The revision records identity and compatibility, not live authority. Current credentials, RoleBindings, run grants, provider availability, Secret eligibility, and Environment bindings are resolved freshly for every `ExecutionAttempt` and Harness Run.
 
 ## Dependency Locks
 
-A dependency lock identifies every artifact whose change could alter reconstruction, capability behavior, state compatibility, security, or output semantics. It includes exact package or artifact identities, trusted adapter keys, relevant schema or codec compatibility, and integrity digests when artifacts are externally materialized.
+A dependency lock identifies every package, external content unit, adapter, or schema whose change could alter reconstruction, Capability behavior, state compatibility, security, or output semantics. It includes exact package or content identities, trusted adapter keys, relevant schema or codec compatibility, and integrity digests when content is externally materialized.
 
 Package installation or entry-point availability grants no trust. The deployment selects allowed adapter and plugin keys, verifies the exact lock, and imports only those installed targets. A durable row never contains an arbitrary module, class, file path, shell command, or remote code URL for execution.
 
@@ -79,21 +85,21 @@ Editing an Agent or publishing another revision never mutates an existing Turn, 
 
 ## Failure Semantics
 
-| Failure                                  | Outcome                                                                     |
-| ---------------------------------------- | --------------------------------------------------------------------------- |
-| Missing revision or lock                 | Execution fails before Harness construction                                 |
-| Artifact digest or package lock mismatch | Execution fails closed and records bounded incompatibility evidence         |
-| Unknown adapter or plugin key            | Revision is not reconstructed; no ambient import fallback occurs            |
-| Model binding required but unavailable   | Execution fails before native model inference                               |
-| Credential or policy unavailable         | Fresh binding fails; the immutable revision is not rewritten                |
-| Checkpoint incompatible with revision    | Continuation fails before Harness entry; display history is not substituted |
-| Worker lost during reconstruction        | Lease recovery uses a new generation; no process-local object is restored   |
+| Failure                                 | Outcome                                                                     |
+| --------------------------------------- | --------------------------------------------------------------------------- |
+| Missing revision or lock                | Execution fails before Harness construction                                 |
+| Content digest or package lock mismatch | Execution fails closed and records bounded incompatibility evidence         |
+| Unknown adapter or plugin key           | Revision is not reconstructed; no ambient import fallback occurs            |
+| Model binding required but unavailable  | Execution fails before native model inference                               |
+| Credential or policy unavailable        | Fresh binding fails; the immutable revision is not rewritten                |
+| Checkpoint incompatible with revision   | Continuation fails before Harness entry; display history is not substituted |
+| Worker lost during reconstruction       | Lease recovery uses a new generation; no process-local object is restored   |
 
 ## Invariants
 
-1. An Execution selects one exact immutable Agent revision and exact integration revisions.
+1. An Execution selects one exact immutable Agent revision and exact integration revisions; it never resolves a mutable Agent head at Worker claim time.
 2. A revision contains serializable Foundation data and references only, never live Python objects or credentials.
-3. Dependency and artifact locks are verified before Harness construction.
+3. Dependency locks and content digests are verified before Harness construction.
 4. Package presence does not authorize an adapter, plugin, Capability, provider, or import target.
 5. Every ExecutionAttempt reconstructs fresh authority and bindings without mutating the selected revision.
 6. Replacement workers preserve stable Thread identity when one exists and change Attempt generation and transient Harness Run correlation.
