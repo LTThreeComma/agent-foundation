@@ -9,7 +9,7 @@ The platform consists of:
 - `agent-harness`, distributed as `converge-agent-harness`, for code-first Pydantic AI execution;
 - `agent-environment-provider`, distributed as `converge-agent-environment-provider`, for shared Environment provider specifications, Managers, built-ins, and runtime attachments;
 - `agent-stream-protocol`, distributed as `converge-agent-stream-protocol`, for shared Harness-to-AG-UI observation;
-- `agent-ui`, distributed as `converge-agent-ui`, for local sessions and WebUI/TUI interaction;
+- `agent-ui`, distributed as `converge-agent-ui`, for reloadable local Agent/Environment composition, Sessions, and complete WebUI/TUI interaction;
 - `agent-envd`, distributed as `converge-agent-envd`, for Environment Interaction Protocol operations;
 - `converge-agent-envd-client`, the generated low-level Python EIP client;
 - `foundation-service`, distributed as `converge-foundation-service`, for optional durable hosting;
@@ -106,18 +106,18 @@ Dependency direction is one-way: Hosts embed the Harness and can use the shared 
 
 ## Component Responsibilities
 
-| Component                    | Owns                                                                                                                                                                                 | Does not own                                                                                                 |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `agent-harness`              | Process-local Agent construction, narrow plugin configuration/loading, trusted plugins, run context, recovery, execution, results, and continuation state                            | Provider resource management, durable Agent schemas, local sessions, presentation, delivery, or billing      |
-| `agent-environment-provider` | Provider specifications, catalogs, create/resume/pause/destroy Managers, Direct Local/Docker/E2B built-ins, resource state, and runtime attachments                                  | Harness operations, Agent execution, durable storage, Host policy, or product APIs                           |
-| `agent-stream-protocol`      | Standard AG-UI conversion, generic `CUSTOM` fallback, optional Host processing, and process-local event accumulation                                                                 | Agent execution, lifecycle invention, Host acceptance, persistence, replay, HTTP/SSE, or rendering           |
-| `agent-ui`                   | Local profiles, sessions, foreground orchestration, process-local background children, application service, WebUI, and TUI                                                           | Distributed execution, multi-tenant authorization, or another Agent loop                                     |
-| `agent-envd-client`          | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                                                         | Harness routing, product-user authorization, provider provisioning, Host lifecycle                           |
-| `agent-envd`                 | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, disk-backed command output, daemon generation, and native command containment                       | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy             |
-| Foundation SDKs              | Language-typed access to the public Foundation Service `/api` contract                                                                                                               | Service internals, product policy, or durable lifecycle authority                                            |
-| `agent-foundation`           | Cross-platform command-line interaction with public Foundation Service operations through the Rust SDK                                                                               | A second HTTP client, service process management, persistence, queues, migrations, or infrastructure control |
-| `foundation-service`         | Managed Secrets, Host-owned definition/Presets/revisions, reconstruction locks, Executions/ExecutionAttempts, client tools, APIs, events, usage records, and optional web projection | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning         |
-| Product                      | Caller authentication, business policy, user experience, and final delivery                                                                                                          | Harness internals and provider implementation                                                                |
+| Component                    | Owns                                                                                                                                                                                                      | Does not own                                                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `agent-harness`              | Process-local Agent construction, narrow plugin configuration/loading, trusted plugins, run context, recovery, execution, results, and continuation state                                                 | Provider resource management, durable Agent schemas, local sessions, presentation, delivery, or billing      |
+| `agent-environment-provider` | Provider specifications, catalogs, create/resume/pause/destroy Managers, Direct Local/Docker/E2B built-ins, resource state, and runtime attachments                                                       | Harness operations, Agent execution, durable storage, Host policy, or product APIs                           |
+| `agent-stream-protocol`      | Standard AG-UI conversion, generic `CUSTOM` fallback, optional replay-stable Host processing, process-local accumulation, and source-history reconstruction                                               | Agent execution, lifecycle invention, Host acceptance, durable history or replay, HTTP/SSE, or rendering     |
+| `agent-ui`                   | Reloadable local Model/Prompt/Plugin/Skill/Agent/Environment resources, hybrid Session persistence, provider-resource orchestration, foreground/background execution, application service, WebUI, and TUI | Distributed execution, multi-tenant authorization, or another Agent loop                                     |
+| `agent-envd-client`          | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                                                                              | Harness routing, product-user authorization, provider provisioning, Host lifecycle                           |
+| `agent-envd`                 | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, disk-backed command output, daemon generation, and native command containment                                            | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy             |
+| Foundation SDKs              | Language-typed access to the public Foundation Service `/api` contract                                                                                                                                    | Service internals, product policy, or durable lifecycle authority                                            |
+| `agent-foundation`           | Cross-platform command-line interaction with public Foundation Service operations through the Rust SDK                                                                                                    | A second HTTP client, service process management, persistence, queues, migrations, or infrastructure control |
+| `foundation-service`         | Managed Secrets, Host-owned definition/Presets/revisions, reconstruction locks, Executions/ExecutionAttempts, client tools, APIs, events, usage records, and optional web projection                      | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning         |
+| Product                      | Caller authentication, business policy, user experience, and final delivery                                                                                                                               | Harness internals and provider implementation                                                                |
 
 ## Harness Foundation
 
@@ -138,7 +138,7 @@ The complete design is indexed in [agent-harness/README.md](agent-harness/README
 
 ## Local Agent Interaction
 
-Agent UI is a local single-user Host above the Harness. It pins resolved Agent-profile snapshots, selects complete `HarnessState` checkpoints, manages process-local asynchronous child jobs, and exposes one application service through a default bundled WebUI or a TUI. Both surfaces consume the same post-processor Agent Stream Protocol events; neither interprets private Harness events or owns a second session model. Its application service can optionally accept envd-initiated reverse-WebSocket attachments and, after explicit local Host selection, publish them into fresh or active Harness Environment topology without giving browser state protocol or provider authority.
+Agent UI is a complete local single-user workstation above the Harness. Human- and agent-editable configuration dynamically publishes validated Model, Prompt, Plugin, Skill, Agent, and Environment catalogs. Each Session pins immutable Agent and Environment snapshots, owns Environment Provider resources, selects complete `HarnessState` checkpoints, and manages process-local asynchronous child jobs. SQLite owns mutable metadata and control state, while resolved snapshots, provider state, Harness state, and retained AG-UI events live in verified compressed files; OpenTelemetry remains an independent export path. One application service exposes the same product semantics through a default bundled WebUI or a direct in-process TUI. Neither surface interprets private Harness events, reads storage for authority, operates providers independently, or owns a second Session model.
 
 `converge-agent-harness`, `converge-agent-environment-provider`, and `converge-agent-stream-protocol` form the Harness release group. One `release/harness-v<version>` tag assigns the same version to all three distributions. Published Harness metadata pins the exact provider-package version, and published Stream Protocol metadata pins the exact Harness version. Agent UI releases independently through `release/agent-ui-v<version>` and its published artifact pins the reviewed Harness release dependencies. Source checkouts continue to resolve unversioned package dependencies from the shared uv workspace. Each tag version is a stable `X.Y.Z` identity or an RC `X.Y.Z-rc.N` identity as defined by [repository release automation](repository-model.md#release-automation). Source directories omit the distribution prefix (`packages/agent-*`), while Python distribution names use `converge-` and import packages use `converge_`.
 
@@ -201,12 +201,12 @@ The hosted service boundary is defined in [Foundation Service](foundation-servic
 
 ## Deployment Profiles
 
-| Profile             | Persistence and coordination                        | Execution                                   |
-| ------------------- | --------------------------------------------------- | ------------------------------------------- |
-| Embedded            | Application-selected                                | Harness in product process                  |
-| Local Agent UI      | Atomic local session store and process coordination | Harness plus process-local child jobs       |
-| Minimal service     | SQLite and in-memory coordination                   | Control and execution together              |
-| Distributed service | PostgreSQL durable authority and Redis coordination | Separately scalable control/execution roles |
+| Profile             | Persistence and coordination                                                             | Execution                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Embedded            | Application-selected                                                                     | Harness in product process                                               |
+| Local Agent UI      | Hybrid SQLite metadata and compressed-file state/event storage with process coordination | Harness plus Environment Provider resources and process-local child jobs |
+| Minimal service     | SQLite and in-memory coordination                                                        | Control and execution together                                           |
+| Distributed service | PostgreSQL durable authority and Redis coordination                                      | Separately scalable control/execution roles                              |
 
 The internal relational, Redis-compatible, object, and mounted-filesystem surfaces for these profiles are defined by [Foundation Storage Capabilities](foundation-service/02-storage.md). Foundation Service's single relational metadata and migration authority is defined by the [Relational Schema Lifecycle](foundation-service/03-relational-schema.md).
 
@@ -289,26 +289,26 @@ Turn acceptance, ModelAttempt completion, Harness terminal delivery, Host Turn o
 
 ## Specification Set
 
-| Area                                  | Document                                                                                                                               |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Repository content and workflow model | [repository-model.md](repository-model.md)                                                                                             |
-| Platform interaction model            | [interaction-model.md](interaction-model.md)                                                                                           |
-| Platform data conventions             | [data-conventions.md](data-conventions.md)                                                                                             |
-| Platform API conventions              | [api-conventions.md](api-conventions.md)                                                                                               |
-| Harness catalog                       | [agent-harness/README.md](agent-harness/README.md)                                                                                     |
-| Environment Provider catalog          | [agent-environment-provider/README.md](agent-environment-provider/README.md)                                                           |
-| Harness architecture                  | [agent-harness/00-overview.md](agent-harness/00-overview.md)                                                                           |
-| Harness definition/build              | [agent-harness/03-agent-definition-and-build.md](agent-harness/03-agent-definition-and-build.md)                                       |
-| Harness plugins                       | [agent-harness/05-plugin-system.md](agent-harness/05-plugin-system.md)                                                                 |
-| Harness execution and recovery        | [agent-harness/06-execution-context-and-lifecycle.md](agent-harness/06-execution-context-and-lifecycle.md)                             |
-| Harness state                         | [agent-harness/10-snapshot-and-resume.md](agent-harness/10-snapshot-and-resume.md)                                                     |
-| Harness public API                    | [agent-harness/14-public-api-and-packaging.md](agent-harness/14-public-api-and-packaging.md)                                           |
-| Harness model/output boundary         | [agent-harness/16-input-model-and-output.md](agent-harness/16-input-model-and-output.md)                                               |
-| Agent Stream Protocol catalog         | [agent-stream-protocol/README.md](agent-stream-protocol/README.md)                                                                     |
-| AG-UI observation contract            | [agent-stream-protocol/00-overview.md](agent-stream-protocol/00-overview.md)                                                           |
-| Agent UI catalog                      | [agent-ui/README.md](agent-ui/README.md)                                                                                               |
-| Agent UI architecture and sessions    | [agent-ui/00-overview.md](agent-ui/00-overview.md), [agent-ui/02-local-sessions-and-state.md](agent-ui/02-local-sessions-and-state.md) |
-| agent-envd catalog                    | [agent-envd/README.md](agent-envd/README.md)                                                                                           |
-| EIP architecture and protocol         | [agent-envd/00-overview.md](agent-envd/00-overview.md), [agent-envd/02-eip-protocol.md](agent-envd/02-eip-protocol.md)                 |
-| Foundation Service boundary           | [foundation-service/README.md](foundation-service/README.md)                                                                           |
-| Foundation Secret management          | [foundation-service/01-secret-management.md](foundation-service/01-secret-management.md)                                               |
+| Area                                  | Document                                                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository content and workflow model | [repository-model.md](repository-model.md)                                                                                                           |
+| Platform interaction model            | [interaction-model.md](interaction-model.md)                                                                                                         |
+| Platform data conventions             | [data-conventions.md](data-conventions.md)                                                                                                           |
+| Platform API conventions              | [api-conventions.md](api-conventions.md)                                                                                                             |
+| Harness catalog                       | [agent-harness/README.md](agent-harness/README.md)                                                                                                   |
+| Environment Provider catalog          | [agent-environment-provider/README.md](agent-environment-provider/README.md)                                                                         |
+| Harness architecture                  | [agent-harness/00-overview.md](agent-harness/00-overview.md)                                                                                         |
+| Harness definition/build              | [agent-harness/03-agent-definition-and-build.md](agent-harness/03-agent-definition-and-build.md)                                                     |
+| Harness plugins                       | [agent-harness/05-plugin-system.md](agent-harness/05-plugin-system.md)                                                                               |
+| Harness execution and recovery        | [agent-harness/06-execution-context-and-lifecycle.md](agent-harness/06-execution-context-and-lifecycle.md)                                           |
+| Harness state                         | [agent-harness/10-snapshot-and-resume.md](agent-harness/10-snapshot-and-resume.md)                                                                   |
+| Harness public API                    | [agent-harness/14-public-api-and-packaging.md](agent-harness/14-public-api-and-packaging.md)                                                         |
+| Harness model/output boundary         | [agent-harness/16-input-model-and-output.md](agent-harness/16-input-model-and-output.md)                                                             |
+| Agent Stream Protocol catalog         | [agent-stream-protocol/README.md](agent-stream-protocol/README.md)                                                                                   |
+| AG-UI observation contract            | [agent-stream-protocol/00-overview.md](agent-stream-protocol/00-overview.md)                                                                         |
+| Agent UI catalog                      | [agent-ui/README.md](agent-ui/README.md)                                                                                                             |
+| Agent UI architecture and sessions    | [agent-ui/00-overview.md](agent-ui/00-overview.md), [agent-ui/04-sessions-environments-and-state.md](agent-ui/04-sessions-environments-and-state.md) |
+| agent-envd catalog                    | [agent-envd/README.md](agent-envd/README.md)                                                                                                         |
+| EIP architecture and protocol         | [agent-envd/00-overview.md](agent-envd/00-overview.md), [agent-envd/02-eip-protocol.md](agent-envd/02-eip-protocol.md)                               |
+| Foundation Service boundary           | [foundation-service/README.md](foundation-service/README.md)                                                                                         |
+| Foundation Secret management          | [foundation-service/01-secret-management.md](foundation-service/01-secret-management.md)                                                             |

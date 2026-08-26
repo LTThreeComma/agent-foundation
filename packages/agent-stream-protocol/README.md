@@ -21,6 +21,19 @@ all_events = observer.snapshot()
 
 One observer binds to the Thread and Run correlation on its first successful source item. Use a separate observer for each root or child Run.
 
+A Host that retains the exact public Harness source history can atomically rebuild a fresh observer before continuing with live items:
+
+```python
+observer = HarnessAguiObserver()
+await observer.resume(host.source_history(run_id=run_id, through=cursor))
+
+async for item in host.live_source(run_id=run_id, after=cursor):
+    new_events = observer.observe(item)
+    await host.persist_and_publish(new_events)
+```
+
+The history is a finite async iterable for one Run. `resume()` accumulates its post-processor AG-UI events without returning them for duplicate publication, leaves the observer fresh if reconstruction fails, and knows nothing about storage, cursors, gaps, or replay-to-live cutover. Those remain Host responsibilities.
+
 A Host can filter or adjust converted values before accumulation:
 
 ```python
@@ -43,7 +56,7 @@ def process_event(
 observer = HarnessAguiObserver(processor=process_event)
 ```
 
-A replacement must retain the same AG-UI event type and source-derived correlation. The processor is synchronous and does not persist or publish events; the Host acts on the complete batch returned by `observe()`.
+A replacement must retain the same AG-UI event type and source-derived correlation. The processor is synchronous, replay-stable, and does not retain mutable processing state or persist, publish, or acknowledge events. The Host acts on the complete batch returned by live `observe()` calls.
 
 ## Ownership
 
@@ -52,10 +65,11 @@ The package owns only:
 - standard Harness-to-AG-UI conversion;
 - generic `CUSTOM` fallback for unmapped public events;
 - multipart text, reasoning, and tool-call observation state;
-- optional Host processing;
+- optional replay-stable Host processing;
+- atomic process-local reconstruction from supplied source history;
 - detached incremental results and accumulated snapshots.
 
-The Host owns persistence, event identities, replay, fan-out, backpressure, cancellation, transport, and rendering policy. The Harness owns source lifecycle facts and continuation state.
+The Host owns source-history retention and selection, cursors, gaps, replay-to-live cutover, persistence, event identities, fan-out, backpressure, cancellation, transport, and rendering policy. The Harness owns source lifecycle facts and continuation state.
 
 ## Dependencies
 

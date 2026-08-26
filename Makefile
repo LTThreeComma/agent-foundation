@@ -454,11 +454,11 @@ release-check: ## Validate a component version (component=harness|agent-ui|found
 
 .PHONY: image-foundation-service
 image-foundation-service: ## Build the local foundation-service container image
-	@docker build -f Dockerfile -t "$(FOUNDATION_SERVICE_IMAGE)" .
+	@docker build -f deploy/containers/foundation-service/Dockerfile -t "$(FOUNDATION_SERVICE_IMAGE)" .
 
 .PHONY: image-sandbox
 image-sandbox: ## Build the local sandbox image with agent-envd
-	@docker build -f Dockerfile.sandbox -t "$(SANDBOX_IMAGE)" .
+	@docker build -f deploy/containers/sandbox/Dockerfile -t "$(SANDBOX_IMAGE)" .
 
 .PHONY: images
 images: image-foundation-service image-sandbox ## Build all local container images

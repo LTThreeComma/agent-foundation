@@ -6,7 +6,7 @@ on:
     paths:
       - ".github/workflows/ci-agent-environment-provider.yml"
       - ".github/workflows/release-harness.yml"
-      - "Dockerfile.sandbox"
+      - "deploy/containers/sandbox/Dockerfile"
       - "packages/agent-environment-provider/**"
       - "packages/agent-harness/pyproject.toml"
       - "pyproject.toml"
@@ -20,7 +20,7 @@ on:
     paths:
       - ".github/workflows/ci-agent-environment-provider.yml"
       - ".github/workflows/release-harness.yml"
-      - "Dockerfile.sandbox"
+      - "deploy/containers/sandbox/Dockerfile"
       - "packages/agent-environment-provider/**"
       - "packages/agent-harness/pyproject.toml"
       - "pyproject.toml"
