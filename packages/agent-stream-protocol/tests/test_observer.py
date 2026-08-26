@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import anyio
 import pytest
 from ag_ui.core import Event
 from ag_ui.core.events import (
@@ -29,6 +30,7 @@ from converge_agent_harness import (
     HarnessExtensionEvent,
     HarnessRunResult,
     HarnessRunResultEvent,
+    HarnessStreamEvent,
     RunBindings,
     SafeFailure,
 )
@@ -85,6 +87,11 @@ def _result_event(
         occurred_at=_OCCURRED_AT,
         result=result,
     )
+
+
+async def _history(*items: HarnessStreamEvent[Any]) -> AsyncIterator[HarnessStreamEvent[Any]]:
+    for item in items:
+        yield item
 
 
 def test_text_lifecycle_uses_harness_request_identity_and_accumulates() -> None:
@@ -463,6 +470,153 @@ def test_returned_events_and_snapshots_are_detached() -> None:
     assert snapshot[0].message_id != "mutated"
     snapshot[0].message_id = "mutated-again"
     assert observer.snapshot()[0].message_id != "mutated-again"
+
+
+@pytest.mark.anyio
+async def test_resume_rebuilds_history_and_continues_through_observe() -> None:
+    history = (
+        _event(0, PartStartEvent(index=0, part=TextPart("hel"))),
+        _event(1, PartDeltaEvent(index=0, delta=TextPartDelta("lo"))),
+    )
+    live = _event(2, PartEndEvent(index=0, part=TextPart("hello")))
+    observer = HarnessAguiObserver()
+
+    resumed = await observer.resume(_history(*history))
+    continued = observer.observe(live)
+
+    expected = HarnessAguiObserver()
+    for item in history:
+        expected.observe(item)
+    expected_continued = expected.observe(live)
+
+    assert resumed is None
+    assert continued == expected_continued
+    assert observer.snapshot() == expected.snapshot()
+    assert observer.thread_id == "thread-1"
+    assert observer.run_id == "run-1"
+
+
+@pytest.mark.anyio
+async def test_resume_replays_processor_without_returning_historical_events() -> None:
+    def processor(source: Any, event: Event) -> Event | None:
+        del source
+        if isinstance(event, TextMessageContentEvent):
+            return event.model_copy(update={"delta": event.delta.upper()})
+        return event
+
+    observer = HarnessAguiObserver(processor=processor)
+
+    assert await observer.resume(_history(_event(0, PartStartEvent(index=0, part=TextPart("hello"))))) is None
+    snapshot = observer.snapshot()
+    assert len(snapshot) == 2
+    assert isinstance(snapshot[1], TextMessageContentEvent)
+    assert snapshot[1].delta == "HELLO"
+
+
+@pytest.mark.anyio
+async def test_resume_is_atomic_when_history_iteration_fails() -> None:
+    async def failing_history() -> AsyncIterator[HarnessStreamEvent[Any]]:
+        yield _event(0, PartStartEvent(index=0, part=TextPart("partial")))
+        raise RuntimeError("history unavailable")
+
+    observer = HarnessAguiObserver()
+
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await observer.resume(failing_history())
+
+    assert observer.snapshot() == ()
+    assert observer.thread_id is None
+    assert observer.run_id is None
+    assert observer.observe(_event(0, PartStartEvent(index=0, part=TextPart("retry"))))
+
+
+@pytest.mark.anyio
+async def test_resume_is_atomic_when_history_changes_run() -> None:
+    observer = HarnessAguiObserver()
+
+    with pytest.raises(AguiObservationError, match="Harness Run correlation changed"):
+        await observer.resume(
+            _history(
+                _event(0, PartStartEvent(index=0, part=TextPart("first"))),
+                _event(0, PartStartEvent(index=0, part=TextPart("second")), run_id="run-2"),
+            )
+        )
+
+    assert observer.snapshot() == ()
+    assert observer.thread_id is None
+    assert observer.run_id is None
+
+
+@pytest.mark.anyio
+async def test_resume_cancellation_leaves_observer_fresh() -> None:
+    entered = anyio.Event()
+
+    async def blocked_history() -> AsyncIterator[HarnessStreamEvent[Any]]:
+        yield _event(0, PartStartEvent(index=0, part=TextPart("partial")))
+        entered.set()
+        await anyio.sleep_forever()
+
+    observer = HarnessAguiObserver()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(observer.resume, blocked_history())
+        await entered.wait()
+        task_group.cancel_scope.cancel()
+
+    assert observer.snapshot() == ()
+    assert observer.thread_id is None
+    assert observer.run_id is None
+
+    await observer.resume(_history(_event(0, PartStartEvent(index=0, part=TextPart("retry")))))
+    assert observer.thread_id == "thread-1"
+    assert observer.run_id == "run-1"
+    assert observer.snapshot()
+
+
+@pytest.mark.anyio
+async def test_resume_requires_a_fresh_observer_even_after_empty_history() -> None:
+    observed = HarnessAguiObserver()
+    observed.observe(_event(0, FinalResultEvent(tool_name=None, tool_call_id=None)))
+    with pytest.raises(AguiObservationError, match="requires a fresh observer"):
+        await observed.resume(_history())
+
+    resumed = HarnessAguiObserver()
+    await resumed.resume(_history())
+    with pytest.raises(AguiObservationError, match="requires a fresh observer"):
+        await resumed.resume(_history())
+
+    assert resumed.observe(_event(0, FinalResultEvent(tool_name=None, tool_call_id=None)))
+
+
+@pytest.mark.anyio
+async def test_resume_rejects_concurrent_observation_and_resumption() -> None:
+    entered = anyio.Event()
+    release = anyio.Event()
+
+    async def waiting_history() -> AsyncIterator[HarnessStreamEvent[Any]]:
+        entered.set()
+        await release.wait()
+        yield _event(0, PartStartEvent(index=0, part=TextPart("history")))
+
+    observer = HarnessAguiObserver()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(observer.resume, waiting_history())
+        await entered.wait()
+
+        assert observer.snapshot() == ()
+        assert observer.thread_id is None
+        assert observer.run_id is None
+        with pytest.raises(AguiObservationError, match="while observer resumption is in progress"):
+            observer.observe(_event(0, PartStartEvent(index=0, part=TextPart("live"))))
+        with pytest.raises(AguiObservationError, match="already in progress"):
+            await observer.resume(_history())
+
+        release.set()
+
+    assert observer.thread_id == "thread-1"
+    assert observer.run_id == "run-1"
+    assert observer.snapshot()
 
 
 @pytest.mark.anyio

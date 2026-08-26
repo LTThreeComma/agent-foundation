@@ -10,7 +10,12 @@ import pytest
 from converge_agent_harness import (
     FILE_VIEW_RULES,
     AgentContext,
+    AgentDefinition,
+    AgentIdentityRef,
+    AgentInstanceContext,
     DefinitionError,
+    DelegationCapability,
+    DelegationRunCapability,
     DirectLocalEnvironmentConfiguration,
     DirectLocalEnvironmentProviderBinding,
     DirectLocalRootConfiguration,
@@ -33,6 +38,8 @@ from converge_agent_harness import (
     SkillManager,
     SkillPath,
     SkillsCapability,
+    SkillSelectionRunCapability,
+    SubagentDefinition,
     create_environment_run_binding,
 )
 from converge_agent_harness.tools import InvocationPolicyCapability, InvocationPolicyDecision
@@ -236,6 +243,190 @@ async def test_skill_manager_materializes_into_authorized_root_and_freezes_front
     assert "skill_inspect" not in {tool.name for tool in seen[0].function_tools}
 
 
+async def test_default_skills_capability_scans_only_workspace_agents_skills(tmp_path: Path) -> None:
+    selected = tmp_path / ".agents" / "skills" / "default"
+    selected.mkdir(parents=True)
+    (selected / "SKILL.md").write_text(
+        "---\nname: default\ndescription: Default workspace skill.\n---\n",
+        encoding="utf-8",
+    )
+    ambient = tmp_path / "other-skills" / "ambient"
+    ambient.mkdir(parents=True)
+    (ambient / "SKILL.md").write_text(
+        "---\nname: ambient\ndescription: Must not be scanned.\n---\n",
+        encoding="utf-8",
+    )
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    capability = SkillsCapability()
+    assert capability.manager.logical_roots == ("/workspace/.agents/skills",)
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(capability,),
+    )
+    result = await executable.run("Use a skill", bindings=RunBindings.local(environment=_binding(tmp_path)))
+
+    assert result.output_or_raise() == "done"
+    instructions = str(captured[0].instructions)
+    assert "Default workspace skill." in instructions
+    assert "Must not be scanned." not in instructions
+
+
+async def test_default_skills_capability_allows_missing_workspace_root(tmp_path: Path) -> None:
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(),),
+    )
+    result = await executable.run("No skills", bindings=RunBindings.local(environment=_binding(tmp_path)))
+
+    assert result.output_or_raise() == "done"
+    assert "<available-skills>" not in str(captured[0].instructions)
+
+
+async def test_default_skills_capability_allows_no_environment_binding() -> None:
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(),),
+    )
+    result = await executable.run("No environment", bindings=RunBindings.local())
+
+    assert result.output_or_raise() == "done"
+    assert len(captured) == 1
+    assert "<available-skills>" not in str(captured[0].instructions)
+
+
+async def test_default_skill_manager_appends_host_sources_with_later_precedence(tmp_path: Path) -> None:
+    for root, description in (
+        (tmp_path / ".agents" / "skills", "Workspace version."),
+        (tmp_path / "host-skills", "Host version."),
+    ):
+        skill = root / "same"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: same\ndescription: {description}\n---\n",
+            encoding="utf-8",
+        )
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    manager = SkillManager.default(additional_sources=(EnvironmentSkillSource("host", ("/workspace/host-skills",)),))
+    assert manager.logical_roots == ("/workspace/.agents/skills", "/workspace/host-skills")
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(manager),),
+    )
+    result = await executable.run("Use a skill", bindings=RunBindings.local(environment=_binding(tmp_path)))
+
+    assert result.output_or_raise() == "done"
+    instructions = str(captured[0].instructions)
+    assert "Host version." in instructions
+    assert "Workspace version." not in instructions
+
+
+async def test_optional_environment_skill_source_skips_each_unavailable_root(tmp_path: Path) -> None:
+    skill = tmp_path / "skills" / "available"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: available\ndescription: Available root.\n---\n",
+        encoding="utf-8",
+    )
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    manager = SkillManager(
+        (
+            EnvironmentSkillSource(
+                "mixed",
+                ("/workspace/skills", "/environment/missing/skills"),
+                required=False,
+            ),
+        )
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(manager),),
+    )
+    result = await executable.run("Use a skill", bindings=RunBindings.local(environment=_binding(tmp_path)))
+
+    assert result.output_or_raise() == "done"
+    assert "Available root." in str(captured[0].instructions)
+
+
+async def test_required_environment_skill_source_rejects_each_unavailable_root(tmp_path: Path) -> None:
+    skill = tmp_path / "skills" / "available"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: available\ndescription: Available root.\n---\n",
+        encoding="utf-8",
+    )
+    manager = SkillManager(
+        (
+            EnvironmentSkillSource(
+                "mixed",
+                ("/workspace/skills", "/environment/missing/skills"),
+                required=True,
+            ),
+        )
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=lambda messages, info: _text("done")),
+        capabilities=(SkillsCapability(manager),),
+    )
+
+    with pytest.raises(DefinitionError) as exc_info:
+        await executable.run("Use a skill", bindings=RunBindings.local(environment=_binding(tmp_path)))
+    assert exc_info.value.code == "skill_source_unavailable"
+    assert exc_info.value.details["source_id"] == "mixed"
+
+
+def test_optional_environment_skill_source_rejects_invalid_logical_root() -> None:
+    with pytest.raises(ValueError, match="must use /workspace or /environment"):
+        EnvironmentSkillSource(
+            "invalid",
+            ("/missing/skills",),
+            required=False,
+        )
+
+
 async def test_skill_catalog_uses_ordered_later_source_precedence(tmp_path: Path) -> None:
     for root, description in (("global", "Global version"), ("project", "Project version")):
         path = tmp_path / root / "same"
@@ -268,6 +459,252 @@ async def test_skill_catalog_uses_ordered_later_source_precedence(tmp_path: Path
     instructions = str(captured[0].instructions)
     assert "Project version" in instructions
     assert "Global version" not in instructions
+
+
+async def test_host_skill_selection_injects_only_exact_selected_names(tmp_path: Path) -> None:
+    for name in ("alpha", "beta"):
+        skill = tmp_path / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Use {name}.\n---\n\n# {name.title()}\n",
+            encoding="utf-8",
+        )
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),),
+    )
+    result = await executable.run(
+        "Use a skill",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(SkillSelectionRunCapability(names=frozenset({"alpha"})),),
+        ),
+    )
+
+    assert result.output_or_raise() == "done"
+    instructions = str(captured[0].instructions)
+    assert 'skill name="alpha"' in instructions
+    assert "Use alpha." in instructions
+    assert 'skill name="beta"' not in instructions
+    assert "Use beta." not in instructions
+
+
+async def test_empty_host_skill_selection_injects_no_skill_catalog(tmp_path: Path) -> None:
+    skill = tmp_path / "skills" / "alpha"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Use alpha.\n---\n",
+        encoding="utf-8",
+    )
+    captured: list[AgentInfo] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(info)
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),),
+    )
+    result = await executable.run(
+        "Use a skill",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(SkillSelectionRunCapability(names=frozenset()),),
+        ),
+    )
+
+    assert result.output_or_raise() == "done"
+    assert "<available-skills>" not in str(captured[0].instructions)
+
+
+async def test_resumed_run_reselects_skills_from_fresh_host_bindings(tmp_path: Path) -> None:
+    for name in ("alpha", "beta"):
+        skill = tmp_path / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Use {name}.\n---\n",
+            encoding="utf-8",
+        )
+    captured: list[str] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        captured.append(str(info.instructions))
+        yield "done"
+
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=stream),
+        capabilities=(SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),),
+    )
+    first = await executable.run(
+        "First",
+        bindings=RunBindings.local(
+            environment=_binding(tmp_path),
+            capabilities=(SkillSelectionRunCapability(names=frozenset({"alpha"})),),
+        ),
+    )
+    assert first.state is not None
+    second = await executable.run(
+        "Second",
+        bindings=RunBindings.local(environment=_binding(tmp_path)),
+        previous_state=first.state,
+    )
+
+    assert first.output_or_raise() == second.output_or_raise() == "done"
+    assert 'skill name="alpha"' in captured[0]
+    assert 'skill name="beta"' not in captured[0]
+    assert 'skill name="alpha"' in captured[1]
+    assert 'skill name="beta"' in captured[1]
+
+
+async def test_child_run_uses_its_own_skill_selection(tmp_path: Path) -> None:
+    for name in ("alpha", "beta"):
+        skill = tmp_path / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Use {name}.\n---\n",
+            encoding="utf-8",
+        )
+    parent_instructions: list[str] = []
+    child_instructions: list[str] = []
+
+    async def child_stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages
+        child_instructions.append(str(info.instructions))
+        yield "child-done"
+
+    async def parent_stream(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[str | DeltaToolCalls]:
+        parent_instructions.append(str(info.instructions))
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not returns:
+            yield {
+                0: DeltaToolCall(
+                    name="delegate",
+                    json_args=json.dumps({"subagent": "worker", "task": {"request": "inspect"}}),
+                    tool_call_id="delegate-skill-selection",
+                )
+            }
+            return
+        yield "parent-done"
+
+    child = AgentDefinition(
+        agent=AgentSpec(model="logical:child"),
+        output_type=str,
+        definition_id="skill-child",
+        model=FunctionModel(stream_function=child_stream),
+        capabilities=(SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),),
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:parent"),
+        output_type=str,
+        model=FunctionModel(stream_function=parent_stream),
+        capabilities=(
+            DelegationCapability(),
+            SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),
+        ),
+        subagents=(
+            SubagentDefinition(
+                name="worker",
+                description="Inspect one task.",
+                agent=child,
+            ),
+        ),
+    )
+
+    async def bind_child(child, input, child_instance_id, continuation, usage_limits):
+        del child, input, continuation, usage_limits
+        return RunBindings(
+            instance=AgentInstanceContext(
+                identity=AgentIdentityRef(issuer="test", subject="child"),
+                agent_instance_id=f"internal-{child_instance_id}",
+                parent_agent_instance_id="skill-parent",
+                delegation_id=child_instance_id,
+            ),
+            environment=_binding(tmp_path),
+        )
+
+    result = await executable.run(
+        "Delegate",
+        bindings=RunBindings(
+            instance=AgentInstanceContext(
+                identity=AgentIdentityRef(issuer="test", subject="parent"),
+                agent_instance_id="skill-parent",
+            ),
+            environment=_binding(tmp_path),
+            capabilities=(
+                InvocationPolicyCapability(evaluator=_Allow()),
+                DelegationRunCapability(binder=bind_child),
+                SkillSelectionRunCapability(names=frozenset({"alpha"})),
+            ),
+        ),
+    )
+
+    assert result.output_or_raise() == "parent-done"
+    assert parent_instructions
+    assert all('skill name="alpha"' in instructions for instructions in parent_instructions)
+    assert all('skill name="beta"' not in instructions for instructions in parent_instructions)
+    assert len(child_instructions) == 1
+    assert 'skill name="alpha"' in child_instructions[0]
+    assert 'skill name="beta"' in child_instructions[0]
+
+
+async def test_host_skill_selection_rejects_unknown_names(tmp_path: Path) -> None:
+    skill = tmp_path / "skills" / "alpha"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Use alpha.\n---\n",
+        encoding="utf-8",
+    )
+    executable = HarnessBuilder().build_code(
+        AgentSpec(model="logical:test"),
+        output_type=str,
+        model=FunctionModel(stream_function=lambda messages, info: _text("done")),
+        capabilities=(SkillsCapability(SkillManager((EnvironmentSkillSource("workspace", ("/workspace/skills",)),))),),
+    )
+
+    with pytest.raises(DefinitionError) as exc_info:
+        await executable.run(
+            "Use a skill",
+            bindings=RunBindings.local(
+                environment=_binding(tmp_path),
+                capabilities=(SkillSelectionRunCapability(names=frozenset({"missing"})),),
+            ),
+        )
+    assert exc_info.value.code == "skill_selection_unknown"
+    assert exc_info.value.details == {"skills": ["missing"], "truncated": False}
+
+
+def test_skill_selection_requires_immutable_bounded_exact_names() -> None:
+    with pytest.raises(TypeError, match="frozenset"):
+        SkillSelectionRunCapability(names=("alpha",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="bounded"):
+        SkillSelectionRunCapability(names=frozenset({"x" * 257}))
+    with pytest.raises(ValueError, match="must be"):
+        SkillSelectionRunCapability(id="custom", names=frozenset())
 
 
 async def test_ordinary_environment_skill_read_emits_usage_observation(tmp_path: Path) -> None:

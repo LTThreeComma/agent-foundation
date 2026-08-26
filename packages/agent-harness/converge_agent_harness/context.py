@@ -260,6 +260,7 @@ class AgentContext:
     deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
     model_context: ModelContextRunBinding | None = None
+    _skill_selection_names: frozenset[str] | None = field(default=None, repr=False, compare=False)
     skill_paths: RunSkillPaths = field(default_factory=RunSkillPaths, compare=False)
     tool_metadata: ToolRuntimeMetadata = field(default_factory=ToolRuntimeMetadata, compare=False)
     _capability_provenance: _CapabilityProvenance = field(default_factory=_CapabilityProvenance, repr=False)

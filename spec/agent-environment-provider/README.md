@@ -8,12 +8,12 @@ Hosts and `converge-agent-harness` consume the same provider keys and configurat
 
 ## Document Catalog
 
-| Document                                                                               | Owning contract                                                                                                                    |
-| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| [00-overview.md](00-overview.md)                                                       | Package position, architecture, boundaries, dependency direction, and stable principles                                            |
-| [01-provider-specs-and-catalog.md](01-provider-specs-and-catalog.md)                   | Serializable provider specifications, typed configuration, built-in and third-party factories, validation, and compatibility       |
-| [02-resource-management-and-attachments.md](02-resource-management-and-attachments.md) | Host-owned management lifecycle, resource state, reusable resources, fresh attachments, EIP session sources, failure, and recovery |
-| [03-built-in-providers.md](03-built-in-providers.md)                                   | Direct Local, Docker, and E2B configuration and lifecycle behavior, SDK boundaries, and security                                   |
+| Document                                                                               | Owning contract                                                                                                                                                     |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [00-overview.md](00-overview.md)                                                       | Package position, architecture, boundaries, dependency direction, and stable principles                                                                             |
+| [01-provider-specs-and-catalog.md](01-provider-specs-and-catalog.md)                   | Serializable provider specifications, typed configuration, built-in and third-party factories, validation, and compatibility                                        |
+| [02-resource-management-and-attachments.md](02-resource-management-and-attachments.md) | Host-owned management lifecycle, operation identities, exact-operation reconciliation, resource state, reusable resources, fresh attachments, failure, and recovery |
+| [03-built-in-providers.md](03-built-in-providers.md)                                   | Direct Local, Docker, and E2B configuration and lifecycle behavior, SDK boundaries, and security                                                                    |
 
 ## Reading Paths
 
@@ -36,7 +36,7 @@ Read `01` and `02`. A third-party factory uses the same provider-specification, 
 ## Authority Rules
 
 - A Host owns user authorization, desired provider specifications, durable resource identity, operation fencing, resource-state persistence, lease policy, and destroy/recreate decisions.
-- The provider package owns provider-specific schema validation and resource-management behavior but no durable record.
+- The provider package owns provider-specific schema validation, resource-management behavior, and bounded exact-operation reconciliation but no durable record.
 - A bound provider resource owns live provider clients, maintenance, and fresh attachment issuance for one Host scope.
 - A runtime attachment carries fresh process-local access material; it is not durable state and is transferred at most once.
 - The Harness owns provider-neutral Environment bindings, topology, operations, state restoration, and run-local cleanup.

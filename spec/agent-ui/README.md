@@ -39,8 +39,8 @@ Read `05`, then the [Agent Stream Protocol specification](../agent-stream-protoc
 
 - Human- and agent-editable configuration files own the desired Model, Prompt, Plugin instance, Skill, Agent, and Environment definitions in the latest accepted configuration generation. SQLite indexes those definitions but does not replace their file authority.
 - Agent UI resolves configuration into immutable content-addressed snapshots. A Session pins exact Agent and Environment snapshots; dynamic reload never mutates a running executable or an existing Session composition.
-- SQLite owns mutable local metadata and control state. Compressed immutable files own selected `HarnessState`, provider resource-state blobs, resolved snapshots, and retained AG-UI event segments.
-- `HarnessState` is the canonical process-local continuation value. AG-UI history, transcript projections, SQLite indexes, rendered terminal state, and browser caches never replace it.
+- SQLite owns mutable local metadata and control state. Compressed immutable files own selected `HarnessState`, pending `DeferredToolRequests`, provider resource-state blobs, resolved snapshots, and retained AG-UI event segments.
+- `HarnessState` is the canonical process-local Agent state value. A waiting Turn additionally pins the exact complete `DeferredToolRequests` required by the Harness resume contract; AG-UI history, identifiers, transcript projections, SQLite indexes, rendered state, and browser caches replace neither value.
 - The Harness and Pydantic AI own native Agent construction, Agent loops, inline delegation, run events, results, and continuation semantics.
 - The Environment Provider package owns provider specification validation, Manager behavior, provider resource-state codecs, and fresh runtime attachments. Agent UI owns desired Environment definitions, lifecycle decisions, fencing, persistence, and Session assignment.
 - Agent Stream Protocol owns reusable Harness-to-AG-UI conversion and process-local accumulation. Agent UI owns event-file persistence, query projection, replay, fan-out, transport, and presentation policy.

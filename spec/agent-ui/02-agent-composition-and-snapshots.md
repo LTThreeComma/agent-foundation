@@ -38,6 +38,7 @@ class AgentDefinitionDocument(BaseModel):
     plugins: tuple[ResourceRef, ...]
     skills: tuple[ResourceRef, ...]
     capabilities: tuple[FirstPartyCapabilitySelection, ...]
+    environment: AgentEnvironmentRequirements
     subagents: tuple[SubagentEdge, ...]
     delegation: DelegationPresentation
     output: AgentOutputSelection
@@ -53,6 +54,25 @@ class SubagentEdge(BaseModel):
     environment: ChildEnvironmentPolicy
 
 
+class AgentEnvironmentRequirements(BaseModel):
+    bindings: tuple[EnvironmentBindingRequirement, ...]
+
+
+class EnvironmentBindingRequirement(BaseModel):
+    binding_name: str
+    required_operations: frozenset[str]
+
+
+class ChildEnvironmentPolicy(BaseModel):
+    mode: Literal[
+        "none",
+        "dedicated",
+        "shared_root",
+        "serialized_root",
+    ]
+    bindings: tuple[str, ...] | None
+
+
 class DelegationPresentation(BaseModel):
     inline: Literal["unified", "named", "disabled"]
     background: Literal["agent-ui", "disabled"]
@@ -60,7 +80,11 @@ class DelegationPresentation(BaseModel):
 
 `model`, `prompt`, `plugins`, `skills`, and child `agent` values reference resources by stable identity in one candidate configuration generation. Resolution replaces every reference with its exact `ResourceRevisionRef`; an immutable resolved snapshot never retains “latest” lookup semantics.
 
-Plugin order and Skill order are significant. Immediate child names are unique. A child edge selects one complete child Agent, authored context and usage ceilings, and explicit Environment sharing policy. It does not inherit the parent's tools, Capabilities, plugins, model, Prompt, credentials, or live bindings.
+Plugin order and Skill order are significant. Immediate child names are unique. A child edge selects one complete child Agent, authored context and usage ceilings, and an explicit Environment resource policy. It does not inherit the parent's tools, Capabilities, plugins, model, Prompt, credentials, or live bindings.
+
+`AgentEnvironmentRequirements` declares the binding names and provider-neutral operation families that must be available when a Session pairs this Agent with an Environment. Agent resolution validates syntax and operation keys but cannot prove resource availability because Environment selection is independent. Session creation or fork performs the cross-snapshot compatibility check against the selected Environment topology and permission ceilings.
+
+`none` supplies an empty child Environment topology. `dedicated` creates or resumes independently fenced provider resource instances scoped to the child invocation or background job and requires every selected provider to advertise `MULTIPLE_FROM_SPEC`. `shared_root` acquires separate concurrent attachments from the root resource instances and requires every selected provider to advertise `SHARED`; the child intentionally observes and can mutate the same underlying workspace. `serialized_root` waits for selected root instances to have no active attachment, then acquires fresh attachments sequentially; it is valid only for background children because an inline child waiting for its still-entered parent binding would deadlock. `bindings` selects a subset of the Session Environment topology or is absent to select all bindings. Unknown names, insufficient operations, or unsupported allocation/concurrency capabilities fail Agent/Environment compatibility during Session creation or fork, before provider effects.
 
 `AgentOutputSelection` maps through a trusted Agent UI adapter to one native Harness business-output contract. The interactive default is text, but structured first-party output contracts can be selected by schema key and version. Arbitrary Python output classes and import targets are not serialized.
 
@@ -75,6 +99,7 @@ Agent revision
   + ordered Plugin instance revisions
   + ordered Skill revisions
   + curated Capability selections
+  + Environment requirements
   + complete child Agent revisions and edges
   + output and recovery policy
 ```
@@ -86,6 +111,7 @@ The sources have distinct responsibilities:
 - **Plugin instances** supply trusted Harness-wide middleware through the Harness-owned plugin contract.
 - **Skills** supply inspectable reusable instructions and artifacts through the first-party Skills Capability.
 - **Capabilities** own Agent-loop tools, Toolsets, guidance, settings, and hooks.
+- **Environment requirements** declare provider-neutral binding/operation needs without selecting provider resources.
 - **Child Agents** are complete recursively resolved Agent definitions.
 
 A plugin can contribute Capabilities through the Harness lifecycle, but Agent UI does not add a second plugin hook model. A Skill cannot directly install Python code, a plugin, a provider, or a Capability. A Prompt cannot enable tools by naming them. Every executable code-selection surface is an installed trusted adapter, curated Capability key, Harness plugin factory key, or Environment provider key selected under Host policy.

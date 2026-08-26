@@ -2,7 +2,7 @@
 
 ## Design Position
 
-An `EnvironmentManager` is the small Host-facing management API for one resolved provider specification. It creates a resource, resumes an existing resource, pauses it when the provider supports suspension, destroys it, and exposes fresh runtime attachments while the resource is usable.
+An `EnvironmentManager` is the small Host-facing management API for one resolved provider specification. It creates a resource, resumes an existing resource, pauses it when the provider supports suspension, destroys it, reconciles uncertain lifecycle operations, and exposes fresh runtime attachments while the resource is usable.
 
 The Manager encapsulates vendor lifecycle differences without becoming a durable store or a second Environment operation API. A Host chooses whether to retain the returned provider state and when to invoke each lifecycle action. The Harness consumes only a fresh attachment and continues to own file, shell, process, output, port, topology, and portable Environment-state behavior.
 
@@ -24,10 +24,54 @@ class EnvironmentPauseMode(StrEnum):
     FILESYSTEM = "filesystem"
 
 
+class EnvironmentResourceAllocation(StrEnum):
+    SINGLE_FROM_SPEC = "single_from_spec"
+    MULTIPLE_FROM_SPEC = "multiple_from_spec"
+
+
+class EnvironmentAttachmentConcurrency(StrEnum):
+    SINGLE = "single"
+    SHARED = "shared"
+
+
 class EnvironmentLifecycleCapabilities(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     pause_modes: frozenset[EnvironmentPauseMode] = frozenset()
+    resource_allocation: EnvironmentResourceAllocation
+    attachment_concurrency: EnvironmentAttachmentConcurrency
+
+
+class EnvironmentManagementAction(StrEnum):
+    CREATE = "create"
+    RESUME = "resume"
+    PAUSE = "pause"
+    DESTROY = "destroy"
+
+
+class EnvironmentOperationContext(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: str
+    action: EnvironmentManagementAction
+    resource_correlation: str
+    attempt: int
+
+
+class EnvironmentReconciliationPhase(StrEnum):
+    RUNNING = "running"
+    PAUSED = "paused"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+class EnvironmentReconciliationResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: str
+    phase: EnvironmentReconciliationPhase
+    state: EnvironmentProviderResourceState | None
+    evidence: JsonValue | None
 
 
 class EnvironmentManager(ABC):
@@ -36,24 +80,40 @@ class EnvironmentManager(ABC):
         self,
     ) -> EnvironmentLifecycleCapabilities: ...
 
-    async def create(self) -> ManagedEnvironment: ...
+    async def create(
+        self,
+        *,
+        operation: EnvironmentOperationContext,
+    ) -> ManagedEnvironment: ...
 
     async def resume(
         self,
         state: EnvironmentProviderResourceState,
+        *,
+        operation: EnvironmentOperationContext,
     ) -> ManagedEnvironment: ...
 
     async def pause(
         self,
         environment: ManagedEnvironment,
         *,
+        operation: EnvironmentOperationContext,
         mode: EnvironmentPauseMode = EnvironmentPauseMode.FULL,
     ) -> EnvironmentProviderResourceState: ...
 
     async def destroy(
         self,
         state: EnvironmentProviderResourceState,
+        *,
+        operation: EnvironmentOperationContext,
     ) -> None: ...
+
+    async def reconcile(
+        self,
+        operation: EnvironmentOperationContext,
+        *,
+        last_known_state: EnvironmentProviderResourceState | None,
+    ) -> EnvironmentReconciliationResult: ...
 
 
 class ManagedEnvironment(AbstractAsyncContextManager["ManagedEnvironment"]):
@@ -67,11 +127,15 @@ class ManagedEnvironment(AbstractAsyncContextManager["ManagedEnvironment"]):
 
 A factory constructs one inert Manager from validated provider configuration and a fresh Host runtime context containing credential and client construction collaborators. Entering or invoking the Manager is the first effectful boundary. Provider SDK clients, subprocesses, and network calls remain lazy and explicit.
 
+Every effectful method requires a Host-generated `EnvironmentOperationContext`. `operation_id` is globally unique within the Host's provider-resource scope, `action` must match the method, `resource_correlation` is the stable Host resource-instance correlation, and `attempt` increases only when Host policy permits a retry. Providers pass the operation identity to vendor idempotency fields or durable resource tags where available. Reusing one operation context cannot target a different action or Host resource.
+
 `create()` returns a usable new resource. `resume()` takes provider-owned state for an existing resource and returns it in a usable running form. If the resource is already running, resume attaches without replacing it; if it is suspended, resume performs the provider's restore/start operation. It never silently creates a different resource when the selected state is missing or incompatible.
 
 `pause()` consumes the live resource and returns updated state after the provider confirms suspension. `FULL` asks the provider to preserve its complete resumable runtime when supported. `FILESYSTEM` preserves the provider filesystem but permits processes and memory to be discarded. An unsupported mode fails before changing the resource. `destroy()` is explicit and terminal; leaving a `ManagedEnvironment` context only disconnects local clients and maintenance tasks.
 
-A Manager exposes only lifecycle behavior shared well enough to be dependable. Provider-specific template authoring, account administration, image building, billing, listing, and arbitrary vendor API passthrough are not added to this interface.
+`reconcile()` performs bounded read-only provider inspection for one exact prior operation. It returns `RUNNING` or `PAUSED` only with a validated provider state for the identified resource, `ABSENT` only when provider evidence authoritatively proves no matching resource exists, and `UNKNOWN` with no state when the provider cannot establish a safe fact. It never creates, resumes, pauses, or destroys a resource. For an uncertain create with no returned state, the provider uses the operation identity and resource correlation recorded in vendor metadata to find the exact resource or prove absence. For other actions, it validates both the last known state and operation correlation.
+
+A Manager exposes only lifecycle behavior shared well enough to be dependable. Provider-specific template authoring, account administration, image building, billing, unscoped listing, and arbitrary vendor API passthrough are not added to this interface. Reconciliation is exact-operation inspection, not a generic provider browser.
 
 ## Provider Resource State
 
@@ -105,7 +169,7 @@ type EnvironmentRuntimeAttachment = (
 )
 ```
 
-An attachment is fresh, process-local, non-serializable, and single-use. An entered `ManagedEnvironment` issues at most one active attachment at a time. Closing the attachment releases binding-local resources but leaves the managed provider resource available for another sequential run.
+An attachment is fresh, process-local, non-serializable, and single-use. `attachment_concurrency=SINGLE` permits at most one active attachment from a managed resource. `SHARED` permits several independently scoped active attachments only when the provider explicitly implements safe concurrent access to the same underlying resource. Closing one attachment releases only its binding-local resources and leaves the managed provider resource and other authorized attachments available.
 
 The provider package imports no Harness type. The Harness adapter exhaustively converts:
 
@@ -154,9 +218,9 @@ sequenceDiagram
     participant Envd
 
     alt new resource
-        Host->>Manager: create()
+        Host->>Manager: create(operation)
     else existing resource
-        Host->>Manager: resume(resource state)
+        Host->>Manager: resume(resource state, operation)
     end
     Manager-->>Host: usable ManagedEnvironment and current state
     loop sequential Harness runs
@@ -168,16 +232,16 @@ sequenceDiagram
         Harness->>Resource: release attachment
     end
     alt retain for later
-        Host->>Manager: pause(resource, mode)
+        Host->>Manager: pause(resource, operation, mode)
         Manager-->>Host: updated provider resource state
     else remove
-        Host->>Manager: destroy(resource state)
+        Host->>Manager: destroy(resource state, operation)
     else leave running
         Host->>Resource: disconnect local resource context
     end
 ```
 
-A `ManagedEnvironment` can span sequential Harness runs. Every run still receives a fresh `EnvironmentProviderBinding`, and every EIP-backed binding receives a fresh initialized session. One built-in resource supports one active attachment/session at a time; callers that need concurrent independent runs create or resume independent resources.
+A `ManagedEnvironment` can span sequential Harness runs. Every run still receives a fresh `EnvironmentProviderBinding`, and every EIP-backed binding receives a fresh initialized session. A Host requesting concurrent access either uses an explicitly `SHARED` managed resource or, when `resource_allocation=MULTIPLE_FROM_SPEC`, creates independently fenced resources. It never infers sharing or independent allocation from repeated Host record creation.
 
 Closing a Harness binding, disconnecting a `ManagedEnvironment`, pausing a resource, and destroying it are separate facts. Harness cleanup never chooses pause or destroy policy.
 
@@ -198,21 +262,24 @@ EIP 1.0 contributes no `EnvironmentBindingState`. Provider-managed filesystem pe
 
 ## Failure Semantics
 
-| Failure                                                | Outcome                                                                            |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| Create fails before a resource exists                  | No `ManagedEnvironment` is returned                                                |
-| Create outcome is uncertain                            | Typed unknown outcome; caller inspects provider state before another create        |
-| Resume state is missing, expired, or incompatible      | Explicit failure; no replacement resource is created                               |
-| Pause fails before acceptance                          | Resource remains live when the provider can prove it                               |
-| Pause outcome is uncertain                             | No claim that the resource is running or paused; inspect before another transition |
-| Attachment acquisition or initialization fails         | No Harness binding is published; managed resource can remain usable                |
-| EIP carrier fails after possible dispatch              | Unknown operation outcome; reconcile by operation ID                               |
-| Harness binding cleanup fails                          | Harness preserves the nearest valid operation/result candidate                     |
-| Managed-resource disconnect fails                      | Provider cleanup failure; no implied pause or destroy                              |
-| Destroy reports not found                              | Successful absence only when the provider response is authoritative                |
-| External cancellation after possible provider dispatch | Cancellation propagates with unknown outcome preserved                             |
+| Failure                                                | Outcome                                                                              |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| Create fails before a resource exists                  | No `ManagedEnvironment` is returned                                                  |
+| Create outcome is uncertain                            | Typed unknown outcome; caller reconciles the exact operation before another create   |
+| Resume state is missing, expired, or incompatible      | Explicit failure; no replacement resource is created                                 |
+| Pause fails before acceptance                          | Resource remains live when the provider can prove it                                 |
+| Pause outcome is uncertain                             | No claim that the resource is running or paused; reconcile before another transition |
+| Attachment acquisition or initialization fails         | No Harness binding is published; managed resource can remain usable                  |
+| Reconciliation proves exact resource running/paused    | Return validated state that the Host can select under its own fence                  |
+| Reconciliation proves authoritative absence            | Return `ABSENT`; Host policy can permit retry or terminal destroy                    |
+| Reconciliation evidence is insufficient                | Return `UNKNOWN`; no lifecycle transition is inferred                                |
+| EIP carrier fails after possible operation dispatch    | EIP operation outcome remains owned by EIP; provider lifecycle is unchanged          |
+| Harness binding cleanup fails                          | Harness preserves the nearest valid operation/result candidate                       |
+| Managed-resource disconnect fails                      | Provider cleanup failure; no implied pause or destroy                                |
+| Destroy reports not found                              | Successful absence only when the provider response is authoritative                  |
+| External cancellation after possible provider dispatch | Cancellation propagates with unknown outcome preserved                               |
 
-Management calls and attachment entry have finite timeouts and preserve provider error categories needed for a caller to distinguish invalid input, unavailable service, missing resource, unsupported lifecycle action, and unknown outcome. They do not expose raw credentials, request bodies, or vendor object representations.
+Management, reconciliation, and attachment entry have finite timeouts and preserve provider error categories needed for a caller to distinguish invalid input, unavailable service, missing resource, unsupported lifecycle action, and unknown outcome. Reconciliation evidence is bounded, credential-free, and safe for Host diagnostics; it does not expose raw credentials, request bodies, unbounded listings, or vendor object representations.
 
 ## Security and Dependencies
 
@@ -222,19 +289,21 @@ Synchronous vendor SDK calls execute through a bounded worker-thread boundary su
 
 ## Compatibility
 
-Provider configuration schema, Manager API, provider resource-state codec, lifecycle capabilities, attachment union, vendor SDK, EIP version, and Harness adapter are independent compatibility axes. The Harness release group aligns package APIs; provider and wire states retain their own versions.
+Provider configuration schema, Manager API, provider resource-state codec, lifecycle allocation/concurrency capabilities, attachment union, vendor SDK, EIP version, and Harness adapter are independent compatibility axes. The Harness release group aligns package APIs; provider and wire states retain their own versions.
 
 Making attachment values reusable, treating resource-context exit as pause/destroy, silently recreating on failed resume, using vendor operations as Harness file/process fallbacks, or storing provider resource state in `HarnessState` is incompatible.
 
 ## Invariants
 
-01. The Manager API is limited to create, resume, pause, destroy, and fresh attachment acquisition.
+01. The Manager API is limited to create, resume, pause, destroy, exact-operation reconciliation, and fresh attachment acquisition.
 02. A Host chooses lifecycle actions and optional storage; the provider package owns no durable resource registry.
 03. Resume returns the selected existing resource or fails; it never silently creates a replacement.
 04. Provider resource state is credential-free, provider-owned, and distinct from `HarnessState`.
 05. A managed resource spans sequential runs, while every attachment, binding, and EIP session is fresh and single-use.
 06. Closing a binding, disconnecting a resource, pausing it, and destroying it are independent operations.
-07. Full and filesystem-only pause semantics are explicit capabilities rather than inferred from provider names.
+07. Pause modes, resource-allocation cardinality, and attachment concurrency are explicit capabilities rather than inferred from provider names.
 08. Docker and E2B use EIP for all Harness Environment operations.
 09. Resume reestablishes provider and binding authority before portable Environment state restoration.
 10. Cancellation and transport failure never convert possible side effects into non-dispatch or rollback.
+11. Every effectful management call carries one stable Host operation identity, and reconciliation inspects only that exact operation/resource correlation.
+12. Reconciliation is read-only and returns running, paused, absent, or unknown evidence; it never creates a replacement resource.

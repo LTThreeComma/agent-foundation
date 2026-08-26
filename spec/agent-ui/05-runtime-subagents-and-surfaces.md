@@ -4,25 +4,25 @@
 
 Agent UI has one surface-neutral application service, one foreground execution coordinator, and one process-local background-child monitor. The service is the only product boundary for configuration, composition, Environment lifecycle, Sessions, Runs, replay, and cleanup. TUI calls it directly in process. WebUI reaches the same typed commands and queries through a thin loopback HTTP/SSE adapter.
 
-The coordinator consumes every root Harness stream exactly once. Inline children remain owned by the Harness `DelegationCapability`; background children use an Agent UI Host Capability and fresh run attachment around the exact child executable graph already built by the Harness. Agent Stream Protocol converts each exposed Harness Run once, after which Agent UI stores and fans out the same processed AG-UI events to both surfaces.
+The coordinator consumes every root Harness stream exactly once. Inline children remain owned by the Harness `DelegationCapability`; background children use an Agent UI Host Capability and fresh run attachment around the exact child executable graph already built by the Harness. Agent Stream Protocol converts every complete root and background-child Harness stream once. Forwarded inline-child events can also be observed as child-correlated detail, but they do not form an independent terminal AG-UI Run when the Harness does not forward the child terminal result.
 
 ## Boundaries
 
-| Concern                                  | Owner                                                         | Agent UI behavior                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Configuration source mutation and reload | Configuration service                                         | Atomic source write, generation acceptance, diagnostics, and subscriptions           |
-| Resource CRUD and validation             | Model, Prompt, Plugin, Skill, Agent, and Environment services | Typed application operations over one captured generation                            |
-| Complete root and child executable graph | Agent resolver and Harness build                              | Reuses exact immutable snapshot; no runtime child rebuilding                         |
-| Foreground Agent loop and continuation   | Harness                                                       | One entered `HarnessRunStream` with fresh bindings                                   |
-| Blocking inline child invocation         | Harness Delegation Capability                                 | Normal tool call, nested child `HarnessState`, usage, and parent checkpoint boundary |
-| Background child presentation            | Agent UI behavior Capability                                  | Bounded spawn/status/wait/steer/cancel tools over exact built children               |
-| Live background scheduling               | Agent UI monitor                                              | Supervised tasks, queues, cancellation, terminal retention, and process generation   |
-| Environment resource lifecycle           | Agent UI plus Environment Provider Manager                    | Fenced create/resume/pause/destroy and fresh attachments                             |
-| Active Environment topology              | Harness                                                       | Adapts complete fresh attachment set into provider-neutral bindings                  |
-| AG-UI conversion                         | Agent Stream Protocol                                         | One observer per exposed root or child Run plus the Agent UI processor               |
-| Session/state/event persistence          | Agent UI local store                                          | SQLite control facts and compressed immutable payload files                          |
-| Web and terminal presentation            | Surface adapters                                              | Submit typed commands and consume safe query/event projections                       |
-| Distributed durable execution            | Foundation Service                                            | Not emulated by local process tasks or storage                                       |
+| Concern                                  | Owner                                                         | Agent UI behavior                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Configuration source mutation and reload | Configuration service                                         | Atomic source write, generation acceptance, diagnostics, and subscriptions                              |
+| Resource CRUD and validation             | Model, Prompt, Plugin, Skill, Agent, and Environment services | Typed application operations over one captured generation                                               |
+| Complete root and child executable graph | Agent resolver and Harness build                              | Reuses exact immutable snapshot; no runtime child rebuilding                                            |
+| Foreground Agent loop and continuation   | Harness                                                       | One entered `HarnessRunStream` with fresh bindings                                                      |
+| Blocking inline child invocation         | Harness Delegation Capability                                 | Normal tool call, nested child `HarnessState`, usage, and parent checkpoint boundary                    |
+| Background child presentation            | Agent UI behavior Capability                                  | Bounded spawn/status/wait/steer/cancel tools over exact built children                                  |
+| Live background scheduling               | Agent UI monitor                                              | Supervised tasks, queues, cancellation, terminal retention, and process generation                      |
+| Environment resource lifecycle           | Agent UI plus Environment Provider Manager                    | Fenced create/resume/pause/destroy and fresh attachments                                                |
+| Active Environment topology              | Harness                                                       | Adapts complete fresh attachment set into provider-neutral bindings                                     |
+| AG-UI conversion                         | Agent Stream Protocol                                         | Complete observer per root/background Run; bounded detail observation for forwarded inline-child events |
+| Session/state/event persistence          | Agent UI local store                                          | SQLite control facts and compressed immutable payload files                                             |
+| Web and terminal presentation            | Surface adapters                                              | Submit typed commands and consume safe query/event projections                                          |
+| Distributed durable execution            | Foundation Service                                            | Not emulated by local process tasks or storage                                                          |
 
 ## Application Service
 
@@ -90,9 +90,9 @@ WebUI and TUI resource editors call the same application commands. An edit:
 
 1. reads one resource and its source revision from a captured configuration generation;
 2. validates the proposed strict document locally;
-3. stages and atomically replaces the owning source file under a source-specific edit lease;
-4. requests an immediate configuration reload;
-5. succeeds only when the intended digest appears in a newly accepted generation;
+3. stages the replacement source values and publishes a one- or multi-resource source transaction manifest under a source-specific edit lease;
+4. requests an immediate configuration reload against the exact manifest digests;
+5. succeeds only when the intended digest set appears in a newly accepted generation;
 6. returns bounded diagnostics while leaving the prior accepted generation active on failure.
 
 External file edits enter through the same reload pipeline. A file watcher is an optimization; periodic source reconciliation and explicit reload prevent dropped watcher events from becoming authority. One application event announces accepted generation, changed resource digests, and restart-bound settings without leaking source content or credentials.
@@ -129,12 +129,17 @@ sequenceDiagram
         App->>Files: publish bounded compressed event segments
         App->>DB: register segment metadata in short transaction
     end
-    Harness-->>App: terminal result and complete state
+    Harness-->>App: terminal Run result and complete state
     App->>Observer: observe terminal item
     Observer-->>App: terminal AG-UI batch
-    App->>Files: publish terminal event segment and state object
-    App->>DB: commit Turn outcome and selected checkpoint
-    App-->>Surface: durable terminal Session projection
+    alt suspended Run result
+        App->>Files: publish event segment, state, and deferred-request object
+        App->>DB: commit waiting Turn, checkpoint, and pending request
+    else completed, failed, or cancelled Run result
+        App->>Files: publish terminal event segment and state object
+        App->>DB: commit Turn terminal outcome and selected checkpoint
+    end
+    App-->>Surface: durable Session projection
     App->>Provider: pause, retain, or disconnect by Session policy
 ```
 
@@ -144,11 +149,13 @@ Model resolution, credential reads, Host run Capabilities, Plugin run binding, S
 
 Input acceptance, Environment availability, Harness start, live event delivery, event-file registration, Harness terminal result, checkpoint selection, Environment pause, OTel export, and surface rendering are independent facts. A surface disconnect does not cancel work. Explicit cancellation requests ordinary Harness cancellation and records its actual outcome.
 
+For inline delegation, the fresh parent bindings include an Agent UI child-binding collaborator constrained by the pinned child edge. `dedicated` policy persists child-scoped resource instances and operation fences before provider dispatch, acquires fresh attachments from `MULTIPLE_FROM_SPEC` providers, and returns complete child bindings to the Harness delegation path. `shared_root` acquires distinct concurrent attachments from `SHARED` root resources without creating a second lifecycle record. The parent checkpoint remains the authority for nested inline child state, while SQLite retains provider lifecycle and cleanup responsibility. `none` returns an empty child topology. `serialized_root` is rejected before the parent Run because its wait condition cannot become true while the parent attachment remains entered.
+
 ## Deferred Input and Approval
 
-A suspended Harness result keeps the same Host Turn in `waiting` with a complete selected state containing exact deferred calls/approvals. Surfaces render the corresponding safe projection and submit one typed response command bound to the Session, Thread, Turn, expected revision, and exact deferred identifiers.
+A suspended Harness result keeps the same Host Turn in `waiting`. The coordinator publishes the complete selected `HarnessState`, the separate exact public `DeferredToolRequests` object returned by the Harness, and pending event segments, then atomically commits the `waiting` transition, both object references, unconsumed status, and Thread revision in SQLite. A valid waiting Turn survives process restart. Surfaces render the corresponding safe projection and submit one typed response command bound to the Session, Thread, Turn, expected revision, and exact deferred identifiers.
 
-The application service validates the response, creates a fresh Run with `DeferredToolResume`, fresh model/Environment/Host bindings, and appends the new `run_id` to the same Turn. AG-UI replay never satisfies deferred state. Stale, duplicate, mismatched, or already-consumed responses conflict before another Harness dispatch.
+The application service loads and validates the complete pending request object, combines the authorized responses with that exact value in `DeferredToolResume`, records one consuming `run_id` before dispatch, creates fresh model/Environment/Host bindings, and appends the Run to the same Turn. AG-UI replay and identifiers alone never reconstruct or satisfy deferred state. Stale, duplicate, mismatched, already-consumed, corrupt, or incompatible responses conflict before another Harness dispatch.
 
 ## Environment Operations
 
@@ -186,6 +193,8 @@ class AgentUiBackgroundRunCapability(
 ```
 
 The public attachment exposes methods rather than mutable fields. The behavior Capability selects one exact `BuiltSubagent` from `AgentContext.subagents`; it cannot submit an arbitrary executable or resource ID. The binder applies the pinned child edge, context and usage ceilings, child Environment policy, fresh Model binding, current Host policy, and independently authorized fresh Environment attachment.
+
+For `dedicated` child Environment policy, job acceptance first persists child-scoped resource-instance records and operation fences before provider dispatch. The child starts only after required `MULTIPLE_FROM_SPEC` instances are available, and those instances retain independent pause, recovery, destroy, and Session-delete cleanup responsibility. `shared_root` waits only for provider admission, then acquires distinct concurrent attachments from `SHARED` root resources. For `serialized_root`, the accepted background job remains queued without a child Harness Run until every selected root instance releases its active attachment; it then acquires fresh sequential attachments. Inline delegation permits `dedicated`, `shared_root`, or `none`; `serialized_root` is background-only.
 
 Model-facing operations use compact parent-scoped references:
 
@@ -255,7 +264,9 @@ Duplicate event notification, surface reconnect, or repeated status query never 
 
 ## Retained and Live AG-UI
 
-The application service observes each exposed Harness Run once, applies the Agent UI processor, assigns Session presentation sequence and event identity, stores compressed segments, updates query projection, and fans out detached values to subscribers.
+The application service observes each complete root and background-child Harness Run once, applies the Agent UI processor, assigns Session presentation sequence and event identity, stores compressed segments, updates query projection, and fans out detached values to subscribers.
+
+Forwarded inline-child events use a child-correlated detail observer while the Harness delegation tool invocation is active. Because the Harness consumes the inline child's terminal result internally, Agent UI does not synthesize `RUN_FINISHED` or `RUN_ERROR` for that detail stream. The owning parent delegation tool lifecycle supplies the visible invocation outcome, closes the detail presentation, and preserves nested child state through the Harness parent checkpoint. This closure is not represented as child Run terminality and cannot be used to resume the child independently.
 
 A subscription consists of:
 
@@ -335,20 +346,20 @@ Agent UI releases independently and pins one exact compatible Harness release gr
 
 ## Failure Semantics
 
-| Failure                                      | Outcome                                                                                           |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Configuration edit fails validation          | Source edit is rejected/rolled back when application-owned; prior generation remains active       |
-| Stale command revision                       | Conflict before affected dispatch or mutation                                                     |
-| Model or credential resolution fails         | Run fails before model use; pinned snapshot remains unchanged                                     |
-| Required Environment cannot become available | Run does not enter Harness; provider lifecycle retains exact failure/unknown state                |
-| Harness stream/projection fails              | Coordinator closes stream and attachments; Turn records actual failed/interrupted outcome         |
-| Event persistence fails after live delivery  | Subscriber saw a non-durable observation; replay later exposes a gap                              |
-| Surface disconnect                           | Work continues unless explicit cancellation/policy says otherwise                                 |
-| Unknown child name or scoped ref             | Validation/not-found before background side effects                                               |
-| Fresh child bindings denied                  | Accepted job fails with bounded outcome before child Harness dispatch                             |
-| Child cleanup uncertain                      | Job becomes interrupted; no invented terminal success                                             |
-| Duplicate notification                       | Same job/event identity; no duplicate execution or delivery                                       |
-| Process exits during active work             | Runs/jobs become interrupted, resources follow bounded cleanup, and no live authority is restored |
+| Failure                                         | Outcome                                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Configuration edit or manifest fails validation | Application-owned transaction manifest is not selected; prior generation remains active           |
+| Stale command revision                          | Conflict before affected dispatch or mutation                                                     |
+| Model or credential resolution fails            | Run fails before model use; pinned snapshot remains unchanged                                     |
+| Required Environment cannot become available    | Run does not enter Harness; provider lifecycle retains exact failure/unknown state                |
+| Harness stream/projection fails                 | Coordinator closes stream and attachments; Turn records actual failed/interrupted outcome         |
+| Event persistence fails after live delivery     | Subscriber saw a non-durable observation; replay later exposes a gap                              |
+| Surface disconnect                              | Work continues unless explicit cancellation/policy says otherwise                                 |
+| Unknown child name or scoped ref                | Validation/not-found before background side effects                                               |
+| Fresh child bindings denied                     | Accepted job fails with bounded outcome before child Harness dispatch                             |
+| Child cleanup uncertain                         | Job becomes interrupted; no invented terminal success                                             |
+| Duplicate notification                          | Same job/event identity; no duplicate execution or delivery                                       |
+| Process exits during active work                | Runs/jobs become interrupted, resources follow bounded cleanup, and no live authority is restored |
 
 ## Compatibility
 

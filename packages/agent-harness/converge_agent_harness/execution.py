@@ -72,7 +72,12 @@ from converge_agent_harness.capabilities.process_monitor import (
     MonitoredProcessCapability,
     MonitoredProcessRunCapability,
 )
-from converge_agent_harness.capabilities.skills import SKILLS_CAPABILITY_ID, SkillsCapability
+from converge_agent_harness.capabilities.skills import (
+    SKILL_SELECTION_RUN_CAPABILITY_ID,
+    SKILLS_CAPABILITY_ID,
+    SkillsCapability,
+    SkillSelectionRunCapability,
+)
 from converge_agent_harness.capabilities.web import (
     WEB_CAPABILITY_ID,
     WEB_RUN_CAPABILITY_ID,
@@ -689,6 +694,7 @@ class ExecutableAgent[OutputT]:
                 code="input_source_conflict",
             )
         run_reserved_ids = _validate_capability_source(bindings.capabilities, source="run")
+        skill_selection_names = _capture_skill_selection_names(bindings.capabilities)
         normalized_resume = (
             preflight_deferred_resume(deferred_resume, previous_state=previous_state)
             if deferred_resume is not None
@@ -702,6 +708,7 @@ class ExecutableAgent[OutputT]:
             previous_state=previous_state,
             deferred_resume=normalized_resume,
             run_reserved_capability_ids=run_reserved_ids,
+            skill_selection_names=skill_selection_names,
             usage=usage,
             usage_limits=usage_limits,
         )
@@ -736,6 +743,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         previous_state: HarnessState | None,
         deferred_resume: DeferredToolResume | None,
         run_reserved_capability_ids: frozenset[str],
+        skill_selection_names: frozenset[str] | None,
         usage: RunUsage | None,
         usage_limits: UsageLimits | None,
     ) -> None:
@@ -750,6 +758,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         self.run_id = f"run-{uuid4().hex}"
         self._deferred_resume = deferred_resume
         self._run_reserved_capability_ids = run_reserved_capability_ids
+        self._skill_selection_names = skill_selection_names
         self._usage = usage if usage is not None else RunUsage()
         self._usage_limits = usage_limits
         self._emitter = _RunEventEmitter(self.thread_id, self.run_id)
@@ -853,6 +862,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                 usage_attribution=usage_attribution,
                 deferred_resume=self._deferred_resume,
                 metadata=self._bindings.metadata,
+                _skill_selection_names=self._skill_selection_names,
                 _capability_provenance=_CapabilityProvenance(
                     definition_ids=self._executable._definition_reserved_capability_ids,
                     run_ids=self._run_reserved_capability_ids,
@@ -2012,6 +2022,7 @@ def _validate_built_capability_tree(
         MONITORED_PROCESS_RUN_CAPABILITY_ID,
         USER_INTERACTION_CAPABILITY_ID,
         SKILLS_CAPABILITY_ID,
+        SKILL_SELECTION_RUN_CAPABILITY_ID,
         MEDIA_CAPABILITY_ID,
         MEDIA_RUN_CAPABILITY_ID,
         DOCUMENTS_CAPABILITY_ID,
@@ -2154,6 +2165,19 @@ def _validate_built_capability_tree(
         )
 
 
+def _capture_skill_selection_names(
+    capabilities: Sequence[AbstractCapability[AgentContext]],
+) -> frozenset[str] | None:
+    selections = tuple(capability for capability in capabilities if type(capability) is SkillSelectionRunCapability)
+    if len(selections) > 1:
+        raise DefinitionError(
+            "RunBindings contains duplicate Host skill selections.",
+            code="capability_id_duplicate",
+            details={"capability_id": SKILL_SELECTION_RUN_CAPABILITY_ID, "source": "run"},
+        )
+    return frozenset(selections[0].names) if selections else None
+
+
 def _validate_capability_source(
     capabilities: Sequence[AbstractCapability[AgentContext]],
     *,
@@ -2164,6 +2188,7 @@ def _validate_capability_source(
         InvocationPolicyCapability,
         ClientToolsRunCapability,
         MonitoredProcessRunCapability,
+        SkillSelectionRunCapability,
         MediaRunCapability,
         DocumentsRunCapability,
         WebRunCapability,
@@ -2210,6 +2235,7 @@ def _validate_capability_source(
         MONITORED_PROCESS_RUN_CAPABILITY_ID,
         USER_INTERACTION_CAPABILITY_ID,
         SKILLS_CAPABILITY_ID,
+        SKILL_SELECTION_RUN_CAPABILITY_ID,
         MEDIA_CAPABILITY_ID,
         MEDIA_RUN_CAPABILITY_ID,
         DOCUMENTS_CAPABILITY_ID,
@@ -2270,6 +2296,7 @@ def _validate_capability_source(
             | MonitoredProcessRunCapability
             | UserInteractionCapability
             | SkillsCapability
+            | SkillSelectionRunCapability
             | MediaCapability
             | MediaRunCapability
             | DocumentsCapability

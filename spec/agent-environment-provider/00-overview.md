@@ -2,7 +2,7 @@
 
 ## Design Position
 
-`converge-agent-environment-provider` is the shared Host-facing package for declaring, validating, provisioning, attaching, observing, and retiring Environment provider resources. It lets independently structured Host components understand the same provider configuration without importing Pydantic AI or the complete Harness runtime.
+`converge-agent-environment-provider` is the shared Host-facing package for declaring, validating, provisioning, attaching, reconciling, observing, and retiring Environment provider resources. It lets independently structured Host components understand the same provider configuration without importing Pydantic AI or the complete Harness runtime.
 
 The package separates three values with different authority:
 
@@ -54,19 +54,19 @@ The Host decides whether to provision, attach, keep, replace, or destroy a resou
 
 ## Boundaries
 
-| Concern                                                                        | Owner                                         | Explicit boundary                                      |
-| ------------------------------------------------------------------------------ | --------------------------------------------- | ------------------------------------------------------ |
-| Provider specification schema and provider key                                 | Provider package and selected factory         | Serializable, credential-free desired configuration    |
-| User authorization and allowed provider configuration                          | Host                                          | Evaluated before manager invocation                    |
-| Catalog selection and installed-code trust                                     | Host and provider package                     | Availability is not authorization                      |
-| Provision, attach, inspect, maintenance, and destroy implementation            | Provider manager                              | External effects with typed outcomes                   |
-| Durable resource records, operation fencing, retry policy, and lease selection | Host                                          | Never delegated to package-global state                |
-| Resource-state field meaning and codec                                         | Selected provider                             | Opaque to the Host except envelope and policy metadata |
-| Resource-state storage, encryption, retention, and authoritative selection     | Host                                          | Separate from `HarnessState`                           |
-| Live provider client and reusable resource scope                               | Bound provider resource                       | Process-local and explicitly closed                    |
-| Fresh runtime attachment                                                       | Bound provider resource                       | Single-use, process-local, and non-serializable        |
-| Attachment-to-binding adaptation and Environment operations                    | Harness                                       | No provider lifecycle authority                        |
-| EIP protocol and session behavior                                              | `converge-agent-envd-client` and `agent-envd` | Independent from vendor provisioning                   |
+| Concern                                                                                    | Owner                                         | Explicit boundary                                                 |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------- | ----------------------------------------------------------------- |
+| Provider specification schema and provider key                                             | Provider package and selected factory         | Serializable, credential-free desired configuration               |
+| User authorization and allowed provider configuration                                      | Host                                          | Evaluated before manager invocation                               |
+| Catalog selection and installed-code trust                                                 | Host and provider package                     | Availability is not authorization                                 |
+| Provision, attach, exact-operation reconciliation, maintenance, and destroy implementation | Provider manager                              | External effects and read-only reconciliation with typed outcomes |
+| Durable resource records, operation fencing, retry policy, and lease selection             | Host                                          | Never delegated to package-global state                           |
+| Resource-state field meaning and codec                                                     | Selected provider                             | Opaque to the Host except envelope and policy metadata            |
+| Resource-state storage, encryption, retention, and authoritative selection                 | Host                                          | Separate from `HarnessState`                                      |
+| Live provider client and reusable resource scope                                           | Bound provider resource                       | Process-local and explicitly closed                               |
+| Fresh runtime attachment                                                                   | Bound provider resource                       | Single-use, process-local, and non-serializable                   |
+| Attachment-to-binding adaptation and Environment operations                                | Harness                                       | No provider lifecycle authority                                   |
+| EIP protocol and session behavior                                                          | `converge-agent-envd-client` and `agent-envd` | Independent from vendor provisioning                              |
 
 The provider package does not own an Agent schema, Harness `EnvironmentState`, desired Environment topology, model-facing aliases, tools, durable Execution, queue, database, user API, or product policy.
 
@@ -102,7 +102,7 @@ sequenceDiagram
     end
 ```
 
-Provider resource operations and Host commits are independent. A successful provider API response is not a durable Host transition; a Host transaction cannot make an uncertain provider side effect known. Operation IDs, provider tags, and current provider inspection supply reconciliation evidence without claiming exactly-once execution.
+Provider resource operations and Host commits are independent. Every effectful management call carries a Host operation identity suitable for provider idempotency metadata and exact-resource correlation. A successful provider API response is not a durable Host transition; a Host transaction cannot make an uncertain provider side effect known. The Manager's bounded read-only reconciliation operation uses that identity, provider tags, and current provider inspection to return running, paused, absent, or still-unknown evidence without claiming exactly-once execution.
 
 ## Operation Backends
 
@@ -135,11 +135,11 @@ Provider specifications contain no credential, bearer token, Docker socket, E2B 
 
 01. One provider specification is understood consistently across Host components without importing the Harness.
 02. The Host owns durable desired state, resource-state selection, fencing, and lifecycle decisions.
-03. Provider managers implement resource effects but do not persist or commit Host lifecycle.
+03. Provider managers implement resource effects and exact-operation reconciliation but do not persist or commit Host lifecycle.
 04. A reusable bound resource and a single-use runtime attachment have separate lifetimes.
 05. Harness binding and operation semantics remain independent from provider resource management.
 06. Direct Local and EIP are the only Environment operation backends.
 07. Docker and E2B use vendor SDKs for lifecycle and EIP for operations.
 08. Provider specification, resource state, runtime attachment, Harness state, and EIP session never substitute for one another.
 09. Import and construction are inert; async management entry is the first effectful boundary.
-10. Failure after possible provider dispatch remains unknown until provider-specific reconciliation supplies evidence.
+10. Failure after possible provider dispatch remains unknown until exact-operation provider reconciliation supplies running, paused, absent, or still-unknown evidence.

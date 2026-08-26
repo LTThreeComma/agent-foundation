@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -100,6 +100,8 @@ class HarnessAguiObserver:
         self._run_id: str | None = None
         self._state = _ObserverState()
         self._events: list[Event] = []
+        self._resuming = False
+        self._resume_completed = False
 
     @property
     def thread_id(self) -> str | None:
@@ -111,8 +113,36 @@ class HarnessAguiObserver:
         """Return the bound Harness Run identity, if observation has begun."""
         return self._run_id
 
+    async def resume(self, history: AsyncIterable[HarnessStreamEvent[Any]]) -> None:
+        """Atomically rebuild this fresh observer from finite source history.
+
+        Historical events are accumulated but not returned. Observation and
+        another resumption are rejected until the history iterable finishes.
+        """
+        if not isinstance(history, AsyncIterable):
+            raise TypeError("history must be an async iterable of Harness stream events")
+        if self._resuming:
+            raise AguiObservationError("Observer resumption is already in progress")
+        if self._resume_completed or self._thread_id is not None or self._run_id is not None:
+            raise AguiObservationError("Observer resumption requires a fresh observer")
+
+        staged = HarnessAguiObserver(processor=self._processor)
+        self._resuming = True
+        try:
+            async for item in history:
+                staged.observe(item)
+            self._thread_id = staged._thread_id
+            self._run_id = staged._run_id
+            self._state = staged._state
+            self._events = staged._events
+            self._resume_completed = True
+        finally:
+            self._resuming = False
+
     def observe(self, item: HarnessStreamEvent[Any]) -> tuple[Event, ...]:
         """Convert and atomically accumulate one source item."""
+        if self._resuming:
+            raise AguiObservationError("Cannot observe while observer resumption is in progress")
         if not isinstance(item, HarnessEvent | HarnessRunResultEvent):
             raise TypeError("item must be a HarnessEvent or HarnessRunResultEvent")
         self._validate_correlation(item)

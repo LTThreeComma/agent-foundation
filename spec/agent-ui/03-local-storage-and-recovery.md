@@ -13,17 +13,18 @@ The design does not claim a cross-file transaction between SQLite and the filesy
 
 ## Boundaries
 
-| Concern                                                                      | Primary authority                                | Relationship                                                          |
-| ---------------------------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
-| Desired process and product configuration                                    | Reloadable configuration files                   | SQLite stores accepted-generation indexes and diagnostics only        |
-| Mutable Session, Thread, Turn, Environment, job, queue, and display metadata | SQLite                                           | Authoritative local control state and selected object references      |
-| Resolved Agent and Environment snapshots                                     | Compressed immutable object files                | SQLite and Sessions reference exact content digests                   |
-| Complete Harness continuation                                                | Compressed immutable `HarnessState` object files | SQLite checkpoint row selects one existing verified object            |
-| Provider resource state                                                      | Compressed immutable provider-state object files | SQLite owns lifecycle/fencing metadata and selected state reference   |
-| Retained processed AG-UI sequence                                            | Compressed immutable event segments              | SQLite indexes segment ranges, cursors, Items, and search projections |
-| Live execution, tasks, streams, clients, attachments, credentials            | Process memory and owning runtime                | Never reconstructed by reading local storage alone                    |
-| OpenTelemetry                                                                | Configured OTel SDK/exporter                     | Independent diagnostic delivery; no local lifecycle authority         |
-| Ordinary application logs                                                    | `converge-logging` process boundary              | Separate from SQLite and Session history                              |
+| Concern                                                                      | Primary authority                                  | Relationship                                                          |
+| ---------------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------- |
+| Desired process and product configuration                                    | Reloadable configuration files                     | SQLite stores accepted-generation indexes and diagnostics only        |
+| Mutable Session, Thread, Turn, Environment, job, queue, and display metadata | SQLite                                             | Authoritative local control state and selected object references      |
+| Resolved Agent and Environment snapshots                                     | Compressed immutable object files                  | SQLite and Sessions reference exact content digests                   |
+| Complete Harness continuation                                                | Compressed immutable `HarnessState` object files   | SQLite checkpoint row selects one existing verified object            |
+| Pending deferred resume authority                                            | Compressed immutable deferred-request object files | SQLite waiting Turn selects one exact unconsumed request object       |
+| Provider resource state                                                      | Compressed immutable provider-state object files   | SQLite owns lifecycle/fencing metadata and selected state reference   |
+| Retained processed AG-UI sequence                                            | Compressed immutable event segments                | SQLite indexes segment ranges, cursors, Items, and search projections |
+| Live execution, tasks, streams, clients, attachments, credentials            | Process memory and owning runtime                  | Never reconstructed by reading local storage alone                    |
+| OpenTelemetry                                                                | Configured OTel SDK/exporter                       | Independent diagnostic delivery; no local lifecycle authority         |
+| Ordinary application logs                                                    | `converge-logging` process boundary                | Separate from SQLite and Session history                              |
 
 SQLite is not a disposable cache as a whole. Some tables are authoritative control state, while resource and event indexes can be rebuilt from their owning files. Each table documents which category it belongs to; recovery never guesses SQLite-owned facts from display history.
 
@@ -40,6 +41,7 @@ agent-ui-home/
 │   ├── agent-snapshots/
 │   ├── environment-snapshots/
 │   ├── harness-states/
+│   ├── deferred-requests/
 │   └── provider-states/
 ├── sessions/
 │   └── YYYY/MM/DD/<session-id>/
@@ -135,6 +137,30 @@ Writing a state object does not select it. The authoritative selected checkpoint
 
 A database failure after file publication leaves the prior checkpoint selected. External model, tool, and Environment effects remain unknown where applicable; the Host never infers rollback from the unselected object.
 
+## Deferred Request Objects
+
+A suspended Harness result carries complete public `DeferredToolRequests` outside `HarnessState`. Agent UI stores that exact value in a separate compressed immutable object before a Turn can enter `waiting`:
+
+```python
+class StoredDeferredRequests(BaseModel):
+    object_schema_version: str
+    session_id: str
+    thread_id: str
+    turn_id: str
+    source_run_id: str
+    agent_snapshot_digest: str
+    harness_release: str
+    request_codec_version: str
+    request_digest: str
+    tool_surface_lock: DeferredToolSurfaceLock
+    requests: DeferredToolRequests
+    exported_at: datetime
+```
+
+`request_digest` covers the canonical complete request value, including the exact distinction and identities of deferred calls and approvals. `tool_surface_lock` identifies the resolved Agent/tool/plugin/Capability surface required to interpret those requests; it contains no live tool or authority. The object is continuation input but is not itself `HarnessState`, an AG-UI projection, or proof that a response has been authorized.
+
+The SQLite waiting transition atomically selects the verified checkpoint object and deferred-request object, records their digests, preserves the request as unconsumed, and advances the Thread revision. A response command verifies both objects, exact pending identities, pinned snapshots, codec compatibility, and unconsumed status. Before dispatch it records one consuming `run_id` and transitions the Turn to `running` in SQLite; process loss after possible dispatch becomes interrupted and never reuses the request automatically. A later suspended result publishes and selects a new complete request object.
+
 ## Provider State and Resolved Snapshots
 
 Resolved Agent and Environment snapshots use the same compressed immutable object contract. Their content is authority-neutral and content-addressed. Removing or changing current source configuration does not remove an object referenced by a retained Session.
@@ -215,7 +241,7 @@ Startup recovery proceeds before command acceptance:
 2. open SQLite, validate schema, apply owned migrations, and verify integrity needed for authoritative tables;
 3. validate the latest accepted configuration generation or accept a newer complete file generation;
 4. reconcile staging files and quarantine malformed objects;
-5. verify every selected Agent snapshot, Environment snapshot, provider-state reference needed for lifecycle, and selected checkpoint;
+5. verify every selected Agent snapshot, Environment snapshot, provider-state reference needed for lifecycle, selected checkpoint, and pending deferred-request object;
 6. scan registered AG-UI segment chains and repair rebuildable projection lag;
 7. mark prior-process `accepted` or `running` Turns and live jobs interrupted, while preserving a `waiting` Turn whose selected complete checkpoint and exact deferred correlations validate;
 8. publish the recovered application view.
@@ -227,7 +253,8 @@ Unreferenced valid immutable objects survive a grace period before garbage colle
 | Current source configuration                 | Candidate reload fails; last retained accepted generation can remain queryable, but new composition requiring the source is denied |
 | Pinned Agent or Environment snapshot         | Affected Session fails closed for execution                                                                                        |
 | Selected `HarnessState`                      | Affected Thread fails closed for continuation; AG-UI history is not promoted                                                       |
-| Unselected checkpoint object                 | Quarantine or remove after reference analysis; selected state is unchanged                                                         |
+| Selected deferred-request object             | Waiting Turn fails closed; identifiers or AG-UI cannot reconstruct the request                                                     |
+| Unselected checkpoint/deferred object        | Quarantine or remove after reference analysis; selected state is unchanged                                                         |
 | Selected provider resource state             | Provider lifecycle operation fails closed; no replacement resource is silently created                                             |
 | AG-UI segment with valid selected checkpoint | Continuation can remain available; replay exposes an explicit sequence gap                                                         |
 | Rebuildable projection rows/database pages   | Rebuild from verified event files                                                                                                  |
@@ -279,18 +306,18 @@ None substitutes for another.
 
 ## Failure Semantics
 
-| Failure                                                    | Outcome                                                                             |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Compression or object validation fails                     | No SQLite reference is committed                                                    |
-| Object publishes but SQLite commit fails                   | Object is orphaned and cleanup-safe; prior selected metadata remains                |
-| SQLite selects a reference but later file loss is detected | Type-specific corruption outcome; no fallback fabrication                           |
-| AG-UI projection update fails                              | Event file remains durable; projection catches up later                             |
-| AG-UI event file fails after live delivery                 | Replay contains an explicit gap; live delivery does not become durable history      |
-| Checkpoint commit succeeds but AG-UI registration lags     | Thread can continue; presentation repair indexes verified files or reports a gap    |
-| SQLite busy timeout expires before dispatch                | Command conflicts/fails before Harness or provider side effects                     |
-| SQLite commit fails after external work                    | Prior selected state remains; effect outcome is unknown and requires reconciliation |
-| Store lease owner disappears                               | Recovery marks nonterminal work interrupted; it never auto-reruns                   |
-| OTel exporter or ordinary logging fails                    | Diagnostic loss only; product lifecycle facts are unchanged                         |
+| Failure                                                    | Outcome                                                                                            |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Compression or object validation fails                     | No SQLite reference is committed                                                                   |
+| Object publishes but SQLite commit fails                   | Object is orphaned and cleanup-safe; prior selected metadata remains                               |
+| SQLite selects a reference but later file loss is detected | Type-specific corruption outcome; no fallback fabrication                                          |
+| AG-UI projection update fails                              | Event file remains durable; projection catches up later                                            |
+| AG-UI event file fails after live delivery                 | Replay contains an explicit gap; live delivery does not become durable history                     |
+| Checkpoint commit succeeds but AG-UI registration lags     | Thread can continue; presentation repair indexes verified files or reports a gap                   |
+| SQLite busy timeout expires before dispatch                | Command conflicts/fails before Harness or provider side effects                                    |
+| SQLite commit fails after external work                    | Prior selected state remains; effect outcome is unknown and requires reconciliation                |
+| Store lease owner disappears                               | Recovery interrupts prior active execution, preserves validated waiting Turns, and never auto-runs |
+| OTel exporter or ordinary logging fails                    | Diagnostic loss only; product lifecycle facts are unchanged                                        |
 
 ## Compatibility
 
@@ -314,11 +341,11 @@ Separating telemetry prevents diagnostic volume or exporter failure from corrupt
 
 ## Invariants
 
-01. SQLite stores metadata, control state, object references, and projections; it never stores complete `HarnessState`, provider resource-state payloads, or AG-UI event payloads.
-02. Every selected state, snapshot, provider-state payload, and retained AG-UI segment is an immutable verified Zstandard-compressed file.
+01. SQLite stores metadata, control state, object references, and projections; it never stores complete `HarnessState`, `DeferredToolRequests`, provider resource-state payloads, or AG-UI event payloads.
+02. Every selected state, deferred request, snapshot, provider-state payload, and retained AG-UI segment is an immutable verified Zstandard-compressed file.
 03. A file is completely published before any SQLite transaction can select or index it.
 04. There is no claimed cross-file ACID transaction; orphan files are safe and SQLite references fail closed when payloads are missing.
-05. `HarnessState` remains the only Agent continuation authority, regardless of event or projection availability.
+05. `HarnessState` remains the only Agent state authority; a waiting Turn additionally requires its exact unconsumed `DeferredToolRequests`, and event/projection data can replace neither.
 06. AG-UI segments own presentation replay; SQLite Item/search tables are rebuildable projections and cannot strengthen execution facts.
 07. SQLite-owned mutable control facts are never guessed from AG-UI or state files after corruption.
 08. OpenTelemetry and ordinary logs remain outside SQLite, state objects, and AG-UI files and never determine product completion.

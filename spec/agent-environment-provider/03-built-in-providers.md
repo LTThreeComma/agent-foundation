@@ -67,7 +67,9 @@ The provider schema owns these desired values; the Harness Direct Local adapter 
 
 `create()` validates the configured root and creates it only when `ownership="manager_owned"`. It returns a managed local resource and a resource state containing the Environment identity and a non-authoritative configuration fingerprint. `resume()` revalidates the same configured root and fingerprint. It never uses the state to select a different path.
 
-Direct Local advertises no pause mode. Disconnecting the managed resource closes only Manager-owned live bookkeeping. `destroy()` removes a manager-owned root only under its configured ownership contract and refuses to remove a caller-owned root. Each attachment becomes a fresh Harness Direct Local binding.
+Direct Local advertises `resource_allocation=SINGLE_FROM_SPEC`, `attachment_concurrency=SHARED`, and no pause mode. Repeated `create()` for one specification never represents independent resource ownership. Shared attachments can operate concurrently on the same configured root; this is explicit shared-workspace access and makes no isolation claim. Disconnecting the managed resource closes only Manager-owned live bookkeeping. `destroy()` removes a manager-owned root only under its configured ownership contract and refuses to remove a caller-owned root. Each attachment becomes a fresh Harness Direct Local binding.
+
+Direct Local reconciliation validates the exact configured root, ownership, configuration fingerprint, operation action, and Host resource correlation. It returns `RUNNING` with state when the selected root is authoritatively usable, `ABSENT` only when a manager-owned root for the exact operation is authoritatively absent, and `UNKNOWN` when existing caller-owned content or changed metadata cannot prove the intended lifecycle outcome. It performs no file mutation.
 
 Direct Local makes no sandbox or network-isolation claim. Its existing path, process, output, cancellation, and cleanup contracts remain owned by [Harness Environment Integration](../agent-harness/08-environment-integration.md).
 
@@ -91,11 +93,13 @@ The provider does not accept arbitrary Docker API objects, callbacks, socket pat
 
 The Docker Manager uses the Docker SDK for Python. Blocking SDK calls run through `anyio.to_thread.run_sync` or an equivalent bounded worker-thread boundary.
 
-`create()` creates and starts one container whose image includes compatible `agent-envd` bootstrap. `resume()` inspects the exact container ID from provider resource state and starts it when stopped or reconnects when already running. A missing container fails rather than creating another one.
+`create()` creates and starts one container whose image includes compatible `agent-envd` bootstrap. Before possible visibility loss, it applies bounded labels for the Host operation ID, resource correlation, provider/configuration fingerprint, and ownership. `resume()` inspects the exact container ID from provider resource state and starts it when stopped or reconnects when already running. A missing container fails rather than creating another one.
 
-Docker advertises filesystem pause only. `pause(mode=FILESYSTEM)` stops the container after closing the active attachment; the writable container filesystem or selected volumes remain, but process memory and `agent-envd` generation do not. Resume starts a fresh daemon generation and issues a fresh EIP attachment. `FULL` is unsupported rather than being mapped to Docker's process-freeze operation, because a frozen container is not a portable retained sandbox lifecycle.
+Docker advertises `resource_allocation=MULTIPLE_FROM_SPEC`, `attachment_concurrency=SINGLE`, and filesystem pause only. Each successful create receives an independent container ID and destroy target. `pause(mode=FILESYSTEM)` stops the container after closing the active attachment; the writable container filesystem or selected volumes remain, but process memory and `agent-envd` generation do not. Resume starts a fresh daemon generation and issues a fresh EIP attachment. `FULL` is unsupported rather than being mapped to Docker's process-freeze operation, because a frozen container is not a portable retained sandbox lifecycle.
 
 `destroy()` stops and removes the exact managed container according to the configured volume ownership. A not-found response is successful absence only after the Docker daemon authoritatively reports it.
+
+Docker reconciliation performs an exact label/ID inspection scoped to the operation and resource correlation. One matching running or stopped container yields validated `RUNNING` or `PAUSED` state as appropriate; authoritative zero matches yields `ABSENT`; ambiguous duplicates, inaccessible daemon state, or mismatched ownership yields `UNKNOWN`. Reconciliation never starts, stops, or removes the container.
 
 For stdio, the Manager owns private daemon pipes. For HTTP, it publishes the dedicated EIP port only to loopback or an explicitly trusted private provider link and supplies mandatory EIP bootstrap authentication. Docker port routing does not itself grant Environment authority.
 
@@ -120,9 +124,11 @@ The E2B template starts `agent-envd` as part of its trusted boot contract. The E
 
 Automatic resume from inbound traffic is disabled for managed EIP resources. Resume remains an explicit Manager action, which keeps lifecycle observations and fresh binding construction in one path. Timeout can still pause the sandbox under the selected full or filesystem mode.
 
+E2B advertises `resource_allocation=MULTIPLE_FROM_SPEC` and `attachment_concurrency=SINGLE`. Each successful create returns one independent sandbox state. Its pause modes follow the selected provider configuration and account capabilities.
+
 ### Manager behavior
 
-`create()` calls the E2B SDK to create one sandbox from the selected template and lifecycle configuration. It waits for provider running state, resolves the provider-routed HTTPS host for the dedicated EIP port, and makes that fresh routing available through the managed resource's HTTP session source. The first acquired attachment initializes EIP and must match the expected Environment identity, protocol, required methods, and limits before the Harness publishes a binding.
+`create()` calls the E2B SDK to create one sandbox from the selected template and lifecycle configuration, including bounded metadata for the Host operation ID, resource correlation, provider/configuration fingerprint, and ownership. It waits for provider running state, resolves the provider-routed HTTPS host for the dedicated EIP port, and makes that fresh routing available through the managed resource's HTTP session source. The first acquired attachment initializes EIP and must match the expected Environment identity, protocol, required methods, and limits before the Harness publishes a binding.
 
 `resume()` uses the sandbox ID from validated provider resource state. E2B's connect operation attaches to a running sandbox or resumes a paused sandbox; it never creates a replacement for a missing or killed sandbox. After connect, the Manager resolves fresh routing and issues only a fresh session source; initialization remains owned by attachment entry.
 
@@ -131,6 +137,8 @@ Automatic resume from inbound traffic is disabled for managed EIP resources. Res
 `pause(mode=FILESYSTEM)` preserves the sandbox filesystem while discarding memory and processes. Resume reboots from disk, the template startup contract launches a new `agent-envd` process, and the daemon generation changes. Every previous operation receipt, process handle, output reference, transfer, and session is fenced. The Harness receives a fresh binding revision before operations resume.
 
 `destroy()` kills the exact sandbox ID. A killed or expired sandbox is successful absence only when E2B reports that state authoritatively. Sandbox timeout and connect behavior follow the SDK contract: connect can extend an expiring running sandbox but does not silently shorten a longer current timeout; exact timeout changes use the SDK's explicit timeout operation.
+
+E2B reconciliation uses exact sandbox ID when state exists and exact bounded operation/resource metadata when an uncertain create returned no state. One matching running or paused sandbox yields validated `RUNNING` or `PAUSED` state; authoritative killed/expired/absent evidence yields `ABSENT`; duplicate, inaccessible, or insufficient evidence yields `UNKNOWN`. Reconciliation does not connect, resume, pause, extend, or kill the sandbox.
 
 The E2B Manager uses the SDK's async lifecycle surface. A provider call lacking an async SDK operation is isolated through a bounded worker-thread boundary only when required and preserves cancellation and unknown-outcome semantics. E2B API credentials remain with the Manager. Provider-routed HTTPS, E2B access controls, and EIP bootstrap credentials are separate layers; EIP authentication remains mandatory.
 
@@ -151,7 +159,7 @@ Files written in the sandbox can survive both pause modes as provider-native res
 
 The main provider distribution depends on compatible Docker and E2B SDK versions. There are no provider extras. The package root exports:
 
-- provider specification, catalog, factory, Manager, state, lifecycle capability, and attachment contracts;
+- provider specification, catalog, factory, Manager, operation identity, reconciliation, state, lifecycle capability, and attachment contracts;
 - the three built-in provider keys and typed configuration models;
 - `EIPSessionSource` plus stdio, HTTP, and accepted reverse-WebSocket source configuration;
 - stable provider error and outcome types.
@@ -160,23 +168,24 @@ It does not export vendor clients, Docker models, E2B SDK objects, raw EIP trans
 
 ## Failure Semantics
 
-| Provider         | Material failure                               | Outcome                                                              |
-| ---------------- | ---------------------------------------------- | -------------------------------------------------------------------- |
-| Direct Local     | Root or ownership validation fails             | No attachment and no sandbox claim                                   |
-| Docker           | Container create/start outcome is uncertain    | Reconcile exact container labels/ID before another create            |
-| Docker           | Stopped container resumes                      | New envd generation and fresh binding/session                        |
-| E2B              | Sandbox create response is lost                | Reconcile provider metadata before another create                    |
-| E2B              | Sandbox is paused                              | Explicit resume/connect, fresh routing, and fresh EIP initialization |
-| E2B              | Filesystem-only resume fails to start envd     | Resource remains unavailable; no attachment is issued                |
-| E2B              | Sandbox is killed or expired                   | Resume fails as absent; no implicit replacement                      |
-| Any EIP provider | HTTP disconnect after possible dispatch        | Unknown operation outcome; reconcile by operation ID                 |
-| Any provider     | Lifecycle cleanup fails after a Harness result | Report cleanup separately and preserve the Harness result candidate  |
+| Provider         | Material failure                                 | Outcome                                                               |
+| ---------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
+| Direct Local     | Root or ownership validation fails               | No attachment and no sandbox claim                                    |
+| Docker           | Container create/start outcome is uncertain      | Reconcile exact container labels/ID before another create             |
+| Docker           | Stopped container resumes                        | New envd generation and fresh binding/session                         |
+| E2B              | Sandbox create response is lost                  | Reconcile provider metadata before another create                     |
+| E2B              | Sandbox is paused                                | Explicit resume/connect, fresh routing, and fresh EIP initialization  |
+| E2B              | Filesystem-only resume fails to start envd       | Resource remains unavailable; no attachment is issued                 |
+| E2B              | Sandbox is killed or expired                     | Resume fails as absent; no implicit replacement                       |
+| Any EIP provider | EIP operation disconnect after possible dispatch | EIP outcome remains unknown under EIP operation-ID reconciliation     |
+| Any provider     | Lifecycle API response is lost                   | Reconcile the exact Host operation/resource before another transition |
+| Any provider     | Lifecycle cleanup fails after a Harness result   | Report cleanup separately and preserve the Harness result candidate   |
 
 Raw vendor exceptions remain protected causes. Safe errors expose only bounded provider key, lifecycle action, resource correlation, and stable failure class.
 
 ## Compatibility
 
-Built-in key, configuration schema, provider resource-state codec, lifecycle behavior, template/image bootstrap contract, vendor SDK range, EIP version, and Harness adapter evolve independently. A template or image is compatible only when its `agent-envd` and carrier profile satisfy the configured protocol requirements.
+Built-in key, configuration schema, provider resource-state codec, lifecycle allocation/concurrency behavior, template/image bootstrap contract, vendor SDK range, EIP version, and Harness adapter evolve independently. A template or image is compatible only when its `agent-envd` and carrier profile satisfy the configured protocol requirements.
 
 Changing E2B full pause into filesystem pause, enabling traffic-triggered resume implicitly, using Docker/E2B native operations as Harness fallbacks, or preserving a daemon generation claim across reboot is incompatible.
 

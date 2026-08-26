@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ToolCallPart
@@ -24,7 +25,14 @@ from converge_agent_harness.events import HarnessExtensionEvent
 from converge_agent_harness.tools.metadata import HARNESS_TOOL_METADATA_KEY, normalize_harness_tool_metadata
 
 SKILLS_CAPABILITY_ID = "converge.skills"
+SKILL_SELECTION_RUN_CAPABILITY_ID = "converge.skills.selection.run"
 _SKILL_FILE_NAME = "SKILL.md"
+_DEFAULT_ENVIRONMENT_SKILL_ROOT = "/workspace/.agents/skills"
+_OPTIONAL_SOURCE_UNAVAILABLE_CODES = frozenset(
+    {"environment_not_found", "environment_selection_invalid", "environment_unsupported"}
+)
+_ENVIRONMENT_ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_MAX_SKILL_SELECTION = 10_000
 _SKILL_ROUTING_POLICY = """Before starting a task or a materially different phase, compare it with the available
 skill descriptions. When a skill directly applies, use the ordinary Environment file tools to read the listed
 path's SKILL.md in full before following that workflow. If a read reports more content, continue from the returned
@@ -90,11 +98,10 @@ class EnvironmentSkillSource:
         max_line_length: int = 16 * 1024,
     ) -> None:
         self._source_id = _validate_identifier(source_id, "source_id")
-        self._roots = tuple(roots)
-        if not self._roots or len(set(self._roots)) != len(self._roots):
+        unresolved_roots = tuple(roots)
+        if not unresolved_roots or len(set(unresolved_roots)) != len(unresolved_roots):
             raise ValueError("Environment skill roots must be non-empty and unique")
-        if any(not root.strip() or "\x00" in root for root in self._roots):
-            raise ValueError("Environment skill roots must be valid logical paths")
+        self._roots = tuple(_validate_environment_skill_root(root) for root in unresolved_roots)
         if max_entries_per_root <= 0 or max_frontmatter_lines <= 0 or max_line_length <= 0:
             raise ValueError("Environment skill source limits must be positive")
         self._required = required
@@ -110,6 +117,10 @@ class EnvironmentSkillSource:
     def logical_roots(self) -> tuple[str, ...]:
         return self._roots
 
+    @property
+    def required(self) -> bool:
+        return self._required
+
     async def catalog(self, *, environment: BoundEnvironment) -> tuple[SkillCatalogItem, ...]:
         discovered: list[SkillCatalogItem] = []
         for root in self._roots:
@@ -121,7 +132,7 @@ class EnvironmentSkillSource:
                     include_hidden=False,
                 )
             except EnvironmentError as exc:
-                if not self._required and exc.code in {"environment_not_found", "environment_unsupported"}:
+                if not self.required and exc.code in _OPTIONAL_SOURCE_UNAVAILABLE_CODES:
                     continue
                 raise DefinitionError(
                     "An explicit Environment skill root is unavailable.",
@@ -178,7 +189,25 @@ class SkillsPolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     conflict: Literal["error", "prefer_earlier", "prefer_later"] = "prefer_later"
-    max_skills: int = Field(default=512, gt=0, le=10_000)
+    max_skills: int = Field(default=512, gt=0, le=_MAX_SKILL_SELECTION)
+
+
+@dataclass(kw_only=True)
+class SkillSelectionRunCapability(AbstractCapability[AgentContext]):
+    """Fresh Host override selecting exact skill names for one logical run."""
+
+    id: str | None = SKILL_SELECTION_RUN_CAPABILITY_ID
+    names: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if self.id != SKILL_SELECTION_RUN_CAPABILITY_ID:
+            raise ValueError(f"SkillSelectionRunCapability.id must be {SKILL_SELECTION_RUN_CAPABILITY_ID!r}")
+        if not isinstance(self.names, frozenset) or not all(isinstance(name, str) for name in self.names):
+            raise TypeError("SkillSelectionRunCapability.names must be a frozenset of strings")
+        if len(self.names) > _MAX_SKILL_SELECTION:
+            raise ValueError("SkillSelectionRunCapability.names contains too many skill names")
+        for name in self.names:
+            _validate_identifier(name, "selection name")
 
 
 class SkillManager:
@@ -216,6 +245,28 @@ class SkillManager:
         self._materializers = resolved_materializers
         self._policy = (policy or SkillsPolicy()).model_copy(deep=True)
         self._logical_roots = tuple(dict.fromkeys(root for source in resolved_sources for root in source.logical_roots))
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        additional_sources: Sequence[SkillSource] = (),
+        materializers: Sequence[SkillMaterializer] = (),
+        policy: SkillsPolicy | None = None,
+    ) -> SkillManager:
+        """Use the optional workspace skill root before explicit Host additions."""
+        return cls(
+            (
+                EnvironmentSkillSource(
+                    "workspace",
+                    (_DEFAULT_ENVIRONMENT_SKILL_ROOT,),
+                    required=False,
+                ),
+                *tuple(additional_sources),
+            ),
+            materializers=materializers,
+            policy=policy,
+        )
 
     @property
     def logical_roots(self) -> tuple[str, ...]:
@@ -265,14 +316,25 @@ class SkillManager:
                     code="skill_catalog_too_large",
                     details={"source_id": source.source_id},
                 )
-            try:
-                source_roots = tuple(environment.resolve_path(root) for root in source.logical_roots)
-            except EnvironmentError as exc:
-                raise DefinitionError(
-                    "A selected skill source root is not authorized by the current Environment.",
-                    code="skill_source_unavailable",
-                    details={"source_id": source.source_id, "environment_code": exc.code},
-                ) from exc
+            if not entries:
+                continue
+            resolved_roots: list[EnvironmentPath] = []
+            for root in source.logical_roots:
+                try:
+                    resolved_roots.append(environment.resolve_path(root))
+                except EnvironmentError as exc:
+                    if (
+                        isinstance(source, EnvironmentSkillSource)
+                        and not source.required
+                        and exc.code in _OPTIONAL_SOURCE_UNAVAILABLE_CODES
+                    ):
+                        continue
+                    raise DefinitionError(
+                        "A selected skill source root is not authorized by the current Environment.",
+                        code="skill_source_unavailable",
+                        details={"source_id": source.source_id, "environment_code": exc.code},
+                    ) from exc
+            source_roots = tuple(resolved_roots)
             for raw_entry in entries:
                 parsed = (
                     raw_entry.model_copy(deep=True)
@@ -349,10 +411,10 @@ class SkillsCapability(AbstractCapability[AgentContext]):
 
     id = SKILLS_CAPABILITY_ID
 
-    def __init__(self, manager: SkillManager) -> None:
-        if not isinstance(manager, SkillManager):
-            raise TypeError("SkillsCapability requires SkillManager")
-        self.manager = manager
+    def __init__(self, manager: SkillManager | None = None) -> None:
+        if manager is not None and not isinstance(manager, SkillManager):
+            raise TypeError("SkillsCapability manager must be a SkillManager")
+        self.manager = manager or SkillManager.default()
 
     async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
         existing = ctx.deps._run_capability(SKILLS_CAPABILITY_ID)
@@ -364,7 +426,21 @@ class SkillsCapability(AbstractCapability[AgentContext]):
             raise DefinitionError(
                 "SkillsCapability must originate from the Agent definition.", code="capability_scope_invalid"
             )
+        selected_names = _resolve_skill_selection(ctx)
         catalog = await self.manager.freeze(environment=ctx.deps.environment)
+        if selected_names is not None:
+            discovered_names = frozenset(item.name for item in catalog)
+            unknown_names = sorted(selected_names - discovered_names)
+            if unknown_names:
+                raise DefinitionError(
+                    "The Host skill selection contains names absent from the discovered catalog.",
+                    code="skill_selection_unknown",
+                    details={
+                        "skills": cast(list[JsonValue], unknown_names[:128]),
+                        "truncated": len(unknown_names) > 128,
+                    },
+                )
+            catalog = tuple(item for item in catalog if item.name in selected_names)
         replacement = _SkillsRunCapability(catalog, context=ctx.deps, manager=self.manager)
         ctx.deps._record_run_capability(SKILLS_CAPABILITY_ID, replacement)
         await ctx.deps.events.emit(
@@ -477,10 +553,35 @@ class _SkillsRunCapability(SkillsCapability):
         return result
 
 
+def _resolve_skill_selection(ctx: RunContext[AgentContext]) -> frozenset[str] | None:
+    names = ctx.deps._skill_selection_names
+    if names is None:
+        return None
+    if SKILL_SELECTION_RUN_CAPABILITY_ID not in ctx.deps._capability_provenance.run_ids:
+        raise DefinitionError(
+            "SkillSelectionRunCapability must originate from RunBindings.", code="capability_scope_invalid"
+        )
+    return names
+
+
 def _validate_identifier(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise ValueError(f"skill {field_name} must be non-blank and must not contain NUL")
+    if not isinstance(value, str) or not value.strip() or len(value) > 256 or "\x00" in value:
+        raise ValueError(f"skill {field_name} must be a non-blank bounded string without NUL")
     return value
+
+
+def _validate_environment_skill_root(value: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError("Environment skill roots must be valid logical paths")
+    if any(segment in {".", ".."} for segment in value.split("/")):
+        raise ValueError("Environment skill roots must not contain traversal segments")
+    if value == "/workspace" or value.startswith("/workspace/"):
+        return value
+    if value.startswith("/environment/"):
+        alias = value.removeprefix("/environment/").partition("/")[0]
+        if _ENVIRONMENT_ALIAS_PATTERN.fullmatch(alias):
+            return value
+    raise ValueError("Environment skill roots must use /workspace or /environment/{alias}")
 
 
 def _join_logical_path(root: str, relative: str) -> str:
@@ -550,6 +651,7 @@ __all__ = [
     "SkillCatalogItem",
     "SkillManager",
     "SkillMaterializer",
+    "SkillSelectionRunCapability",
     "SkillSource",
     "SkillsCapability",
     "SkillsPolicy",

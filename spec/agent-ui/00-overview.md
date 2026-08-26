@@ -129,7 +129,7 @@ The schemas, precedence, credential boundary, and reload lifecycle are owned by 
 
 ## Local Persistence
 
-Agent UI uses SQLite for mutable metadata, control state, references, query projection, search, queueing, and revision conflicts. Complete `HarnessState`, provider resource state, resolved Agent/Environment snapshots, and retained AG-UI events are stored as immutable Zstandard-compressed JSON/JSONL files.
+Agent UI uses SQLite for mutable metadata, control state, references, query projection, search, queueing, and revision conflicts. Complete `HarnessState`, pending `DeferredToolRequests`, provider resource state, resolved Agent/Environment snapshots, and retained AG-UI events are stored as immutable Zstandard-compressed JSON/JSONL files.
 
 Files publish before SQLite references. No cross-store ACID transaction is claimed. Published unreferenced files are cleanup-safe; a missing referenced state fails closed. AG-UI projection can lag event files and rebuild, while SQLite-owned control facts are not guessed from presentation history.
 
@@ -177,10 +177,15 @@ sequenceDiagram
         App->>Files: publish compressed event segments
         App->>DB: register ranges/projections in short transactions
     end
-    Harness-->>App: terminal result and complete state
+    Harness-->>App: terminal Run result and complete state
     App->>AGUI: observe terminal item
-    App->>Files: publish terminal AG-UI segment and state object
-    App->>DB: commit Turn terminal state and selected checkpoint
+    alt suspended Run result
+        App->>Files: publish AG-UI segment, state, and deferred-request object
+        App->>DB: commit waiting Turn, checkpoint, and pending request
+    else completed, failed, or cancelled Run result
+        App->>Files: publish terminal AG-UI segment and state object
+        App->>DB: commit Turn terminal outcome and selected checkpoint
+    end
     App-->>Surface: durable Session projection
     App->>Provider: retain pause or disconnect by policy
 ```
@@ -189,7 +194,7 @@ Input acceptance, provider operation, Harness start, Harness result, live event 
 
 ## Application Lifetime
 
-One process owns one application-service instance and one selected data-root lease. Startup opens and recovers storage, accepts a complete configuration generation, validates selected state references, rebuilds required projections, and marks prior-process nonterminal work interrupted before commands are accepted.
+One process owns one application-service instance and one selected data-root lease. Startup opens and recovers storage, accepts a complete configuration generation, validates selected state and pending-deferred references, rebuilds required projections, marks prior-process active execution interrupted, and preserves validated waiting Turns before commands are accepted.
 
 Only one foreground Turn advances one Thread at a time. Independent Sessions execute concurrently under configured limits. Model, plugin, Skill, provider, and executable caches are process-local and keyed by immutable revision content; they contain no Session authority.
 
@@ -255,7 +260,7 @@ Shared commands, lifecycle, and AG-UI prevent terminal and browser products from
 02. An Agent snapshot and an Environment snapshot are independent immutable Session selections.
 03. Dynamic configuration reload publishes complete generations and never mutates active or pinned composition.
 04. SQLite owns mutable local metadata/control; compressed immutable files own snapshots, state payloads, provider-state payloads, and AG-UI events.
-05. `HarnessState` is the only Agent continuation authority; provider state, AG-UI, SQLite Items, and telemetry cannot replace it.
+05. `HarnessState` is the only Agent state authority; a waiting Turn also requires its exact pending `DeferredToolRequests`, and provider state, AG-UI, identifiers, SQLite Items, or telemetry can replace neither.
 06. Every root and child invocation receives fresh model, credential, Environment, Identity, policy, and Host bindings.
 07. TUI runs entirely in process; WebUI is a thin transport over the same application service.
 08. No surface, event subscriber, file path, database row, or local identifier grants runtime authority by possession alone.

@@ -41,6 +41,28 @@ The process settings document selects the data root, definition roots, project-r
 
 A valid reload containing a changed restart-bound value records the accepted desired value and reports `restart_required`; the running process continues to use its previously activated value. It never applies only part of an infrastructure change or silently starts a second store or listener.
 
+### Source Transaction Manifest
+
+Application-owned atomic edits use a strict source transaction document:
+
+```python
+class SourceTransactionEntry(BaseModel):
+    relative_path: str
+    operation: Literal["replace", "delete"]
+    content_digest: str | None
+
+
+class SourceTransactionManifest(BaseModel):
+    schema_version: Literal["1"]
+    transaction_id: str
+    base_catalog_digest: str
+    entries: tuple[SourceTransactionEntry, ...]
+```
+
+Entries are unique, ordered, and confined to one authorized definition root. `replace` requires a staged file with the exact digest; `delete` has no content digest. `base_catalog_digest` provides optimistic conflict detection against the accepted generation from which the editor read. The application publishes the complete manifest by atomic replacement only after every replacement verifies. The loader applies all entries to that exact base as one candidate; a stale base, missing value, extra staged value, digest mismatch, or invalid resulting graph rejects the transaction without selecting any entry.
+
+The manifest is a local authoring commit boundary, not a resource revision, Session fact, package lock, or runtime authority. Once accepted, ordinary immutable resource snapshots and the configuration generation preserve the resulting content.
+
 ## Resource Identity and Revisions
 
 Every reusable definition has one kind-prefixed stable resource ID. Normalization produces immutable revision content and a digest:

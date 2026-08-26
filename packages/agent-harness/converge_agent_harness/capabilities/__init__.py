@@ -60,6 +60,7 @@ from .skills import (
     SkillManager,
     SkillMaterializer,
     SkillsCapability,
+    SkillSelectionRunCapability,
     SkillSource,
     SkillsPolicy,
 )
@@ -142,6 +143,7 @@ __all__ = [
     "SkillCatalogItem",
     "SkillManager",
     "SkillMaterializer",
+    "SkillSelectionRunCapability",
     "SkillSource",
     "SkillsCapability",
     "SkillsPolicy",
