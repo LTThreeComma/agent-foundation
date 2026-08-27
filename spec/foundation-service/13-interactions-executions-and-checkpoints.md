@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Foundation implements the shared [`Session`, `Thread`, `Turn`, and `Item`](../interaction-model.md) interaction model and a separate durable execution model. An `Execution` is accepted schedulable work. An `ExecutionAttempt` is one fenced Worker ownership generation for that Execution. Neither a Harness Run nor a model request replaces those durable identities.
+Foundation implements the shared [`Session`, `Thread`, `Turn`, and `Item`](../interaction-model.md) interaction model and a separate durable execution model under the shared [durable operation contract](06-durable-operations-and-outbox.md). An `Execution` is accepted schedulable work. An `ExecutionAttempt` is one fenced worker ownership generation for that Execution. Neither a Harness Run nor a model request replaces those durable identities.
 
 An interactive Turn normally creates one Execution. A standalone webhook, scheduled job, or service request can create an Execution without a Session or Turn. Worker loss, approval suspension, and selected recovery create later ExecutionAttempts for the same non-terminal Execution; they do not create another Turn or pretend that one process remained alive.
 
@@ -119,6 +119,8 @@ Automatic requeue after lease loss is permitted only when durable state proves t
 
 One ExecutionAttempt starts at most one logical Harness Run. Before entry, the worker resolves exact revisions, creates fresh run Capabilities, acquires fresh Environment attachments, and builds fresh `RunBindings`. A later Attempt creates a new Harness Run, controller, clients, credentials, and bindings.
 
+As soon as the Harness supplies the Run identity and before the worker publishes its first live observation, the worker binds `harness_run_id` to the current ExecutionAttempt under the Attempt generation fence. That binding is immutable. Control resolves an authorized Execution subscription through the current Attempt to this exact live-stream identity; Redis channel discovery never substitutes for the durable binding.
+
 One Harness Run can contain several internal `ModelAttempt` values under the Harness recovery contract. Provider transport retries and ModelAttempt recovery do not create ExecutionAttempts. Conversely, an ExecutionAttempt never restores a task, socket, database session, controller, live provider resource handle, or Harness Run from another process.
 
 ## Checkpoint Selection
@@ -159,9 +161,10 @@ If the worker disappears after `effects_possible`, the Execution remains waiting
 02. Execution owns durable schedulable work; ExecutionAttempt owns one fenced Worker generation.
 03. Interactive and standalone Executions share one scheduler and recovery contract.
 04. One live Attempt generation owns an Execution, and one Attempt starts at most one Harness Run.
-05. A stale Attempt cannot commit lifecycle state, checkpoint selection, pending work, or terminal outcome.
-06. `effects_possible` is committed before any operation that may cause an external effect.
-07. Absence of a receipt, event, or telemetry signal never proves pre-dispatch safety.
-08. Only a complete selected `HarnessState` checkpoint advances Thread continuation.
-09. Terminal records are immutable; retry creates explicit successor records.
-10. Cancellation records intent and never implies rollback of external effects.
+05. The current Attempt durably binds its immutable Harness Run identity before the first live observation is published.
+06. A stale Attempt cannot commit lifecycle state, checkpoint selection, pending work, or terminal outcome.
+07. `effects_possible` is committed before any operation that may cause an external effect.
+08. Absence of a receipt, event, or telemetry signal never proves pre-dispatch safety.
+09. Only a complete selected `HarnessState` checkpoint advances Thread continuation.
+10. Terminal records are immutable; retry creates explicit successor records.
+11. Cancellation records intent and never implies rollback of external effects.
