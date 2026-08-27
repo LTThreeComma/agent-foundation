@@ -32,6 +32,11 @@ The following paths are relative to `/api/v1` and are the owning collection and 
 | Presets and Agents        | `/workspaces/{workspace_id}/presets`, `/workspaces/{workspace_id}/agents`                                                                   | Mutable authoring heads and immutable selected revisions                                  |
 | Agent revisions           | `/agents/{agent_id}/revisions`                                                                                                              | Immutable create/read collection; no in-place revision mutation                           |
 | Model integrations        | `/workspaces/{workspace_id}/model-integrations`                                                                                             | Mutable heads with immutable integration revisions                                        |
+| Connector Providers       | `/connector-providers`, `/connector-providers/{provider_key}`                                                                               | Read-only catalog of deployment-trusted Provider metadata; not an installation API        |
+| Connectors                | `/workspaces/{workspace_id}/connectors`, `/connectors/{connector_id}`                                                                       | Stable Workspace resources; create atomically includes revision `1`                       |
+| Connector revisions       | `/connectors/{connector_id}/revisions`, `/connector-revisions/{connector_revision_id}`                                                      | Immutable create/read configuration versions                                              |
+| Connections               | `/workspaces/{workspace_id}/connections`, `/connections/{connection_id}`                                                                    | Safe account and lifecycle projection; credentials and Provider state remain private      |
+| Triggers                  | `/workspaces/{workspace_id}/triggers`, `/triggers/{trigger_id}`                                                                             | Mutable schedule or Connector-event source targeting one exact Agent revision             |
 | Sessions                  | `/workspaces/{workspace_id}/sessions`                                                                                                       | Hosted interaction tree and product/presentation scope                                    |
 | Threads                   | `/sessions/{session_id}/threads`                                                                                                            | Independently advancing histories within one Session                                      |
 | Turns                     | `/workspaces/{workspace_id}/turns`, `/threads/{thread_id}/turns`, `/turns/{turn_id}`, `/turns/{turn_id}/lineage`                            | Root or continued Host-accepted advancement and exact ancestor lineage                    |
@@ -92,6 +97,8 @@ Commands are subordinate to the resource whose state they mutate:
 | Reconcile Environment operation  | `POST /environments/{environment_id}/reconcile`      | Targets the exact unresolved operation identity                              |
 
 A command returns the mutated resource or a durable receipt. `202` means accepted, not completed. Unknown outcome after possible dispatch is reconciled by repeating the same idempotency key or reading the returned resource; clients never generate a new key merely because acknowledgement was lost.
+
+OAuth redirects terminate at `GET /api/v1/connector-callbacks/{provider_key}` and Connector event delivery terminates at `POST /api/v1/connector-events/{trigger_id}`. These are bounded external ingress protocols, not management resources. The callback requires the exact expiring setup state; the event route requires Provider verification and a stable Provider event identity. Path identifiers grant no authority. Success means setup committed, or the event occurrence was accepted or already known; it never waits for Agent execution.
 
 ## Read Models
 
@@ -177,3 +184,4 @@ The API uses the shared bounded errors and stable codes enforced by the [HTTP in
 6. Replay cursors, identifiers, receipts, and signed URLs grant no authority by possession.
 7. API read models contain no process-local object, provider resource-state data, attachment, credential, or Secret value.
 8. SDKs and the CLI consume this API rather than defining parallel lifecycle or retry semantics.
+9. Connector Provider catalog routes never install or import caller-selected code, and public Turn routes never forge Trigger or Connection selections.

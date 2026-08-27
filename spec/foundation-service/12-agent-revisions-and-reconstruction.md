@@ -22,7 +22,7 @@ An `AgentRevision` is an immutable executable snapshot associated with one Agent
 
 A `ModelIntegration` is a stable Workspace or Organization resource describing a trusted model-provider integration. A `ModelIntegrationRevision` is immutable and selects exact provider type, routing configuration, supported model surface, compatibility facts, and non-secret credential references. Hosted profiles that use logical model aliases require an explicit `RunModelResolver` and fail closed rather than delegating to ambient native inference.
 
-Secret requirements never contain a Secret value. A Workspace-owned requirement stores the exact Secret resource reference. A User-owned requirement stores only the validated key resolved for the active invoking User; a Service Account cannot satisfy it. Current Secret eligibility, values, credentials, RoleBindings, and run grants are resolved freshly rather than captured in the immutable revision.
+Secret requirements never contain a Secret value. A Workspace-owned requirement stores the exact Secret resource reference. A User-owned requirement stores only the validated key resolved for the active invoking User; a Service Account cannot satisfy it. Connector declarations contain no credential or Provider-private state. Current Secret eligibility, Connection status, values, credentials, RoleBindings, and run grants are resolved freshly rather than captured in the immutable revision.
 
 A Foundation authoring API may accept Harness model-configuration or model-settings aliases, including deployment-specific private aliases, as convenience input. Materialization selects the model integration first, resolves each alias plane immediately in declaration order, applies explicit concrete overrides last, validates the resulting lifecycle configuration and provider settings under Foundation schemas, and stores only those concrete values. Alias keys are not revision fields, dependency locks, worker inputs, or reconstruction fallback instructions. Unknown aliases and aliases incompatible with the selected provider fail before revision creation. A context budget does not alter the provider model capability, and a native max-output value remains subject to the selected integration's compatibility validation.
 
@@ -51,7 +51,7 @@ Materialization validates resource scope, references, schemas, permission to bin
 
 ## Dependency Locks
 
-A dependency lock identifies every package, external content unit, adapter, or schema whose change could alter reconstruction, Capability behavior, state compatibility, security, or output semantics. It includes exact package or content identities, trusted adapter keys, relevant schema or codec compatibility, and integrity digests when content is externally materialized.
+A dependency lock identifies every package, external content unit, adapter, or schema whose change could alter reconstruction, Capability behavior, state compatibility, security, or output semantics. It includes exact package or content identities, trusted adapter keys, selected Connector Provider artifacts, relevant schema or codec compatibility, and integrity digests when content is externally materialized.
 
 Package installation or entry-point availability grants no trust. The deployment selects allowed adapter and plugin keys, verifies the exact lock, and imports only those installed targets. A durable row never contains an arbitrary module, class, file path, shell command, or remote code URL for execution.
 
@@ -106,3 +106,4 @@ Editing an Agent or publishing another revision never mutates an existing Turn, 
 5. Every TurnAttempt reconstructs fresh authority and bindings without mutating the selected revision.
 6. Replacement workers preserve stable Thread identity and change TurnAttempt generation and transient Harness Run correlation.
 7. A retained checkpoint is used only under explicitly compatible Agent and state contracts.
+8. Connector tool contracts and Provider artifacts are frozen by the Agent revision; Connection authority and credentials remain fresh per TurnAttempt.

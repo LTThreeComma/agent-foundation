@@ -4,7 +4,7 @@
 
 Foundation Service owns a durable managed Secret resource for opaque values supplied by an authorized caller. The public management API accepts a Secret value on creation or replacement and never returns that value after acceptance, including in the mutation response. It exposes only identity, ownership, key, version, and timestamps.
 
-Secret management is distinct from login credentials, credential selection, resolution, and injection. An Agent revision may bind an exact Workspace-owned Secret reference or declare a User-owned Secret key that is resolved for the invoking User, but it contains no Secret value. This contract owns the referenced Secret's scope and use eligibility; the Agent authoring contract owns how the non-secret requirement enters a revision. The management API exposes no public plaintext-read or comparison operation.
+Secret management is distinct from login credentials, credential selection, resolution, and injection. An Agent revision may bind an exact Workspace-owned Secret reference or declare a User-owned Secret key that is resolved for the invoking User, but it contains no Secret value. [Connections and Triggers](23-connectors-connections-and-triggers.md) can also own lifecycle-managed credential material. This contract owns each referenced Secret's scope and use eligibility; the Agent authoring and Connector contracts own how non-secret requirements and internal credentials enter their resources. The management API exposes no public plaintext-read or comparison operation.
 
 Managed Secrets are recoverable encrypted values rather than password verifiers. Foundation therefore encrypts them directly with AES-256-GCM under one operator-configured master key instead of applying one-way hashing. The service is not a zero-knowledge system: the write path observes plaintext transiently, and any process holding the configured master key is cryptographically capable of recovering stored values. The public management API exposes no plaintext-read operation.
 
@@ -17,15 +17,17 @@ Every Secret belongs to one immutable Organization and Workspace boundary and ha
 ```python
 # Conceptual domain schema; not a wire model.
 class SecretOwnerRef:
-    owner_type: Literal["workspace", "user"]
+    owner_type: Literal["workspace", "user", "connection", "trigger"]
     owner_id: str
 ```
 
-`SecretOwnerType` is a string enum owned by Foundation IAM and serialized as lowercase `snake_case`. OSS supports `workspace` and `user`. Adding another enum value is additive; removing, renaming, or repurposing one is incompatible while durable data refers to it.
+`SecretOwnerType` is a string enum owned by Foundation IAM and serialized as lowercase `snake_case`. OSS supports `workspace`, `user`, `connection`, and `trigger`. Adding another enum value is additive; removing, renaming, or repurposing one is incompatible while durable data refers to it.
 
-`owner_id` is interpreted according to `owner_type`. A Workspace-owned Secret uses the stored `workspace_id` as `owner_id`. A User-owned Secret uses the User ID and remains bounded to the stored Organization and Workspace. The pair determines management ownership and key uniqueness, while the explicit tenant fields determine isolation and routing. Foundation validates the owner, Organization, Workspace, current RoleBindings, and lifecycle before accepting a mutation. An owner reference grants no authority, and the service infers no tenant or routing fact from the identifier string.
+`owner_id` is interpreted according to `owner_type`. A Workspace-owned Secret uses the stored `workspace_id` as `owner_id`. A User-owned Secret uses the User ID and remains bounded to the stored Organization and Workspace. A Connection- or Trigger-owned Secret uses that exact resource ID and the resource's stored tenant boundary. The pair determines ownership and key uniqueness, while the explicit tenant fields determine isolation and routing. Foundation validates the owner, Organization, Workspace, current RoleBindings, and lifecycle before accepting a mutation. An owner reference grants no authority, and the service infers no tenant or routing fact from the identifier string.
 
 A Workspace Builder or Admin manages Workspace-owned Secrets. Only the owning User manages a User-owned Secret; another Builder or Admin cannot list, inspect, replace, transfer, or delete it. Workspace deletion still performs tenant-owned cleanup. A User-owned Secret is eligible for run-time use only when the active invoking Principal is that User, the User currently has access to the Workspace, and the selected Agent revision declares the matching User Secret key. A Service Account cannot use a User-owned Secret.
+
+Connection- and Trigger-owned Secrets are internal lifecycle data. Generic Secret routes never create, enumerate, replace, or delete them. The owning Connector operation creates or rotates their values and returns only the safe Connection or Trigger projection. Runtime resolution permits a Connection-owned Secret only for that exact currently authorized Connection and a Trigger-owned Secret only for its inbound source operation. Trigger credentials never become Agent input or satisfy a tool Connection.
 
 Secret keys, owner references, timestamps, and versions are protected metadata even though they are not plaintext Secret values. Management operations disclose them only after current authorization. Management authority and runtime resolution authority remain separate.
 
@@ -145,7 +147,7 @@ The row enforces these consistency rules:
 - a tombstone has `deleted_at IS NOT NULL` and null `ciphertext`, `nonce`, and `encryption_key_id`;
 - one partial unique index covers `(organization_id, workspace_id, owner_type, owner_id, key)` only for active rows;
 - owner-scoped listing uses an index beginning with `(organization_id, workspace_id, owner_type, owner_id, key, id)`;
-- a Workspace owner has `owner_id = workspace_id`, while a User owner must be a current platform User eligible for the stored Workspace;
+- a Workspace owner has `owner_id = workspace_id`, a User owner must be a current platform User eligible for the stored Workspace, and a Connection or Trigger owner must be that active resource in the same stored tenant boundary;
 - no update can change `id`, `organization_id`, `workspace_id`, `owner_type`, `owner_id`, `key`, or `created_at`.
 
 Bounded text columns preserve the validated public limits. `version` uses a non-overflowing positive integer domain, timestamps preserve UTC instants, and `ciphertext` and `nonce` use binary columns rather than text or JSON encoding. `encryption_key_id` is bounded and non-blank; it identifies key material but never contains that material.
@@ -213,7 +215,7 @@ sequenceDiagram
 
 Direct deletion locks the active row, rechecks authorization and `expected_version`, nulls `ciphertext`, `nonce`, and `encryption_key_id`, sets `deleted_at`, and commits the tombstone and security audit event atomically. It performs no cryptographic operation.
 
-Owner deletion first makes the owner ineligible for Secret creation and replacement. It then tombstones owned Secrets in bounded, restartable batches. Durable batch progress makes interruption and replay safe. Owner deletion is complete only after an authoritative query finds no active owned Secret, and reconciliation repeats cleanup after interruption. Secret resolution, when supplied by a separate runtime contract, denies as soon as the owner is deleting even if physical cleanup has not completed.
+Owner deletion first makes the owner ineligible for Secret creation and replacement. It then tombstones owned Secrets in bounded, restartable batches. Durable batch progress makes interruption and replay safe. Owner deletion is complete only after an authoritative query finds no active owned Secret, and reconciliation repeats cleanup after interruption. Connection revocation and Trigger source cleanup apply their owning lifecycle before tombstoning associated Secrets. Secret resolution denies as soon as any owner is disabled, revoked, deleting, or otherwise ineligible even if physical cleanup has not completed.
 
 ## Failure, Cancellation, and Retry Semantics
 
@@ -243,7 +245,7 @@ The public OpenAPI document marks `value` as `writeOnly` but includes no example
 
 ## Compatibility
 
-Adding a `SecretOwnerType` enum value is additive. Removing, renaming, repurposing, or weakening the tenant, validation, or authorization semantics of a value is incompatible while any durable row, tombstone, or cursor refers to it.
+Adding a `SecretOwnerType` enum value is additive. Removing, renaming, repurposing, or weakening the tenant, validation, authorization, or public-visibility semantics of a value is incompatible while any durable row, tombstone, or cursor refers to it.
 
 The Secret domain `version` is independent from HTTP `v1`, `encryption_key_id`, the `aes_256_gcm_v1` storage profile, and database schema revision. Public clients treat additive response fields and new owner types according to the shared API compatibility rules. No compatible change can add plaintext to an existing response, error, event, SDK debug representation, or management permission.
 
@@ -251,7 +253,7 @@ The `aes_256_gcm_v1` ciphertext layout, nonce size, authentication-tag size, add
 
 ## Trade-offs
 
-Polymorphic `(owner_type, owner_id)` ownership supports Workspace-shared and User-personal values without parallel Secret tables. Explicit Organization and Workspace columns preserve tenant filtering and relational tenant consistency, while Foundation domain logic and each owner lifecycle enforce polymorphic owner existence, cleanup, and reconciliation.
+Polymorphic `(owner_type, owner_id)` ownership supports Workspace-shared, User-personal, Connection, and Trigger values without parallel Secret tables. Explicit Organization and Workspace columns preserve tenant filtering and relational tenant consistency, while Foundation domain logic and each owner lifecycle enforce polymorphic owner existence, visibility, cleanup, and reconciliation.
 
 Write-only management sharply limits accidental human and API disclosure but cannot prove that a process or operator holding the master key never accesses the value. Direct AES-256-GCM encryption avoids an external key-service dependency and keeps the row and write path small. In exchange, compromise of both the database and master key exposes every active Secret, a compromised process holding the key can decrypt stored values, and master-key replacement requires decrypting and re-encrypting all active rows rather than rewrapping small per-Secret keys.
 

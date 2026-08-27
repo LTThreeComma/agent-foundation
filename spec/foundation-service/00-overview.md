@@ -45,8 +45,8 @@ flowchart LR
     External[Models, tools, and external clients]
 
     Client --> API --> Auth
-    Auth --> Authoring & Interaction & Lifecycle & Feedback
-    Authoring & Interaction & Lifecycle & Feedback --> Database
+    Auth --> Authoring & Interaction & Lifecycle & ConnectorControl & Feedback
+    Authoring & Interaction & Lifecycle & ConnectorControl & Feedback --> Database
     Scheduler --> Database
     Scheduler --> Coordination --> Worker
     Worker --> Database
