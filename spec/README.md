@@ -30,8 +30,8 @@ flowchart TB
     subgraph Service[foundation-service]
         Control[Control plane]
         Definitions[Host-owned definition revisions]
-        Lifecycle[Durable Executions and ExecutionAttempts]
-        Worker[Execution worker]
+        Lifecycle[Durable Turns and TurnAttempts]
+        Worker[Worker]
         Reconstruct[Trusted reconstruction adapters]
     end
 
@@ -116,7 +116,7 @@ Dependency direction is one-way: Hosts embed the Harness and can use the shared 
 | `agent-envd`                 | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, disk-backed command output, daemon generation, and native command containment                                              | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy                         |
 | Foundation SDKs              | Language-typed access to the public Foundation Service `/api` contract                                                                                                                                      | Service internals, product policy, or durable lifecycle authority                                                        |
 | `agent-foundation`           | Cross-platform command-line interaction with public Foundation Service operations through the Rust SDK                                                                                                      | A second HTTP client, service process management, persistence, queues, migrations, or infrastructure control             |
-| `foundation-service`         | Managed Secrets, Host-owned definition/Presets/revisions, reconstruction locks, Executions/ExecutionAttempts, client tools, APIs, events, usage records, and optional web projection                        | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning                     |
+| `foundation-service`         | Managed Secrets, Host-owned definition/Presets/revisions, reconstruction locks, durable Turns/TurnAttempts, client tools, APIs, events, usage records, and optional web projection                          | Pydantic Agent loop, Python object serialization, client-side effects, provider-native state meaning                     |
 | Product                      | Caller authentication, business policy, user experience, and final delivery                                                                                                                                 | Harness internals and provider implementation                                                                            |
 
 ## Harness Foundation
@@ -167,7 +167,7 @@ The Harness adapts EIP through `a13n-envd-client`; other trusted consumers can u
 
 Agent UI exposes `a13n.local-envd` as Local Sandbox. Its release pins one exact agent-envd version and target hashes, lazily downloads only the selected Host binary into an Agent UI-managed runtime cache, and never searches ambient `PATH`; an advanced absolute executable override must pass version, isolation, and EIP compatibility checks. Direct Local, Docker, and E2B do not trigger this Host download.
 
-Provider-defined portable backend data can enter only the explicit `HarnessState.environment_state` field after fresh bindings are selected. Provider resource-incarnation evidence and optional launch/reattachment payload remain in a separate encrypted Host envelope. Live clients, sockets, credentials, process handles, readiness, controllers, and provider authority do not become Harness state. Optional `DynamicEnvironmentCapability` composes File/Shell tools with dynamic model context but owns neither provider lifecycle nor state.
+Provider-defined portable backend data can enter only the explicit `HarnessState.environment_state` field after fresh bindings are selected. Provider resource-incarnation evidence and optional launch or reattachment data remain in Host continuation state. Live clients, sockets, credentials, process handles, readiness, controllers, and provider authority do not become Harness state. Optional `DynamicEnvironmentCapability` composes File/Shell tools with dynamic model context but owns neither provider lifecycle nor state.
 
 ## Foundation Client Surfaces
 
@@ -184,9 +184,9 @@ Foundation Service adds durability without changing Harness execution semantics:
 ```mermaid
 flowchart LR
     Ingress[API or webhook] --> Control[Control plane]
-    Control --> Durable[Definitions and Executions]
+    Control --> Durable[Definitions and Turns]
     Durable --> Queue[Scheduling]
-    Queue --> Worker[Execution worker]
+    Queue --> Worker[Worker]
     Worker --> Reconstruct[Trusted adapters]
     Reconstruct --> Harness[agent-harness]
     Harness --> Candidate[Events, result, state, usage]
@@ -195,9 +195,30 @@ flowchart LR
 
 Foundation definitions are Host-owned serializable documents, not Harness `AgentDefinition` wire values. A worker verifies exact dependency/artifact locks, reconstructs native Pydantic/Harness objects, resolves operator-approved Environment providers, materializes current desired topology from encrypted launch-envelope entries, durably advances an unrepresented replacement resource's binding/topology incarnation revisions, and supplies fresh `RunBindings` to the same public API as an embedded application. The worker retains the paired Environment controller only for that active logical run.
 
-One durable Foundation `ExecutionAttempt` starts one logical Harness Run. Internal Harness `ModelAttempt` values are not durable `ExecutionAttempt` generations. Authorized desired Environment topology can advance during that Run and is reconciled through the retained controller with separate effective publication. Worker or lease loss creates a new fenced `ExecutionAttempt`, fresh provider bindings, and a fresh Harness Run from authoritative selected Host and Harness state.
+Every Foundation Agent invocation selects or creates a Session and Thread and
+accepts one durable Turn. One `TurnAttempt` starts at most one logical Harness
+Run; internal Harness `ModelAttempt` values are not durable worker generations.
+Authorized desired Environment topology can advance during that Run and is
+reconciled through the retained controller with separate effective publication.
+Worker or lease loss terminalizes the attempt as `lost`; after Foundation
+classifies unmatched Agent tool dispatches as `unknown_outcome`, applies each
+non-Agent domain's owning recovery contract, and verifies the Turn-owned budget,
+it creates a new fenced `TurnAttempt`, fresh provider bindings, and a fresh
+Harness Run from the same Turn's latest conditionally committed state. Every Turn owns one deterministic state key; Foundation
+replaces that key at complete checkpoints and exposes no separate base, result,
+or checkpoint-history object.
 
-Client-side tools use native Pydantic deferred values. Foundation durably commits pending calls and approvals, authenticates external feedback, and starts a later run with fresh bindings. Asynchronous children use independent Executions and result-delivery ledgers rather than Pydantic deferred spawn calls.
+Client-side tools use native Pydantic deferred values. Foundation seals the waiting Turn with its pending call or approval, authenticates external feedback, and accepts a new Turn whose `parent_turn_id` names that waiting Turn. The new Turn starts a later run with fresh bindings. Asynchronous children use independent Threads and Turns rather than Pydantic deferred spawn calls.
+
+Foundation's [Turn persistence](foundation-service/14-turn-persistence.md) owns
+durable Agent-work identity, scheduling, the recovery budget, the interactive
+recovery boundary, and complete Turn-state object schema. [Turn Attempt
+persistence](foundation-service/15-turn-attempt-persistence.md) owns the
+`turn_attempts` table, worker leases, and fences. [Lifecycle and stream
+persistence](foundation-service/17-lifecycle-and-stream-persistence.md) owns
+one lifecycle-event table and Redis Agent-message transport with object-backed
+retained replay; pending calls, Items, stream entries, and generic provider
+receipts do not receive separate relational tables.
 
 The hosted service boundary is defined in [Foundation Service](foundation-service/README.md).
 
@@ -225,11 +246,11 @@ The platform distinguishes:
 - Host-owned `Session`, `Thread`, `Turn`, and `Item` identities;
 - Host-owned immutable definition revision and dependency locks;
 - process-local Harness Run and `ModelAttempt`;
-- Host durable `Execution` and `ExecutionAttempt`;
+- Foundation durable Turn and `TurnAttempt`;
 - Environment identity and generation;
 - credential binding and invocation grant.
 
-A Host definition revision contains only serializable Host data and exact locks. It contains no plugin/Capability class, native Model, Toolset, output Python type, callable, client, plaintext credential, or process-local object. An execution reconstructs those values without mutating the selected revision.
+A Host definition revision contains only serializable Host data and exact locks. It contains no plugin/Capability class, native Model, Toolset, output Python type, callable, client, plaintext credential, or process-local object. A worker reconstructs those values without mutating the selected revision.
 
 ## Service API Boundaries
 
@@ -274,7 +295,7 @@ flowchart LR
     Run -. projection .-> Telemetry[Telemetry]
 ```
 
-Turn acceptance, ModelAttempt completion, Harness terminal delivery, Host Turn or Execution commit, usage recording, telemetry export, external delivery, billing, and payment are independent facts.
+Turn acceptance, ModelAttempt completion, Harness terminal delivery, Host Turn commit, usage recording, telemetry export, external delivery, billing, and payment are independent facts.
 
 ## Design Principles
 
@@ -284,38 +305,41 @@ Turn acceptance, ModelAttempt completion, Harness terminal delivery, Host Turn o
 04. Keep durable Host schemas outside the Harness library.
 05. Bind Identity and current authority freshly at the Host boundary.
 06. Keep process-local continuation separate from durable lifecycle state.
-07. Preserve unknown side effects and require provider evidence for safe replay.
+07. Preserve unknown side effects, never automatically replay Agent tool calls, and retain owning reconciliation contracts for non-Agent operations.
 08. Use optional typed packages and protocols instead of a universal extension framework.
 09. Use the same Harness API in embedded and hosted modes.
 10. Add enterprise behavior through the same boundaries rather than forks.
 
 ## Specification Set
 
-| Area                                  | Document                                                                                                                                             |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Repository content and workflow model | [repository-model.md](repository-model.md)                                                                                                           |
-| Platform interaction model            | [interaction-model.md](interaction-model.md)                                                                                                         |
-| Platform data conventions             | [data-conventions.md](data-conventions.md)                                                                                                           |
-| Platform API conventions              | [api-conventions.md](api-conventions.md)                                                                                                             |
-| Harness catalog                       | [agent-harness/README.md](agent-harness/README.md)                                                                                                   |
-| Environment Provider catalog          | [agent-environment-provider/README.md](agent-environment-provider/README.md)                                                                         |
-| Harness architecture                  | [agent-harness/00-overview.md](agent-harness/00-overview.md)                                                                                         |
-| Harness definition/build              | [agent-harness/03-agent-definition-and-build.md](agent-harness/03-agent-definition-and-build.md)                                                     |
-| Harness plugins                       | [agent-harness/05-plugin-system.md](agent-harness/05-plugin-system.md)                                                                               |
-| Harness execution and recovery        | [agent-harness/06-execution-context-and-lifecycle.md](agent-harness/06-execution-context-and-lifecycle.md)                                           |
-| Harness state                         | [agent-harness/10-snapshot-and-resume.md](agent-harness/10-snapshot-and-resume.md)                                                                   |
-| Harness public API                    | [agent-harness/14-public-api-and-packaging.md](agent-harness/14-public-api-and-packaging.md)                                                         |
-| Harness model/output boundary         | [agent-harness/16-input-model-and-output.md](agent-harness/16-input-model-and-output.md)                                                             |
-| Agent Stream Protocol catalog         | [agent-stream-protocol/README.md](agent-stream-protocol/README.md)                                                                                   |
-| AG-UI observation contract            | [agent-stream-protocol/00-overview.md](agent-stream-protocol/00-overview.md)                                                                         |
-| Agent UI catalog                      | [agent-ui/README.md](agent-ui/README.md)                                                                                                             |
-| Agent UI architecture and sessions    | [agent-ui/00-overview.md](agent-ui/00-overview.md), [agent-ui/04-sessions-environments-and-state.md](agent-ui/04-sessions-environments-and-state.md) |
-| agent-envd catalog                    | [agent-envd/README.md](agent-envd/README.md)                                                                                                         |
-| EIP architecture and protocol         | [agent-envd/00-overview.md](agent-envd/00-overview.md), [agent-envd/02-eip-protocol.md](agent-envd/02-eip-protocol.md)                               |
-| Foundation Service boundary           | [foundation-service/README.md](foundation-service/README.md)                                                                                         |
-| Foundation runtime and deployment     | [foundation-service/01-runtime-configuration-and-deployment.md](foundation-service/01-runtime-configuration-and-deployment.md)                       |
-| Foundation distribution composition   | [foundation-service/02-distribution-composition-and-extensions.md](foundation-service/02-distribution-composition-and-extensions.md)                 |
-| Foundation Secret management          | [foundation-service/11-secret-management.md](foundation-service/11-secret-management.md)                                                             |
-| Foundation interactions and execution | [foundation-service/13-interactions-executions-and-checkpoints.md](foundation-service/13-interactions-executions-and-checkpoints.md)                 |
-| Foundation scheduling and recovery    | [foundation-service/14-scheduling-workers-and-recovery.md](foundation-service/14-scheduling-workers-and-recovery.md)                                 |
-| Foundation public API                 | [foundation-service/18-management-api.md](foundation-service/18-management-api.md)                                                                   |
+| Area                                   | Document                                                                                                                                             |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository content and workflow model  | [repository-model.md](repository-model.md)                                                                                                           |
+| Platform interaction model             | [interaction-model.md](interaction-model.md)                                                                                                         |
+| Platform data conventions              | [data-conventions.md](data-conventions.md)                                                                                                           |
+| Platform API conventions               | [api-conventions.md](api-conventions.md)                                                                                                             |
+| Harness catalog                        | [agent-harness/README.md](agent-harness/README.md)                                                                                                   |
+| Environment Provider catalog           | [agent-environment-provider/README.md](agent-environment-provider/README.md)                                                                         |
+| Harness architecture                   | [agent-harness/00-overview.md](agent-harness/00-overview.md)                                                                                         |
+| Harness definition/build               | [agent-harness/03-agent-definition-and-build.md](agent-harness/03-agent-definition-and-build.md)                                                     |
+| Harness plugins                        | [agent-harness/05-plugin-system.md](agent-harness/05-plugin-system.md)                                                                               |
+| Harness execution and recovery         | [agent-harness/06-execution-context-and-lifecycle.md](agent-harness/06-execution-context-and-lifecycle.md)                                           |
+| Harness state                          | [agent-harness/10-snapshot-and-resume.md](agent-harness/10-snapshot-and-resume.md)                                                                   |
+| Harness public API                     | [agent-harness/14-public-api-and-packaging.md](agent-harness/14-public-api-and-packaging.md)                                                         |
+| Harness model/output boundary          | [agent-harness/16-input-model-and-output.md](agent-harness/16-input-model-and-output.md)                                                             |
+| Agent Stream Protocol catalog          | [agent-stream-protocol/README.md](agent-stream-protocol/README.md)                                                                                   |
+| AG-UI observation contract             | [agent-stream-protocol/00-overview.md](agent-stream-protocol/00-overview.md)                                                                         |
+| Agent UI catalog                       | [agent-ui/README.md](agent-ui/README.md)                                                                                                             |
+| Agent UI architecture and sessions     | [agent-ui/00-overview.md](agent-ui/00-overview.md), [agent-ui/04-sessions-environments-and-state.md](agent-ui/04-sessions-environments-and-state.md) |
+| agent-envd catalog                     | [agent-envd/README.md](agent-envd/README.md)                                                                                                         |
+| EIP architecture and protocol          | [agent-envd/00-overview.md](agent-envd/00-overview.md), [agent-envd/02-eip-protocol.md](agent-envd/02-eip-protocol.md)                               |
+| Foundation Service boundary            | [foundation-service/README.md](foundation-service/README.md)                                                                                         |
+| Foundation runtime and deployment      | [foundation-service/01-runtime-configuration-and-deployment.md](foundation-service/01-runtime-configuration-and-deployment.md)                       |
+| Foundation distribution composition    | [foundation-service/02-distribution-composition-and-extensions.md](foundation-service/02-distribution-composition-and-extensions.md)                 |
+| Foundation Secret management           | [foundation-service/11-secret-management.md](foundation-service/11-secret-management.md)                                                             |
+| Foundation interaction/runtime mapping | [foundation-service/13-interactions-turns-and-attempts.md](foundation-service/13-interactions-turns-and-attempts.md)                                 |
+| Foundation Turn persistence            | [foundation-service/14-turn-persistence.md](foundation-service/14-turn-persistence.md)                                                               |
+| Foundation TurnAttempt persistence     | [foundation-service/15-turn-attempt-persistence.md](foundation-service/15-turn-attempt-persistence.md)                                               |
+| Foundation scheduling and recovery     | [foundation-service/16-scheduling-workers-and-recovery.md](foundation-service/16-scheduling-workers-and-recovery.md)                                 |
+| Foundation lifecycle and Turn streams  | [foundation-service/17-lifecycle-and-stream-persistence.md](foundation-service/17-lifecycle-and-stream-persistence.md)                               |
+| Foundation public API                  | [foundation-service/21-management-api.md](foundation-service/21-management-api.md)                                                                   |
