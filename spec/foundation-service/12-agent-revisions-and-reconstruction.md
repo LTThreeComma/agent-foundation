@@ -32,6 +32,7 @@ Resolving an Agent ID and version returns this exact reference or fails; it neve
 - non-secret Secret requirements that bind an exact Workspace-owned Secret reference or declare an invoking-User Secret key under [Secret Management](11-secret-management.md);
 - direct trusted adapter keys and bounded adapter configuration;
 - optional Harness plugin configuration under the Harness-owned document contract;
+- exact managed Harness plugin package revision IDs and digests selected from the [managed artifact registry](26-harness-plugin-artifacts-and-runtime-loading.md) for every enabled managed plugin key; and
 - exact dependency, package, content-digest, and schema compatibility locks.
 
 `model_id` references one mutable Workspace `ModelConfig`. It is an exact
@@ -103,13 +104,15 @@ An Agent dependency lock identifies every package, external content unit,
 adapter, or schema selected by the Agent revision whose change could alter
 reconstruction, Capability behavior, state compatibility, security, or output
 semantics. It includes exact package or content identities, trusted adapter
-keys, selected Connector Provider artifacts, relevant schema or codec
-compatibility, and integrity digests when content is externally materialized.
+keys, selected Connector Provider artifacts, managed Harness plugin package
+revision IDs and wheel digests, relevant schema or codec compatibility, and
+integrity digests when content is externally materialized.
+
 The model-provider adapter and schema lock are selected with current
 ModelConfig and captured in the Turn-owned `ModelExecutionSnapshot`, not in the
 Agent revision.
 
-Package installation or entry-point availability grants no trust. The deployment selects allowed adapter and plugin keys, verifies the exact lock, and imports only those installed targets. A durable row never contains an arbitrary module, class, file path, shell command, or remote code URL for execution.
+Package installation or entry-point availability grants no trust. The deployment selects allowed adapter and plugin keys, verifies the exact lock, and imports only those installed targets. When Foundation manages a Harness plugin artifact, materialization resolves an explicit package revision for its key and copies the exact immutable revision ID and digest into the AgentRevision. A durable row never contains an arbitrary module, class, file path, shell command, or remote code URL for execution.
 
 An adapter replacement can reconstruct a retained revision only when it explicitly declares compatibility with that revision and its locks. Name similarity, newer package versions, or a current default does not satisfy a missing lock.
 
@@ -123,7 +126,7 @@ sequenceDiagram
     participant Harness
 
     Worker->>Store: read Turn, exact AgentRevision, model snapshot, and locks
-    Worker->>Worker: verify scope, locks, compatibility, and TurnAttempt generation
+    Worker->>Worker: verify scope, locks, loaded-plugin compatibility, and TurnAttempt generation
     Worker->>Adapter: reconstruct native Agent inputs
     Adapter-->>Worker: AgentSpec with concrete settings, Model, Capabilities, plugins, and policies
     Worker->>Worker: create fresh Identity, policy, credential, model, and provider attachments
@@ -142,9 +145,12 @@ fresh bindings.
 The worker validates the complete definition before starting model or tool
 work. It reconstructs Harness `ModelConfiguration` and native `ModelSettings`
 from the revision's concrete behavior settings and the Turn's model snapshot,
-without alias or current-configuration lookup. It does not partially execute a
-revision whose output schema, Capability state codec, plugin contract, model
-adapter, Environment provider, or dependency lock is incompatible.
+without alias or current-configuration lookup. Before claim, it ensures that
+every managed plugin lock is either absent from the interpreter and loadable on
+demand or exactly matches the process-local loaded-plugin registry. It does not
+partially execute a revision whose output schema, Capability state codec,
+plugin contract, model adapter, Environment provider, or dependency lock is
+incompatible.
 
 ## Continuation Compatibility
 
@@ -154,15 +160,16 @@ Editing an Agent or publishing another revision never mutates an existing Turn, 
 
 ## Failure Semantics
 
-| Failure                                 | Outcome                                                                     |
-| --------------------------------------- | --------------------------------------------------------------------------- |
-| Missing revision or lock                | Turn fails before Harness construction                                      |
-| Content digest or package lock mismatch | Turn fails closed and records bounded incompatibility evidence              |
-| Unknown adapter or plugin key           | Revision is not reconstructed; no ambient import fallback occurs            |
-| Required `RunModelResolver` unavailable | Turn fails before native model inference                                    |
-| Credential or policy unavailable        | Fresh binding fails; the immutable revision is not rewritten                |
-| Checkpoint incompatible with revision   | Continuation fails before Harness entry; display history is not substituted |
-| Worker lost during reconstruction       | Lease recovery uses a new generation; no process-local object is restored   |
+| Failure                                           | Outcome                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Missing revision or lock                          | Turn fails before Harness construction                                          |
+| Content digest or package lock mismatch           | Turn fails closed and records bounded incompatibility evidence                  |
+| Worker already pins a conflicting plugin revision | That Worker declines claim; exact work remains eligible for compatible capacity |
+| Unknown adapter or plugin key                     | Revision is not reconstructed; no ambient import fallback occurs                |
+| Required `RunModelResolver` unavailable           | Turn fails before native model inference                                        |
+| Credential or policy unavailable                  | Fresh binding fails; the immutable revision is not rewritten                    |
+| Checkpoint incompatible with revision             | Continuation fails before Harness entry; display history is not substituted     |
+| Worker lost during reconstruction                 | Lease recovery uses a new generation; no process-local object is restored       |
 
 ## Invariants
 
@@ -177,3 +184,6 @@ Editing an Agent or publishing another revision never mutates an existing Turn, 
 7. A retained checkpoint is used only under explicitly compatible Agent and state contracts.
 8. Connector tool contracts and Provider artifacts are frozen by the Agent
    revision; model and Connector credentials remain fresh per TurnAttempt.
+9. Managed Harness plugin selection freezes the exact package revision and
+   digest; a Worker loads only that revision and never replaces a conflicting
+   imported module in place.

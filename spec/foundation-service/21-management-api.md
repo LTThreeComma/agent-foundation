@@ -13,7 +13,7 @@ Environment resources, events, and raw usage. The API follows
 this document owns Foundation resource routes, command boundaries, read models,
 and cross-resource mutation behavior.
 
-The API is the public boundary consumed by Foundation SDKs and the remote `agent-foundation` CLI. SDKs map this contract and do not invent another lifecycle, retry policy, or HTTP client semantics. Harness Python APIs, Agent Stream Protocol, EIP, provider APIs, and external webhook payloads retain their own contracts.
+The API is the public boundary consumed by Foundation SDKs and the remote `agent-foundation` CLI. SDKs map this contract and do not invent another lifecycle, retry policy, or HTTP client semantics. Harness Python APIs, Agent Stream Protocol, EIP, provider APIs, and external webhook payloads retain their own contracts. The deployment-authenticated [Harness plugin artifact operator API](26-harness-plugin-artifacts-and-runtime-loading.md#internal-operator-api) is deliberately outside `/api/v1` and is not added to public clients.
 
 ## Scope and Authorization
 
@@ -71,7 +71,7 @@ POST /api/v1/threads/{thread_id}/turns
 Idempotency-Key: opaque-caller-key
 ```
 
-The request carries `expected_thread_version`, bounded input, selected Agent authoring reference when permitted, and optional policy-supported metadata. Foundation reads the independent Thread row, requires no active Turn, selects its exact completed `head_turn_id` as the parent, and never infers a parent from Turn timestamps. Acceptance atomically updates the Thread's active and latest Turn references, increments its version, and creates the Turn, first user Item, lifecycle events, idempotency evidence, and outbox intents.
+The request carries `expected_thread_version`, bounded input, selected Agent authoring reference when permitted, and optional policy-supported metadata. Foundation reads the independent Thread row, requires the current Turn not to be `accepted` or `running`, selects its exact completed `head_turn_id` as the parent, and never infers a parent from Turn timestamps. Acceptance atomically sets `current_turn_id` to the new accepted Turn, preserves the head, increments Thread version, and creates the Turn, first user Item, lifecycle events, idempotency evidence, and outbox intents.
 
 The `202` response is an acceptance receipt containing the Session, Thread, and Turn references plus the resource versions committed by that acceptance. It does not wait for a Worker or Harness result. Later Turn lifecycle transitions can advance Thread version. Repeating the same key and canonical request returns the original receipt; different content conflicts.
 
@@ -107,8 +107,7 @@ class ThreadResource:
     origin_thread_id: str | None
     origin_turn_id: str | None
     head_turn_id: str | None
-    active_turn_id: str | None
-    latest_turn_id: str
+    current_turn_id: str
     created_at: datetime
     updated_at: datetime
 ```
@@ -117,7 +116,7 @@ The response is an authorized projection of the
 [durable Thread row](24-thread-persistence.md), not a grouping synthesized from
 Turn activity. The Session collection defaults to deterministic
 `updated_at desc, thread_id desc` order and supports explicit creation order.
-An optional bounded latest-Turn summary comes from `latest_turn_id`; it never
+An optional bounded current-Turn summary comes from `current_turn_id`; it never
 changes Thread version or head meaning. Foundation exposes no general Thread
 PATCH or independent hard-delete route. Origin references are present only when
 the caller can currently read their source; otherwise both source identifiers
@@ -150,24 +149,24 @@ operation and is never implied by this route.
 
 Commands are subordinate to the resource whose state they mutate:
 
-| Command                          | Route                                                    | Required mutation contract                                                                                |
-| -------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Accept invitation                | `POST /invitations/{invitation_id}/accept`               | Exact single-use token; atomically creates User credentials and RoleBindings                              |
-| Resend invitation                | `POST /invitations/{invitation_id}/resend`               | Current authorization; rotates the token under the same Invitation ID                                     |
-| Revoke invitation                | `POST /invitations/{invitation_id}/revoke`               | Current authorization; terminal for the current invitation                                                |
-| Rotate API key                   | `POST /api-keys/{api_key_id}/rotate`                     | Authorized owner or Service Account Admin; same key ID and immediate cutover                              |
-| Revoke API key                   | `POST /api-keys/{api_key_id}/revoke`                     | Idempotently sets permanent revocation without deleting metadata                                          |
-| Test candidate ModelConfig       | `POST /workspaces/{workspace_id}/models/test`            | Synchronous candidate test using Secret references; creates no health resource                            |
-| Copy ModelConfig                 | `POST /workspaces/{workspace_id}/models/{model_id}/copy` | Idempotency key; creates a new ModelConfig and copies no Secret value                                     |
-| Cancel active Turn               | `POST /turns/{turn_id}/cancel`                           | Idempotency key and current authorization; seals the active Turn                                          |
-| Retry failed or cancelled Turn   | `POST /turns/{turn_id}/retry`                            | Expected Thread version and idempotency key; advances the same Thread without reopening the sealed source |
-| Fork completed Turn              | `POST /turns/{turn_id}/fork`                             | Idempotency key; creates an independent Thread and first Turn from exact frozen source state              |
-| Approve pending action           | `POST /pending-actions/{pending_action_id}/approve`      | Expected pending and Thread versions plus idempotency key                                                 |
-| Reject pending action            | `POST /pending-actions/{pending_action_id}/reject`       | Expected pending and Thread versions plus idempotency key                                                 |
-| Submit client-tool result        | `POST /pending-actions/{pending_action_id}/complete`     | Expected Thread version, exact native result envelope, and idempotency key                                |
-| Supply structured user input     | `POST /pending-actions/{pending_action_id}/respond`      | Expected Thread version, schema-valid bounded response, and idempotency key                               |
-| Resume/pause/destroy Environment | `POST /environments/{environment_id}/{action}`           | Expected Environment version and idempotency key                                                          |
-| Reconcile Environment operation  | `POST /environments/{environment_id}/reconcile`          | Targets the exact unresolved operation identity                                                           |
+| Command                          | Route                                                    | Required mutation contract                                                                                                                                              |
+| -------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Accept invitation                | `POST /invitations/{invitation_id}/accept`               | Exact single-use token; atomically creates User credentials and RoleBindings                                                                                            |
+| Resend invitation                | `POST /invitations/{invitation_id}/resend`               | Current authorization; rotates the token under the same Invitation ID                                                                                                   |
+| Revoke invitation                | `POST /invitations/{invitation_id}/revoke`               | Current authorization; terminal for the current invitation                                                                                                              |
+| Rotate API key                   | `POST /api-keys/{api_key_id}/rotate`                     | Authorized owner or Service Account Admin; same key ID and immediate cutover                                                                                            |
+| Revoke API key                   | `POST /api-keys/{api_key_id}/revoke`                     | Idempotently sets permanent revocation without deleting metadata                                                                                                        |
+| Test candidate ModelConfig       | `POST /workspaces/{workspace_id}/models/test`            | Synchronous candidate test using Secret references; creates no health resource                                                                                          |
+| Copy ModelConfig                 | `POST /workspaces/{workspace_id}/models/{model_id}/copy` | Idempotency key; creates a new ModelConfig and copies no Secret value                                                                                                   |
+| Cancel active Turn               | `POST /turns/{turn_id}/cancel`                           | Idempotency key and current authorization; seals the active Turn                                                                                                        |
+| Retry failed or cancelled Turn   | `POST /turns/{turn_id}/retry`                            | Target must be the Thread's current failed or cancelled Turn; expected Thread version and idempotency key; advances the same Thread without reopening the sealed source |
+| Fork completed Turn              | `POST /turns/{turn_id}/fork`                             | Idempotency key; creates an independent Thread and first Turn from exact frozen source state                                                                            |
+| Approve pending action           | `POST /pending-actions/{pending_action_id}/approve`      | Expected pending and Thread versions plus idempotency key                                                                                                               |
+| Reject pending action            | `POST /pending-actions/{pending_action_id}/reject`       | Expected pending and Thread versions plus idempotency key                                                                                                               |
+| Submit client-tool result        | `POST /pending-actions/{pending_action_id}/complete`     | Expected Thread version, exact native result envelope, and idempotency key                                                                                              |
+| Supply structured user input     | `POST /pending-actions/{pending_action_id}/respond`      | Expected Thread version, schema-valid bounded response, and idempotency key                                                                                             |
+| Resume/pause/destroy Environment | `POST /environments/{environment_id}/{action}`           | Expected Environment version and idempotency key                                                                                                                        |
+| Reconcile Environment operation  | `POST /environments/{environment_id}/reconcile`          | Targets the exact unresolved operation identity                                                                                                                         |
 
 A command returns the mutated resource or a durable receipt. `202` means accepted, not completed. Unknown outcome after possible dispatch is reconciled by repeating the same idempotency key or reading the returned resource; clients never generate a new key merely because acknowledgement was lost.
 
@@ -178,7 +177,7 @@ OAuth redirects terminate at `GET /api/v1/connector-callbacks/{provider_key}` an
 Public resources expose stable product fields and safe references, not ORM objects or provider-private state. Read models follow these boundaries:
 
 - Session, Thread, Turn, and Item use the shared interaction meanings;
-- Thread exposes its stored version, Session membership, origin, active Turn, continuation head, latest Turn, and timestamps;
+- Thread exposes its stored version, Session membership, origin, current Turn, continuation head, and timestamps; current-Turn status supplies the latest execution/result projection and determines whether the Thread is active;
 - ModelConfig exposes only safe provider, endpoint, credential-reference, capability, lifecycle, and actor metadata;
 - Turn exposes lifecycle, wait reason, selected revisions, safe model observation, interaction lineage, trigger and retry correlation, cancellation intent, and timestamps;
 - TurnAttempt exposes generation, worker-safe status, safe model observation, dispatch phase, lease timing, Harness correlation, and bounded failure evidence, but no credential or process-private value;
