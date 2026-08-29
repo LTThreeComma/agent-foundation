@@ -11,11 +11,11 @@ import pytest
 import yaml
 from a13n_environment_provider import EnvironmentPauseMode, EnvironmentProviderError
 from a13n_harness import RunModelResolver
-from a13n_ui.application import open_application
 from a13n_ui.composition import ResolvedAgentSnapshot
 from a13n_ui.configuration import ConfigurationSettings, DefinitionRootSettings, LocalDirectorySettings
 from a13n_ui.environments import EnvdExecutableResolver, ProviderRuntimeResolver
 from a13n_ui.errors import EnvironmentLifecycleError, RuntimeResolutionError, SessionError, StoreIntegrityError
+from a13n_ui.host import open_agent_ui_host
 from a13n_ui.sessions import SessionLifecycleState, SessionUpdate, TurnState
 from a13n_ui.settings import AgentUiSettings, StorageSettings
 from a13n_ui.storage.database import transaction
@@ -31,6 +31,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy import func, select
+from sqlalchemy.pool.impl import AsyncAdaptedQueuePool
 
 pytestmark = pytest.mark.anyio
 
@@ -194,7 +195,7 @@ async def test_session_baseline_and_direct_local_environment_survive_restart(tmp
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         agent = await application.resolve_agent_snapshot("agent-main")
         environment = await application.resolve_environment_snapshot("environment-main")
         created = await application.create_session(
@@ -224,7 +225,7 @@ async def test_session_baseline_and_direct_local_environment_survive_restart(tmp
         session_id = created.session_id
         checkpoint = updated.root.selected_checkpoint
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         retained = await restarted.session(session_id)
         assert retained.title == "Renamed"
         assert retained.root.selected_checkpoint == checkpoint
@@ -244,7 +245,7 @@ async def test_eager_direct_local_session_is_ready_after_provider_state_selectio
     _write_composition(definitions, provision="eager")
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -263,7 +264,7 @@ async def test_foreground_turn_persists_checkpoint_and_agui_replay_across_restar
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_test_model_resolver_factory,
     ) as application:
@@ -291,7 +292,7 @@ async def test_foreground_turn_persists_checkpoint_and_agui_replay_across_restar
         assert replay[-1].stored.event.type == "RUN_FINISHED"
         assert {item.origin for item in replay} == {"replay"}
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         retained = await restarted.session(session_id)
         replayed = await restarted.session_events(session_id)
 
@@ -307,7 +308,7 @@ async def test_waiting_turn_resumes_from_exact_deferred_object(tmp_path: Path) -
     _write_composition(definitions, user_interaction=True)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_deferred_model_resolver_factory,
     ) as application:
@@ -359,7 +360,7 @@ async def test_event_subscription_has_gap_free_replay_to_live_cutover(tmp_path: 
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_test_model_resolver_factory,
     ) as application:
@@ -409,7 +410,7 @@ async def test_startup_recovers_file_first_event_segment(tmp_path: Path) -> None
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_test_model_resolver_factory,
     ) as application:
@@ -426,10 +427,7 @@ async def test_startup_recovers_file_first_event_segment(tmp_path: Path) -> None
         before = await application.session_events(created.session_id)
         session_id = created.session_id
 
-        async with transaction(
-            application._store.database.sessions,
-            cleanup_timeout_seconds=application._store.settings.cleanup_timeout_seconds,
-        ) as database_session:
+        async with transaction(application._store.database.sessions) as database_session:
             segment = (
                 await database_session.execute(
                     select(EventSegmentRecord)
@@ -444,7 +442,7 @@ async def test_startup_recovers_file_first_event_segment(tmp_path: Path) -> None
             presentation.last_segment_digest = segment.previous_segment_digest
             await database_session.delete(segment)
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         recovered = await restarted.session_events(session_id)
         diagnostics = await restarted.recovery_diagnostics()
 
@@ -459,7 +457,7 @@ async def test_terminal_commit_failure_closes_running_turn(tmp_path: Path, monke
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_test_model_resolver_factory,
     ) as application:
@@ -505,7 +503,7 @@ async def test_provider_dispatch_then_host_commit_failure_is_unknown(
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -547,7 +545,7 @@ async def test_pause_waits_for_active_environment_attachment(tmp_path: Path, mon
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -585,7 +583,7 @@ async def test_delete_failure_retains_assignments_for_cleanup_retry(
     _write_composition(definitions, release="destroy_when_unreferenced")
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -630,7 +628,7 @@ async def test_hard_delete_removes_baseline_checkpoint_and_assignments(tmp_path:
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -639,10 +637,7 @@ async def test_hard_delete_removes_baseline_checkpoint_and_assignments(tmp_path:
             created.session_id,
             expected_revision=created.control_revision,
         )
-        async with transaction(
-            application._store.database.sessions,
-            cleanup_timeout_seconds=application._store.settings.cleanup_timeout_seconds,
-        ) as database_session:
+        async with transaction(application._store.database.sessions) as database_session:
             checkpoint_count = int(
                 (
                     await database_session.execute(
@@ -672,7 +667,7 @@ async def test_startup_blocks_session_with_unreadable_selected_checkpoint(tmp_pa
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -690,7 +685,7 @@ async def test_startup_blocks_session_with_unreadable_selected_checkpoint(tmp_pa
 
     checkpoint_path.unlink()
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         retained = await restarted.session(session_id)
         diagnostics = await restarted.recovery_diagnostics()
         assert retained.lifecycle_state is SessionLifecycleState.blocked
@@ -711,7 +706,7 @@ async def test_startup_marks_unreadable_selected_provider_state_unknown(tmp_path
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -736,7 +731,7 @@ async def test_startup_marks_unreadable_selected_provider_state_unknown(tmp_path
 
     provider_state_path.unlink()
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         availability = await restarted.session_environment(session_id)
         diagnostics = await restarted.recovery_diagnostics()
         assert availability.resources[0].lifecycle_state.value == "unknown"
@@ -770,7 +765,7 @@ async def test_external_task_cancellation_re_raises_after_durable_run_cleanup(tm
 
         return resolve
 
-    async with open_application(settings, model_resolver_factory=resolver_factory) as application:
+    async with open_agent_ui_host(settings, model_resolver_factory=resolver_factory) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -801,7 +796,7 @@ async def test_startup_blocks_waiting_turn_with_unreadable_deferred_authority(tm
     _write_composition(definitions, user_interaction=True)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(
+    async with open_agent_ui_host(
         settings,
         model_resolver_factory=_deferred_model_resolver_factory,
     ) as application:
@@ -828,7 +823,7 @@ async def test_startup_blocks_waiting_turn_with_unreadable_deferred_authority(tm
 
     deferred_path.unlink()
 
-    async with open_application(settings) as restarted:
+    async with open_agent_ui_host(settings) as restarted:
         retained = await restarted.session(session_id)
         diagnostics = await restarted.recovery_diagnostics()
         assert retained.lifecycle_state is SessionLifecycleState.blocked
@@ -842,7 +837,7 @@ async def test_known_failed_resource_is_not_reused_or_implicitly_recreated(tmp_p
     _write_composition(definitions)
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -894,7 +889,7 @@ async def test_anyio_cancellation_restores_environment_borrow_invariants(tmp_pat
 
         return resolve
 
-    async with open_application(settings, model_resolver_factory=resolver_factory) as application:
+    async with open_agent_ui_host(settings, model_resolver_factory=resolver_factory) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
@@ -913,6 +908,10 @@ async def test_anyio_cancellation_restores_environment_borrow_invariants(tmp_pat
             with fail_after(5):
                 await model_started.wait()
             tasks.cancel_scope.cancel()
+
+        pool = application._store.database.engine.pool
+        assert isinstance(pool, AsyncAdaptedQueuePool)
+        assert pool.checkedout() == 0
 
         availability = await application.session_environment(created.session_id)
         resource_id = availability.resources[0].host_resource_id
@@ -933,7 +932,7 @@ async def test_cleanup_retry_reconciles_unknown_destroy_before_detach(
     _write_composition(definitions, release="destroy_when_unreferenced")
     settings = _settings(tmp_path / "data", definitions, workspace)
 
-    async with open_application(settings) as application:
+    async with open_agent_ui_host(settings) as application:
         created = await application.create_session(
             agent_snapshot=await application.resolve_agent_snapshot("agent-main"),
             environment_snapshot=await application.resolve_environment_snapshot("environment-main"),
