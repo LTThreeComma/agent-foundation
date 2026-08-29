@@ -11,6 +11,25 @@ The substrate exposes capability-specific interfaces instead of one generic stor
 
 Backend selection happens once during process startup. A failed network backend never falls back to local state.
 
+## Model Management
+
+Control-plane and all-in-one roles expose the accepted Model Management API at `/api/v1`. The service includes the trusted OpenAI, Anthropic, Gemini, Vertex AI, Azure OpenAI, Bedrock, Alibaba Model Studio, DeepSeek, Moonshot, Zhipu, and generic OpenAI-compatible adapters. Provider catalogs are release-owned autocomplete metadata; an unknown bounded model name remains valid and never causes dynamic provider discovery.
+
+`ModelConfig` stores only a credential requirement. To enable the built-in candidate connection tester and runtime Secret resolver, configure an exact 32-byte master key as standard base64 together with its non-secret key identifier:
+
+```bash
+FOUNDATION_SECRET_MASTER_KEY_BASE64='<base64-encoded-32-byte-key>'
+FOUNDATION_SECRET_ENCRYPTION_KEY_ID='master-2026-08'
+```
+
+The key has no default and is never stored in the database. Values in `managed_secrets` use the `aes_256_gcm_v1` AES-256-GCM profile and are decrypted only after the database session closes. A Host can inject `ServiceComponents.model_secret_resolver` and `model_connection_tester` when its Secret authority is supplied by another trusted composition.
+
+Model create and copy require `Idempotency-Key`; update and delete require the current strong `ETag` through `If-Match`. Custom endpoints are limited to the trusted OpenAI-compatible adapter and are checked against `FOUNDATION_MODEL_PRIVATE_ENDPOINT_DOMAINS` and `FOUNDATION_MODEL_PRIVATE_ENDPOINT_CIDRS`. Redirects are not followed by the built-in tester.
+
+The Agent domain supplies `ServiceComponents.model_reference_reader` once its immutable AgentRevision store is composed. Model deletion and the references route fail closed while that owner is unavailable; Model Management does not create a shadow AgentRevision table.
+
+Turn acceptance integrations use `AcceptedModelSelector.prepare()` before the owning short transaction and `freeze_in_transaction()` while inserting the Turn. Workers use `SnapshotRunModelResolver` with the retained non-secret snapshot, current Secret resolver, endpoint policy, and `NativeModelFactory`; they never fall back to the current `ModelConfig` for a replacement attempt.
+
 ## Runtime
 
 `ServiceSettings` owns the `FOUNDATION_*` environment contract and maps it to the frozen `StorageSettings` model. The storage package accepts typed configuration and does not read process environment variables itself. `foundation-service serve` constructs all selected providers once in FastAPI lifespan, publishes the resulting `StorageResources` on `app.state.storage`, and closes the resources during shutdown.
