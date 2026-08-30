@@ -61,7 +61,7 @@ The following paths are relative to `/api/v1` and are the owning collection and 
 | Skills                    | `/workspaces/{workspace_id}/skills`, `/skills/{skill_id}`                                                                                   | Stable Workspace resources with versioned display/head selection                           |
 | Skill revisions           | `/skills/{skill_id}/revisions`, `/skill-revisions/{skill_revision_id}`, `/skill-revisions/{skill_revision_id}/content`                      | Immutable normalized packages; binary content download is separately authorized            |
 | Model Providers           | `/model-providers`                                                                                                                          | Read-only trusted Provider registry; not an installation API                               |
-| Models                    | `/workspaces/{workspace_id}/models`, `/workspaces/{workspace_id}/models/{model_id}`                                                         | Mutable current ModelConfig resources with strong ETag concurrency                         |
+| Models                    | `/workspaces/{workspace_id}/models`, `/workspaces/{workspace_id}/models/{model_id}`                                                         | Mutable current ModelConfig resources with integer optimistic concurrency                  |
 | Connector Providers       | `/connector-providers`, `/connector-providers/{provider_key}`                                                                               | Read-only catalog of deployment-trusted Provider metadata; not an installation API         |
 | Connectors                | `/workspaces/{workspace_id}/connectors`, `/connectors/{connector_id}`                                                                       | Stable Workspace resources; create atomically includes revision `1`                        |
 | Connector revisions       | `/connectors/{connector_id}/revisions`, `/connector-revisions/{connector_revision_id}`                                                      | Immutable create/read configuration revisions                                              |
@@ -233,7 +233,6 @@ Commands are subordinate to the resource whose state they mutate:
 | Change Plugin lifecycle        | `POST /plugins/{plugin_id}/{action}`                         | `archive` or `unarchive`; archive requires an inactive uploaded Plugin                                                                                                                                    |
 | Test candidate ModelConfig     | `POST /workspaces/{workspace_id}/models/test`                | Synchronous candidate test using Secret references; creates no health resource                                                                                                                            |
 | Test Environment revision      | `POST /environment-revisions/{environment_revision_id}/test` | Synchronously connects the exact revision with current credentials; creates no resource, lease, or retained health state                                                                                  |
-| Copy ModelConfig               | `POST /workspaces/{workspace_id}/models/{model_id}/copy`     | Idempotency key; creates a new ModelConfig and copies no Secret value                                                                                                                                     |
 | Cancel active Turn             | `POST /turns/{turn_id}/cancel`                               | Idempotency key and current authorization; seals the active Turn                                                                                                                                          |
 | Retry failed or cancelled Turn | `POST /turns/{turn_id}/retry`                                | Target must be the Thread's current failed or cancelled Turn; expected Thread version and idempotency key; preserves its Preset Version, Runtime lock, and effective Skill selection without reopening it |
 | Fork completed Turn            | `POST /turns/{turn_id}/fork`                                 | Idempotency key; creates an independent Thread and first Turn from exact frozen source state                                                                                                              |
@@ -242,7 +241,11 @@ Commands are subordinate to the resource whose state they mutate:
 | Submit client-tool result      | `POST /pending-actions/{pending_action_id}/complete`         | Expected Thread version, exact native result envelope, and idempotency key                                                                                                                                |
 | Supply structured user input   | `POST /pending-actions/{pending_action_id}/respond`          | Expected Thread version, schema-valid bounded response, and idempotency key                                                                                                                               |
 
-A command returns the mutated resource or a durable receipt. `202` means accepted, not completed. Unknown outcome after possible dispatch is reconciled by repeating the same idempotency key or reading the returned resource; clients never generate a new key merely because acknowledgement was lost.
+A command returns the mutated resource or a durable receipt. `202` means
+accepted, not completed. For commands that declare an idempotency key, an
+unknown outcome after possible dispatch is reconciled by repeating the same
+key or reading the returned resource; clients never generate a new key merely
+because acknowledgement was lost.
 
 Successful runner-profile Plugin runtime commands return a thin receipt containing `operation_id`,
 `status` in `running`, `succeeded`, or `failed`, resulting resource references,
@@ -348,7 +351,7 @@ Their shared wire behavior follows
 their evidence and atomic commit follow
 [Durable Operations and Outbox](06-durable-operations-and-outbox.md). Immutable
 revisions and usage records reject mutation rather than carrying artificial
-versions. ModelConfig is the non-versioned exception defined by
+versions. ModelConfig uses the ordinary versioned mutation contract defined by
 [Model Management](25-model-management.md).
 
 ## Errors and Compatibility
@@ -364,7 +367,7 @@ The API uses the shared bounded errors and stable codes enforced by the [HTTP in
 03. Thread reads come from the independent durable Thread resource, and accepted advancement compares and updates its exact version.
 04. Public API acceptance never waits for Harness completion.
 05. TurnAttempt mutation is internal; public TurnAttempt routes are bounded operational reads.
-06. Commands use resource-scoped paths, idempotency evidence, and version checks where lost updates are possible.
+06. Commands use resource-scoped paths and explicitly declare the idempotency evidence or version checks required by their mutation contract.
 07. Replay cursors, identifiers, receipts, and signed URLs grant no authority by possession.
 08. API read models contain no process-local object, provider resource-state data, attachment, credential, or Secret value.
 09. SDKs and the CLI consume this API rather than defining parallel lifecycle or retry semantics.
