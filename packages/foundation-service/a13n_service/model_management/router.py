@@ -4,18 +4,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from a13n_service.iam import AuthenticatedActor, authenticate_request
 
 from .domain import (
     ModelConfigCollection,
-    ModelConfigCopy,
     ModelConfigCreate,
     ModelConfigPatch,
     ModelConfigResource,
     ModelConnectionTestResult,
-    ModelReferenceCollection,
 )
 from .providers import ProviderDefinitionCollection
 from .service import ModelConfigService, ModelManagementError
@@ -65,65 +63,36 @@ async def list_models(
 )
 async def create_model(
     request: Request,
-    response: Response,
     actor: Actor,
     workspace_id: str,
     body: ModelConfigCreate,
 ) -> ModelConfigResource:
-    model = await _service(request).create(
+    return await _service(request).create(
         actor=actor,
         workspace_id=workspace_id,
         request=body,
     )
-    response.headers["ETag"] = model.strong_etag()
-    return model
 
 
 @router.get("/workspaces/{workspace_id}/models/{model_id}", response_model=ModelConfigResource)
-async def get_model(
-    request: Request, response: Response, actor: Actor, workspace_id: str, model_id: str
-) -> ModelConfigResource:
-    model = await _service(request).get(actor=actor, workspace_id=workspace_id, model_id=model_id)
-    response.headers["ETag"] = model.strong_etag()
-    return model
+async def get_model(request: Request, actor: Actor, workspace_id: str, model_id: str) -> ModelConfigResource:
+    return await _service(request).get(actor=actor, workspace_id=workspace_id, model_id=model_id)
 
 
 @router.patch("/workspaces/{workspace_id}/models/{model_id}", response_model=ModelConfigResource)
 async def patch_model(
     request: Request,
-    response: Response,
     actor: Actor,
     workspace_id: str,
     model_id: str,
     body: ModelConfigPatch,
-    if_match: Annotated[str | None, Header(alias="If-Match", max_length=80)] = None,
 ) -> ModelConfigResource:
-    model = await _service(request).patch(
+    return await _service(request).patch(
         actor=actor,
         workspace_id=workspace_id,
         model_id=model_id,
         request=body,
-        if_match=_require_if_match(if_match),
     )
-    response.headers["ETag"] = model.strong_etag()
-    return model
-
-
-@router.delete("/workspaces/{workspace_id}/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_model(
-    request: Request,
-    actor: Actor,
-    workspace_id: str,
-    model_id: str,
-    if_match: Annotated[str | None, Header(alias="If-Match", max_length=80)] = None,
-) -> Response:
-    await _service(request).delete(
-        actor=actor,
-        workspace_id=workspace_id,
-        model_id=model_id,
-        if_match=_require_if_match(if_match),
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/workspaces/{workspace_id}/models/test", response_model=ModelConnectionTestResult)
@@ -131,53 +100,3 @@ async def test_model_candidate(
     request: Request, actor: Actor, workspace_id: str, body: ModelConfigCreate
 ) -> ModelConnectionTestResult:
     return await _service(request).test_candidate(actor=actor, workspace_id=workspace_id, request=body)
-
-
-@router.post(
-    "/workspaces/{workspace_id}/models/{model_id}/copy",
-    response_model=ModelConfigResource,
-    status_code=status.HTTP_201_CREATED,
-)
-async def copy_model(
-    request: Request,
-    response: Response,
-    actor: Actor,
-    workspace_id: str,
-    model_id: str,
-    body: ModelConfigCopy,
-) -> ModelConfigResource:
-    model = await _service(request).copy(
-        actor=actor,
-        workspace_id=workspace_id,
-        model_id=model_id,
-        request=body,
-    )
-    response.headers["ETag"] = model.strong_etag()
-    return model
-
-
-@router.get(
-    "/workspaces/{workspace_id}/models/{model_id}/references",
-    response_model=ModelReferenceCollection,
-)
-async def list_model_references(
-    request: Request,
-    actor: Actor,
-    workspace_id: str,
-    model_id: str,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    cursor: Annotated[str | None, Query(max_length=2048)] = None,
-) -> ModelReferenceCollection:
-    return await _service(request).references(
-        actor=actor,
-        workspace_id=workspace_id,
-        model_id=model_id,
-        limit=limit,
-        cursor=cursor,
-    )
-
-
-def _require_if_match(value: str | None) -> str:
-    if value is None:
-        raise ModelManagementError("precondition_required", "If-Match is required for this mutation.", status_code=428)
-    return value

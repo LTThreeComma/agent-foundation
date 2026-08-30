@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from a13n_service.model_management.runtime import (
     AcceptedModelSelector,
     NativeModelFactory,
     SnapshotRunModelResolver,
+    _parse_google_service_account,
 )
 from a13n_service.model_management.service import ModelManagementError
 from a13n_service.secret_management.models import ManagedSecretRecord
@@ -54,6 +56,7 @@ def openai_resource() -> ModelConfigResource:
     return ModelConfigResource(
         id=MODEL_ID,
         workspace_id=WORKSPACE_ID,
+        version=1,
         name="Primary",
         description=None,
         provider_type="openai",
@@ -73,12 +76,11 @@ def openai_resource() -> ModelConfigResource:
 
 def snapshot_for(resource: ModelConfigResource) -> ModelExecutionSnapshot:
     registry = built_in_provider_registry()
-    adapter_key, schema_version, dependency_lock = registry.execution_lock(resource.provider_type)
+    adapter_key, adapter_version = registry.execution_identity(resource.provider_type)
     return ModelExecutionSnapshot.freeze(
         resource,
         adapter_key=adapter_key,
-        adapter_schema_version=schema_version,
-        adapter_dependency_lock=dependency_lock,
+        adapter_version=adapter_version,
     )
 
 
@@ -107,13 +109,10 @@ async def test_snapshot_resolver_uses_exact_snapshot_and_resolves_secret_freshly
 
 
 @pytest.mark.anyio
-async def test_snapshot_resolver_rejects_mismatch_digest_and_adapter_lock() -> None:
+async def test_snapshot_resolver_rejects_unavailable_adapter_version() -> None:
     registry = built_in_provider_registry()
     valid = snapshot_for(openai_resource())
-    cases = (
-        valid.model_copy(update={"model_name": "tampered"}),
-        valid.model_copy(update={"adapter_schema_version": "999"}),
-    )
+    cases = (valid.model_copy(update={"adapter_version": "999"}),)
     async with httpx2.AsyncClient() as client:
         for snapshot in cases:
             resolver = SnapshotRunModelResolver(
@@ -200,6 +199,7 @@ async def selector_database(
                 id=MODEL_ID,
                 organization_id=ORG_ID,
                 workspace_id=WORKSPACE_ID,
+                version=1,
                 name="Accepted",
                 normalized_name="accepted",
                 description=None,
@@ -266,6 +266,7 @@ async def test_turn_acceptance_retries_when_model_changes_after_endpoint_validat
         record = await session.get(ModelConfigRecord, MODEL_ID)
         assert record is not None
         record.model_name = "edited-model"
+        record.version += 1
         record.updated_at = datetime(2026, 8, 30, 11, 1, tzinfo=UTC)
 
     with pytest.raises(ModelManagementError) as captured:
@@ -273,3 +274,10 @@ async def test_turn_acceptance_retries_when_model_changes_after_endpoint_validat
             await selector.freeze_in_transaction(session, prepared=prepared)
 
     assert captured.value.code == "model_configuration_changed"
+
+
+def test_vertex_service_account_rejects_caller_controlled_token_uri() -> None:
+    credential = json.dumps({"token_uri": "https://attacker.example.com/token"})
+
+    with pytest.raises(ValueError, match="official Google OAuth token endpoint"):
+        _parse_google_service_account(credential)

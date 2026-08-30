@@ -1,8 +1,8 @@
 """add model management foundation.
 
-Revision ID: 17ec8805a955
+Revision ID: 916295e4a4e4
 Revises:
-Create Date: 2026-08-30 05:32:58.793279+00:00
+Create Date: 2026-08-30 06:21:27.156091+00:00
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "17ec8805a955"
+revision: str = "916295e4a4e4"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -157,6 +157,7 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(length=72), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
         sa.Column("name", sa.String(length=128), nullable=False),
         sa.Column("normalized_name", sa.String(length=128), nullable=False),
         sa.Column("description", sa.String(length=2048), nullable=True),
@@ -185,6 +186,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("length(model_name) BETWEEN 1 AND 256", name=op.f("ck_model_configs_model_name_bounded")),
         sa.CheckConstraint("length(name) BETWEEN 1 AND 128", name=op.f("ck_model_configs_name_bounded")),
+        sa.CheckConstraint("version >= 1", name=op.f("ck_model_configs_version_positive")),
         sa.ForeignKeyConstraint(
             ["workspace_id", "organization_id"],
             ["workspaces.id", "workspaces.organization_id"],

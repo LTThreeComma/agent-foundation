@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from a13n_service.iam.domain import PrincipalRef
 from a13n_service.ids import new_object_id
@@ -54,7 +51,6 @@ ModelCredential = Annotated[
     WorkspaceSecretCredential | InvokingUserSecretCredential | NoCredential,
     Field(discriminator="source"),
 ]
-_MODEL_CREDENTIAL_ADAPTER = TypeAdapter(ModelCredential)
 
 
 class ModelCapabilities(BaseModel):
@@ -101,6 +97,7 @@ class ModelConfigPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_version: int = Field(ge=1)
     name: BoundedName | None = None
     description: BoundedDescription | None = None
     provider_type: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{1,63}$")] | None = None
@@ -126,6 +123,7 @@ class ModelConfigResource(BaseModel):
 
     id: ObjectId
     workspace_id: ObjectId
+    version: int = Field(ge=1)
     name: str
     description: str | None
     provider_type: str
@@ -141,57 +139,11 @@ class ModelConfigResource(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    def strong_etag(self) -> str:
-        """Return a strong tag over the complete mutable representation."""
-
-        mutable = self.model_dump(
-            mode="json",
-            include={
-                "name",
-                "description",
-                "provider_type",
-                "model_name",
-                "base_url",
-                "credential",
-                "provider_config",
-                "capabilities",
-                "capability_source",
-                "enabled",
-                "updated_by",
-                "updated_at",
-            },
-        )
-        encoded = json.dumps(mutable, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        return f'"{hashlib.sha256(encoded).hexdigest()}"'
-
 
 class ModelConfigCollection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     items: tuple[ModelConfigResource, ...]
-    next_cursor: str | None
-
-
-class ModelConfigCopy(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: BoundedName
-    description: BoundedDescription | None = None
-    enabled: bool
-
-
-class ModelReference(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    agent_id: ObjectId
-    agent_revision_id: ObjectId
-    agent_name: str
-
-
-class ModelReferenceCollection(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    items: tuple[ModelReference, ...]
     next_cursor: str | None
 
 
@@ -224,9 +176,7 @@ class ModelExecutionSnapshot(BaseModel):
     credential: ModelCredential
     provider_config: dict[str, object]
     adapter_key: str
-    adapter_schema_version: str
-    adapter_dependency_lock: dict[str, object]
-    content_digest_sha256: str
+    adapter_version: str
 
     @classmethod
     def freeze(
@@ -234,23 +184,18 @@ class ModelExecutionSnapshot(BaseModel):
         model: ModelConfigResource,
         *,
         adapter_key: str,
-        adapter_schema_version: str,
-        adapter_dependency_lock: dict[str, object],
+        adapter_version: str,
     ) -> ModelExecutionSnapshot:
-        content: dict[str, object] = {
-            "schema_version": "1",
-            "model_id": model.id,
-            "provider_type": model.provider_type,
-            "model_name": model.model_name,
-            "base_url": model.base_url,
-            "credential": _MODEL_CREDENTIAL_ADAPTER.dump_python(model.credential, mode="json"),
-            "provider_config": model.provider_config,
-            "adapter_key": adapter_key,
-            "adapter_schema_version": adapter_schema_version,
-            "adapter_dependency_lock": adapter_dependency_lock,
-        }
-        encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        return cls.model_validate({**content, "content_digest_sha256": hashlib.sha256(encoded).hexdigest()})
+        return cls(
+            model_id=model.id,
+            provider_type=model.provider_type,
+            model_name=model.model_name,
+            base_url=model.base_url,
+            credential=model.credential,
+            provider_config=model.provider_config,
+            adapter_key=adapter_key,
+            adapter_version=adapter_version,
+        )
 
     def observation(self) -> ModelExecutionObservation:
         return ModelExecutionObservation(
@@ -258,9 +203,3 @@ class ModelExecutionSnapshot(BaseModel):
             provider_type=self.provider_type,
             model_name=self.model_name,
         )
-
-    def verify_content_digest(self) -> None:
-        content = self.model_dump(mode="json", exclude={"content_digest_sha256"})
-        encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        if not hmac.compare_digest(self.content_digest_sha256, hashlib.sha256(encoded).hexdigest()):
-            raise ValueError("model execution snapshot digest mismatch")

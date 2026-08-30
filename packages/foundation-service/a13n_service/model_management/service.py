@@ -30,13 +30,11 @@ from .cursors import CursorError, decode_model_cursor, encode_model_cursor
 from .domain import (
     InvokingUserSecretCredential,
     ModelConfigCollection,
-    ModelConfigCopy,
     ModelConfigCreate,
     ModelConfigPatch,
     ModelConfigResource,
     ModelConnectionTestResult,
     ModelCredential,
-    ModelReferenceCollection,
     WorkspaceSecretCredential,
     new_model_config_id,
 )
@@ -63,21 +61,6 @@ class ModelManagementError(Exception):
         self.message = message
         self.status_code = status_code
         self.details = details or {}
-
-
-class ModelReferenceReader(Protocol):
-    async def count(self, session: AsyncSession, *, organization_id: str, workspace_id: str, model_id: str) -> int: ...
-
-    async def list(
-        self,
-        session: AsyncSession,
-        *,
-        organization_id: str,
-        workspace_id: str,
-        model_id: str,
-        limit: int,
-        cursor: str | None,
-    ) -> ModelReferenceCollection: ...
 
 
 class CandidateConnectionTester(Protocol):
@@ -113,7 +96,7 @@ def _audit_failed_attempt(
                 if (
                     action == "model_config.update"
                     and isinstance(request, ModelConfigPatch)
-                    and request.model_fields_set == {"enabled"}
+                    and request.model_fields_set == {"enabled", "expected_version"}
                 ):
                     audit_action = f"model_config.{'enable' if request.enabled else 'disable'}"
                 await service._record_failed_attempt(
@@ -138,7 +121,6 @@ class ModelConfigService:
         *,
         clock: Callable[[], datetime] | None = None,
         resolve_dns_on_save: bool = True,
-        reference_reader: ModelReferenceReader | None = None,
         connection_tester: CandidateConnectionTester | None = None,
         connection_test_timeout_seconds: float = 15,
     ) -> None:
@@ -147,7 +129,6 @@ class ModelConfigService:
         self._endpoint_policy = endpoint_policy
         self._clock = clock or (lambda: datetime.now(UTC))
         self._resolve_dns_on_save = resolve_dns_on_save
-        self._reference_reader = reference_reader
         self._connection_tester = connection_tester
         self._connection_test_timeout_seconds = connection_test_timeout_seconds
 
@@ -189,6 +170,7 @@ class ModelConfigService:
                     id=model_id,
                     organization_id=workspace.organization_id,
                     workspace_id=workspace.workspace_id,
+                    version=1,
                     name=request.name,
                     normalized_name=_normalize_name(request.name),
                     description=request.description,
@@ -325,13 +307,15 @@ class ModelConfigService:
         workspace_id: str,
         model_id: str,
         request: ModelConfigPatch,
-        if_match: str,
     ) -> ModelConfigResource:
         await self._preauthorize_manage(actor=actor, workspace_id=workspace_id)
         current = await self.get(actor=actor, workspace_id=workspace_id, model_id=model_id)
-        if current.strong_etag() != if_match:
+        if current.version != request.expected_version:
             raise ModelManagementError(
-                "precondition_failed", "The ModelConfig representation has changed.", status_code=412
+                "model_version_conflict",
+                "The ModelConfig version has changed.",
+                status_code=409,
+                details={"current_version": current.version},
             )
         capabilities = (
             request.capabilities
@@ -383,9 +367,12 @@ class ModelConfigService:
                         "model_not_found", "The model configuration was not found.", status_code=404
                     )
                 before = record.to_resource()
-                if before.strong_etag() != if_match:
+                if before.version != request.expected_version:
                     raise ModelManagementError(
-                        "precondition_failed", "The ModelConfig representation has changed.", status_code=412
+                        "model_version_conflict",
+                        "The ModelConfig version has changed.",
+                        status_code=409,
+                        details={"current_version": before.version},
                     )
                 await _require_eligible_credential(
                     session,
@@ -428,6 +415,7 @@ class ModelConfigService:
                 record.updated_by_type = actor.principal.principal_type.value
                 record.updated_by_id = actor.principal.principal_id
                 record.updated_at = now
+                record.version += 1
                 audit_action = (
                     f"model_config.{'enable' if merged.enabled else 'disable'}"
                     if changed_fields == ["enabled"]
@@ -452,189 +440,6 @@ class ModelConfigService:
                 "A model configuration with this name already exists in the Workspace.",
                 status_code=409,
             ) from error
-
-    @_audit_failed_attempt("model_config.copy", model_id_argument="model_id")
-    async def copy(
-        self,
-        *,
-        actor: AuthenticatedActor,
-        workspace_id: str,
-        model_id: str,
-        request: ModelConfigCopy,
-    ) -> ModelConfigResource:
-        await self._preauthorize_manage(actor=actor, workspace_id=workspace_id)
-        source = await self.get(actor=actor, workspace_id=workspace_id, model_id=model_id)
-        if source.base_url is not None:
-            try:
-                await self._endpoint_policy.validate(source.base_url, resolve_dns=self._resolve_dns_on_save)
-            except EndpointPolicyError as error:
-                raise ModelManagementError(
-                    "invalid_model_configuration", "The source model configuration is no longer valid.", status_code=400
-                ) from error
-        now = self._clock()
-        try:
-            async with transaction(self._sessions) as session:
-                workspace = await _authorize(
-                    session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_manage
-                )
-                source_record = await session.scalar(
-                    select(ModelConfigRecord).where(
-                        ModelConfigRecord.organization_id == workspace.organization_id,
-                        ModelConfigRecord.workspace_id == workspace.workspace_id,
-                        ModelConfigRecord.id == model_id,
-                    )
-                )
-                if source_record is None:
-                    raise ModelManagementError(
-                        "model_not_found", "The model configuration was not found.", status_code=404
-                    )
-                await _require_eligible_credential(
-                    session,
-                    organization_id=workspace.organization_id,
-                    workspace_id=workspace.workspace_id,
-                    actor=actor,
-                    credential=source_record.to_resource().credential,
-                )
-                copied_id = new_model_config_id()
-                copied = ModelConfigRecord(
-                    id=copied_id,
-                    organization_id=workspace.organization_id,
-                    workspace_id=workspace.workspace_id,
-                    name=request.name,
-                    normalized_name=_normalize_name(request.name),
-                    description=request.description,
-                    provider_type=source_record.provider_type,
-                    model_name=source_record.model_name,
-                    base_url=source_record.base_url,
-                    credential=dict(source_record.credential),
-                    provider_config=dict(source_record.provider_config),
-                    capabilities=dict(source_record.capabilities),
-                    capability_source=source_record.capability_source,
-                    enabled=request.enabled,
-                    created_by_type=actor.principal.principal_type.value,
-                    created_by_id=actor.principal.principal_id,
-                    updated_by_type=actor.principal.principal_type.value,
-                    updated_by_id=actor.principal.principal_id,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(copied)
-                session.add(
-                    _audit_record(
-                        actor=actor,
-                        organization_id=workspace.organization_id,
-                        workspace_id=workspace.workspace_id,
-                        model_id=copied_id,
-                        action="model_config.copy",
-                        now=now,
-                    )
-                )
-                await session.flush()
-                return copied.to_resource()
-        except IntegrityError as error:
-            raise ModelManagementError(
-                "model_name_conflict",
-                "A model configuration with this name already exists in the Workspace.",
-                status_code=409,
-            ) from error
-
-    @_audit_failed_attempt("model_config.delete", model_id_argument="model_id")
-    async def delete(
-        self,
-        *,
-        actor: AuthenticatedActor,
-        workspace_id: str,
-        model_id: str,
-        if_match: str,
-    ) -> None:
-        async with transaction(self._sessions) as session:
-            workspace = await _authorize(
-                session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_manage
-            )
-            if self._reference_reader is None:
-                raise ModelManagementError(
-                    "model_reference_reader_unavailable",
-                    "Model reference validation is unavailable.",
-                    status_code=503,
-                )
-            record = await session.scalar(
-                select(ModelConfigRecord)
-                .where(
-                    ModelConfigRecord.organization_id == workspace.organization_id,
-                    ModelConfigRecord.workspace_id == workspace.workspace_id,
-                    ModelConfigRecord.id == model_id,
-                )
-                .with_for_update()
-            )
-            if record is None:
-                raise ModelManagementError("model_not_found", "The model configuration was not found.", status_code=404)
-            if record.to_resource().strong_etag() != if_match:
-                raise ModelManagementError(
-                    "precondition_failed", "The ModelConfig representation has changed.", status_code=412
-                )
-            references = await self._reference_reader.count(
-                session,
-                organization_id=workspace.organization_id,
-                workspace_id=workspace.workspace_id,
-                model_id=model_id,
-            )
-            if references:
-                raise ModelManagementError(
-                    "model_in_use",
-                    "The model configuration is referenced by executable Agent revisions.",
-                    status_code=409,
-                    details={"reference_count": references},
-                )
-            session.add(
-                _audit_record(
-                    actor=actor,
-                    organization_id=workspace.organization_id,
-                    workspace_id=workspace.workspace_id,
-                    model_id=model_id,
-                    action="model_config.delete",
-                    now=self._clock(),
-                )
-            )
-            await session.delete(record)
-
-    async def references(
-        self,
-        *,
-        actor: AuthenticatedActor,
-        workspace_id: str,
-        model_id: str,
-        limit: int = 50,
-        cursor: str | None = None,
-    ) -> ModelReferenceCollection:
-        if limit < 1 or limit > 100:
-            raise ModelManagementError("invalid_request", "limit must be between 1 and 100.", status_code=400)
-        async with transaction(self._sessions) as session:
-            workspace = await _authorize(
-                session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_read
-            )
-            if self._reference_reader is None:
-                raise ModelManagementError(
-                    "model_reference_reader_unavailable",
-                    "Model reference validation is unavailable.",
-                    status_code=503,
-                )
-            exists = await session.scalar(
-                select(ModelConfigRecord.id).where(
-                    ModelConfigRecord.organization_id == workspace.organization_id,
-                    ModelConfigRecord.workspace_id == workspace.workspace_id,
-                    ModelConfigRecord.id == model_id,
-                )
-            )
-            if exists is None:
-                raise ModelManagementError("model_not_found", "The model configuration was not found.", status_code=404)
-            return await self._reference_reader.list(
-                session,
-                organization_id=workspace.organization_id,
-                workspace_id=workspace.workspace_id,
-                model_id=model_id,
-                limit=limit,
-                cursor=cursor,
-            )
 
     @_audit_failed_attempt("model_config.test")
     async def test_candidate(

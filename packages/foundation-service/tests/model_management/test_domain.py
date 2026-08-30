@@ -20,6 +20,7 @@ def resource() -> ModelConfigResource:
     return ModelConfigResource(
         id="mdl_1234567890abcdef",
         workspace_id="ws_1234567890abcdef",
+        version=1,
         name="Primary model",
         description=None,
         provider_type="openai",
@@ -58,22 +59,13 @@ def test_model_credential_is_a_closed_discriminated_union() -> None:
 
 
 def test_patch_distinguishes_omitted_description_from_explicit_clear() -> None:
-    omitted = ModelConfigPatch(name="Renamed")
-    cleared = ModelConfigPatch(description=None)
+    omitted = ModelConfigPatch(expected_version=1, name="Renamed")
+    cleared = ModelConfigPatch(expected_version=1, description=None)
 
     assert "description" not in omitted.model_fields_set
     assert "description" in cleared.model_fields_set
     with pytest.raises(ValidationError, match="fields cannot be null: enabled"):
-        ModelConfigPatch(enabled=None)
-
-
-def test_etag_covers_every_mutable_field() -> None:
-    original = resource()
-    changed = original.model_copy(update={"description": "Changed"})
-
-    assert original.strong_etag().startswith('"')
-    assert original.strong_etag() != changed.strong_etag()
-    assert original.strong_etag() == original.model_copy(update={"created_at": datetime.now(UTC)}).strong_etag()
+        ModelConfigPatch(expected_version=1, enabled=None)
 
 
 def test_execution_snapshot_is_deterministic_and_contains_no_secret_value() -> None:
@@ -81,17 +73,14 @@ def test_execution_snapshot_is_deterministic_and_contains_no_secret_value() -> N
     snapshot = ModelExecutionSnapshot.freeze(
         model,
         adapter_key="a13n.model.openai",
-        adapter_schema_version="1",
-        adapter_dependency_lock={"adapter": "a13n.model.openai", "schema": "1"},
+        adapter_version="1",
     )
 
     assert snapshot == ModelExecutionSnapshot.freeze(
         model,
         adapter_key="a13n.model.openai",
-        adapter_schema_version="1",
-        adapter_dependency_lock={"adapter": "a13n.model.openai", "schema": "1"},
+        adapter_version="1",
     )
-    assert snapshot.content_digest_sha256.isascii()
     assert "secret_id" in snapshot.model_dump_json()
     assert "secret_value" not in snapshot.model_dump_json()
     assert snapshot.observation().model_id == model.id

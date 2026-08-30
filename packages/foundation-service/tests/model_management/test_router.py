@@ -9,29 +9,18 @@ from a13n_service.app import ServiceComponents, create_app
 from a13n_service.database.metadata import service_metadata
 from a13n_service.iam import AuthenticatedActor
 from a13n_service.iam.models import OrganizationRecord, RoleBindingRecord, UserRecord, WorkspaceRecord
-from a13n_service.model_management.domain import ModelReferenceCollection, PrincipalRef
+from a13n_service.model_management.domain import PrincipalRef
 from a13n_service.secret_management.models import ManagedSecretRecord
 from a13n_service.settings import ServiceSettings
 from a13n_service.storage import transaction
 from a13n_service.storage.relational import create_session_factory, create_sql_engine
 from fastapi import Request
-from sqlalchemy.ext.asyncio import AsyncSession
 
 NOW = datetime(2026, 8, 30, 10, 0, tzinfo=UTC)
 ORG_ID = "org_1234567890abcdef"
 WORKSPACE_ID = "ws_1234567890abcdef"
 USER_ID = "usr_1234567890abcdef"
 SECRET_ID = "sec_1234567890abcdef"
-
-
-class NoReferences:
-    async def count(self, session: AsyncSession, **_: object) -> int:
-        del session
-        return 0
-
-    async def list(self, session: AsyncSession, **_: object) -> ModelReferenceCollection:
-        del session
-        return ModelReferenceCollection(items=(), next_cursor=None)
 
 
 async def authenticate(request: Request) -> AuthenticatedActor:
@@ -154,7 +143,6 @@ async def api_client(tmp_path: Path) -> AsyncIterator[httpx2.AsyncClient]:
         config,
         components=ServiceComponents(
             request_authenticator=authenticate,
-            model_reference_reader=NoReferences(),
             model_connection_tester=successful_test,
         ),
     )
@@ -191,46 +179,36 @@ async def test_model_resource_http_lifecycle(api_client: httpx2.AsyncClient) -> 
     )
     assert created.status_code == 201
     model = created.json()
-    etag = created.headers["etag"]
+    assert model["version"] == 1
     model_url = f"/api/v1/workspaces/{WORKSPACE_ID}/models/{model['id']}"
 
     fetched = await api_client.get(model_url)
     assert fetched.status_code == 200
-    assert fetched.headers["etag"] == etag
     assert fetched.json() == model
 
     no_precondition = await api_client.patch(model_url, json={"enabled": False})
-    assert no_precondition.status_code == 428
-    assert no_precondition.json()["error"]["code"] == "precondition_required"
-    stale = await api_client.patch(model_url, json={"enabled": False}, headers={"If-Match": '"stale"'})
-    assert stale.status_code == 412
+    assert no_precondition.status_code == 400
+    assert no_precondition.json()["error"]["code"] == "invalid_request"
+    stale = await api_client.patch(model_url, json={"expected_version": 2, "enabled": False})
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "model_version_conflict"
+    assert stale.json()["error"]["details"] == {"current_version": 1}
 
-    patched = await api_client.patch(model_url, json={"enabled": False}, headers={"If-Match": etag})
+    patched = await api_client.patch(model_url, json={"expected_version": 1, "enabled": False})
     assert patched.status_code == 200
     assert not patched.json()["enabled"]
-    assert patched.headers["etag"] != etag
+    assert patched.json()["version"] == 2
 
     listed = await api_client.get(f"/api/v1/workspaces/{WORKSPACE_ID}/models?enabled=false")
     assert [item["id"] for item in listed.json()["items"]] == [model["id"]]
-
-    copied = await api_client.post(
-        f"{model_url}/copy",
-        json={"name": "Copy", "enabled": False},
-    )
-    assert copied.status_code == 201
-    assert copied.json()["credential"] == model["credential"]
-
-    references = await api_client.get(f"{model_url}/references")
-    assert references.status_code == 200
-    assert references.json() == {"items": [], "next_cursor": None}
 
     tested = await api_client.post(f"/api/v1/workspaces/{WORKSPACE_ID}/models/test", json=candidate("Unsaved"))
     assert tested.status_code == 200
     assert tested.json()["success"]
 
-    deleted = await api_client.delete(model_url, headers={"If-Match": patched.headers["etag"]})
-    assert deleted.status_code == 204
-    assert (await api_client.get(model_url)).status_code == 404
+    assert (await api_client.post(f"{model_url}/copy", json={"name": "Copy", "enabled": False})).status_code == 404
+    assert (await api_client.get(f"{model_url}/references")).status_code == 404
+    assert (await api_client.delete(model_url)).status_code == 404
 
 
 @pytest.mark.anyio

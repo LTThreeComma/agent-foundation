@@ -49,9 +49,7 @@ class NativeModelConnectionTester:
             credential=credential,
             provider_config=selection.provider_config,
             adapter_key=selection.adapter_key,
-            adapter_schema_version=selection.adapter_schema_version,
-            adapter_dependency_lock=selection.adapter_dependency_lock,
-            content_digest_sha256="0" * 64,
+            adapter_version=selection.adapter_version,
         )
         endpoint = effective_execution_endpoint(snapshot)
         if endpoint is not None:

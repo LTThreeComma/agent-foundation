@@ -205,7 +205,6 @@ Commands are subordinate to the resource whose state they mutate:
 | Revoke API key                 | `POST /api-keys/{api_key_id}/revoke`                         | Idempotently sets permanent revocation without deleting metadata                                                                                                                                     |
 | Test candidate ModelConfig     | `POST /workspaces/{workspace_id}/models/test`                | Synchronous candidate test using Secret references; creates no health resource                                                                                                                       |
 | Test Environment revision      | `POST /environment-revisions/{environment_revision_id}/test` | Synchronously connects the exact revision with current credentials; creates no resource, lease, or retained health state                                                                             |
-| Copy ModelConfig               | `POST /workspaces/{workspace_id}/models/{model_id}/copy`     | Synchronous creation of a new ModelConfig; copies no Secret value and retains no operation replay record                                                                                             |
 | Cancel active Turn             | `POST /turns/{turn_id}/cancel`                               | Idempotency key and current authorization; seals the active Turn                                                                                                                                     |
 | Retry failed or cancelled Turn | `POST /turns/{turn_id}/retry`                                | Target must be the Thread's current failed or cancelled Turn; expected Thread version and idempotency key; preserves its effective Skill selection and advances the same Thread without reopening it |
 | Fork completed Turn            | `POST /turns/{turn_id}/fork`                                 | Idempotency key; creates an independent Thread and first Turn from exact frozen source state                                                                                                         |
@@ -218,9 +217,7 @@ A command returns the mutated resource or a durable receipt. `202` means
 accepted, not completed. For commands that declare an idempotency key, an
 unknown outcome after possible dispatch is reconciled by repeating the same
 key or reading the returned resource; clients never generate a new key merely
-because acknowledgement was lost. Synchronous commands without replay
-evidence, including ModelConfig copy, are retried as new requests and reconcile
-through their resource identity and uniqueness constraints.
+because acknowledgement was lost.
 
 OAuth redirects terminate at `GET /api/v1/connector-callbacks/{provider_key}` and Connector event delivery terminates at `POST /api/v1/connector-events/{trigger_id}`. These are bounded external ingress protocols, not management resources. The callback requires the exact expiring setup state; the event route requires Provider verification and a stable Provider event identity. Path identifiers grant no authority. Success means setup committed, or the event occurrence was accepted or already known; it never waits for Agent execution.
 
@@ -304,7 +301,7 @@ Their shared wire behavior follows
 their evidence and atomic commit follow
 [Durable Operations and Outbox](06-durable-operations-and-outbox.md). Immutable
 revisions and usage records reject mutation rather than carrying artificial
-versions. ModelConfig is the non-versioned exception defined by
+versions. ModelConfig uses the ordinary versioned mutation contract defined by
 [Model Management](25-model-management.md).
 
 ## Errors and Compatibility

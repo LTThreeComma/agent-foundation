@@ -14,10 +14,8 @@ from a13n_service.iam.models import (
 )
 from a13n_service.model_management.domain import (
     InvokingUserSecretCredential,
-    ModelConfigCopy,
     ModelConfigCreate,
     ModelConfigPatch,
-    ModelReferenceCollection,
     PrincipalRef,
     WorkspaceSecretCredential,
 )
@@ -30,7 +28,7 @@ from a13n_service.storage import short_session, transaction
 from a13n_service.storage.config import SQLiteConfig
 from a13n_service.storage.relational import create_session_factory, create_sql_engine
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 NOW = datetime(2026, 8, 30, 9, 0, tzinfo=UTC)
 ORG_ID = "org_1234567890abcdef"
@@ -38,16 +36,6 @@ WORKSPACE_ID = "ws_1234567890abcdef"
 USER_ID = "usr_1234567890abcdef"
 VIEWER_ID = "usr_abcdef1234567890"
 SECRET_ID = "sec_1234567890abcdef"
-
-
-class NoReferences:
-    async def count(self, session: AsyncSession, **_: object) -> int:
-        del session
-        return 0
-
-    async def list(self, session: AsyncSession, **_: object) -> ModelReferenceCollection:
-        del session
-        return ModelReferenceCollection(items=(), next_cursor=None)
 
 
 async def successful_connection_test(**_: object) -> None:
@@ -161,7 +149,6 @@ async def model_service(tmp_path: Path) -> AsyncIterator[tuple[ModelConfigServic
         EndpointPolicy(),
         clock=lambda: NOW,
         resolve_dns_on_save=False,
-        reference_reader=NoReferences(),
         connection_tester=successful_connection_test,
     )
     try:
@@ -199,6 +186,7 @@ async def test_create_commits_model_and_safe_audit(
     created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
     assert created.id.startswith("mdl_")
+    assert created.version == 1
     assert created.base_url == "https://api.openai.com/v1"
     assert created.capability_source == "catalog"
     sessions = create_session_factory(engine)
@@ -359,7 +347,7 @@ async def test_list_is_filtered_and_cursor_paginated(
 
 
 @pytest.mark.anyio
-async def test_patch_requires_current_etag_and_a_noop_keeps_it(
+async def test_patch_requires_current_version_and_a_noop_keeps_it(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, engine = model_service
@@ -370,28 +358,27 @@ async def test_patch_requires_current_etag_and_a_noop_keeps_it(
             actor=actor(),
             workspace_id=WORKSPACE_ID,
             model_id=created.id,
-            request=ModelConfigPatch(description="Changed"),
-            if_match='"stale"',
+            request=ModelConfigPatch(expected_version=2, description="Changed"),
         )
-    assert captured.value.code == "precondition_failed"
+    assert captured.value.code == "model_version_conflict"
+    assert captured.value.details == {"current_version": 1}
     changed = await service.patch(
         actor=actor(),
         workspace_id=WORKSPACE_ID,
         model_id=created.id,
-        request=ModelConfigPatch(description="Changed", enabled=False),
-        if_match=created.strong_etag(),
+        request=ModelConfigPatch(expected_version=1, description="Changed", enabled=False),
     )
     noop = await service.patch(
         actor=actor(),
         workspace_id=WORKSPACE_ID,
         model_id=created.id,
-        request=ModelConfigPatch(description="Changed", enabled=False),
-        if_match=changed.strong_etag(),
+        request=ModelConfigPatch(expected_version=2, description="Changed", enabled=False),
     )
 
     assert changed.description == "Changed"
     assert not changed.enabled
-    assert noop.strong_etag() == changed.strong_etag()
+    assert changed.version == 2
+    assert noop.version == changed.version
     sessions = create_session_factory(engine)
     async with short_session(sessions) as session:
         audits = tuple((await session.scalars(select(SecurityAuditRecord).order_by(SecurityAuditRecord.action))).all())
@@ -402,46 +389,6 @@ async def test_patch_requires_current_etag_and_a_noop_keeps_it(
     success_details = [item.details for item in updates if item.outcome == "success"]
     assert {"changed_fields": ["description", "enabled"]} in success_details
     assert {"changed_fields": []} in success_details
-
-
-@pytest.mark.anyio
-async def test_copy_reuses_only_non_secret_configuration(
-    model_service: tuple[ModelConfigService, AsyncEngine],
-) -> None:
-    service, _ = model_service
-    source = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
-
-    copied = await service.copy(
-        actor=actor(),
-        workspace_id=WORKSPACE_ID,
-        model_id=source.id,
-        request=ModelConfigCopy(name="Copy", description="Copied", enabled=False),
-    )
-
-    assert copied.id != source.id
-    assert copied.credential == source.credential
-    assert copied.capabilities == source.capabilities
-    assert copied.capability_source == source.capability_source
-    assert not copied.enabled
-
-
-@pytest.mark.anyio
-async def test_delete_hard_removes_model_but_not_secret(
-    model_service: tuple[ModelConfigService, AsyncEngine],
-) -> None:
-    service, engine = model_service
-    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
-
-    await service.delete(actor=actor(), workspace_id=WORKSPACE_ID, model_id=created.id, if_match=created.strong_etag())
-
-    with pytest.raises(ModelManagementError) as captured:
-        await service.get(actor=actor(), workspace_id=WORKSPACE_ID, model_id=created.id)
-    assert captured.value.code == "model_not_found"
-    sessions = create_session_factory(engine)
-    async with short_session(sessions) as session:
-        assert (
-            await session.scalar(select(ManagedSecretRecord.id).where(ManagedSecretRecord.id == SECRET_ID)) == SECRET_ID
-        )
 
 
 @pytest.mark.anyio

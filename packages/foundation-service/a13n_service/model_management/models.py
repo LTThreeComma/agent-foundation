@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pydantic import TypeAdapter
-from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, String
+from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from a13n_service.database import Base
@@ -31,6 +31,7 @@ class ModelConfigRecord(Base):
         ),
         CheckConstraint("length(name) BETWEEN 1 AND 128", name="name_bounded"),
         CheckConstraint("length(model_name) BETWEEN 1 AND 256", name="model_name_bounded"),
+        CheckConstraint("version >= 1", name="version_positive"),
         CheckConstraint("capability_source IN ('catalog', 'manual_override')", name="capability_source_valid"),
         CheckConstraint("created_by_type IN ('user', 'service_account')", name="created_by_type_valid"),
         CheckConstraint("updated_by_type IN ('user', 'service_account')", name="updated_by_type_valid"),
@@ -42,6 +43,7 @@ class ModelConfigRecord(Base):
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(String(72))
     workspace_id: Mapped[str] = mapped_column(String(72))
+    version: Mapped[int] = mapped_column(BigInteger, default=1)
     name: Mapped[str] = mapped_column(String(128))
     normalized_name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str | None] = mapped_column(String(2048))
@@ -64,6 +66,7 @@ class ModelConfigRecord(Base):
         return ModelConfigResource(
             id=self.id,
             workspace_id=self.workspace_id,
+            version=self.version,
             name=self.name,
             description=self.description,
             provider_type=self.provider_type,

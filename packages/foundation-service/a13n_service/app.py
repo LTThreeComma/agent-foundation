@@ -27,7 +27,6 @@ from a13n_service.model_management.secrets import DatabaseSecretValueResolver
 from a13n_service.model_management.service import (
     CandidateConnectionTester,
     ModelConfigService,
-    ModelReferenceReader,
 )
 from a13n_service.settings import ServiceRole, ServiceSettings, get_settings
 from a13n_service.storage import StorageResources, open_storage, short_session
@@ -42,7 +41,6 @@ _CONTROL_PLANE_ROLES = {ServiceRole.all, ServiceRole.control}
 @dataclass(frozen=True, slots=True)
 class ServiceComponents:
     request_authenticator: RequestAuthenticator | None = None
-    model_reference_reader: ModelReferenceReader | None = None
     model_connection_tester: CandidateConnectionTester | None = None
     model_secret_resolver: RuntimeSecretValueResolver | None = None
 
@@ -85,7 +83,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     app.state.model_provider_registry,
                     app.state.model_endpoint_policy,
                     resolve_dns_on_save=settings.model_resolve_dns_on_save,
-                    reference_reader=app.state.components.model_reference_reader,
                     connection_tester=connection_tester,
                     connection_test_timeout_seconds=settings.model_connection_test_timeout_seconds,
                 )

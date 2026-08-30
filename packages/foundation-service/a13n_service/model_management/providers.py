@@ -194,8 +194,7 @@ class ValidatedProviderSelection(BaseModel):
     capabilities: ModelCapabilities
     capability_source: CapabilitySource
     adapter_key: str
-    adapter_schema_version: str
-    adapter_dependency_lock: dict[str, object]
+    adapter_version: str
 
 
 class _ProviderAdapter:
@@ -216,8 +215,7 @@ class _ProviderAdapter:
         self.official_base_url = official_base_url
         self.model_catalog = model_catalog
         self.adapter_key = f"a13n.model.{key}"
-        self.adapter_schema_version = "1"
-        self.adapter_dependency_lock: dict[str, object] = {"adapter": self.adapter_key, "schema": "1"}
+        self.adapter_version = "1"
 
     def public_definition(self) -> ProviderDefinition:
         credential_types = tuple(
@@ -269,8 +267,7 @@ class _ProviderAdapter:
                 CapabilitySource.manual_override if capabilities is not None else CapabilitySource.catalog
             ),
             adapter_key=self.adapter_key,
-            adapter_schema_version=self.adapter_schema_version,
-            adapter_dependency_lock=self.adapter_dependency_lock,
+            adapter_version=self.adapter_version,
         )
 
 
@@ -291,9 +288,9 @@ class ProviderRegistry:
     def definition(self, provider_type: str) -> ProviderDefinition:
         return self._adapter(provider_type).public_definition()
 
-    def execution_lock(self, provider_type: str) -> tuple[str, str, dict[str, object]]:
+    def execution_identity(self, provider_type: str) -> tuple[str, str]:
         adapter = self._adapter(provider_type)
-        return adapter.adapter_key, adapter.adapter_schema_version, dict(adapter.adapter_dependency_lock)
+        return adapter.adapter_key, adapter.adapter_version
 
     def validate(
         self,

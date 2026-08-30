@@ -47,6 +47,8 @@ from .models import ModelConfigRecord
 from .providers import ProviderRegistry, ValidatedProviderSelection, alibaba_base_url
 from .service import ModelManagementError
 
+_GOOGLE_OAUTH_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
 
 class RuntimeSecretValueResolver(Protocol):
     async def resolve(
@@ -81,7 +83,7 @@ class PreparedModelExecution:
     workspace_id: str
     resource: ModelConfigResource
     selection: ValidatedProviderSelection
-    etag: str
+    version: int
 
 
 class AcceptedModelSelector:
@@ -150,7 +152,7 @@ class AcceptedModelSelector:
             workspace_id=workspace_id,
             resource=resource,
             selection=selection,
-            etag=resource.strong_etag(),
+            version=resource.version,
         )
 
     async def freeze_in_transaction(
@@ -172,7 +174,7 @@ class AcceptedModelSelector:
             raise ModelManagementError(
                 "model_disabled", "The selected model configuration is disabled.", status_code=409
             )
-        if current.strong_etag() != prepared.etag:
+        if current.version != prepared.version:
             raise ModelManagementError(
                 "model_configuration_changed",
                 "The model configuration changed during Turn acceptance.",
@@ -182,8 +184,7 @@ class AcceptedModelSelector:
         return ModelExecutionSnapshot.freeze(
             current,
             adapter_key=selection.adapter_key,
-            adapter_schema_version=selection.adapter_schema_version,
-            adapter_dependency_lock=selection.adapter_dependency_lock,
+            adapter_version=selection.adapter_version,
         )
 
 
@@ -331,14 +332,9 @@ class SnapshotRunModelResolver:
                 details={"model_id": model_id},
             )
         try:
-            snapshot.verify_content_digest()
-            adapter_key, schema_version, dependency_lock = self._registry.execution_lock(snapshot.provider_type)
-            if (
-                snapshot.adapter_key != adapter_key
-                or snapshot.adapter_schema_version != schema_version
-                or snapshot.adapter_dependency_lock != dependency_lock
-            ):
-                raise ValueError("accepted adapter compatibility lock is unavailable")
+            adapter_key, adapter_version = self._registry.execution_identity(snapshot.provider_type)
+            if snapshot.adapter_key != adapter_key or snapshot.adapter_version != adapter_version:
+                raise ValueError("accepted adapter compatibility identity is unavailable")
             endpoint = effective_execution_endpoint(snapshot)
             if endpoint is not None:
                 await self._endpoint_policy.validate(endpoint, resolve_dns=True)
@@ -437,7 +433,11 @@ def _parse_google_service_account(value: str) -> ServiceAccountCredentials:
         raise ValueError("Google Vertex credential must be a service-account JSON object") from error
     if not isinstance(decoded, dict):
         raise ValueError("Google Vertex credential must be a service-account JSON object")
+    if decoded.get("token_uri") != _GOOGLE_OAUTH_TOKEN_URI:
+        raise ValueError("Google Vertex credential must use the official Google OAuth token endpoint")
+    trusted_info = dict(decoded)
+    trusted_info["token_uri"] = _GOOGLE_OAUTH_TOKEN_URI
     try:
-        return ServiceAccountCredentials.from_service_account_info(decoded)
+        return ServiceAccountCredentials.from_service_account_info(trusted_info)
     except (TypeError, ValueError) as error:
         raise ValueError("Google Vertex credential must be a service-account JSON object") from error
