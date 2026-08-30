@@ -47,7 +47,7 @@ Read `05`, then the [Agent Stream Protocol specification](../agent-stream-protoc
 - Agent Stream Protocol owns reusable Harness-to-AG-UI conversion and process-local accumulation. Agent UI owns event-file persistence, query projection, replay, fan-out, transport, and presentation policy.
 - OpenTelemetry is exported through the repository observability boundary and is not stored in Agent UI SQLite databases, Session files, or AG-UI segments.
 - WebUI and CLI are product peers over one `AgentUiHost`. Neither owns a separate configuration model, Session model, orchestration loop, runtime-generation controller, or rendering truth.
-- The stable Host process owns the data-root lease, durable state, configuration, frontend listeners, runtime routing, and commit authority. Replaceable runtime Runners own only process-local execution behavior; restarting a Runner never transfers active work or durable authority.
+- Each frontend invocation owns one stable Host process. Multiple local Hosts can share the data root through SQLite transactions and atomic file publication; no process-lifetime owner lease exists. Replaceable runtime Runners own only process-local execution behavior and no durable commit authority.
 - Persisted references and local identifiers grant no Agent, Environment, model, plugin, credential, or child authority. Every invocation receives fresh current `RunBindings`, provider attachments, and a new `EnvironmentRuntime`; none is reconstructed from persisted state.
 
 ## Specification Conventions

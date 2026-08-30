@@ -20,18 +20,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .metadata import Base
 
 
-class StoreLeaseRecord(Base):
-    """The process generation currently owning this data root."""
-
-    __tablename__ = "store_lease"
-    __table_args__ = (CheckConstraint("singleton_id = 1", name="singleton"),)
-
-    singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    process_generation: Mapped[str] = mapped_column(String(64), nullable=False)
-    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class ImmutableObjectRecord(Base):
     """One verified immutable object known to the metadata store."""
 
@@ -45,7 +33,7 @@ class ImmutableObjectRecord(Base):
 
 
 class RecoveryDiagnosticRecord(Base):
-    """Bounded evidence from local-store recovery and quarantine."""
+    """Bounded evidence from local-store recovery and integrity checks."""
 
     __tablename__ = "recovery_diagnostic"
 
@@ -574,7 +562,6 @@ __all__ = [
     "SessionRecord",
     "SessionThreadRecord",
     "SkillPackageReferenceRecord",
-    "StoreLeaseRecord",
     "ThreadCheckpointRecord",
     "TurnRecord",
     "TurnRunRecord",

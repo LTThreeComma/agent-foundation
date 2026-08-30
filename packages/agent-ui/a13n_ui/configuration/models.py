@@ -130,11 +130,6 @@ class ConfigurationSettings(StrictModel):
         ge=1024,
         le=1024 * 1024 * 1024,
     )
-    max_prepared_skill_bytes: int = Field(
-        default=128 * 1024 * 1024,
-        ge=1024,
-        le=1024 * 1024 * 1024,
-    )
     max_yaml_nodes: int = Field(default=100_000, gt=0, le=1_000_000)
     max_document_depth: int = Field(default=64, gt=0, le=256)
     stable_read_attempts: int = Field(default=3, gt=0, le=10)
@@ -142,8 +137,6 @@ class ConfigurationSettings(StrictModel):
     max_skill_package_files: int = Field(default=4096, gt=0, le=100_000)
     max_skill_package_depth: int = Field(default=32, gt=0, le=256)
     max_skill_package_bytes: int = Field(default=64 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024)
-    max_skill_scan_leases: int = Field(default=16, gt=0, le=1024)
-    skill_scan_lease_seconds: float = Field(default=300.0, gt=0, le=3600)
     reconciliation_interval_seconds: float = Field(default=5.0, gt=0, le=3600)
     envd_executable_override: Path | None = None
 

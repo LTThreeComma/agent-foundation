@@ -217,7 +217,6 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
     { name = "anyio" },
-    { name = "filelock" },
     { name = "httpx2" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
@@ -241,7 +240,6 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21,<1" },
     { name = "alembic", specifier = ">=1.17.1,<2" },
     { name = "anyio", specifier = ">=4,<5" },
-    { name = "filelock", specifier = ">=3.20,<4" },
     { name = "httpx2", specifier = ">=2.5,<3" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-slim", specifier = ">=2.33,<2.34" },
@@ -3482,8 +3480,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [

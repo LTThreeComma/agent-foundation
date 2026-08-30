@@ -79,7 +79,7 @@ sequenceDiagram
     participant Surface as CLI or Web adapter
 
     CLI->>Host: start(process settings and selected surface)
-    Host->>Store: acquire lease, migrate, and recover
+    Host->>Store: migrate and validate shared local state
     Host->>Config: load and accept complete generation
     Host->>Runtime: start and validate initial Runner
     Host->>Host: build trusted catalogs and start supervisors
@@ -92,35 +92,31 @@ sequenceDiagram
     Host->>Store: commit interruption/unknown facts and close
 ```
 
-Startup does not accept surface commands until authoritative SQLite metadata, selected state objects, configuration generation, projections required for queries, prior-process interruption transitions, and the initial runtime Runner validate. Shutdown stops acceptance, preserves external cancellation across cleanup, drains within configured bounds, closes every entered Runner stream in its owning task, applies Environment lifecycle policy, seals pending AG-UI segments, stops runtime Runners, and commits unknown/interrupted outcomes before releasing the store lease.
+Startup does not accept surface commands until authoritative SQLite metadata, selected state objects, configuration generation, projections required for queries, and the initial runtime Runner validate. Opening another Host never classifies another process's active work as abandoned. Shutdown stops acceptance, preserves external cancellation across cleanup, closes every entered Runner stream in its owning task, applies Environment lifecycle policy, seals pending AG-UI segments, stops runtime Runners, and closes this process's store connections.
 
 ## Runtime Runner Lifecycle
 
-`AgentUiHost` remains alive while runtime Runners restart. The stable process owns the data-root lease, SQLite, immutable-object and event stores, configuration sources, Session and Turn authority, frontend listeners, runtime selection, and all durable commit decisions. A Runner never opens Agent UI storage, edits desired configuration, accepts work durably, selects a checkpoint, or serves a frontend.
+`AgentUiHost` remains alive while runtime Runners restart. The stable process owns its SQLite connections, immutable-object and event-store collaborators, configuration view, frontend listeners, runtime selection, and durable commit decisions. Other local Host processes can use the same data root through the storage concurrency contract. A Runner never opens Agent UI storage, edits desired configuration, accepts work durably, selects a checkpoint, or serves a frontend.
 
 A Runner starts in a fresh Python interpreter from an exact argument vector without shell evaluation. Agent UI process control uses a private loopback connection with a versioned bounded message format and an unguessable single-use launch capability. Standard output and standard error remain ordinary diagnostic streams rather than protocol channels. Authentication and generation correlation complete before the launch capability is discarded.
 
-The runtime-generation service serializes startup, restart, and close. One generation follows these observable states:
+The runtime-generation service uses one process-local lifecycle serializer so startup, restart, and close cannot interleave. It has no distributed lock or lease protocol. One generation follows these observable states:
 
 ```mermaid
 stateDiagram-v2
     [*] --> starting
-    starting --> ready: authenticated process control
-    ready --> preparing: PREPARE
-    preparing --> prepared: PREPARED
-    prepared --> active: COMMIT then ACTIVE
+    starting --> ready: authenticated READY with validated provenance
+    ready --> active: ACTIVATE then ACTIVE
     active --> draining: DRAIN
     draining --> exited: DRAINED then SHUTDOWN
-    starting --> exited: failed or aborted
-    ready --> exited: failed or aborted
-    preparing --> exited: failed or aborted
-    prepared --> exited: failed or aborted
+    starting --> exited: startup failure
+    ready --> exited: startup failure
     active --> exited: unexpected loss or forced stop
 ```
 
-`ready` proves only that the child control endpoint is authenticated and responsive. The Host separately calls the Agent UI runtime-readiness operation and validates the reported Runner release, protocol version, and loaded provenance before promotion. A passive Runner can satisfy this probe without accepting execution.
+`ready` proves that the child control endpoint authenticated and reported the expected Runner release, protocol version, and loaded provenance. A candidate performs no application work before activation.
 
-Restart uses a prepare/commit barrier:
+Restart uses a direct activation cutover:
 
 ```mermaid
 sequenceDiagram
@@ -131,19 +127,14 @@ sequenceDiagram
 
     Host->>Runtime: restart
     Runtime->>New: launch and authenticate
-    New-->>Host: runtime readiness
-    Host-->>Runtime: readiness accepted
-    Runtime->>New: PREPARE
-    New-->>Runtime: PREPARED
-    Runtime->>Host: close admission and stage route
-    Host-->>Runtime: promotion prepared
-    Runtime->>New: COMMIT
+    New-->>Runtime: READY with runtime provenance
+    Runtime->>New: ACTIVATE
     New-->>Runtime: ACTIVE
-    Runtime->>Host: commit staged route and reopen admission
+    Runtime->>Host: select new generation
     Runtime->>Old: DRAIN then SHUTDOWN
 ```
 
-A candidate performs no application work before `ACTIVE`. Failure before activation aborts the candidate and leaves the previous active Runner selected. The final Host route commit is infallible under the closed-admission barrier. After activation, only later eligible work selects the new generation. An active Run remains on the Runner that admitted it; work never migrates between interpreters, and Runner memory is never promoted to durable state.
+Failure before `ACTIVE` stops the candidate and leaves the previous active Runner selected. The Host changes its process-local selection only after `ACTIVE`; no prepare/commit consensus, admission barrier, or abort subprotocol is required for one passive candidate. After activation, only later eligible work selects the new generation. An active Run remains on the Runner that admitted it; work never migrates between interpreters, and Runner memory is never promoted to durable state.
 
 Drain is bounded. Timeout escalates to terminate and then kill, and the resulting observation distinguishes graceful drain, nonzero exit, unexpected loss, forced termination, and forced kill. Process exit alone never proves that model, tool, provider, or Environment effects stopped or completed. Runner loss maps affected accepted work to the existing interrupted or unknown Host outcomes, while generation-fenced late output cannot commit.
 
@@ -372,7 +363,7 @@ For each nonterminal stream item, the service applies the ordinary child AG-UI o
 
 Harness child invocations deny runtime deferred calls inside the same Run and never return a suspended result. If an unexpected bypass still produces terminal `DeferredToolRequests`, the Harness normalizes it to `status="failed"` with `code="subagent_deferred_unsupported"`; Agent UI commits that ordinary failed terminal job and exposes no answer, approval, denial, or resume action for it.
 
-A prior-process `accepted`, `queued`, or `running` job becomes `interrupted` during recovery. It is never submitted or replayed automatically, even when no child Run ID was recorded. Committed terminal outcomes remain. `resume_subagent` accepts a compatible terminal job with a selected complete child state and creates a new linked job under a new `execution_id`; it never mutates the terminal record, performs deferred resume, or consults the latest child definition. One terminal job can designate at most one delivery-successor continuation. Creating that successor atomically transfers its still-pending immediate-child delivery targets to the new job under the same stable delivery identities; a different continuation attempt conflicts rather than racing or duplicating delivery.
+Opening another Host does not change an `accepted`, `queued`, or `running` job because process generation is not liveness evidence. It is never submitted or replayed automatically, even when no child Run ID was recorded. An explicit versioned cancellation or recovery operation can mark unresolved work `interrupted`; committed terminal outcomes remain. `resume_subagent` accepts a compatible terminal job with a selected complete child state and creates a new linked job under a new `execution_id`; it never mutates the terminal record, performs deferred resume, or consults the latest child definition. One terminal job can designate at most one delivery-successor continuation. Creating that successor atomically transfers its still-pending immediate-child delivery targets to the new job under the same stable delivery identities; a different continuation attempt conflicts rather than racing or duplicating delivery.
 
 Active task, stream, model, provider attachment, `EnvironmentRuntime`, cancellation scope, native input router, usage accumulator, and authority remain process-local. Durable acceptance, failover, and automatic retry remain Foundation Service responsibilities.
 
@@ -455,11 +446,11 @@ The capability is process-local, absent from configuration, Session storage, mod
 
 ## CLI
 
-The interactive and one-shot CLI paths call the same `AgentUiHost` in the stable terminal process. They perform no HTTP request, start no Web server, and listen on no frontend port. The CLI provides the same semantic configuration, Environment, Session, Run, approval, child, runtime-management, and replay operations as WebUI.
+The default `a13n-ui` command and explicit `a13n-ui tui` command are aliases for the same interactive terminal frontend. Both construct the same `AgentUiHost`, start its runtime-generation service before accepting terminal input, perform no HTTP request, start no Web server, and listen on no frontend port. One-shot CLI paths use the same Host boundary rather than defining another application core.
 
 The interactive CLI is a Codex-style single-page terminal experience. One-shot commands expose explicit human-readable or machine-readable output without introducing a second application API. Both consume the same AG-UI schemas and durable query projections. Terminal resize, key binding, clipboard, color, and pager behavior do not alter command or Session semantics.
 
-CLI exit follows the Host shutdown contract: stop frontend acceptance, explicitly cancel or drain current root and async-child work according to Host policy, drain runtime Runners, apply Environment policy, and release the data-root lease last. Closing a renderer or abandoning a one-shot wait is not an implicit claim that accepted work or provider effects stopped.
+CLI exit follows the Host shutdown contract: stop frontend acceptance, explicitly cancel or drain current root and async-child work according to Host policy, drain runtime Runners, apply Environment policy, and close this process's storage collaborators last. Closing a renderer or abandoning a one-shot wait is not an implicit claim that accepted work or provider effects stopped.
 
 ## Surface Equivalence
 
@@ -546,5 +537,5 @@ Using one processed event sequence makes live delivery, replay, protocol inspect
 10. Work requiring distributed durable acceptance, failover, retry, or remote multi-user policy uses Foundation Service rather than local process state.
 11. Local Sandbox uses only the package-pinned managed envd executable or one explicit validated absolute override; acquisition is lazy and never affects Direct Local, Docker, or E2B.
 12. Agent UI Host resolves and verifies envd artifacts, the Local Envd Provider owns subprocess/private-runtime lifecycle, and the low-level client owns only EIP communication.
-13. A runtime Runner owns no Agent UI data-root lease or durable commit authority, and a restart never migrates an active Run.
+13. A runtime Runner owns no Agent UI storage connection or durable commit authority, and a restart never migrates an active Run.
 14. Candidate failure before activation leaves the selected Runner unchanged; forced Runner loss preserves only Host-committed facts and maps unresolved work to interrupted or unknown outcomes.

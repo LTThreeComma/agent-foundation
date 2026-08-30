@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +12,7 @@ from a13n_environment_provider import EnvironmentPauseMode, EnvironmentProviderE
 from a13n_harness import RunModelResolver
 from a13n_ui.composition import ResolvedAgentSnapshot
 from a13n_ui.configuration import ConfigurationSettings, DefinitionRootSettings, LocalDirectorySettings
-from a13n_ui.environments import EnvdExecutableResolver, ProviderRuntimeResolver
+from a13n_ui.environments import ProviderRuntimeResolver
 from a13n_ui.errors import EnvironmentLifecycleError, RuntimeResolutionError, SessionError, StoreIntegrityError
 from a13n_ui.host import open_agent_ui_host
 from a13n_ui.sessions import SessionLifecycleState, SessionUpdate, TurnState
@@ -176,15 +175,12 @@ def _write_composition(
 
 
 async def test_local_envd_upstream_gate_is_explicit_and_never_falls_back() -> None:
-    envd_mock = AsyncMock(spec=EnvdExecutableResolver)
-    envd_mock.resolve.return_value = object()
-    resolver = ProviderRuntimeResolver(cast("EnvdExecutableResolver", envd_mock))
+    resolver = ProviderRuntimeResolver()
 
     with pytest.raises(RuntimeResolutionError) as raised:
         await resolver.resolve("a13n.local-envd")
 
     assert raised.value.code == "local_envd_provider_unavailable"
-    envd_mock.resolve.assert_awaited_once_with()
 
 
 async def test_session_baseline_and_direct_local_environment_survive_restart(tmp_path: Path) -> None:
@@ -402,7 +398,7 @@ async def test_event_subscription_has_gap_free_replay_to_live_cutover(tmp_path: 
         assert len({item.stored.event_id for item in combined}) == len(combined)
 
 
-async def test_startup_recovers_file_first_event_segment(tmp_path: Path) -> None:
+async def test_startup_does_not_claim_an_unregistered_event_segment(tmp_path: Path) -> None:
     definitions = tmp_path / "definitions"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -440,12 +436,17 @@ async def test_startup_recovers_file_first_event_segment(tmp_path: Path) -> None
             presentation.next_sequence = segment.first_sequence
             presentation.last_segment_digest = segment.previous_segment_digest
             await database_session.delete(segment)
+        retained_event_ids = [
+            item.stored.event_id for item in before if item.stored.presentation_sequence < segment.first_sequence
+        ]
+        orphan_path = application._store.layout.sessions / segment.relative_path
 
     async with open_agent_ui_host(settings) as restarted:
-        recovered = await restarted.session_events(session_id)
+        retained = await restarted.session_events(session_id)
         diagnostics = await restarted.recovery_diagnostics()
 
-        assert [item.stored.event_id for item in recovered] == [item.stored.event_id for item in before]
+        assert [item.stored.event_id for item in retained] == retained_event_ids
+        assert orphan_path.is_file()
         assert not any(item.code == "event_segment_unselected" for item in diagnostics)
 
 

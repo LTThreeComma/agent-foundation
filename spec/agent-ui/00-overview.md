@@ -8,10 +8,11 @@ The executable exposes an interactive CLI and one-shot query commands:
 
 ```text
 a13n-ui
+a13n-ui tui
 a13n-ui runtime status
 ```
 
-The default command enters the interactive CLI. Every CLI command opens the same stable Host boundary and accepted configuration. The bundled WebUI attaches through its loopback transport to the same Host operations rather than defining a second executable core. CLI and WebUI use the same SQLite metadata, compressed-file stores, pinned Session composition, and retained/live [post-processor AG-UI sequence](../agent-stream-protocol/00-overview.md). A frontend changes only presentation and transport lifecycle.
+The default command and explicit `tui` command enter the same interactive terminal frontend. Every CLI command opens the same stable Host boundary and accepted configuration. The bundled WebUI attaches through its loopback transport to the same Host operations rather than defining a second executable core. CLI and WebUI use the same SQLite metadata, compressed-file stores, pinned Session composition, and retained/live [post-processor AG-UI sequence](../agent-stream-protocol/00-overview.md). A frontend changes only presentation and transport lifecycle.
 
 Agent UI does not expose a multi-tenant service, durable distributed worker protocol, arbitrary Python composition language, alternative Agent loop, or second Environment operation protocol. Work requiring service-owned durable acceptance, failover, remote authorization, or distributed retry remains Foundation Service responsibility.
 
@@ -64,7 +65,7 @@ An Agent is the exact composition of Model, Prompt, Plugin, available Skill, def
 | Web and terminal rendering                                         | Surface adapters                   | Consume Host queries/events and submit typed commands                                                       |
 | Identity, credentials, Model, provider attachments, current policy | Fresh Host collaborators           | Reauthorized for every root and child invocation                                                            |
 | OpenTelemetry                                                      | Repository observability boundary  | Exported independently; absent from SQLite and Session files                                                |
-| Stable lifetime, routing, and durable execution authority          | `AgentUiHost`                      | Owns the data-root lease, accepted work, runtime selection, persistence, and commit semantics               |
+| Stable lifetime, routing, and durable execution authority          | `AgentUiHost`                      | Owns one frontend lifetime, accepted work, runtime selection, persistence, and commit semantics             |
 | Process-local Agent execution                                      | Runtime Runner                     | Uses exact Harness-built Agents and children; active streams never migrate between Runner generations       |
 | Distributed durable execution                                      | Foundation Service                 | Not emulated by local Sessions or process tasks                                                             |
 
@@ -124,7 +125,7 @@ flowchart TB
     Events --> Web & CLI
 ```
 
-`AgentUiHost` is the only product boundary. Neither surface reads configuration or storage directly, controls the runtime-generation service, constructs a Model/Agent, operates an `EnvironmentProvider`, calls `ExecutableAgent.stream()`, or translates Harness events. A runtime Runner never opens Agent UI SQLite, acquires the data-root lease, edits desired configuration, accepts a Turn, selects a checkpoint, or commits durable state.
+`AgentUiHost` is the only product boundary. Neither surface reads configuration or storage directly, controls the runtime-generation service, constructs a Model/Agent, operates an `EnvironmentProvider`, calls `ExecutableAgent.stream()`, or translates Harness events. A runtime Runner never opens Agent UI SQLite, edits desired configuration, accepts a Turn, selects a checkpoint, or commits durable state.
 
 ## Configuration and Reload
 
@@ -210,11 +211,11 @@ Input acceptance, provider operation, Harness start, Harness result, durable AG-
 
 ## Application Lifetime
 
-One stable process owns one `AgentUiHost` instance and one selected data-root lease. Startup opens and recovers storage, accepts a complete configuration generation, validates selected state and root pending-deferred references, rebuilds required projections, marks prior-process active root Runs and async-child jobs interrupted, and preserves only validated waiting root Turns before commands are accepted.
+Each frontend invocation owns one stable process and one `AgentUiHost` instance. Multiple local Host processes can share the same data root; SQLite transactions and atomic file publication coordinate durable writes without a process-lifetime lease. Startup opens and validates storage, accepts a complete configuration generation, validates selected state and root pending-deferred references, and rebuilds required projections before commands are accepted. It never treats another process generation as proof that the other Host stopped.
 
 Only one foreground Turn advances one Thread at a time. Independent Sessions execute concurrently under configured limits. Model, plugin, provider, AG-UI processor, and executable caches live in runtime Runners and contain no Session authority. Host-side configuration and snapshot caches remain detached from executable runtime objects.
 
-Shutdown stops command acceptance, closes surface subscriptions, requests cancellation, drains root Harness streams and async-subagent tasks, seals event segments, applies Environment lifecycle policy, records interrupted/unknown outcomes, closes executables/providers, and then releases storage. It never reports success merely because a process object disappeared.
+Shutdown stops command acceptance, closes surface subscriptions, requests cancellation, drains root Harness streams and async-subagent tasks, seals event segments, applies Environment lifecycle policy, records interrupted/unknown outcomes, closes executables/providers, and then closes this process's storage collaborators. It never reports success merely because a process object disappeared.
 
 ## Surfaces
 

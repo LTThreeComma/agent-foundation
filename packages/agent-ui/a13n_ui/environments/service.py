@@ -32,9 +32,7 @@ from a13n_harness.environment import (
 )
 from a13n_harness.environment.advanced import (
     EnvironmentRuntime,
-    EnvironmentRuntimeLimits,
     EnvironmentRuntimeMount,
-    EnvironmentStateLimits,
     create_environment_provider_binding,
     create_environment_runtime,
 )
@@ -76,7 +74,6 @@ class EnvironmentService:
         self._repository = EnvironmentRepository(store)
         self._factories = factories
         self._runtimes = runtimes
-        self._locks_guard = Lock()
         self._resource_locks: dict[str, Lock] = {}
         self._live: dict[str, _LiveResource] = {}
         self._borrow_counts: dict[str, int] = {}
@@ -121,38 +118,7 @@ class EnvironmentService:
                     },
                 )
 
-        resources = await self._repository.resources_in_states(
-            frozenset(
-                {
-                    HostResourceLifecycleState.creating,
-                    HostResourceLifecycleState.resuming,
-                    HostResourceLifecycleState.pausing,
-                    HostResourceLifecycleState.destroying,
-                    HostResourceLifecycleState.unknown,
-                }
-            )
-        )
-        reconciled = 0
-        for resource in resources:
-            if resource.host_resource_id in invalid_resources:
-                continue
-            if resource.lifecycle_state is not HostResourceLifecycleState.unknown:
-                operation = resource.last_operation
-                if operation is None:
-                    continue
-                await self._repository.fail_operation(
-                    resource.host_resource_id,
-                    fence=resource.operation_fence,
-                    operation_id=operation.operation_id,
-                    unknown=True,
-                    failure={"code": "environment_operation_interrupted"},
-                )
-            try:
-                await self.reconcile(resource.host_resource_id)
-            except (EnvironmentLifecycleError, RuntimeResolutionError, EnvironmentProviderError):
-                continue
-            reconciled += 1
-        return reconciled
+        return len(invalid_resources)
 
     async def availability(self, session_id: str) -> EnvironmentAvailability:
         return await self._repository.availability(session_id)
@@ -196,8 +162,6 @@ class EnvironmentService:
             environment = create_environment_runtime(
                 mounts=runtime_mounts,
                 default_mount=default_mount,
-                runtime_limits=EnvironmentRuntimeLimits(max_mounts=max(1, len(runtime_mounts))),
-                state_limits=EnvironmentStateLimits(),
             )
             yield environment
 
@@ -311,7 +275,7 @@ class EnvironmentService:
                 raise
 
     async def reconcile(self, host_resource_id: str) -> HostEnvironmentResource:
-        lock = await self._lock_for(host_resource_id)
+        lock = self._lock_for(host_resource_id)
         async with lock:
             current = await self._repository.resource(host_resource_id)
             operation_view = current.last_operation
@@ -374,7 +338,7 @@ class EnvironmentService:
             raise BaseExceptionGroup("Environment resource shutdown failed", failures)
 
     async def _ensure_available(self, host_resource_id: str) -> HostEnvironmentResource:
-        lock = await self._lock_for(host_resource_id)
+        lock = self._lock_for(host_resource_id)
         async with lock:
             current = await self._repository.resource(host_resource_id)
             return await self._ensure_available_locked(current)
@@ -578,7 +542,7 @@ class EnvironmentService:
         self,
         host_resource_id: str,
     ) -> AsyncGenerator[EnvironmentRuntimeAttachment]:
-        lock = await self._lock_for(host_resource_id)
+        lock = self._lock_for(host_resource_id)
         async with lock:
             if host_resource_id in self._lifecycle_pending:
                 raise EnvironmentLifecycleError(
@@ -628,7 +592,7 @@ class EnvironmentService:
 
     @asynccontextmanager
     async def _exclusive_lifecycle(self, host_resource_id: str) -> AsyncGenerator[None]:
-        lock = await self._lock_for(host_resource_id)
+        lock = self._lock_for(host_resource_id)
         async with lock:
             if host_resource_id in self._lifecycle_pending:
                 raise EnvironmentLifecycleError(
@@ -650,13 +614,8 @@ class EnvironmentService:
                 async with lock:
                     self._lifecycle_pending.discard(host_resource_id)
 
-    async def _lock_for(self, host_resource_id: str) -> Lock:
-        async with self._locks_guard:
-            lock = self._resource_locks.get(host_resource_id)
-            if lock is None:
-                lock = Lock()
-                self._resource_locks[host_resource_id] = lock
-            return lock
+    def _lock_for(self, host_resource_id: str) -> Lock:
+        return self._resource_locks.setdefault(host_resource_id, Lock())
 
 
 def _permissions(mount: ResolvedEnvironmentMountDefinition) -> EnvironmentPermissionSet:
