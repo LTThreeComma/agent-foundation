@@ -69,16 +69,12 @@ async def create_model(
     actor: Actor,
     workspace_id: str,
     body: ModelConfigCreate,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=256)] = None,
 ) -> ModelConfigResource:
-    model, replayed = await _service(request).create(
+    model = await _service(request).create(
         actor=actor,
         workspace_id=workspace_id,
         request=body,
-        idempotency_key=_require_idempotency_key(idempotency_key),
     )
-    if replayed:
-        response.status_code = status.HTTP_200_OK
     response.headers["ETag"] = model.strong_etag()
     return model
 
@@ -149,17 +145,13 @@ async def copy_model(
     workspace_id: str,
     model_id: str,
     body: ModelConfigCopy,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=256)] = None,
 ) -> ModelConfigResource:
-    model, replayed = await _service(request).copy(
+    model = await _service(request).copy(
         actor=actor,
         workspace_id=workspace_id,
         model_id=model_id,
         request=body,
-        idempotency_key=_require_idempotency_key(idempotency_key),
     )
-    if replayed:
-        response.status_code = status.HTTP_200_OK
     response.headers["ETag"] = model.strong_etag()
     return model
 
@@ -183,12 +175,6 @@ async def list_model_references(
         limit=limit,
         cursor=cursor,
     )
-
-
-def _require_idempotency_key(value: str | None) -> str:
-    if value is None:
-        raise ModelManagementError("idempotency_key_required", "Idempotency-Key is required.", status_code=400)
-    return value
 
 
 def _require_if_match(value: str | None) -> str:

@@ -185,14 +185,9 @@ async def test_provider_discovery_is_authenticated_and_finite(api_client: httpx2
 
 @pytest.mark.anyio
 async def test_model_resource_http_lifecycle(api_client: httpx2.AsyncClient) -> None:
-    missing_key = await api_client.post(f"/api/v1/workspaces/{WORKSPACE_ID}/models", json=candidate())
-    assert missing_key.status_code == 400
-    assert missing_key.json()["error"]["code"] == "idempotency_key_required"
-
     created = await api_client.post(
         f"/api/v1/workspaces/{WORKSPACE_ID}/models",
         json=candidate(),
-        headers={"Idempotency-Key": "create-primary"},
     )
     assert created.status_code == 201
     model = created.json()
@@ -221,7 +216,6 @@ async def test_model_resource_http_lifecycle(api_client: httpx2.AsyncClient) -> 
     copied = await api_client.post(
         f"{model_url}/copy",
         json={"name": "Copy", "enabled": False},
-        headers={"Idempotency-Key": "copy-primary"},
     )
     assert copied.status_code == 201
     assert copied.json()["credential"] == model["credential"]
@@ -247,7 +241,6 @@ async def test_unknown_input_fields_use_shared_safe_error(api_client: httpx2.Asy
     response = await api_client.post(
         f"/api/v1/workspaces/{WORKSPACE_ID}/models",
         json=body,
-        headers={"Idempotency-Key": "invalid"},
     )
 
     assert response.status_code == 400

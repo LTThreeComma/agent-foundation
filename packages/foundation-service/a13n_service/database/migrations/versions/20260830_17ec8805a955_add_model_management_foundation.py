@@ -1,8 +1,8 @@
 """add model management foundation.
 
-Revision ID: 721b262eac56
+Revision ID: 17ec8805a955
 Revises:
-Create Date: 2026-08-29 17:31:26.354704+00:00
+Create Date: 2026-08-30 05:32:58.793279+00:00
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "721b262eac56"
+revision: str = "17ec8805a955"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -206,37 +206,6 @@ def upgrade() -> None:
         "uq_model_configs_workspace_normalized_name", "model_configs", ["workspace_id", "normalized_name"], unique=True
     )
     op.create_table(
-        "model_idempotency_records",
-        sa.Column("id", sa.String(length=72), nullable=False),
-        sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(length=72), nullable=False),
-        sa.Column("principal_type", sa.String(length=32), nullable=False),
-        sa.Column("principal_id", sa.String(length=72), nullable=False),
-        sa.Column("operation", sa.String(length=16), nullable=False),
-        sa.Column("idempotency_key", sa.String(length=256), nullable=False),
-        sa.Column("request_sha256", sa.String(length=64), nullable=False),
-        sa.Column("model_id", sa.String(length=72), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "operation IN ('create', 'copy')", name=op.f("ck_model_idempotency_records_operation_valid")
-        ),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "organization_id"],
-            ["workspaces.id", "workspaces.organization_id"],
-            name=op.f("fk_model_idempotency_records_workspace_id_workspaces"),
-            ondelete="CASCADE",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_model_idempotency_records")),
-    )
-    op.create_index("ix_model_idempotency_expiry", "model_idempotency_records", ["expires_at"], unique=False)
-    op.create_index(
-        "uq_model_idempotency_scope_key",
-        "model_idempotency_records",
-        ["workspace_id", "principal_type", "principal_id", "operation", "idempotency_key"],
-        unique=True,
-    )
-    op.create_table(
         "role_bindings",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
@@ -338,9 +307,6 @@ def downgrade() -> None:
     op.drop_index("uq_role_bindings_principal_resource", table_name="role_bindings")
     op.drop_index("ix_role_bindings_authorization", table_name="role_bindings")
     op.drop_table("role_bindings")
-    op.drop_index("uq_model_idempotency_scope_key", table_name="model_idempotency_records")
-    op.drop_index("ix_model_idempotency_expiry", table_name="model_idempotency_records")
-    op.drop_table("model_idempotency_records")
     op.drop_index("uq_model_configs_workspace_normalized_name", table_name="model_configs")
     op.drop_index("ix_model_configs_workspace_updated", table_name="model_configs")
     op.drop_index("ix_model_configs_workspace_provider", table_name="model_configs")

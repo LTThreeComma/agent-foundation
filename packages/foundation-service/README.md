@@ -24,7 +24,7 @@ FOUNDATION_SECRET_ENCRYPTION_KEY_ID='master-2026-08'
 
 The key has no default and is never stored in the database. Values in `managed_secrets` use the `aes_256_gcm_v1` AES-256-GCM profile and are decrypted only after the database session closes. A Host can inject `ServiceComponents.model_secret_resolver` and `model_connection_tester` when its Secret authority is supplied by another trusted composition.
 
-Model create and copy require `Idempotency-Key`; update and delete require the current strong `ETag` through `If-Match`. Custom endpoints are limited to the trusted OpenAI-compatible adapter and are checked against `FOUNDATION_MODEL_PRIVATE_ENDPOINT_DOMAINS` and `FOUNDATION_MODEL_PRIVATE_ENDPOINT_CIDRS`. Redirects are not followed by the built-in tester.
+Model create and copy are synchronous mutations protected by Workspace name uniqueness and retain no separate replay records. Update and delete require the current strong `ETag` through `If-Match`. Custom endpoints are limited to the trusted OpenAI-compatible adapter and are checked against `FOUNDATION_MODEL_PRIVATE_ENDPOINT_DOMAINS` and `FOUNDATION_MODEL_PRIVATE_ENDPOINT_CIDRS`. Redirects are not followed by the built-in tester.
 
 The Agent domain supplies `ServiceComponents.model_reference_reader` once its immutable AgentRevision store is composed. Model deletion and the references route fail closed while that owner is unavailable; Model Management does not create a shadow AgentRevision table.
 

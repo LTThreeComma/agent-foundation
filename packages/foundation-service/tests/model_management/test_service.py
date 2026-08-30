@@ -191,21 +191,13 @@ def create_request(*, name: str = "Primary", model_name: str = "gpt-5.6-terra") 
 
 
 @pytest.mark.anyio
-async def test_create_commits_model_idempotency_and_safe_audit(
+async def test_create_commits_model_and_safe_audit(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, engine = model_service
 
-    created, replayed = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="create-primary"
-    )
-    replay, replayed_again = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="create-primary"
-    )
+    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
-    assert not replayed
-    assert replayed_again
-    assert replay == created
     assert created.id.startswith("mdl_")
     assert created.base_url == "https://api.openai.com/v1"
     assert created.capability_source == "catalog"
@@ -219,37 +211,14 @@ async def test_create_commits_model_idempotency_and_safe_audit(
 
 
 @pytest.mark.anyio
-async def test_idempotency_key_reuse_with_different_input_conflicts(
-    model_service: tuple[ModelConfigService, AsyncEngine],
-) -> None:
-    service, _ = model_service
-    await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="same-key")
-
-    with pytest.raises(ModelManagementError) as captured:
-        await service.create(
-            actor=actor(),
-            workspace_id=WORKSPACE_ID,
-            request=create_request(model_name="gpt-5.6-sol"),
-            idempotency_key="same-key",
-        )
-
-    assert captured.value.code == "idempotency_conflict"
-    assert captured.value.status_code == 409
-
-
-@pytest.mark.anyio
 async def test_workspace_name_uniqueness_is_case_insensitive(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, _ = model_service
-    await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(name="Primary"), idempotency_key="one"
-    )
+    await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(name="Primary"))
 
     with pytest.raises(ModelManagementError) as captured:
-        await service.create(
-            actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(name="PRIMARY"), idempotency_key="two"
-        )
+        await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(name="PRIMARY"))
 
     assert captured.value.code == "model_name_conflict"
 
@@ -259,9 +228,7 @@ async def test_viewer_can_read_but_cannot_create(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, _ = model_service
-    created, _ = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="create"
-    )
+    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
     assert (await service.get(actor=actor(VIEWER_ID), workspace_id=WORKSPACE_ID, model_id=created.id)).id == created.id
     with pytest.raises(ModelManagementError) as captured:
@@ -269,7 +236,6 @@ async def test_viewer_can_read_but_cannot_create(
             actor=actor(VIEWER_ID),
             workspace_id=WORKSPACE_ID,
             request=create_request(name="Denied"),
-            idempotency_key="denied",
         )
     assert captured.value.code == "resource_not_found"
     assert captured.value.status_code == 404
@@ -286,7 +252,6 @@ async def test_viewer_can_read_but_cannot_create(
             actor=actor(VIEWER_ID),
             workspace_id=WORKSPACE_ID,
             request=unsafe,
-            idempotency_key="denied-before-endpoint-validation",
         )
     assert unauthorized.value.code == "resource_not_found"
 
@@ -301,9 +266,7 @@ async def test_missing_secret_reference_fails_closed(
     )
 
     with pytest.raises(ModelManagementError) as captured:
-        await service.create(
-            actor=actor(), workspace_id=WORKSPACE_ID, request=request, idempotency_key="missing-secret"
-        )
+        await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=request)
     assert captured.value.code == "credential_not_eligible"
     assert SECRET_ID not in captured.value.message
 
@@ -336,9 +299,7 @@ async def test_user_secret_requires_exact_invoking_user(
         update={"credential": InvokingUserSecretCredential(secret_key="personal_model_key")}
     )
 
-    created, _ = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=request, idempotency_key="personal"
-    )
+    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=request)
     assert created.credential.source == "invoking_user_secret"
 
 
@@ -356,7 +317,7 @@ async def test_invalid_custom_endpoint_is_rejected_before_persistence(
     )
 
     with pytest.raises(ModelManagementError) as captured:
-        await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=request, idempotency_key="unsafe")
+        await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=request)
     assert captured.value.code == "invalid_model_configuration"
 
 
@@ -365,7 +326,7 @@ async def test_list_is_filtered_and_cursor_paginated(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, _ = model_service
-    for index, name in enumerate(("OpenAI Primary", "OpenAI Secondary", "DeepSeek")):
+    for name in ("OpenAI Primary", "OpenAI Secondary", "DeepSeek"):
         request = create_request(name=name)
         if name == "DeepSeek":
             request = ModelConfigCreate(
@@ -376,9 +337,7 @@ async def test_list_is_filtered_and_cursor_paginated(
                 provider_config={},
                 enabled=False,
             )
-        await service.create(
-            actor=actor(), workspace_id=WORKSPACE_ID, request=request, idempotency_key=f"create-{index}"
-        )
+        await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=request)
 
     first = await service.list(actor=actor(VIEWER_ID), workspace_id=WORKSPACE_ID, limit=2)
     second = await service.list(actor=actor(VIEWER_ID), workspace_id=WORKSPACE_ID, limit=2, cursor=first.next_cursor)
@@ -404,9 +363,7 @@ async def test_patch_requires_current_etag_and_a_noop_keeps_it(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, engine = model_service
-    created, _ = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="create"
-    )
+    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
     with pytest.raises(ModelManagementError) as captured:
         await service.patch(
@@ -448,32 +405,19 @@ async def test_patch_requires_current_etag_and_a_noop_keeps_it(
 
 
 @pytest.mark.anyio
-async def test_copy_reuses_only_non_secret_configuration_and_is_idempotent(
+async def test_copy_reuses_only_non_secret_configuration(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, _ = model_service
-    source, _ = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="source"
-    )
+    source = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
-    copied, replayed = await service.copy(
+    copied = await service.copy(
         actor=actor(),
         workspace_id=WORKSPACE_ID,
         model_id=source.id,
         request=ModelConfigCopy(name="Copy", description="Copied", enabled=False),
-        idempotency_key="copy",
-    )
-    replay, replayed_again = await service.copy(
-        actor=actor(),
-        workspace_id=WORKSPACE_ID,
-        model_id=source.id,
-        request=ModelConfigCopy(name="Copy", description="Copied", enabled=False),
-        idempotency_key="copy",
     )
 
-    assert not replayed
-    assert replayed_again
-    assert copied == replay
     assert copied.id != source.id
     assert copied.credential == source.credential
     assert copied.capabilities == source.capabilities
@@ -486,9 +430,7 @@ async def test_delete_hard_removes_model_but_not_secret(
     model_service: tuple[ModelConfigService, AsyncEngine],
 ) -> None:
     service, engine = model_service
-    created, _ = await service.create(
-        actor=actor(), workspace_id=WORKSPACE_ID, request=create_request(), idempotency_key="create"
-    )
+    created = await service.create(actor=actor(), workspace_id=WORKSPACE_ID, request=create_request())
 
     await service.delete(actor=actor(), workspace_id=WORKSPACE_ID, model_id=created.id, if_match=created.strong_etag())
 

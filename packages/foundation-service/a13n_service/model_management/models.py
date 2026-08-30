@@ -1,4 +1,4 @@
-"""Relational ModelConfig and retry-evidence rows."""
+"""Relational ModelConfig rows."""
 
 from __future__ import annotations
 
@@ -83,40 +83,6 @@ class ModelConfigRecord(Base):
             created_at=_as_utc(self.created_at),
             updated_at=_as_utc(self.updated_at),
         )
-
-
-class ModelIdempotencyRecord(Base):
-    __tablename__ = "model_idempotency_records"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ("workspace_id", "organization_id"),
-            ("workspaces.id", "workspaces.organization_id"),
-            ondelete="CASCADE",
-        ),
-        CheckConstraint("operation IN ('create', 'copy')", name="operation_valid"),
-        Index(
-            "uq_model_idempotency_scope_key",
-            "workspace_id",
-            "principal_type",
-            "principal_id",
-            "operation",
-            "idempotency_key",
-            unique=True,
-        ),
-        Index("ix_model_idempotency_expiry", "expires_at"),
-    )
-
-    id: Mapped[str] = mapped_column(String(72), primary_key=True)
-    organization_id: Mapped[str] = mapped_column(String(72))
-    workspace_id: Mapped[str] = mapped_column(String(72))
-    principal_type: Mapped[str] = mapped_column(String(32))
-    principal_id: Mapped[str] = mapped_column(String(72))
-    operation: Mapped[str] = mapped_column(String(16))
-    idempotency_key: Mapped[str] = mapped_column(String(256))
-    request_sha256: Mapped[str] = mapped_column(String(64))
-    model_id: Mapped[str] = mapped_column(String(72))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def _as_utc(value: datetime) -> datetime:

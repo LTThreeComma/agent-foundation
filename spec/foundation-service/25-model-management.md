@@ -307,8 +307,12 @@ GET    /api/v1/workspaces/{workspace_id}/models/{model_id}/references
 
 The model collection uses cursor pagination, deterministic
 `updated_at desc, id desc` order, bounded name search, and explicit
-`provider_type` and `enabled` filters. Create and copy accept an
-`Idempotency-Key`.
+`provider_type` and `enabled` filters.
+
+Create and copy are synchronous database mutations and retain no separate
+idempotency or replay record. They do not accept `Idempotency-Key`. Repeating
+either operation is a new request; the Workspace name uniqueness constraint
+returns `409 model_name_conflict` when the requested name already exists.
 
 A single-resource response includes a strong `ETag` derived from the complete
 mutable representation. `PATCH` and `DELETE` require `If-Match`; a missing

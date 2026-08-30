@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import wraps
 from time import monotonic
 from typing import Any, Protocol, cast
@@ -43,7 +41,7 @@ from .domain import (
     new_model_config_id,
 )
 from .endpoint_policy import EndpointPolicy, EndpointPolicyError
-from .models import ModelConfigRecord, ModelIdempotencyRecord
+from .models import ModelConfigRecord
 from .providers import ProviderDefinitionCollection, ProviderRegistry, ValidatedProviderSelection
 
 _CREDENTIAL_ADAPTER = TypeAdapter(ModelCredential)
@@ -170,67 +168,15 @@ class ModelConfigService:
         actor: AuthenticatedActor,
         workspace_id: str,
         request: ModelConfigCreate,
-        idempotency_key: str,
-    ) -> tuple[ModelConfigResource, bool]:
-        """Create or replay one ModelConfig. The boolean is true for a replay."""
-
-        key = _validate_idempotency_key(idempotency_key)
+    ) -> ModelConfigResource:
         await self._preauthorize_manage(actor=actor, workspace_id=workspace_id)
         selection = await self._validate_provider(request)
-        request_sha256 = _canonical_sha256(request.model_dump(mode="json"))
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
                 workspace = await _authorize(
                     session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_manage
                 )
-                replay = await session.scalar(
-                    select(ModelIdempotencyRecord).where(
-                        ModelIdempotencyRecord.workspace_id == workspace.workspace_id,
-                        ModelIdempotencyRecord.principal_type == actor.principal.principal_type.value,
-                        ModelIdempotencyRecord.principal_id == actor.principal.principal_id,
-                        ModelIdempotencyRecord.operation == "create",
-                        ModelIdempotencyRecord.idempotency_key == key,
-                    )
-                )
-                if replay is not None:
-                    if _as_utc(replay.expires_at) <= now:
-                        await session.delete(replay)
-                        await session.flush()
-                        replay = None
-                if replay is not None:
-                    if replay.request_sha256 != request_sha256:
-                        raise ModelManagementError(
-                            "idempotency_conflict",
-                            "The idempotency key was already used with different input.",
-                            status_code=409,
-                        )
-                    record = await session.scalar(
-                        select(ModelConfigRecord).where(
-                            ModelConfigRecord.organization_id == workspace.organization_id,
-                            ModelConfigRecord.workspace_id == workspace.workspace_id,
-                            ModelConfigRecord.id == replay.model_id,
-                        )
-                    )
-                    if record is None:
-                        raise ModelManagementError(
-                            "idempotency_result_unavailable",
-                            "The prior idempotent result is no longer available.",
-                            status_code=409,
-                        )
-                    session.add(
-                        _audit_record(
-                            actor=actor,
-                            organization_id=workspace.organization_id,
-                            workspace_id=workspace.workspace_id,
-                            model_id=record.id,
-                            action="model_config.create",
-                            now=now,
-                            details={"idempotent_replay": True},
-                        )
-                    )
-                    return record.to_resource(), True
-
                 await _require_eligible_credential(
                     session,
                     organization_id=workspace.organization_id,
@@ -263,21 +209,6 @@ class ModelConfigService:
                 )
                 session.add(record)
                 session.add(
-                    ModelIdempotencyRecord(
-                        id=new_object_id("idem"),
-                        organization_id=workspace.organization_id,
-                        workspace_id=workspace.workspace_id,
-                        principal_type=actor.principal.principal_type.value,
-                        principal_id=actor.principal.principal_id,
-                        operation="create",
-                        idempotency_key=key,
-                        request_sha256=request_sha256,
-                        model_id=model_id,
-                        created_at=now,
-                        expires_at=now + timedelta(hours=24),
-                    )
-                )
-                session.add(
                     _audit_record(
                         actor=actor,
                         organization_id=workspace.organization_id,
@@ -288,18 +219,8 @@ class ModelConfigService:
                     )
                 )
                 await session.flush()
-                return record.to_resource(), False
+                return record.to_resource()
         except IntegrityError as error:
-            replay = await self._replay_after_integrity(
-                actor=actor,
-                workspace_id=workspace_id,
-                operation="create",
-                idempotency_key=key,
-                request_sha256=request_sha256,
-                now=now,
-            )
-            if replay is not None:
-                return replay, True
             raise ModelManagementError(
                 "model_name_conflict",
                 "A model configuration with this name already exists in the Workspace.",
@@ -540,9 +461,7 @@ class ModelConfigService:
         workspace_id: str,
         model_id: str,
         request: ModelConfigCopy,
-        idempotency_key: str,
-    ) -> tuple[ModelConfigResource, bool]:
-        key = _validate_idempotency_key(idempotency_key)
+    ) -> ModelConfigResource:
         await self._preauthorize_manage(actor=actor, workspace_id=workspace_id)
         source = await self.get(actor=actor, workspace_id=workspace_id, model_id=model_id)
         if source.base_url is not None:
@@ -552,59 +471,12 @@ class ModelConfigService:
                 raise ModelManagementError(
                     "invalid_model_configuration", "The source model configuration is no longer valid.", status_code=400
                 ) from error
-        request_sha256 = _canonical_sha256({"source_model_id": model_id, "request": request.model_dump(mode="json")})
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
                 workspace = await _authorize(
                     session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_manage
                 )
-                replay = await session.scalar(
-                    select(ModelIdempotencyRecord).where(
-                        ModelIdempotencyRecord.workspace_id == workspace.workspace_id,
-                        ModelIdempotencyRecord.principal_type == actor.principal.principal_type.value,
-                        ModelIdempotencyRecord.principal_id == actor.principal.principal_id,
-                        ModelIdempotencyRecord.operation == "copy",
-                        ModelIdempotencyRecord.idempotency_key == key,
-                    )
-                )
-                if replay is not None:
-                    if _as_utc(replay.expires_at) <= now:
-                        await session.delete(replay)
-                        await session.flush()
-                        replay = None
-                if replay is not None:
-                    if replay.request_sha256 != request_sha256:
-                        raise ModelManagementError(
-                            "idempotency_conflict",
-                            "The idempotency key was already used with different input.",
-                            status_code=409,
-                        )
-                    replay_record = await session.scalar(
-                        select(ModelConfigRecord).where(
-                            ModelConfigRecord.organization_id == workspace.organization_id,
-                            ModelConfigRecord.workspace_id == workspace.workspace_id,
-                            ModelConfigRecord.id == replay.model_id,
-                        )
-                    )
-                    if replay_record is None:
-                        raise ModelManagementError(
-                            "idempotency_result_unavailable",
-                            "The prior idempotent result is no longer available.",
-                            status_code=409,
-                        )
-                    session.add(
-                        _audit_record(
-                            actor=actor,
-                            organization_id=workspace.organization_id,
-                            workspace_id=workspace.workspace_id,
-                            model_id=replay_record.id,
-                            action="model_config.copy",
-                            now=now,
-                            details={"idempotent_replay": True},
-                        )
-                    )
-                    return replay_record.to_resource(), True
                 source_record = await session.scalar(
                     select(ModelConfigRecord).where(
                         ModelConfigRecord.organization_id == workspace.organization_id,
@@ -648,21 +520,6 @@ class ModelConfigService:
                 )
                 session.add(copied)
                 session.add(
-                    ModelIdempotencyRecord(
-                        id=new_object_id("idem"),
-                        organization_id=workspace.organization_id,
-                        workspace_id=workspace.workspace_id,
-                        principal_type=actor.principal.principal_type.value,
-                        principal_id=actor.principal.principal_id,
-                        operation="copy",
-                        idempotency_key=key,
-                        request_sha256=request_sha256,
-                        model_id=copied_id,
-                        created_at=now,
-                        expires_at=now + timedelta(hours=24),
-                    )
-                )
-                session.add(
                     _audit_record(
                         actor=actor,
                         organization_id=workspace.organization_id,
@@ -673,18 +530,8 @@ class ModelConfigService:
                     )
                 )
                 await session.flush()
-                return copied.to_resource(), False
+                return copied.to_resource()
         except IntegrityError as error:
-            replay = await self._replay_after_integrity(
-                actor=actor,
-                workspace_id=workspace_id,
-                operation="copy",
-                idempotency_key=key,
-                request_sha256=request_sha256,
-                now=now,
-            )
-            if replay is not None:
-                return replay, True
             raise ModelManagementError(
                 "model_name_conflict",
                 "A model configuration with this name already exists in the Workspace.",
@@ -853,64 +700,6 @@ class ModelConfigService:
             )
         return ModelConnectionTestResult(success=success, elapsed_ms=elapsed_ms, code=code, message=message)
 
-    async def _replay_after_integrity(
-        self,
-        *,
-        actor: AuthenticatedActor,
-        workspace_id: str,
-        operation: str,
-        idempotency_key: str,
-        request_sha256: str,
-        now: datetime,
-    ) -> ModelConfigResource | None:
-        async with transaction(self._sessions) as session:
-            workspace = await _authorize(
-                session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.models_manage
-            )
-            replay = await session.scalar(
-                select(ModelIdempotencyRecord).where(
-                    ModelIdempotencyRecord.workspace_id == workspace.workspace_id,
-                    ModelIdempotencyRecord.principal_type == actor.principal.principal_type.value,
-                    ModelIdempotencyRecord.principal_id == actor.principal.principal_id,
-                    ModelIdempotencyRecord.operation == operation,
-                    ModelIdempotencyRecord.idempotency_key == idempotency_key,
-                    ModelIdempotencyRecord.expires_at > now,
-                )
-            )
-            if replay is None:
-                return None
-            if replay.request_sha256 != request_sha256:
-                raise ModelManagementError(
-                    "idempotency_conflict",
-                    "The idempotency key was already used with different input.",
-                    status_code=409,
-                )
-            record = await session.scalar(
-                select(ModelConfigRecord).where(
-                    ModelConfigRecord.organization_id == workspace.organization_id,
-                    ModelConfigRecord.workspace_id == workspace.workspace_id,
-                    ModelConfigRecord.id == replay.model_id,
-                )
-            )
-            if record is None:
-                raise ModelManagementError(
-                    "idempotency_result_unavailable",
-                    "The prior idempotent result is no longer available.",
-                    status_code=409,
-                )
-            session.add(
-                _audit_record(
-                    actor=actor,
-                    organization_id=workspace.organization_id,
-                    workspace_id=workspace.workspace_id,
-                    model_id=record.id,
-                    action=f"model_config.{operation}",
-                    now=now,
-                    details={"idempotent_replay": True},
-                )
-            )
-            return record.to_resource()
-
     async def _preauthorize_manage(self, *, actor: AuthenticatedActor, workspace_id: str) -> None:
         async with transaction(self._sessions) as session:
             await _authorize(
@@ -1061,26 +850,3 @@ def _audit_record(
 
 def _normalize_name(name: str) -> str:
     return name.casefold()
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _canonical_sha256(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _validate_idempotency_key(value: str) -> str:
-    if (
-        not value
-        or len(value.encode()) > 256
-        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
-    ):
-        raise ModelManagementError(
-            "invalid_idempotency_key",
-            "Idempotency-Key must contain 1 through 256 printable ASCII characters.",
-            status_code=400,
-        )
-    return value
