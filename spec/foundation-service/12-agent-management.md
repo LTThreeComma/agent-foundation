@@ -83,6 +83,7 @@ A custom Preset is created as `enabled` with no active Version. Its complete con
 - instructions and typed input and output declarations;
 - one exact `model_id` plus concrete Harness `HarnessModelCharacteristics` and native `ModelSettings`;
 - Capability, Tool, Skill, Connector, and Environment declarations or exact managed-resource references;
+- bounded public protocol metadata, schemas, visibility, client-tool policy, and limits;
 - non-secret Secret requirements;
 - bounded trusted-adapter keys and configuration;
 - the Harness Plugin Configuration Document and, in `on_demand`, exact PluginVersion bindings; and
@@ -91,6 +92,54 @@ A custom Preset is created as `enabled` with no active Version. Its complete con
 The config contains no Python class, import target, callable, native Model, Toolset, Capability instance, plugin object, client, credential, plaintext Secret, provider attachment, live controller, arbitrary artifact URL, or process-local value. A request cannot carry a broad `config_override`. Per-Turn input, fresh bindings, and typed execution options can narrow execution or satisfy declared requirements, but cannot replace the model, instructions, output schema, tools, Capabilities, plugins, dependency set, Environment provider contract, or security ceiling.
 
 Saving config performs only request-schema structure, type, size, and bounds validation. Foundation exposes no independent Validate resource, preview state, warning collection, or partially valid config lifecycle. Publish is the sole authoritative resolve-and-build validation path.
+
+## Protocol Configuration
+
+Every `AgentPresetConfig` embeds one finite `protocol` configuration. It is
+Preset-owned authoring data rather than an independently addressable resource,
+and it has no separate lifecycle, API, enable switch, or content digest:
+
+```python
+class ProtocolConfig:
+    schema_version: Literal["1"]
+    public_name: str
+    public_description: str | None
+    input_modes: tuple[str, ...]
+    output_modes: tuple[str, ...]
+    input_data_schema: JsonObject | None
+    state_schema: JsonObject | None
+    context_schema: JsonObject | None
+    client_tools: tuple[ClientToolPolicy, ...]
+    event_visibility: tuple[str, ...]
+    a2a_skills: tuple[A2ASkillProjection, ...]
+    extended_agent_card: ExtendedAgentCardPolicy | None
+    limits: ProtocolLimits
+```
+
+The bounded nested types are Foundation-owned serializable values. Publish
+validates JSON Schemas, public metadata, MIME modes, event names, client-tool
+policies, A2A projections, and per-protocol limits against finite registries and
+deployment hard ceilings. Configuration can narrow a permitted surface but
+cannot expose raw reasoning, credentials, private execution identities,
+unregistered events, arbitrary code, or a capability that the deployment does
+not support.
+
+Safe defaults accept bounded text input, expose bounded text output and the
+standard Run, text, and client-visible tool event families, accept no client
+tools, require empty state and context, generate a minimal public-safe A2A Agent
+Card, and expose no extended Card. Native and Hosted AG-UI remain available for
+every callable Preset. The deployment-wide `gateway.a2a_enabled` setting is the
+only A2A availability switch; ProtocolConfig does not enable or disable a
+protocol.
+
+Publish copies the normalized ProtocolConfig into the immutable
+`AgentPresetVersion`, whose `content_digest` already covers the complete config.
+Hosted AG-UI Run and A2A Task acceptance persist the exact
+`agent_preset_version_id`; retry, feedback, recovery, and replay therefore use
+the same protocol configuration without storing a redundant protocol digest.
+Publishing another Version changes Cards and acceptance policy only for later
+work. Continuation additionally follows the state and input compatibility rules
+of the selected Version.
 
 ## Immutable AgentPresetVersion
 
@@ -432,3 +481,4 @@ Wheel and entry-point constraints give deterministic packaging and loading, not 
 10. `on_demand` Preset Versions bind exact PluginVersions and never resolve `latest`; `runner` Preset Versions use stable keys and Turn acceptance pins the active deployment lock.
 11. Runtime commands succeed only in `runner`; `on_demand` conflicts remain eligible before claim and are never silently substituted.
 12. No AgentPreset or Plugin Version is mutated, overwritten, or exposed through hard delete.
+13. ProtocolConfig is Preset-owned authoring data frozen by AgentPresetVersion; it is not another resource, digest, or per-Preset protocol switch.

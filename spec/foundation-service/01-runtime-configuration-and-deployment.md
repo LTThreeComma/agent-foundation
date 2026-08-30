@@ -54,6 +54,9 @@ root = "/var/lib/foundation"
 
 [control]
 
+[gateway]
+a2a_enabled = true
+
 [worker]
 
 [plugin_runtime]
@@ -65,6 +68,13 @@ The example defines section ownership, not an exhaustive setting catalog. The ex
 The artifact's fixed distribution descriptor supplies the complete typed configuration schema before values are parsed. No CLI option, TOML field, or environment variable selects a distribution or names an import target. Distribution-specific settings live in an explicit namespaced section and cannot reinterpret a common field. Secret-bearing values can come from the selected TOML file or environment. They remain redacted from representations, logs, traces, errors, probes, and generated configuration output. The deployment protects any file or environment source containing credentials.
 
 Configuration is immutable after startup. Changing a setting requires a new process. The service performs no partial or hot reload that could leave replicas or role components using different configuration generations.
+
+`gateway.a2a_enabled` is the single protocol availability switch. It defaults
+to `true`. Native and Hosted AG-UI have no runtime enable setting. When false,
+the `control` or `all` process omits A2A discovery, runtime, streaming, push
+routes, and A2A delivery components while preserving every Native and Hosted
+AG-UI surface. The setting does not select another distribution and there is no
+Agent-level A2A enable setting.
 
 ## Deployment Profiles
 
@@ -91,6 +101,8 @@ child-process lifecycle; lock-scoped Runner children own the execution loop.
 | Capability                                | `control` | `worker` |   `all` |
 | ----------------------------------------- | --------: | -------: | ------: |
 | Product API and browser application       |       Yes |       No |     Yes |
+| Native and Hosted AG-UI Gateway surfaces  |       Yes |       No |     Yes |
+| A2A Gateway surface when enabled          |       Yes |       No |     Yes |
 | Authentication and authorization ingress  |       Yes |       No |     Yes |
 | Domain-owned control reconcilers          |       Yes |       No |     Yes |
 | Outbox publication                        |       Yes |       No |     Yes |
@@ -152,6 +164,10 @@ Readiness succeeds only when:
 - every selected critical role component started successfully; and
 - a Worker can scan work through a healthy on-demand loop or the healthy Runner required by its configured profile.
 
+An enabled A2A surface contributes its required push and delivery components to
+readiness. A disabled A2A surface contributes no route, component, or readiness
+dependency.
+
 Loss of PostgreSQL, Redis, shared object storage, or another role-required dependency makes the affected process unready. A transient dependency loss does not by itself make liveness fail or erase already committed work. The process stops accepting new dependent work while the owning component performs bounded reconnect behavior. An unrecoverable client or component failure terminates the process.
 
 Probe responses expose only bounded status, role, build identity, and safe dependency categories. They contain no endpoint, credential, tenant data, queue contents, traceback, or raw provider error.
@@ -188,6 +204,9 @@ No failure causes an implicit switch to a local backend, another distribution, o
 
 Role values, configuration precedence, stable TOML section names, Plugin Runtime mode, and supported deployment profiles are operational compatibility contracts. New optional fields and new distribution-owned namespaces can be added. Reinterpreting an existing field, changing precedence, making an accepted profile unsafe, or changing a role's ownership requires an explicit compatibility change.
 
+The `gateway.a2a_enabled` field is a common operational compatibility contract;
+its absence has the release-default meaning `true`.
+
 The effective configuration is deployment input, not a durable product resource or public API representation. Replicas participating in one deployment use configuration and distribution versions that are compatible with the same schema and data-flow contracts.
 
 `plugin_runtime.mode` defaults to `on_demand`. Control persists the selected value when initializing a deployment and may replace it only while no Plugin, AgentPresetVersion, or Turn exists. Every role verifies the resulting value before readiness. A non-empty mode mismatch never performs an in-place migration or starts with weaker semantics.
@@ -206,3 +225,4 @@ The effective configuration is deployment input, not a durable product resource 
 10. Runtime failure never selects a weaker backend, role, or distribution automatically.
 11. Runtime configuration never selects a distribution or arbitrary code target; the build artifact fixes one trusted distribution descriptor.
 12. Every deployment durably fixes one Plugin Runtime mode; `on_demand` executes in the Worker interpreter, while `runner` keeps Plugin code and Harness execution out of the stable Supervisor.
+13. Native and Hosted AG-UI are always present on control-capable roles; A2A is controlled only by the default-on deployment-wide setting.
