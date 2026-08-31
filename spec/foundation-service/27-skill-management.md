@@ -4,19 +4,25 @@
 
 Foundation manages Skills as Workspace-owned resources with immutable revisions. A Builder publishes a revision from a staged ZIP package or a typed GitHub selector, then selects exact revisions while authoring an Agent. Package bytes live in object storage; identity, revisions, authorization, provenance, and AgentPresetVersion locks live in Foundation's durable control state.
 
-Foundation follows the shared [Managed Skill Package Contract](../managed-skill-packages.md) and never executes from an upload, repository, mutable ref, object URL, or Worker cache. A Worker materializes only the effective Run selection from the revisions locked by the selected `AgentPresetVersion`, then uses the public Harness `SkillManager` and `SkillsCapability`. Managed Skills are content resources, not trusted Harness plugins.
+Foundation follows the shared [Managed Skill Package Contract](../managed-skill-packages.md)
+and never executes from an upload, repository, mutable ref, object URL, or Worker
+cache. A Worker materializes only the effective Run selection from the revisions
+locked by the selected `AgentPresetVersion`, then uses the public Harness `SkillManager`
+and `SkillsCapability`. Managed Skills are content resources, not trusted Harness
+plugins. Foundation validates package `SKILL.md` metadata with its own admission
+parser; it does not import a Harness parser API.
 
 ## Boundaries
 
-| Concern                                                          | Owner                                                                            |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Package shape, ZIP/GitHub normalization, digest, and hard limits | [Managed Skill Package Contract](../managed-skill-packages.md)                   |
-| Harness discovery, selection, instructions, and paths            | [Harness Skills](../agent-harness/09-context-and-memory.md#skills-and-discovery) |
-| Workspace resource, revision, API, authorization, and retention  | This document                                                                    |
-| Idempotency and unknown mutation outcomes                        | [Durable Operations](06-durable-operations-and-outbox.md)                        |
-| GitHub credential value and eligibility                          | [Secret Management](11-secret-management.md)                                     |
-| Exact Agent composition                                          | [Agent Management](12-agent-management.md)                                       |
-| Environment attachment and write authority                       | [Environment Management](19-environment-management.md)                           |
+| Concern                                                           | Owner                                                                            |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Package shape, metadata projection, normalization, digest, limits | [Managed Skill Package Contract](../managed-skill-packages.md)                   |
+| Harness discovery, selection, instructions, and paths             | [Harness Skills](../agent-harness/09-context-and-memory.md#skills-and-discovery) |
+| Workspace resource, revision, API, authorization, and retention   | This document                                                                    |
+| Idempotency and unknown mutation outcomes                         | [Durable Operations](06-durable-operations-and-outbox.md)                        |
+| GitHub credential value and eligibility                           | [Secret Management](11-secret-management.md)                                     |
+| Exact Agent composition                                           | [Agent Management](12-agent-management.md)                                       |
+| Environment attachment and write authority                        | [Environment Management](19-environment-management.md)                           |
 
 Foundation accepts no server-native source path, arbitrary URL, executable extension, or ambient Skill directory through this API.
 
@@ -93,7 +99,10 @@ GET /api/v1/skill-uploads/{upload_id}
 DELETE /api/v1/skill-uploads/{upload_id}
 ```
 
-The POST body is exactly one ZIP. Foundation streams, hashes, fully normalizes, and Harness-validates it under the shared limits, stores the resulting candidate package, then creates an expiring receipt. It does not accept multipart metadata, base64, or a client-selected storage path.
+The POST body is exactly one ZIP. Foundation streams, hashes, fully normalizes, and
+validates it under the shared contract with its own package-admission implementation,
+stores the resulting candidate package, then creates an expiring receipt. It does
+not accept multipart metadata, base64, or a client-selected storage path.
 
 ```python
 class SkillUploadReceipt:
