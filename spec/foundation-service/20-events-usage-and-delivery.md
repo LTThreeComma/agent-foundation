@@ -52,14 +52,11 @@ One observer belongs to one Harness Run and is consumed by its current worker. T
 
 Before publishing its first live observation, the worker durably binds the immutable Harness Run identity to the current TurnAttempt. It then appends bounded messages to the one stable tenant-scoped Redis Stream owned by the Turn. Replacement TurnAttempts create fresh Harness Runs but continue the same Turn Stream; every entry carries exact TurnAttempt and Harness Run provenance.
 
+Expected planned handoff is a Foundation Attempt transition, not a Harness Run outcome. Closing the old process-local stream for `turn_attempt.yielded` emits no AG-UI `RUN_FINISHED`, `RUN_ERROR`, or synthetic cancelled result, does not close the Turn Stream, and does not repeat `turn.running`. The successor's fresh Harness Run continues observations in the same Turn Stream under new Attempt and Run provenance.
+
 Redis Stream entry IDs are bounded live replay cursors, not product authority. Stream possession and cursor knowledge grant no access. Control authenticates and authorizes the caller against current Foundation state before reading or subscribing, and it releases all database sessions before streaming.
 
-The [Protocol Gateway](28-protocol-gateway.md) owns each public wire projection.
-Native Turn SSE preserves the Turn Stream cursor; Hosted AG-UI assigns its own
-retained delivery cursor; A2A exposes current Task state rather than a Native
-cursor. The best-effort Native notification WebSocket carries only wake-up
-metadata and has no retained delivery source. None of these projections changes
-the source event or Item.
+The [Protocol Gateway](28-protocol-gateway.md) owns each public wire projection. Native Turn SSE preserves the Turn Stream cursor; Hosted AG-UI assigns its own retained delivery cursor; A2A exposes current Task state rather than a Native cursor. The best-effort Native notification WebSocket carries only wake-up metadata and has no retained delivery source. None of these projections changes the source event or Item.
 
 Bounded queues and explicit overflow handling prevent a slow client from blocking Harness work. When the retained Redis prefix is unavailable, control returns the explicit replay-gap semantics defined by the stream owner. Once a Turn seals with a complete, nonempty stream within the retention bounds, Foundation publishes its immutable `TurnReplaySnapshot`; reconnect and retained reads use the snapshot rather than reconstructing presentation from relational rows, object listings, telemetry, or Harness state. An incomplete, trimmed, empty, or oversized stream reports retained replay as unavailable.
 
@@ -67,19 +64,9 @@ Bounded queues and explicit overflow handling prevent a slow client from blockin
 
 Every authoritative Turn and TurnAttempt transition writes the bounded typed lifecycle event required by [Lifecycle and Stream Persistence](17-lifecycle-and-stream-persistence.md). Waiting pending data remains owned by its sealed Turn and state, while child relationships and Connector or Trigger operations retain their owning domain records and outbox intents without extending the lifecycle entity registry implicitly. Event publication follows the atomicity, retry, and duplicate-delivery rules in [Durable Operations and Outbox](06-durable-operations-and-outbox.md).
 
-Each lifecycle resource has one contiguous `resource_seq`; the Workspace feed
-has a separate database-assigned cursor that is monotonic but not a causal
-order. Duplicate publication preserves one event identity. Event content
-references owning resources and retained Items rather than copying differently
-retained payloads. Redis presence, subscriber receipt, and telemetry never
-manufacture a lifecycle fact.
+Each lifecycle resource has one contiguous `resource_seq`; the Workspace feed has a separate database-assigned cursor that is monotonic but not a causal order. Duplicate publication preserves one event identity. Event content references owning resources and retained Items rather than copying differently retained payloads. Redis presence, subscriber receipt, and telemetry never manufacture a lifecycle fact.
 
-External Webhook delivery specializes the shared Outbox. One lifecycle source
-creates one Outbox row for each matching HookSubscription version because each
-delivery completes independently from source commitment and from other
-subscriptions. A bounded destination policy can exhaust retries and dead-letter
-its own row without changing the source lifecycle event, Turn Stream, retained
-snapshot, or Turn outcome.
+External Webhook delivery specializes the shared Outbox. One lifecycle source creates one Outbox row for each matching HookSubscription version because each delivery completes independently from source commitment and from other subscriptions. A bounded destination policy can exhaust retries and dead-letter its own row without changing the source lifecycle event, Turn Stream, retained snapshot, or Turn outcome.
 
 Durable Hook subscription delivery is limited to committed lifecycle events. Live-only Turn Stream entries and Items use authorized Turn SSE and never create Outbox rows merely because a subscriber selected their Hook names. Native notification WebSocket frames remain coarse, best-effort wake-ups rather than Hook payload delivery.
 
@@ -107,35 +94,15 @@ class FoundationDeliveryEnvelope:
     payload: BoundedSafePayload
 ```
 
-The schema is conceptual. `hook_name` is one exact name from the Hook registry,
-and `hook_schema_version` versions that Hook payload independently from the
-source storage and Native transport schemas. A lifecycle event uses its stable
-relational identity. `resource_type`, `resource_id`, `resource_seq`, and
-`resource_version` are the delivery names for the source lifecycle event's
-`entity_type`, `entity_id`, `resource_seq`, and `entity_version`. Optional
-correlation is absent rather than inferred when the source does not own it.
-Turn SSE and Native notification frames never use this envelope.
+The schema is conceptual. `hook_name` is one exact name from the Hook registry, and `hook_schema_version` versions that Hook payload independently from the source storage and Native transport schemas. A lifecycle event uses its stable relational identity. `resource_type`, `resource_id`, `resource_seq`, and `resource_version` are the delivery names for the source lifecycle event's `entity_type`, `entity_id`, `resource_seq`, and `entity_version`. Optional correlation is absent rather than inferred when the source does not own it. Turn SSE and Native notification frames never use this envelope.
 
-`resource_seq` is contiguous only within one
-`(workspace_id, resource_type, resource_id)` lifecycle stream and is the value
-used to identify stale, duplicate, and missing resource events.
-`resource_version` identifies the resource state version produced by the
-source mutation; it can skip and is not used for gap detection.
+`resource_seq` is contiguous only within one `(workspace_id, resource_type, resource_id)` lifecycle stream and is the value used to identify stale, duplicate, and missing resource events. `resource_version` identifies the resource state version produced by the source mutation; it can skip and is not used for gap detection.
 
-Re-delivery of the same source to the same subscription preserves
-`delivery_id`. Webhook delivery is not ordered, including between consecutive
-events for the same resource and subscription. Parallel publishers, retry
-backoff, response loss, and redrive can all deliver a later `resource_seq`
-before an earlier one. Source commitment, Turn Stream append,
-retained-snapshot publication, destination acknowledgement, and client receipt
-are separate facts.
+Re-delivery of the same source to the same subscription preserves `delivery_id`. Webhook delivery is not ordered, including between consecutive events for the same resource and subscription. Parallel publishers, retry backoff, response loss, and redrive can all deliver a later `resource_seq` before an earlier one. Source commitment, Turn Stream append, retained-snapshot publication, destination acknowledgement, and client receipt are separate facts.
 
 Streaming routes follow the [HTTP streaming contract](05-http-ingress-and-request-contract.md#streaming-connections). Disconnect never cancels or seals a Turn.
 
-The old combined Workspace SSE/WebSocket delivery surface does not exist.
-Durable Workspace lifecycle reads, detailed Turn SSE, and best-effort Native
-notifications use the distinct contracts in [Native Streaming and
-Notifications](29-native-streaming-and-notifications.md).
+The old combined Workspace SSE/WebSocket delivery surface does not exist. Durable Workspace lifecycle reads, detailed Turn SSE, and best-effort Native notifications use the distinct contracts in [Native Streaming and Notifications](29-native-streaming-and-notifications.md).
 
 ## Durable Usage Ingestion
 
@@ -144,22 +111,21 @@ The Harness owns native `RunUsage`, the run-local attribution ledger, immutable 
 - Organization, Workspace, Session, Thread, and Turn;
 - originating TurnAttempt and Harness Run;
 - stable AgentPreset, exact AgentPresetVersion, and Runtime lock digest; and
-- accepted `model_id`, provider type, and model name from the TurnAttempt
-  observation, plus model/provider identity and measures from the record.
+- accepted `model_id`, provider type, and model name from the TurnAttempt observation, plus model/provider identity and measures from the record.
 
 A `usage_report` ID is a delivery identity, not another usage fact. Reports can overlap through retries or chunk delivery. `HarnessRunResult.usage_records` is a complete detached run-local snapshot and can overlap records already delivered incrementally. Foundation deduplicates all paths by immutable `record_id` and rejects conflicting content for the same identity.
 
 Terminal `RunUsage` is an aggregate process-local snapshot used for operational limits and summary display. Foundation does not sum it with UsageRecords, inline-child snapshots, or later TurnAttempt snapshots. Durable attribution operates from immutable records. Harness model records already carry the applied build-time pricing revision, rule, status, and cost source; Foundation may add negotiated or settlement projections without changing record identity or content.
 
-### Late Usage from a Stale TurnAttempt
+### Late Usage from a Terminal or Stale TurnAttempt
 
-TurnAttempt fencing prevents a stale worker from changing lifecycle state. It does not erase usage already incurred before lease loss. Foundation can ingest a late immutable UsageRecord under the original TurnAttempt identity when its stable record identity and canonical content validate.
+TurnAttempt fencing prevents a stale worker from changing lifecycle state. It does not erase usage already incurred before lease loss or a committed planned handoff. Foundation can ingest a late immutable UsageRecord under the original failed, yielded, or otherwise terminal TurnAttempt identity when its stable record identity and canonical content validate.
 
 Late ingestion:
 
 - cannot publish Turn state, a retained Item, waiting pending data, or lifecycle transition;
 - cannot change Turn or TurnAttempt outcome;
-- preserves the stale TurnAttempt attribution and ingestion timestamp;
+- preserves the original TurnAttempt attribution and ingestion timestamp;
 - remains idempotent by `record_id`; and
 - can be supplemented by separately identified provider evidence under an owning reconciliation contract.
 
@@ -173,7 +139,7 @@ For example, a command result that exceeds the inline Item limit is staged as an
 
 ## Observability
 
-OpenTelemetry traces and metrics correlate safe service role, build, Session, Thread, Turn, TurnAttempt, Harness Run, and provider identities. They omit credentials, authorization headers, plaintext Secrets, raw prompts, model output, tool payloads, and uploaded content by default.
+OpenTelemetry traces and metrics correlate safe service role, `worker_build_id`, worker generation, Session, Thread, Turn, TurnAttempt, Harness Run, and provider identities. They omit credentials, authorization headers, plaintext Secrets, raw prompts, model output, tool payloads, and uploaded content by default.
 
 Telemetry is best effort. Its loss cannot erase durable audit, lifecycle, retained Item, state, or usage facts, and its presence cannot prove commitment.
 
@@ -190,6 +156,7 @@ Telemetry is best effort. Its loss cannot erase durable audit, lifecycle, retain
 | Client disconnects                                 | Turn continues according to durable state                                                          |
 | Usage report repeats or overlaps terminal snapshot | `record_id` deduplication prevents double counting                                                 |
 | Stale TurnAttempt supplies valid late usage        | Usage is attributed and retained without lifecycle mutation                                        |
+| Yielded Run cleanup reaches its protocol observer  | No public terminal AG-UI event is fabricated; the running Turn Stream remains open                 |
 | Same usage identity has different content          | Ingestion fails closed and emits a security diagnostic                                             |
 | Object upload and owning-record commit diverge     | Cleanup or an explicit content-read failure preserves owning-record authority                      |
 | Harness pricing is disabled, declined, or fails    | Raw usage remains durable and ordinary Foundation operation is unaffected                          |
@@ -206,9 +173,7 @@ Telemetry is best effort. Its loss cannot erase durable audit, lifecycle, retain
 08. Late stale-TurnAttempt usage cannot change lifecycle state.
 09. Object references and signed delivery URLs grant no product authority.
 10. Telemetry observes the system and never acts as durable lifecycle authority.
-11. Live-only Turn Stream entries and Items never create durable Hook-delivery
-    intents; durable subscriptions select committed lifecycle events only.
-12. Native, Hosted AG-UI, and A2A delivery are independent projections over
-    shared Foundation facts and never translate through one another.
-13. A Webhook envelope identifies its resource sequence and version, but the
-    Webhook transport makes no ordering or exactly-once-processing guarantee.
+11. Live-only Turn Stream entries and Items never create durable Hook-delivery intents; durable subscriptions select committed lifecycle events only.
+12. Native, Hosted AG-UI, and A2A delivery are independent projections over shared Foundation facts and never translate through one another.
+13. A Webhook envelope identifies its resource sequence and version, but the Webhook transport makes no ordering or exactly-once-processing guarantee.
+14. Planned handoff has an internal `turn_attempt.yielded` lifecycle fact but no AG-UI Run terminal event and no Turn Stream boundary.
