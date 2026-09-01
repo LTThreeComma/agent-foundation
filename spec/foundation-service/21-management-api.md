@@ -66,6 +66,7 @@ The following paths are relative to `/api/v1` and are the owning collection and 
 | Native notifications      | `WS /notifications`                                                                                                                         | Explicit Thread or Workspace subscriptions; best-effort wake-ups without replay                   |
 | Hook subscriptions        | `/workspaces/{workspace_id}/hook-subscriptions`, `/hook-subscriptions/{hook_subscription_id}`                                               | Long-lived creation plus management of every durable subscription, including Run-inline resources |
 | Usage records             | `/workspaces/{workspace_id}/usage-records`                                                                                                  | Immutable raw records with durable attribution                                                    |
+| Trace queries             | `/workspaces/{workspace_id}/traces`, `/workspaces/{workspace_id}/traces/{trace_id}`                                                         | Authorized provider-backed list and detail views; not durable Foundation resources                |
 
 The selected [distribution](02-distribution-composition-and-extensions.md) registers exactly the routes for its supported capabilities. An EE or Cloud capability can add Organization lifecycle, external identity, Group, custom-role, or Organization-bound credential routes without inserting license branches into OSS handlers or changing existing resource meaning.
 
@@ -178,6 +179,7 @@ Public resources expose stable product fields and safe references, not ORM objec
 - LifecycleEvent reads preserve event identity and type, schema version, owning-resource sequence, subject, actor when applicable, RunAttempt attribution, resource version, bounded payload, and commit time;
 - HookSubscription reads preserve version, active or paused status, exact Hook names, bounded resource filters, callback URL, managed signing-Secret reference, signature profile, and timestamps without URL credentials or signing Secret values;
 - UsageRecord reads preserve immutable identity and attribution.
+- Trace reads expose normalized provider telemetry only after validating exact Foundation RunAttempt correlation and current resource visibility; they do not become lifecycle, retained interaction, audit, or usage authority.
 
 An Item read never substitutes for lifecycle event replay, and an event read never expands private Item or object-backed content without separate authorization.
 
@@ -216,6 +218,8 @@ The service authorizes the head and every ancestor under current tenant, princip
 
 Ordinary collections use `limit` and opaque `cursor` exactly as defined by Platform API Conventions. Each resource defines deterministic default ordering and explicit filters. Cursors are bound to principal scope, filter, order, and retention.
 
+The Trace collection additionally follows the provider-backed range, search, cursor, and authorization rules in [Trace Query](39-trace-query.md). Its cursor is ordinary query continuation, not telemetry or lifecycle authority.
+
 Workspace lifecycle replay uses its own opaque cursor over authorized durable `lifecycle_events`. It supports only owning lifecycle/resource filters and reports an explicit retained-floor gap. It does not include detailed Run text, reasoning, tool, or message deltas.
 
 `GET /api/v1/runs/{run_id}/stream` opens the detailed Run SSE and resumes with `Last-Event-ID`. `WS /api/v1/notifications` opens the distinct Native best-effort notification channel and begins with no subscriptions. Their framing, topic registry, cursor, gap, heartbeat, and reconciliation behavior are owned by [Native Streaming and Notifications](29-native-streaming-and-notifications.md). There is no `GET` or `WS /api/v1/workspaces/{workspace_id}/stream` route and no detailed Run WebSocket.
@@ -248,3 +252,4 @@ The API uses the shared bounded errors and stable codes enforced by the [HTTP in
 14. Queue-only mutation creates no Run and changes no Thread advancement reference; queue consumption atomically changes the queue and accepts one Run.
 15. Existing-Thread Run submission queues behind earlier submissions and while the current Run is `accepted`, `running`, or `waiting`; it never bypasses queue order. A completed source can seal together with first-entry consumption and successor acceptance after state-first preparation; otherwise terminal recovery drain remains independently repeatable.
 16. Every distinct Asset upload creates one immutable Asset identity; the API exposes no overwrite, rename, revision, or Run-to-Asset link surface.
+17. Trace query views normalize authorized backend telemetry and never become Foundation resources or durable authority.

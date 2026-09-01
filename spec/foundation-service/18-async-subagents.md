@@ -4,6 +4,8 @@
 
 An asynchronous subagent is an independent child Run in its own child Thread under the same Session. It has its own RunAttempts, Harness Runs, state key, cancellation, fresh `RunBindings`, Environment attachments, runtime mounts, `EnvironmentRuntime`, usage, retained replay, and result delivery through the parent Thread inbox. The Harness continues to own native Pydantic deferred values and blocking inline delegation; Foundation does not encode pending authority in `HarnessState` or reinterpret asynchronous submission as an unfinished Pydantic tool call.
 
+The child Thread is also an independent [Thread Trace and observability session](38-observability.md#thread-trace-and-vendor-mapping). Its RunAttempts start separate traces; bounded lineage and a best-effort span link express origin without placing child execution inside the parent Thread's trace set or vendor session.
+
 [Agent Control: Input and Continuation](34-agent-control-input-and-continuation.md#deferred-interaction) owns approval, client-tool execution, structured user input, and the common atomic waiting-feedback contract. This document owns asynchronous child acceptance, independent execution, the `async_subagent_result` inbox payload, and the child result's participation in that common feedback boundary without treating the child as a native Pydantic deferred call. [Agent Control: Active Execution](35-agent-control-active-execution.md#thread-inbox) owns the common Thread inbox row, ordering, status, and Redis wakeup contract.
 
 ## Asynchronous Child Runs

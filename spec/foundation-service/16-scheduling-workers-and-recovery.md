@@ -91,6 +91,8 @@ Usage ingestion has the narrow exception defined by [Events, Usage, and Delivery
 
 A stale Worker may publish bounded non-authoritative telemetry identifying its Attempt. It cannot publish a lifecycle event, retained Item, state object, or outcome that consumers could mistake for current product state.
 
+Each successful claim starts a separate parentless RunAttempt trace under the [observability contract](38-observability.md). Expired-lease takeover never reopens or completes the prior Worker's root span; it creates a new root and uses stable Attempt lineage plus a best-effort link when context is still available.
+
 ## Recovery Trigger
 
 Replacement becomes eligible only when one of these conditions holds:

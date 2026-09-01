@@ -2,7 +2,7 @@
 
 ## Design Position
 
-Foundation publishes independent Python, Go, Rust, and TypeScript SDKs for the complete public Native Foundation Service contract. The SDKs map the same resources, commands, receipts, errors, pagination, Run SSE, Workspace lifecycle events, and Native notifications without creating language-specific lifecycle or retry semantics.
+Foundation publishes independent Python, Go, Rust, and TypeScript SDKs for the complete public Native Foundation Service contract. The SDKs map the same resources, trace query views, commands, receipts, errors, pagination, Run SSE, Workspace lifecycle events, and Native notifications without creating language-specific lifecycle or retry semantics.
 
 Foundation Web and the remote `agent-foundation` CLI are first-party clients of that public boundary. Standard AG-UI and A2A clients call their respective Gateway protocols directly and do not need a Foundation SDK.
 
@@ -28,6 +28,7 @@ The standalone SDK projects under `sdk/{python,go,rust,typescript}` all belong t
 - request ID and upstream correlation access;
 - explicit idempotency keys and version or ETag preconditions;
 - deterministic collection pagination;
+- bounded Trace list and detail reads through the configured query provider;
 - streaming Asset upload and content download without whole-body buffering;
 - Run SSE consumption and cursor recovery;
 - Workspace lifecycle event reconciliation;
@@ -85,7 +86,7 @@ A CLI command exists only when its service operation and Rust SDK method are rea
 
 ## Foundation Web
 
-Foundation Web uses only public Native API, Run SSE, Workspace event, and notification WebSocket contracts. It does not query Foundation tables, Redis, object storage, Worker endpoints, or internal operator routes.
+Foundation Web uses only public Native API, including Trace Query, Run SSE, Workspace event, and notification WebSocket contracts. It does not query Foundation tables, Redis, object storage, trace backends, Worker endpoints, or internal operator routes.
 
 Foundation Web implements the product's supported browser workflows; it is not required to provide a page for every administrative resource in the Management API. An absent browser page does not remove the corresponding public API or SDK contract. Browser cookie authentication, Origin, CSRF, and same-origin behavior follow the shared ingress and IAM contracts.
 

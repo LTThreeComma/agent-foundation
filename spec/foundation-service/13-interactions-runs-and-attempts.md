@@ -70,6 +70,8 @@ As soon as the Harness supplies its Run identity and before the worker publishes
 
 Bounded connector transport retries and internal Harness recovery remain within the Harness Run and do not allocate another RunAttempt. Conversely, durable worker replacement, including a planned handoff after `yielded`, always allocates another RunAttempt and another Harness Run.
 
+After durable claim, each traced RunAttempt starts one parentless `foundation.run_attempt` root under the [Service observability contract](38-observability.md#runattempt-trace-lifecycle). `harness.run` remains the existing child owner. Replacement Attempts create separate traces and correlate through stable domain IDs plus best-effort span links; a Thread Trace groups those bounded traces and never becomes another durable interaction resource.
+
 ## Invariants
 
 01. Session, Thread, Run, and Item retain the shared platform meanings.

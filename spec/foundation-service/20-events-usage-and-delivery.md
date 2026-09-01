@@ -2,11 +2,11 @@
 
 ## Design Position
 
-Foundation owns durable lifecycle publication, optional retained interaction projection, raw usage ingestion, large-content selection, and external delivery without turning transport or telemetry into Run authority. [Lifecycle and Stream Persistence](17-lifecycle-and-stream-persistence.md) owns the lifecycle-event schema, the stable Run-scoped Redis Stream, Redis replay cursors, retained Items, and the immutable `RunReplaySnapshot`. This document owns usage attribution, external destination delivery, large content, and observability consequences of those records.
+Foundation owns durable lifecycle publication, optional retained interaction projection, raw usage ingestion, large-content selection, and external delivery without turning transport or telemetry into Run authority. [Lifecycle and Stream Persistence](17-lifecycle-and-stream-persistence.md) owns the lifecycle-event schema, the stable Run-scoped Redis Stream, Redis replay cursors, retained Items, and the immutable `RunReplaySnapshot`. This document owns usage attribution, external destination delivery, large content, and the authority boundary between those records and telemetry. [Observability](38-observability.md) owns trace topology, content and scope policy, OTLP export, backend ownership, and hot-backend mapping.
 
 [Foundation Hook Notifications](20a-hook-notifications.md) owns the public Hook-name registry, durable subscription matching, external channel eligibility, and Webhook flow. Hook routing reuses the records and delivery envelope defined here rather than creating another event log or transport authority. Native Run SSE, lifecycle reads, and best-effort notifications remain owned by [Native Streaming and Notifications](29-native-streaming-and-notifications.md).
 
-Harness observations follow the accepted Agent Stream Protocol path. Foundation consumes `HarnessAguiObserver` output and does not implement another Harness-to-AG-UI mapping. A live message or delivered envelope becomes authoritative only through the owning Run, lifecycle-event, retained-Item, or usage commit.
+Harness observations follow the accepted Agent Stream Protocol path. Foundation consumes `HarnessAguiObserver` output and does not implement another Harness-to-AG-UI mapping. The separate [Trace Query](39-trace-query.md) contract reads authorized backend telemetry without turning it into a retained interaction or usage source. A live message or delivered envelope becomes authoritative only through the owning Run, lifecycle-event, retained-Item, or usage commit.
 
 ## Record Layers
 
