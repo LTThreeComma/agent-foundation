@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.iam.domain import PrincipalRef
 from a13n_service.ids import new_object_id
-from a13n_service.secret_management.crypto import SecretProtectionError, SecretProtector
-from a13n_service.secret_management.models import ManagedSecretRecord
+from a13n_service.secrets.crypto import SecretProtectionError, SecretProtector
+from a13n_service.secrets.models import SecretRecord
 from a13n_service.storage import short_session
 
 from .errors import ConnectorError
@@ -161,13 +161,13 @@ class DatabaseConnectorSecretStore:
         records = tuple(
             (
                 await session.scalars(
-                    select(ManagedSecretRecord)
+                    select(SecretRecord)
                     .where(
-                        ManagedSecretRecord.organization_id == organization_id,
-                        ManagedSecretRecord.workspace_id == workspace_id,
-                        ManagedSecretRecord.owner_type == owner_type,
-                        ManagedSecretRecord.owner_id == owner_id,
-                        ManagedSecretRecord.deleted_at.is_(None),
+                        SecretRecord.organization_id == organization_id,
+                        SecretRecord.workspace_id == workspace_id,
+                        SecretRecord.owner_type == owner_type,
+                        SecretRecord.owner_id == owner_id,
+                        SecretRecord.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
@@ -178,7 +178,7 @@ class DatabaseConnectorSecretStore:
         for item in supplied:
             record = existing.pop(item.key, None)
             if record is None:
-                record = ManagedSecretRecord(
+                record = SecretRecord(
                     id=new_object_id("sec"),
                     organization_id=organization_id,
                     workspace_id=workspace_id,
@@ -230,15 +230,15 @@ class DatabaseConnectorSecretStore:
             records = tuple(
                 (
                     await session.scalars(
-                        select(ManagedSecretRecord)
+                        select(SecretRecord)
                         .where(
-                            ManagedSecretRecord.organization_id == organization_id,
-                            ManagedSecretRecord.workspace_id == workspace_id,
-                            ManagedSecretRecord.owner_type == owner_type,
-                            ManagedSecretRecord.owner_id == owner_id,
-                            ManagedSecretRecord.deleted_at.is_(None),
+                            SecretRecord.organization_id == organization_id,
+                            SecretRecord.workspace_id == workspace_id,
+                            SecretRecord.owner_type == owner_type,
+                            SecretRecord.owner_id == owner_id,
+                            SecretRecord.deleted_at.is_(None),
                         )
-                        .order_by(ManagedSecretRecord.key)
+                        .order_by(SecretRecord.key)
                     )
                 ).all()
             )
@@ -281,13 +281,13 @@ class DatabaseConnectorSecretStore:
         records = tuple(
             (
                 await session.scalars(
-                    select(ManagedSecretRecord)
+                    select(SecretRecord)
                     .where(
-                        ManagedSecretRecord.organization_id == organization_id,
-                        ManagedSecretRecord.workspace_id == workspace_id,
-                        ManagedSecretRecord.owner_type == owner_type,
-                        ManagedSecretRecord.owner_id == owner_id,
-                        ManagedSecretRecord.deleted_at.is_(None),
+                        SecretRecord.organization_id == organization_id,
+                        SecretRecord.workspace_id == workspace_id,
+                        SecretRecord.owner_type == owner_type,
+                        SecretRecord.owner_id == owner_id,
+                        SecretRecord.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
@@ -303,7 +303,7 @@ class DatabaseConnectorSecretStore:
             record.deleted_at = now
 
 
-def _snapshot(record: ManagedSecretRecord) -> _EncryptedSecretSnapshot:
+def _snapshot(record: SecretRecord) -> _EncryptedSecretSnapshot:
     if record.ciphertext is None or record.nonce is None or record.encryption_key_id is None:
         raise ConnectorError("Connector credential material is unavailable.", code="connection_incompatible")
     return _EncryptedSecretSnapshot(

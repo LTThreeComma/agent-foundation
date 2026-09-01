@@ -9,8 +9,8 @@ from a13n_service.connectors import ConnectorProviderSecret, DatabaseConnectorSe
 from a13n_service.database import DatabaseMigrator
 from a13n_service.iam.domain import PrincipalRef
 from a13n_service.iam.models import OrganizationRecord, WorkspaceRecord
-from a13n_service.secret_management import SecretProtector
-from a13n_service.secret_management.models import ManagedSecretRecord
+from a13n_service.secrets import SecretProtector
+from a13n_service.secrets.models import SecretRecord
 from a13n_service.storage import transaction
 from a13n_service.storage.config import SQLiteConfig
 from a13n_service.storage.relational import create_session_factory, create_sql_engine
@@ -94,7 +94,7 @@ async def test_connection_secrets_use_canonical_encrypted_secret_rows(
         "refresh_token": "refresh-token",
     }
     async with sessions() as session:
-        records = tuple((await session.scalars(select(ManagedSecretRecord))).all())
+        records = tuple((await session.scalars(select(SecretRecord))).all())
     assert all(record.ciphertext not in {b"first-token", b"refresh-token"} for record in records)
     assert all(record.owner_type == "connection" for record in records)
 

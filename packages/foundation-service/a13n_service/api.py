@@ -8,11 +8,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from a13n_service.asset_management.errors import AssetManagementError
+from a13n_service.assets.errors import AssetError
 from a13n_service.connectors import ConnectorError
 from a13n_service.iam import AuthenticationError
-from a13n_service.model_management.service import ModelManagementError
-from a13n_service.skill_management.errors import SkillManagementError
+from a13n_service.model_configs.service import ModelConfigError
+from a13n_service.skills.errors import SkillError
 
 
 def install_api_conventions(app: FastAPI) -> None:
@@ -29,12 +29,12 @@ def install_api_conventions(app: FastAPI) -> None:
     async def authentication_error(request: Request, _error: AuthenticationError) -> JSONResponse:
         return _error_response(request, 401, "authentication_required", "Authentication is required.")
 
-    @app.exception_handler(AssetManagementError)
-    async def asset_management_error(request: Request, error: AssetManagementError) -> JSONResponse:
+    @app.exception_handler(AssetError)
+    async def asset_error_handler(request: Request, error: AssetError) -> JSONResponse:
         return _error_response(request, error.status_code, error.code, error.message, error.details)
 
-    @app.exception_handler(ModelManagementError)
-    async def model_management_error(request: Request, error: ModelManagementError) -> JSONResponse:
+    @app.exception_handler(ModelConfigError)
+    async def model_config_error_handler(request: Request, error: ModelConfigError) -> JSONResponse:
         return _error_response(request, error.status_code, error.code, error.message, error.details)
 
     @app.exception_handler(ConnectorError)
@@ -42,8 +42,8 @@ def install_api_conventions(app: FastAPI) -> None:
         status_code = _connector_status(error.code)
         return _error_response(request, status_code, error.code, str(error), dict(error.details))
 
-    @app.exception_handler(SkillManagementError)
-    async def skill_management_error(request: Request, error: SkillManagementError) -> JSONResponse:
+    @app.exception_handler(SkillError)
+    async def skill_error_handler(request: Request, error: SkillError) -> JSONResponse:
         response = _error_response(request, error.status_code, error.code, error.message, error.details)
         if error.retry_after_seconds is not None:
             response.headers["Retry-After"] = str(error.retry_after_seconds)
