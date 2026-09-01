@@ -30,8 +30,8 @@ operation.
 | SDK, CLI, and browser consumption                     | [Service SDKs and Clients](32-service-sdks-and-clients.md)                                                               | Clients consume public protocols only                                                                           |
 | Durable acceptance and lifecycle                      | [Interactions](13-interactions-runs-and-attempts.md)                                                                     | Protocol responses report but never replace durable facts                                                       |
 | Stream sources and retained projection                | [Lifecycle and Stream Persistence](17-lifecycle-and-stream-persistence.md)                                               | Protocol delivery reads authorized projections                                                                  |
-| Agent protocol metadata and policy                    | [Agent Management](12-agent-management.md#protocol-configuration)                                                        | Acceptance freezes the selected Preset Version and protocol configuration                                       |
-| Managed Environment lifecycle                         | [Environment Management](19-environment-management.md) and the shared Environment Provider contracts                     | Gateway can expose Foundation management APIs but owns no current state, finalization, destroy, or prune policy |
+| Agent protocol metadata and policy                    | [Agent Management](12-agent-management.md#protocol-configuration)                                                        | Acceptance freezes the selected Preset Revision and protocol configuration                                      |
+| Managed Environment configuration and Host lifecycle  | [Environment Management](19-environment-management.md) and the shared Environment Provider contracts                     | Gateway can expose Foundation management APIs but owns no current state, finalization, destroy, or prune policy |
 
 The Gateway never calls ORM repositories, Redis keys, object keys, Worker private interfaces, or Harness execution directly from a transport adapter. Application use cases own short transactions, current authorization, durable mutation, and subscription selection.
 
@@ -93,7 +93,7 @@ External protocol identifiers provide correlation only. They never grant authori
 
 Every new command authenticates its caller, resolves the current resource, and authorizes the owning action. Every subscription attachment and continuation reauthorizes its current scope. A persisted external binding narrows lookup but does not preserve an earlier authorization decision.
 
-Run acceptance freezes the exact `agent_preset_version_id`, whose content includes the normalized protocol configuration, plus the normalized client tool surface, canonical accepted `AgentInput`, and other owning-domain inputs required by the selected protocol. Later Preset edits or publication do not rewrite an accepted Run or Task. Worker replacement changes RunAttempt and Harness Run identity without changing the accepted protocol correlation.
+Run acceptance freezes the exact `agent_preset_revision_id`, whose content includes the normalized protocol configuration, plus the normalized client tool surface, canonical accepted `AgentInput`, and other owning-domain inputs required by the selected protocol. Later Preset edits or publication do not rewrite an accepted Run or Task. Worker replacement changes RunAttempt and Harness Run identity without changing the accepted protocol correlation.
 
 ## Security and Admission
 

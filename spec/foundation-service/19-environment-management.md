@@ -20,6 +20,7 @@ Harness receives already constructed adapters as lightweight mounts. It enters a
 | Concern                                                    | Owner                                        | Contract                                                                                    |
 | ---------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Workspace Environment identity and immutable revisions     | Foundation                                   | Serializable desired Provider configuration, credentials references, and access             |
+| Agent selection and Run execution configuration            | Foundation                                   | At most one primary Environment, exact Provider lock, Secret references, and access ceiling |
 | Provider configuration schema and deterministic validation | Environment Provider                         | No external I/O during validation or Environment construction                               |
 | Provider catalog and exact package lock                    | Foundation distribution or operator boundary | Trusted code selection; catalog presence grants no Workspace authority                      |
 | Workspace Provider selection                               | Foundation authorization                     | Enables one exact trusted Provider package lock                                             |
@@ -119,7 +120,7 @@ class EnvironmentCredentialBinding:
     credential: SecretCredentialSource
 ```
 
-`SecretCredentialSource` is the shared non-secret selector defined by the [Secret credential-reference contract](11-secret-management.md#credential-references). Environment bindings add only the connector requirement key; they do not create Environment-specific variants of the same Secret reference.
+`SecretCredentialSource` is the shared non-secret selector defined by the [Secret credential-reference contract](11-secret-management.md#credential-references). Environment bindings add only the Provider requirement key; they do not create Environment-specific variants of the same Secret reference.
 
 Every RunAttempt and Host lifecycle operation reauthorizes the Workspace selection, Environment use, credential source, owning principal, and current Secret eligibility. Foundation decrypts values only after closing the authorization transaction and supplies them to one process-local runtime builder. Secret rotation therefore affects the next independent operation without creating another revision or changing current Environment state.
 
@@ -127,55 +128,29 @@ Secret values and value-derived data never enter revisions, Environment state, R
 
 ## Environment Selection and Run State
 
-An `AgentPresetVersion` stores an ordered set of exact desired Environment mount requirements plus its runtime-selection policy:
+An `AgentPresetConfig` selects at most one primary exact Environment revision:
 
 ```python
-class AgentEnvironmentRequirement:
-    mount_name: str
+class EnvironmentSelection:
     environment_revision_id: EnvironmentRevisionId
-    required: bool
 ```
 
-Mount names are unique and use the Harness mount-name syntax. An optional default mount names one requirement. Authoring may accept an `EnvironmentId`, but materialization stores its current revision. Runtime-selection policy controls whether a caller can replace or add desired mounts, the maximum mount count, and the maximum access levels it can select.
-
-A permitted Run mount selection uses an exact revision, a mutable Environment resolved at acceptance, or inline desired configuration:
+A typed Run override may replace that selection with another exact revision or one inline configuration. Explicit null clears the Environment; omission inherits the Revision:
 
 ```python
-type EnvironmentSourceSelection = (
-    EnvironmentIdSelection
-    | EnvironmentRevisionSelection
-    | InlineEnvironmentSelection
-)
-
-
-class EnvironmentIdSelection:
-    environment_id: EnvironmentId
-
-
-class EnvironmentRevisionSelection:
-    environment_revision_id: EnvironmentRevisionId
-
-
 class InlineEnvironmentSelection:
     provider: EnvironmentProviderSpec
     credential_bindings: tuple[EnvironmentCredentialBinding, ...]
     access: EnvironmentAccess = "full"
-
-
-class EnvironmentSelectionEntry:
-    mount_name: str
-    required: bool
-    source: EnvironmentSourceSelection
 ```
 
-Inline entries pass the same selection, schema, credential-reference, access, and authorization validation but create no reusable revision.
+Inline selection passes the same provider-selection, schema, credential-reference, access, and authorization validation but creates no reusable revision. Foundation exposes no public multi-Environment topology, mount-name map, default-mount selector, mutable Environment-head selector, or per-Preset Environment policy document in the first version.
 
-Acceptance writes complete non-secret desired configuration into the initial `state.json`:
+Publish resolves an exact named selection into the immutable Revision. Run acceptance resolves the final exact or inline selection into `EffectiveAgentConfig.environment`:
 
 ```python
-class EnvironmentExecutionMount:
-    mount_name: str
-    required: bool
+class EnvironmentExecutionConfig:
+    schema_version: str
     source_environment_revision_id: EnvironmentRevisionId | None
     provider: EnvironmentProviderSpec
     provider_package_revision_id: EnvironmentProviderPackageRevisionId | None
@@ -183,24 +158,17 @@ class EnvironmentExecutionMount:
     credential_bindings: tuple[EnvironmentCredentialBinding, ...]
     access: EnvironmentAccess
     logical_digest_sha256: str
-
-
-class EnvironmentExecutionConfig:
-    schema_version: str
-    desired_mounts: tuple[EnvironmentExecutionMount, ...]
-    default_mount: str | None
-    logical_digest_sha256: str
 ```
 
-`EnvironmentExecutionConfig` is one immutable field of the Run state envelope, not a relational Environment snapshot resource or current-state container. Every replacement RunAttempt reuses it while reauthorizing current selection and credentials. It never follows newer Environment revisions, Provider artifacts, or Workspace defaults.
+`EnvironmentExecutionConfig` is one immutable field of the accepted `EffectiveAgentConfig`, not a relational Environment snapshot resource or current-state container. Every replacement RunAttempt reuses it while reauthorizing current selection and credentials. It never follows newer Environment revisions, Provider artifacts, or Workspace defaults.
 
 No `EnvironmentState` is copied into this desired configuration. Foundation associates current state with the logical Thread mount separately so later Runs and replacement Attempts select the latest Host-authoritative value.
 
 ## Host-private Current State
 
-For every managed root or child Thread mount, Foundation retains behavior equivalent to:
+For every managed root or child Thread primary Environment association, Foundation retains behavior equivalent to:
 
-- the owning Thread and desired mount association;
+- the owning Thread and desired Environment association;
 - exact Provider key and desired-configuration digest;
 - current authoritative `EnvironmentState | None`;
 - whether the association is active, detached, cleanup-pending, or no longer eligible;
@@ -213,20 +181,23 @@ An association initialized with `None` is authoritative no-state. Deleted, detac
 
 State is sensitive tenant data even when it is not a credential. Foundation validates Provider key, state version, canonical JSON, configuration compatibility, and size before Environment construction. State contains no Secret, client, PID, daemon process, EIP session, task, lock, Harness mount ID, or RunAttempt authority.
 
-A root Thread normally keeps one association per selected mount across all of its Runs. A Thread fork always creates new associations with authoritative `None`; it never copies the source Thread's current state or backing targets. A shared-root child policy uses the same Host state authority while constructing fresh child adapters. A dedicated child policy creates private child associations with authoritative no-state values and explicitly destroys resulting targets after the child completes. A no-Environment child has no associations. Inline child execution borrows the already entered parent Harness facade and does not create or publish separate state.
+A root Thread normally keeps one association for its selected primary Environment across all of its Runs. A Thread fork always creates a new association with authoritative `None`; it never copies the source Thread's current state or backing target. A shared-root child policy uses the same Host state authority while constructing a fresh child adapter. A dedicated child policy creates a private child association with authoritative no-state and explicitly destroys the resulting target after the child completes. A no-Environment child has no association. Inline child execution borrows the already entered parent Harness facade and does not create or publish separate state.
+
+One association is bound to the exact Provider key and desired-configuration digest that created it. A later Run with the same accepted Environment configuration reuses its current Host state. Replacing the Environment through a compatible continuation or Run override creates a new association with authoritative `None` before execution and makes the displaced association eligible for explicit cleanup; clearing the Environment creates no replacement association. `shared_root` requires the child Environment configuration and Provider lock to match the root association exactly and permits only an equal or narrower access ceiling. `dedicated` uses the child's frozen configuration with independent no-state authority.
 
 ## RunAttempt Construction and Finalization
 
 Run acceptance performs no Provider I/O. For each claimed independent RunAttempt, the Worker:
 
-1. reads the exact `EnvironmentExecutionConfig` from `state.json` and validates its Provider locks;
-2. reauthorizes Environment use, Workspace Provider selection, access levels, principal eligibility, and every credential source;
-3. loads a coherent current Host-state value for every selected Thread association;
-4. resolves fresh Secret values and process-local runtime collaborators outside the authorization transaction;
-5. resolves each exact trusted `EnvironmentProvider`, validates configuration and state, and constructs one fresh `Environment` without external I/O;
-6. wraps each adapter in a lightweight Harness `EnvironmentMount` with the accepted access ceiling and supplies the complete mapping and optional default to one Harness Run;
-7. lets Harness allocate fresh opaque mount IDs, enter all adapters, route operations, snapshot portable non-`None` states, and close adapters non-destructively; and
-8. in unconditional finalization, obtains each adapter's latest known state, closes any still-open process-local resources, and attempts changed-only Host publication independently from Run checkpoint and continuation publication.
+1. reads the optional exact `EnvironmentExecutionConfig` from `EffectiveAgentConfig` and validates its Provider lock;
+2. when the configuration is absent, supplies no Environment mount and performs no Environment state, Provider, credential, lifecycle, or publication work;
+3. when present, reauthorizes Environment use, Workspace Provider selection, access level, principal eligibility, and every credential source;
+4. loads the coherent current Host-state value for the selected Thread association;
+5. resolves fresh Secret values and process-local runtime collaborators outside the authorization transaction;
+6. resolves the exact trusted `EnvironmentProvider`, validates configuration and state, and constructs one fresh `Environment` without external I/O;
+7. wraps the adapter in a lightweight Harness `EnvironmentMount` with the accepted access ceiling and supplies it as the default `workspace` mount to one Harness Run;
+8. lets Harness allocate a fresh opaque mount ID, enter the adapter, route operations, snapshot portable non-`None` state, and close the adapter non-destructively; and
+9. in unconditional finalization, obtains the adapter's latest known state, closes any still-open process-local resources, and attempts changed-only Host publication independently from Run checkpoint and continuation publication.
 
 Finalization runs after success, failure, cancellation, checkpoint failure, state-export failure, and adapter-close failure. A target created before later entry/readiness failure must still be publishable. `dump_state()` is an infallible process-local read of the adapter's last validated cache, so a later lifecycle or observation failure cannot hide newer state already known by the adapter.
 
@@ -242,7 +213,7 @@ For each association:
 
 Equal-state no-op prevents an older completing Attempt from overwriting a concurrent changed value merely because it finished later. A genuinely changed later result can still win and orphan another target. Foundation accepts that trade-off rather than imposing a shared global lease or exactly-once creation protocol.
 
-If the Worker disappears before publication, the last Host state remains current. A newly created but unpublished target can be orphaned and later found only when Provider-supported discovery and exact Foundation correlation permit it. Replacement RunAttempts construct fresh adapters from current Host state and never reuse live clients, envd processes, Harness mount IDs, or entered facades.
+If the Worker disappears before publication, the last Host state remains current. A newly created but unpublished target can be orphaned and later found only when Provider-supported discovery and exact Foundation correlation permit it. Replacement RunAttempts construct a fresh adapter from current Host state and never reuse live clients, envd processes, Harness mount IDs, or entered facades.
 
 ## Agent Input and Managed Skill Preparation
 
@@ -293,7 +264,7 @@ Provider catalog reads authorize `environment_provider.read`; Workspace
 selection mutation authorizes `environment_provider.select`; Environment and
 revision reads authorize `environment.read`; create, metadata mutation,
 revision publication, and archive mutation authorize `environment.manage`; a
-connection test authorizes `environment.test`; and an explicit Run selection
+configuration test authorizes `environment.test`; and an explicit Run selection
 authorizes `environment.use` in addition to Agent invocation. These stable
 actions and built-in grants are owned by the IAM
 [registry](10-identity-and-access-management.md#stable-action-registry).
@@ -313,21 +284,21 @@ Unavailable, inaccessible, incompatible, or unknown target evidence is not autho
 
 ## Failure Semantics
 
-| Failure                                                  | Foundation outcome                                                                               |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Invalid Provider key, schema, lock, mount set, or access | No Environment revision or Run is accepted                                                       |
-| Archived, disabled, denied, or raced selection           | Acceptance, Attempt reconstruction, or lifecycle operation fails closed without substitution     |
-| Missing, inactive, or denied credential                  | Attempt or lifecycle operation records a bounded credential failure                              |
-| Invalid or incompatible current state                    | Fail before target mutation; do not adopt continuation state                                     |
-| Target missing with authoritative absence                | Provider can create a replacement when its contract permits                                      |
-| Target unavailable, inaccessible, or outcome unknown     | Attempt fails without speculative replacement                                                    |
-| Entry creates state then later fails                     | Finalization still attempts changed-state publication                                            |
-| Harness checkpoint or continuation publication fails     | Environment state finalization still runs; prior selected continuation remains current           |
-| Adapter close fails                                      | State publication is still attempted and close failure is reported independently                 |
-| Concurrent changed publications                          | Last write wins; displaced targets become explicit prune candidates                              |
-| Worker disappears                                        | Last published Host state remains current; undisclosed creation can become a discoverable orphan |
-| Explicit destroy has unknown outcome                     | Preserve last state and cleanup eligibility for inspection or retry                              |
-| Agent Environment result is missing after dispatch       | Invocation becomes `unknown_outcome`; Foundation does not replay it automatically                |
+| Failure                                                          | Foundation outcome                                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Invalid Provider key, schema, lock, primary selection, or access | No Environment revision or Run is accepted                                                       |
+| Archived, disabled, denied, or raced selection                   | Acceptance, Attempt reconstruction, or lifecycle operation fails closed without substitution     |
+| Missing, inactive, or denied credential                          | Attempt or lifecycle operation records a bounded credential failure                              |
+| Invalid or incompatible current state                            | Fail before target mutation; do not adopt continuation state                                     |
+| Target missing with authoritative absence                        | Provider can create a replacement when its contract permits                                      |
+| Target unavailable, inaccessible, or outcome unknown             | Attempt fails without speculative replacement                                                    |
+| Entry creates state then later fails                             | Finalization still attempts changed-state publication                                            |
+| Harness checkpoint or continuation publication fails             | Environment state finalization still runs; prior selected continuation remains current           |
+| Adapter close fails                                              | State publication is still attempted and close failure is reported independently                 |
+| Concurrent changed publications                                  | Last write wins; displaced targets become explicit prune candidates                              |
+| Worker disappears                                                | Last published Host state remains current; undisclosed creation can become a discoverable orphan |
+| Explicit destroy has unknown outcome                             | Preserve last state and cleanup eligibility for inspection or retry                              |
+| Agent Environment result is missing after dispatch               | Invocation becomes `unknown_outcome`; Foundation does not replay it automatically                |
 
 ## Security and Compatibility
 
@@ -343,14 +314,15 @@ The pre-release connector, Resource, attachment, runtime-mount object, aggregate
 
 01. Foundation uses only `EnvironmentProvider`, `Environment`, and `EnvironmentState` as shared Environment lifecycle entities.
 02. Workspace Environment revisions contain exact desired Provider configuration, not current target identity or state.
-03. Provider validation and fresh Environment construction perform no external I/O.
-04. Every independent RunAttempt receives fresh Environment adapters selected from current Host state.
-05. Current managed Host state, including authoritative `None`, wins over `HarnessState.environment_states`.
-06. Harness entry and close are Run-local and non-destructive; only Foundation policy invokes `destroy()`.
-07. Background processes are Run-owned, contribute no durable Foundation or Harness continuation state, and cannot trigger post-Run wake.
-08. Known changed state publishes from unconditional finalization after every Run outcome.
-09. Equal state performs no write; genuinely changed state is last-write-wins.
-10. State publication, continuation publication, and Run terminalization are independent outcomes.
-11. Root/child association, retention, cleanup, and prune remain Foundation-owned behavior without a shared record schema.
-12. Credentials, PIDs, live clients, adapters, mount IDs, and native handles never enter desired configuration, Environment state, or continuation.
-13. Orphans are accepted as a concurrency and failure consequence and handled by explicit prune.
+03. An AgentPresetRevision and accepted Run select at most one primary Environment; Harness receives it as the default `workspace` mount.
+04. Provider validation and fresh Environment construction perform no external I/O.
+05. Every independent RunAttempt receives a fresh Environment adapter selected from current Host state.
+06. Current managed Host state, including authoritative `None`, wins over `HarnessState.environment_states`.
+07. Harness entry and close are Run-local and non-destructive; only Foundation policy invokes `destroy()`.
+08. Background processes are Run-owned, contribute no durable Foundation or Harness continuation state, and cannot trigger post-Run wake.
+09. Known changed state publishes from unconditional finalization after every Run outcome.
+10. Equal state performs no write; genuinely changed state is last-write-wins.
+11. State publication, continuation publication, and Run terminalization are independent outcomes.
+12. Root/child association, retention, cleanup, and prune remain Foundation-owned behavior without a shared record schema.
+13. Credentials, PIDs, live clients, adapters, mount IDs, and native handles never enter desired configuration, Environment state, or continuation.
+14. Orphans are accepted as a concurrency and failure consequence and handled by explicit prune.
