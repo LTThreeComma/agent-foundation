@@ -41,6 +41,7 @@ from .domain import (
     AgentPresetRevisionCollection,
     AgentPresetRevisionCreateResult,
     AgentPresetSource,
+    BuiltinAgentPresetRegistration,
     CreateAgentPresetRequest,
     DuplicateAgentPresetRequest,
     PatchAgentPresetRequest,
@@ -80,6 +81,221 @@ class AgentPresetService:
         self._resolver = resolver
         self._invocation_resolver = invocation_resolver
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def register_builtin(
+        self,
+        *,
+        actor: AuthenticatedActor,
+        workspace_id: str,
+        registration: BuiltinAgentPresetRegistration,
+    ) -> AgentPresetRevisionCreateResult:
+        """Register or upgrade one distribution-owned built-in Preset."""
+
+        expected_content_digest: str | None = None
+        try:
+            async with transaction(self._sessions) as session:
+                workspace = await authorize_workspace(
+                    session,
+                    actor=actor,
+                    workspace_id=workspace_id,
+                    action=WorkspaceAction.agent_preset_create,
+                )
+                current = await session.scalar(
+                    select(AgentPresetRecord).where(AgentPresetRecord.id == registration.preset_id)
+                )
+                if current is not None and (
+                    current.organization_id != workspace.organization_id
+                    or current.workspace_id != workspace.workspace_id
+                    or current.source != AgentPresetSource.builtin.value
+                ):
+                    raise AgentPresetError(
+                        "preset_state_conflict",
+                        "The built-in AgentPreset identity is already in use.",
+                        status_code=409,
+                    )
+        except AuthorizationError as error:
+            raise _authorization_error(error) from error
+        try:
+            prepared = await self._resolver.prepare(
+                actor=actor,
+                organization_id=workspace.organization_id,
+                workspace_id=workspace.workspace_id,
+                agent_preset_id=registration.preset_id,
+                config=registration.config,
+            )
+        except Exception as error:
+            raise resolution_error(error) from error
+        now = self._clock()
+        try:
+            async with transaction(self._sessions) as session:
+                workspace = await authorize_workspace(
+                    session,
+                    actor=actor,
+                    workspace_id=workspace_id,
+                    action=WorkspaceAction.agent_preset_create,
+                )
+                record = await session.scalar(
+                    select(AgentPresetRecord)
+                    .where(
+                        AgentPresetRecord.id == registration.preset_id,
+                        AgentPresetRecord.organization_id == workspace.organization_id,
+                        AgentPresetRecord.workspace_id == workspace.workspace_id,
+                    )
+                    .with_for_update()
+                )
+                created = record is None
+                if created:
+                    record = _new_builtin_preset(
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace.workspace_id,
+                        registration=registration,
+                        now=now,
+                    )
+                elif record.source != AgentPresetSource.builtin.value:
+                    raise AgentPresetError(
+                        "preset_state_conflict",
+                        "The built-in AgentPreset identity is already in use.",
+                        status_code=409,
+                    )
+                try:
+                    resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                except Exception as error:
+                    raise resolution_error(error) from error
+                revision = _new_revision(
+                    record,
+                    revision_id=new_agent_preset_revision_id(),
+                    revision_number=await _next_revision_number(session, record.id),
+                    mode=self._resolver.plugin_runtime_mode,
+                    config=registration.config,
+                    resolved=resolved,
+                    source_revision_id=None,
+                    actor=actor,
+                    now=now,
+                )
+                revision.created_by_type = "system"
+                revision.created_by_id = registration.system_actor_id
+                expected_content_digest = revision.content_digest
+                current_revision = (
+                    await _locked_revision(
+                        session,
+                        organization_id=record.organization_id,
+                        workspace_id=record.workspace_id,
+                        preset_id=record.id,
+                        revision_id=record.default_revision_id,
+                    )
+                    if record.default_revision_id is not None
+                    else None
+                )
+                content_changed = current_revision is None or current_revision.content_digest != revision.content_digest
+                metadata_changed = (
+                    record.name != registration.name
+                    or record.description != registration.description
+                    or record.normalized_name != _normalized_name(registration.name)
+                )
+                if not content_changed and not metadata_changed:
+                    assert current_revision is not None
+                    return AgentPresetRevisionCreateResult(
+                        preset=record.to_resource(),
+                        revision=current_revision.to_resource(),
+                    )
+                if created:
+                    session.add(record)
+                else:
+                    record.resource_version += 1
+                record.name = registration.name
+                record.normalized_name = _normalized_name(registration.name)
+                record.description = registration.description
+                record.updated_by_type = "system"
+                record.updated_by_id = registration.system_actor_id
+                record.updated_at = now
+                if content_changed:
+                    record.config = revision.config
+                    record.config_digest = revision.config_digest
+                    record.config_base_revision_id = revision.id
+                    record.config_base_digest = revision.config_digest
+                    record.default_revision_id = revision.id
+                    session.add(revision)
+                session.add(
+                    _audit(
+                        actor=actor,
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace.workspace_id,
+                        action="agent_preset.builtin.register",
+                        preset_id=record.id,
+                        now=now,
+                    )
+                )
+                await session.flush()
+                selected_revision = revision if content_changed else current_revision
+                assert selected_revision is not None
+                return AgentPresetRevisionCreateResult(
+                    preset=record.to_resource(),
+                    revision=selected_revision.to_resource(),
+                )
+        except AuthorizationError as error:
+            raise _authorization_error(error) from error
+        except IntegrityError as error:
+            if expected_content_digest is not None:
+                try:
+                    replay = await self._builtin_registration_replay(
+                        actor=actor,
+                        workspace_id=workspace_id,
+                        registration=registration,
+                        expected_content_digest=expected_content_digest,
+                    )
+                except AuthorizationError as authorization_error:
+                    raise _authorization_error(authorization_error) from authorization_error
+                if replay is not None:
+                    return replay
+            raise AgentPresetError(
+                "preset_name_conflict",
+                "An AgentPreset with this name already exists in the Workspace.",
+                status_code=409,
+            ) from error
+
+    async def _builtin_registration_replay(
+        self,
+        *,
+        actor: AuthenticatedActor,
+        workspace_id: str,
+        registration: BuiltinAgentPresetRegistration,
+        expected_content_digest: str,
+    ) -> AgentPresetRevisionCreateResult | None:
+        async with transaction(self._sessions) as session:
+            workspace = await authorize_workspace(
+                session,
+                actor=actor,
+                workspace_id=workspace_id,
+                action=WorkspaceAction.agent_preset_create,
+            )
+            record = await session.scalar(
+                select(AgentPresetRecord).where(
+                    AgentPresetRecord.id == registration.preset_id,
+                    AgentPresetRecord.organization_id == workspace.organization_id,
+                    AgentPresetRecord.workspace_id == workspace.workspace_id,
+                    AgentPresetRecord.source == AgentPresetSource.builtin.value,
+                )
+            )
+            if (
+                record is None
+                or record.default_revision_id is None
+                or record.name != registration.name
+                or record.description != registration.description
+            ):
+                return None
+            revision = await session.scalar(
+                select(AgentPresetRevisionRecord).where(
+                    AgentPresetRevisionRecord.id == record.default_revision_id,
+                    AgentPresetRevisionRecord.agent_preset_id == record.id,
+                    AgentPresetRevisionRecord.content_digest == expected_content_digest,
+                )
+            )
+            if revision is None:
+                return None
+            return AgentPresetRevisionCreateResult(
+                preset=record.to_resource(),
+                revision=revision.to_resource(),
+            )
 
     async def create(
         self,
@@ -1136,6 +1352,40 @@ async def _next_revision_number(session: AsyncSession, preset_id: str) -> int:
         .limit(1)
     )
     return 1 if latest is None else latest + 1
+
+
+def _new_builtin_preset(
+    *,
+    organization_id: str,
+    workspace_id: str,
+    registration: BuiltinAgentPresetRegistration,
+    now: datetime,
+) -> AgentPresetRecord:
+    config_payload = registration.config.model_dump(mode="json", by_alias=True)
+    return AgentPresetRecord(
+        id=registration.preset_id,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        source=AgentPresetSource.builtin.value,
+        name=registration.name,
+        normalized_name=_normalized_name(registration.name),
+        description=registration.description,
+        lifecycle_state=AgentPresetLifecycleState.enabled.value,
+        resource_version=1,
+        config=config_payload,
+        config_digest=canonical_digest(registration.config),
+        default_revision_id=None,
+        config_base_revision_id=None,
+        config_base_digest=None,
+        duplicated_from_preset_id=None,
+        duplicated_from_revision_id=None,
+        created_by_type="system",
+        created_by_id=registration.system_actor_id,
+        updated_by_type="system",
+        updated_by_id=registration.system_actor_id,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _new_revision(

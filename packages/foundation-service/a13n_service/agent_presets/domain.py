@@ -493,6 +493,16 @@ class AgentPresetRevisionCollection(StrictModel):
     next_cursor: str | None
 
 
+class BuiltinAgentPresetRegistration(StrictModel):
+    """One distribution-owned Preset entry resolved for a specific Workspace."""
+
+    preset_id: ObjectId
+    system_actor_id: ObjectId
+    name: PresetName
+    description: PresetDescription | None = None
+    config: AgentPresetConfig
+
+
 class CreateAgentPresetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

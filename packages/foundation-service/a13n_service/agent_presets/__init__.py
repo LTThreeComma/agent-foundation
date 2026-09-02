@@ -5,6 +5,7 @@ from .domain import (
     AgentPresetConfig,
     AgentPresetRevision,
     AgentRunOverride,
+    BuiltinAgentPresetRegistration,
     EffectiveAgentConfig,
 )
 from .errors import AgentPresetError
@@ -25,6 +26,7 @@ __all__ = [
     "AgentPresetSelectorKind",
     "AgentRunOverride",
     "AgentRunSensitiveValues",
+    "BuiltinAgentPresetRegistration",
     "EffectiveAgentConfig",
     "FrozenAgentInvocation",
     "MergedAgentRunConfig",
