@@ -1,0 +1,27 @@
+"""Zhipu Provider adapter."""
+
+import httpx2
+from pydantic_ai.providers.zai import ZaiProvider
+
+from . import openai_provider
+from .base import ProviderIntegration, bearer_models_request, openai_style_discovery
+from .types import EmptyProviderConfig, RuntimeProvider
+
+
+def _build_provider(
+    provider: RuntimeProvider,
+    http_client: httpx2.AsyncClient,
+    pydantic_provider_name: str,
+) -> ZaiProvider:
+    return openai_provider.build(provider, http_client, pydantic_provider_name, ZaiProvider)
+
+
+INTEGRATION = ProviderIntegration(
+    key="zhipu",
+    display_name="Zhipu / GLM",
+    config_model=EmptyProviderConfig,
+    supported_model_apis=("openai.chat_completions",),
+    build_provider=_build_provider,
+    endpoint="https://open.bigmodel.cn/api/paas/v4",
+    model_discovery=openai_style_discovery(bearer_models_request),
+)

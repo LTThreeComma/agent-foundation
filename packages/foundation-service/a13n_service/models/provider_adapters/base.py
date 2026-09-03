@@ -1,0 +1,153 @@
+"""Shared contracts and mechanics for Provider adapters."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import httpx2
+from a13n_harness.errors import ModelResolutionError
+from pydantic_ai.providers import Provider
+
+from .types import CredentialFormat, ProviderConfig, RuntimeProvider, ValidatedProviderConfig
+
+DiscoveredModelIdentity = tuple[str, str | None]
+NativeProviderBuilder = Callable[[RuntimeProvider, httpx2.AsyncClient, str], Provider[Any]]
+EndpointResolver = Callable[[Mapping[str, object]], str | None]
+CredentialValidator = Callable[[Mapping[str, object], bool], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelListRequest:
+    url: str
+    headers: Mapping[str, str]
+
+
+class ModelDiscoveryAdapter(Protocol):
+    def request(self, provider: RuntimeProvider) -> ModelListRequest: ...
+
+    def parse(self, payload: Any) -> list[DiscoveredModelIdentity]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModelListSchema:
+    collection_field: str
+    identifier_field: str
+    display_name_fields: tuple[str, ...] = ()
+    identifier_prefix: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class JsonModelDiscoveryAdapter:
+    """Describe one Provider's bounded JSON model-list operation."""
+
+    request_builder: Callable[[RuntimeProvider], ModelListRequest]
+    schema: ModelListSchema
+
+    def request(self, provider: RuntimeProvider) -> ModelListRequest:
+        return self.request_builder(provider)
+
+    def parse(self, payload: Any) -> list[DiscoveredModelIdentity]:
+        if not isinstance(payload, Mapping):
+            raise ValueError("the Provider model-list response is invalid")
+        values = payload.get(self.schema.collection_field)
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ValueError("the Provider model-list response is invalid")
+
+        parsed: list[DiscoveredModelIdentity] = []
+        for value in values:
+            if not isinstance(value, Mapping):
+                continue
+            raw_id = value.get(self.schema.identifier_field)
+            if not isinstance(raw_id, str):
+                continue
+            model_id = raw_id.removeprefix(self.schema.identifier_prefix).strip()
+            if not 1 <= len(model_id) <= 256:
+                continue
+            parsed.append((model_id, _display_name(value, self.schema.display_name_fields, model_id)))
+        return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderIntegration:
+    """One trusted Provider type's metadata and connection behavior."""
+
+    key: str
+    display_name: str
+    config_model: type[ProviderConfig]
+    supported_model_apis: tuple[str, ...]
+    build_provider: NativeProviderBuilder
+    credential_format: CredentialFormat | None = CredentialFormat.api_key
+    credential_required: bool = True
+    endpoint: str | EndpointResolver | None = None
+    endpoint_config_field: str | None = None
+    credential_validator: CredentialValidator | None = None
+    model_discovery: ModelDiscoveryAdapter | None = None
+
+    def validate_config(self, config: Mapping[str, object], *, credential_configured: bool) -> ValidatedProviderConfig:
+        if self.credential_required and not credential_configured:
+            raise ValueError("the provider credential is required")
+        if self.credential_format is None and credential_configured:
+            raise ValueError("the provider does not accept a credential")
+        normalized = self.config_model.model_validate(dict(config)).model_dump(mode="json", exclude_none=True)
+        if self.credential_validator is not None:
+            self.credential_validator(normalized, credential_configured)
+        endpoint = self.endpoint(normalized) if callable(self.endpoint) else self.endpoint
+        return ValidatedProviderConfig(config=normalized, endpoint=endpoint)
+
+    def with_validated_endpoint(self, validated: ValidatedProviderConfig, endpoint: str) -> ValidatedProviderConfig:
+        normalized = dict(validated.config)
+        if self.endpoint_config_field is not None:
+            normalized[self.endpoint_config_field] = endpoint
+        return ValidatedProviderConfig(config=normalized, endpoint=endpoint)
+
+
+def openai_style_discovery(
+    request_builder: Callable[[RuntimeProvider], ModelListRequest],
+) -> JsonModelDiscoveryAdapter:
+    return JsonModelDiscoveryAdapter(
+        request_builder=request_builder,
+        schema=ModelListSchema(
+            collection_field="data",
+            identifier_field="id",
+            display_name_fields=("name",),
+        ),
+    )
+
+
+def bearer_models_request(provider: RuntimeProvider) -> ModelListRequest:
+    return ModelListRequest(
+        url=join_url(require_endpoint(provider), "models"),
+        headers={"authorization": f"Bearer {require_credential(provider)}"},
+    )
+
+
+def join_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def require_endpoint(provider: RuntimeProvider) -> str:
+    if provider.endpoint is None:
+        raise ValueError("the Model Provider endpoint is missing")
+    return provider.endpoint
+
+
+def require_credential(provider: RuntimeProvider) -> str:
+    if not provider.credential:
+        raise ModelResolutionError(
+            "The Model Provider credential is unavailable.",
+            code="model_provider_credential_unavailable",
+            details={"provider_type": provider.type},
+        )
+    return provider.credential
+
+
+def _display_name(value: Mapping[object, object], fields: tuple[str, ...], model_id: str) -> str | None:
+    for field in fields:
+        raw_display_name = value.get(field)
+        if isinstance(raw_display_name, str):
+            display_name = raw_display_name.strip()
+            if display_name != model_id and 1 <= len(display_name) <= 128:
+                return display_name
+    return None
