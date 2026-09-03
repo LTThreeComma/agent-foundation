@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
@@ -11,6 +11,7 @@ import httpx2
 from a13n_environment_provider import build_environment_provider_catalog
 from anyio import create_task_group, fail_after
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from a13n_service.agents.domain import PluginRuntimeMode
@@ -26,13 +27,22 @@ from a13n_service.assets.objects import AssetObjectStore
 from a13n_service.assets.router import router as asset_router
 from a13n_service.assets.service import AssetService
 from a13n_service.assets.staging import AssetStaging
+from a13n_service.connectivity.adapters import ConnectorAdapter, IngressAdapter
+from a13n_service.connectivity.composition import AdapterRegistry
+from a13n_service.connectivity.connectors.router import router as connector_router
+from a13n_service.connectivity.ingress.admission_domain import FoundationInputAcceptor
+from a13n_service.connectivity.ingress.data_router import router as ingress_data_router
+from a13n_service.connectivity.ingress.providers import built_in_ingress_adapter_registry
+from a13n_service.connectivity.ingress.router import router as ingress_router
+from a13n_service.connectivity.lifespan import BackgroundComponent, install_connectivity_lifespan
+from a13n_service.connectivity.mcp.router import router as mcp_router
+from a13n_service.endpoint_policy import EndpointPolicy
 from a13n_service.environments.catalog import FoundationEnvironmentProviderCatalog
 from a13n_service.environments.router import router as environment_router
 from a13n_service.environments.service import EnvironmentManagementService
 from a13n_service.environments.testing import EnvironmentAttachmentTester
 from a13n_service.iam import RequestAuthenticator
 from a13n_service.models.connection_test import NativeModelConnectionTester
-from a13n_service.models.endpoint_policy import EndpointPolicy
 from a13n_service.models.model_factory import NativeModelFactory
 from a13n_service.models.provider_operations import NativeProviderOperations
 from a13n_service.models.provider_runtime import LiveProviderResolver
@@ -92,6 +102,8 @@ logger = logging.getLogger("a13n_service.app")
 _API_METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
 _CONTROL_PLANE_ROLES = {ServiceRole.all, ServiceRole.control}
 _WORKER_ROLES = {ServiceRole.all, ServiceRole.worker}
+_CONNECTIVITY_ROLES = {ServiceRole.all, ServiceRole.connectivity}
+_CONNECTIVITY_RESOURCE_ROLES = _CONTROL_PLANE_ROLES | _CONNECTIVITY_ROLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +122,15 @@ class ServiceComponents:
     skill_credential_resolver: GitHubCredentialResolver | None = None
     trace_access_authorizer: TraceAccessAuthorizer | None = None
     trace_query_provider_registry: TraceQueryProviderRegistry | None = None
+    ingress_adapter_registry: AdapterRegistry[IngressAdapter] | None = None
+    connector_adapter_registry: AdapterRegistry[ConnectorAdapter] | None = None
+    foundation_input_acceptor: FoundationInputAcceptor | None = None
     builtin_plugin_artifacts: tuple[BuiltinPluginArtifact, ...] = ()
+
+
+async def _run_critical_component(name: str, run: Callable[[], Awaitable[None]]) -> None:
+    await run()
+    raise RuntimeError(f"critical component returned unexpectedly: {name}")
 
 
 @asynccontextmanager
@@ -167,6 +187,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     authorizer=app.state.components.trace_access_authorizer,
                 )
             secret_protector = settings.secret_protector()
+            connectivity_background_components = await install_connectivity_lifespan(
+                app,
+                settings,
+                storage,
+                stack,
+                secret_protector,
+                control_plane=settings.role in _CONTROL_PLANE_ROLES,
+                data_plane=settings.role in _CONNECTIVITY_ROLES,
+            )
             model_http_client = await stack.enter_async_context(
                 httpx2.AsyncClient(
                     follow_redirects=False,
@@ -357,6 +386,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     plugin_runtime_mode=settings.plugin_runtime_mode,
                     environment_resolver=app.state.agent_environment_selection_resolver,
                     plugin_resolver=app.state.agent_plugin_selection_resolver,
+                    connectivity_resolver=app.state.connectivity_selection_resolver,
                 )
                 app.state.agent_invocation_resolver = (
                     app.state.components.agent_invocation_resolver
@@ -366,6 +396,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         plugin_runtime_mode=settings.plugin_runtime_mode,
                         environment_resolver=app.state.agent_environment_selection_resolver,
                         plugin_resolver=app.state.agent_plugin_selection_resolver,
+                        connectivity_resolver=app.state.connectivity_selection_resolver,
                     )
                 )
                 app.state.agent_service = AgentService(
@@ -405,11 +436,21 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             if settings.role in _WORKER_ROLES:
                 app.state.native_model_factory = native_model_factory
                 app.state.skill_runtime_preparer = SkillRuntimePreparer(storage.sessions, package_store)
+            background_components: list[BackgroundComponent] = []
+            if asset_cleanup_reconciler is not None:
+                background_components.append(("asset cleanup reconciler", asset_cleanup_reconciler.run))
+            if plugin_runtime_command_coordinator is not None:
+                background_components.append(
+                    ("plugin runtime command coordinator", plugin_runtime_command_coordinator.run)
+                )
+            background_components.extend(connectivity_background_components)
             async with create_task_group() as background_tasks:
-                if asset_cleanup_reconciler is not None:
-                    background_tasks.start_soon(asset_cleanup_reconciler.run)
-                if plugin_runtime_command_coordinator is not None:
-                    background_tasks.start_soon(plugin_runtime_command_coordinator.run)
+                for name, run in background_components:
+                    background_tasks.start_soon(
+                        _run_critical_component,
+                        name,
+                        run,
+                    )
                 logger.info(
                     "service_started",
                     extra={
@@ -419,9 +460,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         "build_version": settings.build_version,
                     },
                 )
+                app.state.startup_complete = True
+                app.state.draining = False
                 try:
                     yield
                 finally:
+                    app.state.draining = True
                     background_tasks.cancel_scope.cancel()
                     logger.info(
                         "service_stopped",
@@ -432,6 +476,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         },
                     )
     finally:
+        app.state.startup_complete = False
         await observability.aclose()
 
 
@@ -458,6 +503,8 @@ def create_app(settings: ServiceSettings | None = None, *, components: ServiceCo
     )
     install_api_conventions(app)
     app.state.settings = resolved_settings
+    app.state.startup_complete = False
+    app.state.draining = False
     app.state.components = resolved_components
     app.state.trace_query_provider_registry = trace_query_provider_registry.copy()
     app.state.request_authenticator = app.state.components.request_authenticator
@@ -466,6 +513,27 @@ def create_app(settings: ServiceSettings | None = None, *, components: ServiceCo
         private_domains=resolved_settings.model_private_endpoint_domains,
         private_cidrs=resolved_settings.model_private_endpoint_cidrs,
     )
+    if resolved_settings.role in _CONNECTIVITY_RESOURCE_ROLES:
+        app.state.ingress_adapter_registry = (
+            resolved_components.ingress_adapter_registry
+            or built_in_ingress_adapter_registry(
+                allowed_provider_origins=resolved_settings.connectivity_provider_origins,
+            )
+        ).copy()
+        app.state.connector_adapter_registry = (
+            resolved_components.connector_adapter_registry or AdapterRegistry[ConnectorAdapter]()
+        ).copy()
+        app.state.uses_builtin_connector_adapters = resolved_components.connector_adapter_registry is None
+        app.state.connectivity_endpoint_policy = resolved_settings.connectivity_endpoint_policy()
+
+    @app.middleware("http")
+    async def reject_during_drain(request: Request, call_next):
+        if request.app.state.draining and request.url.path not in {"/healthz", "/readyz"}:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "service draining"},
+            )
+        return await call_next(request)
 
     @app.get("/healthz", include_in_schema=False)
     async def health() -> dict[str, str]:
@@ -473,6 +541,11 @@ def create_app(settings: ServiceSettings | None = None, *, components: ServiceCo
 
     @app.get("/readyz", include_in_schema=False)
     async def readiness(request: Request) -> dict[str, str]:
+        if not request.app.state.startup_complete or request.app.state.draining:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="service not ready",
+            )
         storage: StorageResources = request.app.state.storage
         on_demand_runtime: OnDemandPluginRuntime | None = getattr(
             request.app.state,
@@ -505,6 +578,9 @@ def create_app(settings: ServiceSettings | None = None, *, components: ServiceCo
             ) from exc
         return {"status": "ready", "role": resolved_settings.role.value}
 
+    if resolved_settings.role in _CONNECTIVITY_ROLES:
+        app.include_router(ingress_data_router)
+
     if serves_control_plane:
         app.include_router(agent_router)
         app.include_router(environment_router)
@@ -513,6 +589,9 @@ def create_app(settings: ServiceSettings | None = None, *, components: ServiceCo
         app.include_router(plugin_router)
         app.include_router(skill_router)
         app.include_router(trace_query_router)
+        app.include_router(ingress_router)
+        app.include_router(connector_router)
+        app.include_router(mcp_router)
 
         @app.api_route("/api", methods=_API_METHODS, include_in_schema=False)
         async def unknown_api_root() -> None:

@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import httpx2
 import pytest
-from a13n_service.app import ServiceComponents, create_app
+from a13n_service.app import ServiceComponents, _run_critical_component, create_app
+from a13n_service.connectivity.adapters import ConnectorAdapter, IngressAdapter
+from a13n_service.connectivity.composition import AdapterDefinition, AdapterRegistry
+from a13n_service.connectivity.ingress.retention import IngressRetentionReconciler
+from a13n_service.connectivity.retention import CatalogRetentionReconciler
 from a13n_service.database import DatabaseMigrator
 from a13n_service.plugins import BuiltinPluginArtifact, BuiltinPluginRegistration
 from a13n_service.plugins.commands import (
@@ -101,6 +105,8 @@ def local_settings(tmp_path: Path, **updates: object) -> ServiceSettings:
         "filesystem_root": tmp_path / "files",
         "secret_master_key_base64": b64encode(b"0123456789abcdef0123456789abcdef").decode(),
         "secret_encryption_key_id": "foundation-service-test-key",
+        "connectivity_public_origin": "http://testserver",
+        "connectivity_http_origins": ("http://testserver",),
     }
     values.update(updates)
     settings = ServiceSettings(**values)
@@ -113,6 +119,15 @@ def test_health_reports_process_role() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "role": "worker"}
+
+
+@pytest.mark.anyio
+async def test_critical_component_normal_return_is_a_process_failure() -> None:
+    async def returns() -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="returned unexpectedly: test component"):
+        await _run_critical_component("test component", returns)
 
 
 def test_control_plane_openapi_uses_api_namespace() -> None:
@@ -128,12 +143,14 @@ def test_control_plane_openapi_uses_api_namespace() -> None:
     schemas = document["components"]["schemas"]
     assert {
         "Asset",
+        "Ingress",
         "Model",
         "Plugin",
         "PluginVersion",
         "Skill",
         "SkillPackageManifest",
         "SkillRevision",
+        "Route",
     } <= schemas.keys()
     assert {"Observation", "TraceCollection", "TraceDetail", "TraceSummary"} <= schemas.keys()
     assert {
@@ -154,6 +171,25 @@ def test_control_plane_openapi_uses_api_namespace() -> None:
     assert "/api/v1/plugin-versions/{plugin_version_id}/activate" in document["paths"]
     assert "/api/v1/plugins/{plugin_id}/deactivate" in document["paths"]
     assert "/api/v1/operations/{operation_id}" in document["paths"]
+    assert "/api/v1/workspaces/{workspace_id}/ingresses" in document["paths"]
+    assert "/api/v1/ingresses/{ingress_id}/routes" in document["paths"]
+    assert "/api/v1/workspaces/{workspace_id}/mcp-connections" in document["paths"]
+    assert "/api/v1/mcp-connections/{connection_id}/authorize" in document["paths"]
+    assert "/api/v1/oauth/mcp/client-metadata.json" in document["paths"]
+    connectivity_paths = {
+        path: operations
+        for path, operations in document["paths"].items()
+        if any(segment in path for segment in ("/ingresses", "/connectors", "/connector-connections", "/mcp"))
+    }
+    assert connectivity_paths
+    assert all(
+        operation.get("tags") == ["connectivity-management"]
+        for operations in connectivity_paths.values()
+        for operation in operations.values()
+        if isinstance(operation, dict)
+    )
+    assert document["components"]["schemas"]["CreateIngressRequest"]["properties"]["credentials"]["writeOnly"]
+    assert "credentials" not in document["components"]["schemas"]["Ingress"]["properties"]
 
 
 def test_web_application_serves_assets_and_browser_history(tmp_path: Path) -> None:
@@ -196,6 +232,57 @@ def test_connectivity_role_exposes_no_control_plane_routes() -> None:
     assert request(app, "/healthz").json() == {"status": "ok", "role": "connectivity"}
     assert request(app, "/api/openapi.json").status_code == 404
     assert request(app, "/").status_code == 404
+    assert request(app, "/connectivity/v1/ingresses/ing_test/events", method="POST").status_code == 503
+
+
+def test_non_connectivity_roles_do_not_expose_provider_data_plane() -> None:
+    for role in (ServiceRole.control, ServiceRole.worker):
+        app = create_app(ServiceSettings(_env_file=None, role=role))
+        assert request(app, "/connectivity/v1/ingresses/ing_test/events", method="POST").status_code == 404
+
+
+def test_connectivity_registries_are_copied_only_for_owning_roles() -> None:
+    class Adapter:
+        provider_key = "fake"
+        driver_key = "fake"
+        config_versions = frozenset({"fake_v1"})
+
+    ingress_registry = AdapterRegistry[IngressAdapter]()
+    connector_registry = AdapterRegistry[ConnectorAdapter]()
+    ingress_registry.register(
+        AdapterDefinition(
+            key="fake",
+            config_versions=frozenset({"fake_v1"}),
+            factory=Adapter,
+        )
+    )
+    connector_registry.register(
+        AdapterDefinition(
+            key="fake",
+            config_versions=frozenset({"fake_v1"}),
+            factory=Adapter,
+        )
+    )
+    components = ServiceComponents(
+        ingress_adapter_registry=ingress_registry,
+        connector_adapter_registry=connector_registry,
+    )
+
+    control = create_app(ServiceSettings(_env_file=None, role=ServiceRole.control), components=components)
+    connectivity = create_app(ServiceSettings(_env_file=None, role=ServiceRole.connectivity), components=components)
+    worker = create_app(ServiceSettings(_env_file=None, role=ServiceRole.worker), components=components)
+    ingress_registry.register(
+        AdapterDefinition(
+            key="later",
+            config_versions=frozenset({"fake_v1"}),
+            factory=Adapter,
+        )
+    )
+
+    assert control.state.ingress_adapter_registry.keys() == ("fake",)
+    assert connectivity.state.connector_adapter_registry.keys() == ("fake",)
+    assert not hasattr(worker.state, "ingress_adapter_registry")
+    assert not hasattr(worker.state, "connectivity_endpoint_policy")
 
 
 def test_configured_web_build_requires_an_index(tmp_path: Path) -> None:
@@ -225,6 +312,59 @@ async def test_lifespan_constructs_storage_once_and_readiness_uses_it(tmp_path: 
 
         assert response.status_code == 200
         assert response.json() == {"status": "ready", "role": "all"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", tuple(ServiceRole))
+async def test_role_lifespan_installs_only_owned_connectivity_components(
+    tmp_path: Path,
+    role: ServiceRole,
+) -> None:
+    app = create_app(local_settings(tmp_path / role.value, role=role))
+
+    async with app.router.lifespan_context(app):
+        serves_control = role in {ServiceRole.all, ServiceRole.control}
+        serves_connectivity = role in {ServiceRole.all, ServiceRole.connectivity}
+        serves_worker = role in {ServiceRole.all, ServiceRole.worker}
+        assert hasattr(app.state, "connector_connection_service") is serves_control
+        assert hasattr(app.state, "mcp_connection_service") is serves_control
+        assert hasattr(app.state, "connector_reconciler") is serves_control
+        assert hasattr(app.state, "mcp_reconciler") is serves_control
+        assert hasattr(app.state, "ingress_event_service") is serves_connectivity
+        assert hasattr(app.state, "ingress_admission_reconciler") is serves_connectivity
+        if serves_control or serves_connectivity:
+            assert app.state.connector_adapter_registry.keys() == ("composio", "openconnector")
+        else:
+            assert not hasattr(app.state, "connector_adapter_registry")
+        assert hasattr(app.state, "native_model_factory") is serves_worker
+        assert hasattr(app.state, "catalog_retention_reconciler") is serves_control
+        assert hasattr(app.state, "ingress_retention_reconciler") is serves_connectivity
+        if serves_control:
+            assert isinstance(app.state.catalog_retention_reconciler, CatalogRetentionReconciler)
+        if serves_connectivity:
+            assert isinstance(app.state.ingress_retention_reconciler, IngressRetentionReconciler)
+
+
+@pytest.mark.anyio
+async def test_drain_fails_readiness_before_rejecting_new_connectivity_work(tmp_path: Path) -> None:
+    app = create_app(local_settings(tmp_path, role=ServiceRole.connectivity))
+
+    async with app.router.lifespan_context(app):
+        app.state.draining = True
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            readiness = await client.get("/readyz")
+            delivery = await client.post("/connectivity/v1/ingresses/ing_test/events")
+            health = await client.get("/healthz")
+
+        assert readiness.status_code == 503
+        assert readiness.json() == {"detail": "service not ready"}
+        assert delivery.status_code == 503
+        assert delivery.json() == {"detail": "service draining"}
+        assert health.status_code == 200
+
+    assert app.state.startup_complete is False
+    assert app.state.draining is True
 
 
 @pytest.mark.anyio
@@ -473,5 +613,20 @@ async def test_lifespan_fails_closed_without_secret_master_key(tmp_path: Path) -
     )
 
     with pytest.raises(SecretProtectionError, match="FOUNDATION_SECRET_MASTER_KEY_BASE64"):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan unexpectedly started")
+
+
+@pytest.mark.anyio
+async def test_control_lifespan_requires_connectivity_public_origin(tmp_path: Path) -> None:
+    app = create_app(
+        local_settings(
+            tmp_path,
+            role=ServiceRole.control,
+            connectivity_public_origin=None,
+        )
+    )
+
+    with pytest.raises(ValueError, match="FOUNDATION_CONNECTIVITY_PUBLIC_ORIGIN"):
         async with app.router.lifespan_context(app):
             pytest.fail("lifespan unexpectedly started")
