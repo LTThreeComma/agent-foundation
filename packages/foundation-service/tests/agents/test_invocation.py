@@ -433,3 +433,16 @@ async def test_invalid_run_settings_preserve_the_parameter_error(
     assert invalid.value.code == "invalid_model_settings"
     assert invalid.value.details["path"] == ["settings", "temperature"]
     assert "secret" not in str(invalid.value.details)
+
+
+@pytest.mark.parametrize("field", ["account_tools", "native_tool_contexts"])
+def test_native_authority_cannot_be_supplied_through_agent_config_or_override(field):
+    from a13n_service.agents.domain import AgentConfig, AgentRevision, EffectiveAgentConfig
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AgentConfig.model_validate({**agent_config().model_dump(), field: []})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AgentRunOverride.model_validate({field: []})
+    assert field not in AgentRevision.model_fields
+    assert field not in EffectiveAgentConfig.model_fields

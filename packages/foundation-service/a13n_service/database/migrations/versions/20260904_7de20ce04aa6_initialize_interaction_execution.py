@@ -153,7 +153,7 @@ def upgrade() -> None:
         sa.Column("model_execution_observation_json", sa.JSON(), nullable=False),
         sa.Column("connector_connection_selections_json", sa.JSON(), nullable=False),
         sa.Column("mcp_connection_selections_json", sa.JSON(), nullable=False),
-        sa.Column("ingress_context_json", sa.JSON(none_as_null=True), nullable=True),
+        sa.Column("native_tool_contexts_json", sa.JSON(), nullable=False),
         sa.Column("priority", sa.Integer(), nullable=False),
         sa.Column("queue_name", sa.String(length=256), nullable=False),
         sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),

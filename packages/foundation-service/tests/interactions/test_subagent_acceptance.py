@@ -122,6 +122,7 @@ async def test_child_acceptance_is_fenced_atomic_and_non_idempotent(
         assert parent_record is not None
         running_parent = parent_record.to_resource()
 
+    assert running_parent.native_tool_contexts
     child_config = effective_agent_config(environment=environment_execution_config())
     first = _prepared_child(
         running_parent,
@@ -167,6 +168,7 @@ async def test_child_acceptance_is_fenced_atomic_and_non_idempotent(
         )
         assert child is not None and child_thread is not None
         child_resource = child.to_resource()
+        assert child_resource.native_tool_contexts == ()
         assert child_resource.authority_principal == running_parent.authority_principal
         assert child_resource.connector_connection_selections == (CONNECTOR_SELECTION.model_dump(mode="json"),)
         assert child_resource.mcp_connection_selections == (MCP_SELECTION.model_dump(mode="json"),)
@@ -542,6 +544,19 @@ async def _accept_parent(
         idempotency_key="parent-start",
         request_fingerprint="1" * 64,
         config=config,
+    ).model_copy(
+        update={
+            "native_tool_contexts": (
+                {
+                    "kind": "account",
+                    "account_id": "acct_parent",
+                    "provider_key": "slack",
+                    "execution_principal_ref": {"principal_type": "user", "principal_id": USER_ID},
+                    "allowed_actions": ["slack.send_message"],
+                    "target_scope": {"channel_ids": ["C1"]},
+                },
+            )
+        }
     )
     states = RunStateStore(objects)
     await RunAcceptanceService(

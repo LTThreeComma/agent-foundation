@@ -36,6 +36,8 @@ from .mcp.credentials import decode_request_headers
 from .mcp.management import require_connection as require_mcp_connection
 from .mcp.oauth_bundles import decode_oauth_bundle, optional_expiration
 from .mcp.transport import RemoteTransport
+from .native import native_capability
+from .native_context import NativeToolContext, parse_native_contexts
 from .selection_domain import ConnectorConnectionRunSelection, MCPConnectionRunSelection
 from .selection_resolution import ConnectivitySelectionResolver, FrozenRunConnectivity, PreparedRevisionConnectivity
 from .tool_validation import validate_result
@@ -51,7 +53,7 @@ class AttemptToolScope:
     organization_id: str
     workspace_id: str
     selections: FrozenRunConnectivity
-    ingress_context: JsonObject | None = field(repr=False)
+    native_tool_contexts: tuple[NativeToolContext, ...] = field(repr=False)
 
 
 class ExternalToolRuntime:
@@ -99,7 +101,7 @@ class ExternalToolRuntime:
                     _CONNECTORS.validate_python(run.connector_connection_selections_json),
                     _MCPS.validate_python(run.mcp_connection_selections_json),
                 ),
-                run.ingress_context_json,
+                parse_native_contexts(run.native_tool_contexts_json),
             )
 
     @asynccontextmanager
@@ -138,9 +140,12 @@ class ExternalToolRuntime:
                 capability = await stack.enter_async_context(self._mcp(selection, guard))
                 if capability is not None:
                     capabilities.append(capability)
-            if accepted.ingress_context is not None:
-                # Native adapters are bound by the same protected Attempt scope.
-                capabilities.extend(await self._native(accepted, guard))
+            for context in accepted.native_tool_contexts:
+                capability = await native_capability(
+                    self._sessions, self._protector, accepted, context, guard, self._endpoints
+                )
+                if capability is not None:
+                    capabilities.append(capability)
             yield tuple(capabilities)
 
     async def _connector(
@@ -251,11 +256,3 @@ class ExternalToolRuntime:
                         id=key,
                         defer_loading=selection.defer_loading,
                     )
-
-    async def _native(
-        self, scope: AttemptToolScope, guard: Callable[[], Awaitable[None]]
-    ) -> tuple[MCP[AgentContext], ...]:
-        from .native import native_capability
-
-        capability = await native_capability(self._sessions, self._protector, scope, guard, self._endpoints)
-        return (capability,) if capability is not None else ()
