@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import UTC, datetime
-
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,7 +11,7 @@ from a13n_service.connectivity.connectors.adapters import (
     ConnectorAdapter,
 )
 from a13n_service.connectivity.cursors import CursorError, decode_cursor, encode_cursor
-from a13n_service.connectivity.ingress.domain import JsonObject
+from a13n_service.connectivity.domain import JsonObject
 from a13n_service.connectivity.management import (
     ConnectivityManagementValueError,
     canonical_digest,
@@ -27,6 +24,7 @@ from a13n_service.iam.authorization import WorkspaceAction
 from a13n_service.ids import new_object_id
 from a13n_service.secrets import InternalSecretService
 from a13n_service.storage import transaction
+from a13n_service.temporal import Clock, utc_now
 
 from .connection_access import (
     authorize_connection,
@@ -73,7 +71,7 @@ class ConnectorConnectionService:
         correlation_secret: bytes | None,
         public_origin: str | None,
         setup_ttl_seconds: int,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
         self._adapters = adapters
