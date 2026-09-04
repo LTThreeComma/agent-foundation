@@ -36,7 +36,7 @@ from a13n_service.process.resources import ExecutionResources
 from a13n_service.process.runtime import SharedRuntime, WorkerRuntime
 from a13n_service.run_stream import LifecycleRunStreamProjector, RedisRunStream, RunReplayStore
 from a13n_service.secrets import InternalSecretService
-from a13n_service.settings import ServiceSettings
+from a13n_service.settings import Settings
 from a13n_service.skills.runtime import SkillRuntimePreparer
 
 
@@ -47,7 +47,7 @@ class _NoEnvironmentKeepaliveSources:
 
 
 async def build_worker_runtime(
-    settings: ServiceSettings,
+    settings: Settings,
     shared: SharedRuntime,
     execution: ExecutionResources,
     environment_catalog: FoundationEnvironmentProviderCatalog,
