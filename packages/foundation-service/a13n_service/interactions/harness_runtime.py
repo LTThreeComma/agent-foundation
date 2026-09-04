@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -40,6 +41,7 @@ from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from .attempts import AttemptPreparationAccepted
+from .environment_observation import EnvironmentHookObservation, observe_environment_entry
 from .harness_control import (
     HarnessContextBinding,
     HarnessHookBoundary,
@@ -50,6 +52,7 @@ from .harness_control import (
 from .state import RunStateEnvelope
 
 _DEFERRED_REQUESTS_ADAPTER = TypeAdapter(DeferredToolRequests)
+logger = logging.getLogger("a13n_service.interactions.harness_runtime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,9 +178,13 @@ class FoundationHarnessInvocation[OutputT]:
 
 
 class HarnessEventProjector(Protocol):
-    """Await one non-terminal canonical Harness observation with backpressure."""
+    """Project one canonical public Harness stream item into live presentation."""
 
-    async def project(self, event: HarnessEvent) -> None: ...
+    def project(self, event: HarnessEvent | HarnessRunResultEvent[Any]) -> None: ...
+
+    def project_environment(self, observation: EnvironmentHookObservation) -> None: ...
+
+    async def close(self) -> None: ...
 
 
 class HarnessDriver:
@@ -224,23 +231,26 @@ class HarnessDriver:
             executable,
             input_source=input_source,
             bindings=bindings,
-            environment=invocation.environment,
+            environment=_observe_environment(invocation.environment, self._projector),
             previous_state=state,
             deferred_resume=deferred_resume,
             usage=invocation.usage,
             usage_limits=invocation.usage_limits,
         )
-        async with stream as entered:
-            self._attach(entered, invocation.collaborators.instance, state.thread_id)
-            try:
-                await self._control.enter_harness(
-                    HarnessRunIdentity(thread_id=entered.thread_id, run_id=entered.run_id),
-                    preparation,
-                )
-                await self._control.after_stream_entry()
-                return await self._consume(entered)
-            finally:
-                self._detach()
+        try:
+            async with stream as entered:
+                self._attach(entered, invocation.collaborators.instance, state.thread_id)
+                try:
+                    await self._control.enter_harness(
+                        HarnessRunIdentity(thread_id=entered.thread_id, run_id=entered.run_id),
+                        preparation,
+                    )
+                    await self._control.after_stream_entry()
+                    return await self._consume(entered)
+                finally:
+                    self._detach()
+        finally:
+            await self._close_live_projection()
 
     def bind_model_attempt(self, ctx: RunContext[AgentContext]) -> HarnessContextBinding:
         self._require_context(ctx)
@@ -332,19 +342,43 @@ class HarnessDriver:
                         code="foundation_control_identity_mismatch",
                     )
                 terminal = item.result
+                if self._control.terminal_observation_allowed:
+                    self._project_live(item)
                 continue
             if terminal is not None:
                 raise RunError(
                     "Harness stream emitted an observation after its terminal result.",
                     code="foundation_stream_event_after_terminal",
                 )
-            await self._projector.project(item)
+            self._project_live(item)
         if terminal is None:
             raise RunError(
                 "Harness stream ended without a terminal result.",
                 code="foundation_stream_terminal_missing",
             )
         return terminal
+
+    def _project_live(self, item: HarnessEvent | HarnessRunResultEvent[Any]) -> None:
+        try:
+            self._projector.project(item)
+        except Exception:
+            logger.exception(
+                "Harness live observation projection failed",
+                extra={
+                    "event": "harness_live_projection_failed",
+                    "harness_run_id": item.run_id,
+                    "harness_sequence": item.sequence,
+                },
+            )
+
+    async def _close_live_projection(self) -> None:
+        try:
+            await self._projector.close()
+        except Exception:
+            logger.exception(
+                "Harness live observation projector close failed",
+                extra={"event": "harness_live_projection_close_failed"},
+            )
 
     def _attach[OutputT](
         self,
@@ -527,6 +561,20 @@ def _create_stream[OutputT](
         usage=usage,
         usage_limits=usage_limits,
     )
+
+
+def _observe_environment(
+    environment: FoundationHarnessEnvironment,
+    projector: HarnessEventProjector,
+) -> FoundationHarnessEnvironment:
+    if isinstance(environment, SingleHarnessEnvironment):
+        return SingleHarnessEnvironment(observe_environment_entry(environment.entry, projector))
+    if isinstance(environment, MountedHarnessEnvironments):
+        return MountedHarnessEnvironments(
+            entries={name: observe_environment_entry(entry, projector) for name, entry in environment.entries.items()},
+            default_environment=environment.default_environment,
+        )
+    return environment
 
 
 def _require_environment_entry(entry: object) -> None:

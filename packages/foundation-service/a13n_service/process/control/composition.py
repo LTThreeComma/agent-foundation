@@ -17,6 +17,7 @@ from a13n_service.trace_query.provider import TraceQueryProviderRegistry
 from .agent import build_agent_management
 from .asset import build_asset_bundle
 from .environment import build_environment_bundle
+from .hook import build_hook_bundle
 from .model import build_model_bundle
 from .plugin import build_plugin_bundle
 from .skill import build_skill_bundle
@@ -68,6 +69,7 @@ async def build_control_runtime(
         connectivity_selection,
     )
     assets = await build_asset_bundle(settings, shared)
+    hooks = await build_hook_bundle(settings, shared, stack)
     runtime = ControlRuntime(
         trace_queries=trace_queries,
         environments=environments.service,
@@ -79,8 +81,10 @@ async def build_control_runtime(
         models=models.models,
         model_providers=models.providers,
         assets=assets.service,
+        hook_subscriptions=hooks.subscriptions,
+        lifecycle_events=hooks.lifecycle_events,
     )
-    background_tasks = [assets.cleanup_task]
+    background_tasks = [assets.cleanup_task, hooks.delivery_task, hooks.retention_task]
     if plugins.background_task is not None:
         background_tasks.append(plugins.background_task)
     return runtime, tuple(background_tasks)

@@ -12,6 +12,7 @@ from a13n_harness import (
     AgentSpec,
     HarnessBuilder,
     HarnessEvent,
+    HarnessRunResultEvent,
     HarnessState,
     SafeFailure,
 )
@@ -28,6 +29,7 @@ from a13n_service.interactions import (
     CompletedOutcomeCandidate,
     ConsumedThreadInboxEntry,
     ControlWatcher,
+    EnvironmentHookObservation,
     FoundationHarnessCollaborators,
     FoundationHarnessInvocation,
     HarnessContextBinding,
@@ -180,10 +182,16 @@ class _Wakeups:
 
 @dataclass
 class _Projector:
-    events: list[HarnessEvent] = field(default_factory=list)
+    events: list[HarnessEvent | HarnessRunResultEvent[object]] = field(default_factory=list)
 
-    async def project(self, event: HarnessEvent) -> None:
+    def project(self, event: HarnessEvent | HarnessRunResultEvent[object]) -> None:
         self.events.append(event)
+
+    def project_environment(self, observation: EnvironmentHookObservation) -> None:
+        del observation
+
+    async def close(self) -> None:
+        pass
 
 
 @dataclass

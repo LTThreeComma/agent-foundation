@@ -15,6 +15,7 @@ from a13n_harness import (
     HarnessBuilder,
     HarnessEvent,
     HarnessRunResult,
+    HarnessRunResultEvent,
     HarnessState,
     ModelRecoveryPolicy,
     RunBindings,
@@ -29,6 +30,7 @@ from a13n_service.interactions import (
     AttemptPreparationAccepted,
     ConsumedThreadInboxEntry,
     DeferredContinuationState,
+    EnvironmentHookObservation,
     FoundationHarnessCollaborators,
     FoundationHarnessInvocation,
     FoundationHarnessOutcomeAdapter,
@@ -144,10 +146,16 @@ class _RecordingThreadInbox:
 
 @dataclass
 class _RecordingEventProjector:
-    events: list[HarnessEvent] = field(default_factory=list)
+    events: list[HarnessEvent | HarnessRunResultEvent[object]] = field(default_factory=list)
 
-    async def project(self, event: HarnessEvent) -> None:
+    def project(self, event: HarnessEvent | HarnessRunResultEvent[object]) -> None:
         self.events.append(event)
+
+    def project_environment(self, observation: EnvironmentHookObservation) -> None:
+        del observation
+
+    async def close(self) -> None:
+        pass
 
 
 @dataclass
