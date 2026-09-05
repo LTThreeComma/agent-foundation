@@ -35,7 +35,7 @@ from a13n_ui.composition import (
 from a13n_ui.configuration import load_agent_ui_configuration
 from a13n_ui.environment_profiles import SANDBOX_PROFILE_ID
 from a13n_ui.environment_runtime import EnvironmentRunService
-from a13n_ui.errors import AppStateError, StoreConflictError
+from a13n_ui.errors import AppStateError, StoreConflictError, ThreadError
 from a13n_ui.model_accounts import (
     DEFAULT_GROK_OAUTH_CLIENT_ID,
     DEFAULT_GROK_OAUTH_ISSUER,
@@ -50,6 +50,7 @@ from a13n_ui.settings import AgentUiSettings, StorageSettings
 from a13n_ui.storage import ObjectKind
 from a13n_ui.surfaces import (
     ChildExecutionPage,
+    DecisionResponseBatch,
     ExternalToolResult,
     RootOperationStatus,
     ThreadDeferredResponse,
@@ -200,6 +201,10 @@ async def test_application_starts_persists_objects_and_closes(tmp_path: Path) ->
     async with open_agent_ui_app(settings) as app:
         retained = app
         assert app.state is AppState.ready
+        assert (await app.active_work_summary()).model_dump() == {
+            "root_operations": 0,
+            "child_executions": 0,
+        }
         reference = await app._store.publish_object(
             object_kind=ObjectKind.run_composition,
             object_schema_version="1",
@@ -882,7 +887,8 @@ async def test_application_creates_and_runs_root_thread(tmp_path: Path) -> None:
         assert selected.continuation_id == operation.outcome.continuation.continuation_id
         transcript = await app.get_thread_transcript(thread_id=thread.thread_id, limit=1)
         assert transcript.total >= 1
-        assert transcript.entries[0].message_kind == "request"
+        assert transcript.entries[0].position == transcript.total - 1
+        assert transcript.entries[0].message_kind == "response"
         assert transcript.entries[0].parts
 
 
@@ -932,6 +938,21 @@ async def test_root_deferred_response_requires_exact_selected_request_batch(tmp_
         request = detail.deferred_requests[0]
         assert request.kind == "external"
         assert request.request_id == "deferred-1"
+        decisions = await app.thread_decisions(
+            thread_id=thread.thread_id,
+            expected_continuation_id=detail.continuation_id,
+        )
+        assert decisions is not None
+        assert decisions.requests[0].kind == "external"
+        with pytest.raises(ThreadError) as changed:
+            await app.get_thread_transcript(
+                thread_id=thread.thread_id,
+                expected_continuation_id="0" * 64,
+            )
+        assert changed.value.code == "thread_history_continuation_changed"
+        workbench = await app.workbench(project_id="project-main")
+        assert workbench.rows[0].pending_decision is not None
+        assert workbench.rows[0].pending_decision.count == 1
 
         incomplete_receipt = await app.respond_thread(
             thread_id=thread.thread_id,
@@ -962,9 +983,9 @@ async def test_root_deferred_response_requires_exact_selected_request_batch(tmp_
         assert stale.failure is not None
         assert stale.failure.code == "thread_continuation_conflict"
 
-        response_receipt = await app.respond_thread(
+        response_receipt = await app.respond_decisions(
             thread_id=thread.thread_id,
-            response=ThreadDeferredResponse(
+            response=DecisionResponseBatch(
                 expected_continuation_id=detail.continuation_id,
                 responses=(
                     ExternalToolResult(
