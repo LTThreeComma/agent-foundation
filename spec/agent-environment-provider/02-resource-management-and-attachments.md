@@ -1,14 +1,23 @@
-# Environment Re-entry Lifecycle
+# Lifecycle Control and Runtime Access
 
 ## Design Position
 
-`Environment` is the process-local implementation of one provider target. It combines provider-neutral operations with the minimum lifecycle needed to create or re-enter that target from portable state.
+The shared package separates provider-side target lifecycle I/O from data-plane
+access:
 
-`EnvironmentState` is the only shared durable lifecycle value. There is no shared Resource, runtime attachment, Provider binding, operation record, pause mode, or lifecycle capability graph. Hosts can persist, correlate, and prune targets using their own models without imposing those models on embedded applications or other Hosts.
+- `EnvironmentControl` performs lifecycle calls explicitly authorized by Foundation.
+- `EnvironmentState` optionally carries a portable exact-target reference between
+  processes when a validated target specification is insufficient by itself.
+- `Environment` enters one already-ready exact target and serves file, shell,
+  process, output, and port operations.
 
-Construction is inert. External effects begin only when a caller invokes `enter()`, `warmup()`, or `destroy()`.
+Within this repository, only Foundation's trusted lifecycle path constructs and
+holds `EnvironmentControl`. Harness, Agent UI, Agent code, and data-plane
+`Environment` instances never receive it. The package defines and implements the
+provider-facing client so every Provider exposes the same external-I/O behavior;
+Foundation remains the sole owner of durable lifecycle policy and state.
 
-## State Envelope
+## Portable Target State
 
 ```python
 class EnvironmentState(BaseModel):
@@ -19,31 +28,259 @@ class EnvironmentState(BaseModel):
     state: JsonValue
 ```
 
-Fields:
+State can contain an exact Docker container ID or E2B sandbox ID, immutable artifact
+identity, configuration fingerprint, and bounded non-secret recovery correlation.
+It is a semantic soft reference, not a credential, lease, ownership claim, live
+client, or proof that the target still exists.
 
-| Field           | Meaning                                                            |
-| --------------- | ------------------------------------------------------------------ |
-| `provider_key`  | Stable namespaced Provider discriminator                           |
-| `state_version` | Provider-owned version for the opaque state payload codec          |
-| `state`         | Canonical JSON needed to validate and re-enter one provider target |
+Direct Local and Local Envd produce no `EnvironmentState`: their attached workspace
+is selected completely by the validated target specification, and their
+process-local clients or daemon generations do not survive the adapter. Optional
+state is not a placeholder for configuration that already identifies the target.
 
-State is a semantic soft reference. It can identify a Docker container or E2B sandbox, but it is not a credential, a lease, a Python `weakref`, a live client, an ownership claim, or proof that the target still exists.
+State contains no:
 
-State contains only values that remain meaningful across process restart. It contains no:
+- API key, bearer URL, bootstrap secret, SDK client, transport, callback, task, or
+  lock;
+- process handle, pipe, private temporary path, or unresolved ambient endpoint;
+- Harness mount name, permission ceiling, working directory, Agent identity, or
+  Thread relationship; or
+- Foundation row ID, lifecycle phase, retention policy, operation claim, or fencing
+  token.
 
-- Provider, Environment, client, SDK object, transport, session, callback, task, or lock;
-- credential, bearer URL, secret bootstrap material, or ambient configuration;
-- PID, subprocess handle, pipe, private temporary path, daemon generation, or open port route;
-- Harness mount name, mount ID, permission ceiling, working directory, Agent identity, or Thread relationship;
-- Host record key, persistence generation, lease, retention policy, or prune status.
+When state is present, Providers validate its exact version, payload, provider key,
+connection-option compatibility, target-specification fingerprint, and immutable
+target evidence before use. Missing required state, unexpected state for a stateless
+target specification, and unsupported or incompatible state fail; state is never
+silently adopted or retargeted.
 
-Providers validate the exact state version and payload model. Unknown fields, unsupported versions, invalid canonical JSON, provider-key mismatch, and configuration incompatibility fail before target mutation.
+## Lifecycle Operation Context
 
-A deterministic stateless provider can return `None`. State absence does not mean target absence; it means the provider must apply its documented no-state entry semantics.
+Every lifecycle call that establishes state or can change Provider state receives an
+immutable operation context:
 
-## Environment Contract
+```python
+@dataclass(frozen=True, slots=True)
+class EnvironmentLifecycleOperation:
+    operation_id: str
+    request_digest: str
+    target_generation: int
+```
 
-The conceptual process-local contract is:
+This is an in-memory request value, not a prescribed database entity. Foundation
+owns the durable operation slot and claim/fencing protocol. Repeating a call with
+the same operation ID and digest means reconcile or retry the same logical
+operation; changing the digest under the same ID is an error.
+
+Providers use native idempotency keys when available. Otherwise they attach bounded
+operation correlation to provider-native metadata or names and look it up before
+retrying. A Provider must not create two managed targets for one logical create
+operation merely because the first response was lost.
+
+Target observations use one provider-neutral shape:
+
+```python
+type EnvironmentCondition = Literal[
+    "pending",
+    "ready",
+    "stopped",
+    "absent",
+    "failed",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentObservation:
+    condition: EnvironmentCondition
+    state: EnvironmentState | None
+    observed_at: datetime
+    retained_until: datetime | None
+    safe_code: str | None
+    safe_message: str | None
+```
+
+Diagnostics are bounded and safe for Foundation logs; they never carry native
+exception objects or secrets. `condition` alone reports whether the target is
+pending, ready, stopped, absent, failed, or unknown. A stateful Provider normally
+preserves exact state even when the target is stopped, failed, or absent; a stateless
+Provider returns `state=None` for every condition. Therefore `state=None` alone never
+means absence, and `condition="ready", state=None` is the normal Direct Local and
+Local Envd observation.
+
+## Control Contract
+
+The conceptual Control contract is:
+
+```python
+class EnvironmentControl(ABC):
+    async def probe_connection(self) -> EnvironmentProviderObservation: ...
+
+    async def create(
+        self,
+        *,
+        target_spec: ValidatedManagedProviderTargetSpec,
+        operation: EnvironmentLifecycleOperation,
+    ) -> EnvironmentLifecycleResult: ...
+
+    async def attach(
+        self,
+        *,
+        target_spec: ValidatedAttachedProviderTargetSpec,
+        operation: EnvironmentLifecycleOperation,
+    ) -> EnvironmentLifecycleResult: ...
+
+    async def observe(
+        self,
+        *,
+        target_spec: ValidatedProviderTargetSpec,
+        state: EnvironmentState | None,
+    ) -> EnvironmentObservation: ...
+
+    async def ensure_ready(
+        self,
+        *,
+        target_spec: ValidatedProviderTargetSpec,
+        state: EnvironmentState | None,
+        timeout_seconds: float,
+    ) -> EnvironmentObservation: ...
+
+    async def retain(
+        self,
+        *,
+        target_spec: ValidatedProviderTargetSpec,
+        state: EnvironmentState | None,
+        retain_until: datetime,
+        operation: EnvironmentLifecycleOperation,
+    ) -> EnvironmentLifecycleResult: ...
+
+    async def destroy(
+        self,
+        *,
+        target_spec: ValidatedManagedProviderTargetSpec,
+        state: EnvironmentState,
+        operation: EnvironmentLifecycleOperation,
+    ) -> EnvironmentLifecycleResult: ...
+
+    async def close(self) -> None: ...
+```
+
+Exact language APIs may group request values, but the semantics remain fixed.
+`target_spec` is a Provider-validated call value compiled from Foundation-owned
+configuration. It is not an `EnvironmentRevision`, an inline Environment resource,
+or a database record.
+
+### Connection probe
+
+`probe_connection()` performs one bounded non-mutating account/endpoint and
+credential check. It reports safe Provider identity and available capability facts
+without listing, selecting, creating, attaching, retaining, starting, or destroying
+a target. It is advisory current evidence rather than a durable health resource.
+
+### Create
+
+`create()` is valid only for a managed target specification. It creates or
+reconciles exactly one target from the immutable recipe, records operation
+correlation where supported, and returns the resulting portable state as soon as
+exact identity is known. A later readiness failure does not erase known state.
+
+Creation does not install arbitrary dependency lists supplied at Run time. Immutable
+dependencies belong in the selected image, E2B template, snapshot, or equivalent
+Provider artifact. A bounded declared initialization action can start envd or verify
+the runtime contract, but it is part of the revision fingerprint and is not an
+unrestricted package-build service.
+
+### Attach
+
+`attach()` is valid only for an attached target specification. It validates and
+normalizes the configured exact external reference, observes that target, and
+returns optional state without creating, starting, resuming, replacing, stopping,
+or destroying anything. Direct Local and Local Envd return no state. Repeated attach
+is idempotent.
+
+An inaccessible target is not absent. Attach fails rather than substituting a newly
+created target.
+
+### Observe and readiness
+
+`observe()` returns the current provider-neutral condition of the exact target:
+`pending`, `ready`, `stopped`, `absent`, `failed`, or `unknown`, plus bounded native
+diagnostics and refreshed optional state when observation safely supplies compatible
+non-secret evidence.
+
+`ensure_ready()` performs bounded waiting and readiness probes. It does not select a
+replacement or acquire ownership. For attached targets it never starts or resumes
+the target. For managed targets, any provider startup needed to reach the initial
+ready condition is part of the already-issued create operation, not an implicit new
+lifecycle decision in data-plane entry.
+
+### Retain
+
+`retain()` monotonically requests that the exact target remain available until at
+least `retain_until`. Providers map it to a native timeout extension, keepalive API,
+or a documented confirmed no-op for targets without provider expiration. They never
+shorten native lifetime.
+
+Retain is permitted for both managed and attached targets when the Provider declares
+support. For attached targets it does not transfer ownership and must not change any
+other lifecycle property. Foundation must not promise a lifetime longer than the
+provider confirms.
+
+### Destroy
+
+`destroy()` is valid only for a managed target specification and removes only the
+exact target identified by compatible state. Prior authoritative absence is success.
+Unknown identity or incompatible evidence fails without mutation.
+
+Destroy also removes Provider-owned bootstrap material whose ownership is encoded in
+the managed target specification or state. It never removes external bind sources,
+user files, shared workspaces, or volumes that the Provider did not create for that
+target. Attached targets can never reach this method through a valid typed request.
+
+### Close
+
+Control close releases process-local SDK clients, HTTP sessions, engine clients,
+watchers, and credentials. It never changes the target. Foundation invokes it in
+unconditional cleanup after every lifecycle scope.
+
+### Persistence boundary
+
+Control methods communicate only with the external Provider boundary. They never
+open a Foundation database session, read or write an `EnvironmentTarget`, publish a
+domain event, choose a lifecycle phase, or schedule a retry. Foundation records an
+operation intent in a short transaction, closes that transaction, awaits Control,
+and applies a confirmed result or typed unknown outcome in another fenced short
+transaction.
+
+## Results and Unknown Outcomes
+
+```python
+@dataclass(frozen=True, slots=True)
+class EnvironmentLifecycleResult:
+    observation: EnvironmentObservation
+    operation_id: str
+    provider_receipt: JsonValue | None
+```
+
+A successful result is confirmed provider evidence. Managed create returns an
+observation with exact state. Attach returns exact state only when the Provider needs
+one; Direct Local and Local Envd return `condition="ready", state=None`. A successful
+destroy reports confirmed absence through `condition="absent"`. Provider receipts
+are bounded, non-secret reconciliation evidence, not credentials or a durable audit
+log.
+
+Timeout, cancellation, transport loss, or worker death after dispatch can leave an
+unknown outcome. A typed unknown-outcome error retains the operation ID and last
+known state. Foundation keeps its durable operation slot and retries the same
+logical operation; the Provider reconciles through native idempotency or operation
+correlation. Only Foundation changes its target lifecycle phase, and only after a
+confirmed observation.
+
+This contract does not promise distributed exactly-once delivery. It promises that
+one logical operation is identifiable, retryable, and never treated as rolled back
+merely because the caller did not receive a response.
+
+## Data-plane Environment Contract
 
 ```python
 class Environment(ABC):
@@ -60,241 +297,91 @@ class Environment(ABC):
         host_refs: Mapping[str, str] = {},
     ) -> None: ...
 
-    async def warmup(self) -> None: ...
-
     def dump_state(self) -> EnvironmentState | None: ...
 
     async def close(self) -> None: ...
-
-    async def destroy(self) -> None: ...
 ```
 
-Provider-neutral file, shell, process, output, readiness, and port facets are exposed by the same Environment or typed views obtained from it. Harness imports those contracts and adds multi-mount routing; it does not wrap Environment in another provider lifecycle object.
+Construction binds validated Provider connection options, one validated target
+specification, optional state, credentials, and runtime collaborators without
+external I/O. The Provider validates that the target specification plus state selects
+one exact target. Every independent Run receives fresh Environment instances. An
+instance is process-local, single-use, and never stored durably.
 
-### Construction
+`enter()` validates and connects to the exact already-ready target, establishes
+fresh operation clients, validates EIP or direct runtime descriptors, and returns
+only when declared operations are usable. It never creates, replaces, starts,
+resumes, retains, stops, or destroys the backing target. Absent, stopped,
+incompatible, inaccessible, or unknown targets fail with typed errors.
 
-One Provider call creates one fresh Environment. Construction:
+`dump_state()` is an infallible synchronous read of a detached copy of the fixed
+`EnvironmentState | None` supplied at construction. It performs no external I/O and
+cannot publish lifecycle changes. Direct Local and Local Envd return `None`. Control
+is the only shared API that can produce changed state after lifecycle mutation.
 
-- accepts validated desired configuration;
-- accepts `EnvironmentState | None` before entry;
-- accepts fresh process-local runtime collaborators;
-- validates deterministic type and codec compatibility;
-- performs no filesystem, subprocess, Docker, E2B, network, or envd I/O.
-
-An Environment is single-use for one independent Run or one explicit Host lifecycle operation. It is not shared concurrently across independent Runs and is not retained in durable records.
-
-### Entry metadata
-
-`thread_id`, `run_id`, `agent_instance_id`, `mount_id`, and bounded `host_refs` are ephemeral correlation supplied to `enter()`. They can be keyword arguments or an implementation-internal immutable value. They are not Environment state, Agent state, provider target identity, or another shared domain entity.
-
-Providers may use these values for logs, traces, operation correlation, or envd session metadata. They must not persist them into `EnvironmentState` unless a provider's target identity independently requires an equivalent provider-owned value.
-
-### Entry
-
-`enter()` establishes one process-local operation scope:
-
-1. validate supplied state and runtime collaborators;
-2. inspect or prepare the provider target according to provider semantics;
-3. create on no state when supported;
-4. re-enter an exact compatible target when it exists;
-5. create a replacement only after authoritative target absence;
-6. update known state immediately after successful create or replacement;
-7. establish fresh operation clients, descriptor, readiness, and provider facets;
-8. return only after the Environment can serve its documented entered operations.
-
-An unavailable, inaccessible, incompatible, or unknown target is not absent. Entry fails without speculative replacement.
-
-Entry is idempotent only as documented by a provider. The common contract does not promise exactly-once target creation. Cancellation or transport failure can leave an unknown outcome. State or provider discovery evidence is used on a later fresh Environment to reconcile that outcome.
-
-### Warmup
-
-`warmup()` is optional Host-only proactive entry work. It can ensure that the backing target exists and reaches a provider-defined reusable readiness point without granting Agent operations. It follows the same create/re-entry/replacement and state rules as `enter()`.
-
-A Provider that has no meaningful warmup may implement it as normal entry preparation or a no-op. Harness never calls `warmup()` and never assumes it occurred.
-
-### State dump
-
-`dump_state()` returns a detached copy of the latest validated provider state cached by the adapter or `None` for a stateless/destroyed target. It is an infallible synchronous process-local read: it performs no external I/O or target refresh, returns promptly for every valid constructed adapter, and never commits to Host storage. Mutating a caller-owned input state or a previously returned nested JSON value cannot change the adapter's cache.
-
-Known state must remain available after:
-
-- successful entry and execution;
-- a create or replacement followed by later entry/readiness failure;
-- execution failure or cancellation;
-- Harness checkpoint/export failure;
-- process-local close failure.
-
-A Provider updates the cache immediately whenever `enter()`, `warmup()`, `destroy()`, or another explicit operation obtains validated evidence of a changed target state. A failed or unknown-outcome observation leaves the last validated cache intact and reports its own operation failure separately. Serialization and codec validation happen before a value becomes the cached known state, so a later refresh failure can never make that state unavailable to the Host.
-
-### Close
-
-`close()` fences new operations and releases process-local resources such as:
-
-- SDK clients and HTTP sessions;
-- EIP sessions and carriers;
-- readiness watchers and keepalive tasks;
-- local daemon processes owned only for the current adapter;
-- local process handles, streams, and temporary private runtime data;
-- ephemeral entry correlation.
-
-`close()` never destroys the backing Environment target represented by state. It never removes a Docker container, terminates an E2B sandbox, deletes a Host workspace, removes external volumes, or selects retention policy.
-
-Context-manager exit is exactly `close()` semantics. Cancellation and failure do not convert it into destruction. `close()` is also valid after successful `destroy()` and releases the process-local clients and runtime collaborators used by that explicit lifecycle operation without repeating target destruction. Close is idempotent where practical; repeated close never gains destructive behavior.
-
-### Destroy
-
-`destroy()` is an explicit Host-only backing-target operation. It validates selected configuration, state, runtime authority, and current target evidence before mutation. It removes only the exact provider target and provider-owned secret/bootstrap material represented by that state.
-
-Rules:
-
-1. Harness never invokes `destroy()`.
-2. A Host constructs a fresh Environment specifically for cleanup or prune.
-3. Target identity and immutable metadata are revalidated before mutation.
-4. Incompatible evidence fails; it is never adopted or removed.
-5. Authoritative prior absence is success when provider-owned auxiliary material is also absent.
-6. Unknown outcome preserves state so a later Host operation can inspect or retry.
-7. Success makes `dump_state()` return `None`.
-8. The caller invokes `close()` in unconditional cleanup after either success or failure; `destroy()` does not leave process-local clients or collaborators as durable authority.
-9. External bind sources, user files, named volumes not owned by the provider, and shared workspaces are never removed unless their ownership is an explicit provider contract.
+`close()` fences new operations and releases process-local clients, sessions,
+streams, handles, and entry correlation. Context-manager exit has exactly these
+non-destructive semantics. A closed Environment cannot be re-entered.
 
 ## Provider-neutral Operations
 
-The package owns one typed single-Environment operation surface. Exact models can be grouped into facets, but the semantic families are:
+The entered Environment exposes typed operation facets:
 
-| Family    | Operations                                                                                             |
-| --------- | ------------------------------------------------------------------------------------------------------ |
-| Files     | stat, bounded read/list/glob/search, streaming read/write, patch, create directory, move, copy, remove |
-| Commands  | bounded foreground execution, optional provider process start/control, working-directory validation    |
-| Output    | independent stdout/stderr cursors, retained-range disclosure, truncation, bounded pages                |
-| Readiness | operation-family readiness requirements and typed timeout/unavailable results                          |
-| Ports     | provider-local port observation and bounded wait                                                       |
-| State     | dump current portable state                                                                            |
-| Lifecycle | enter, optional warmup, non-destructive close, explicit destroy                                        |
+| Family   | Operations                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------ |
+| Files    | stat, bounded read/list/glob/search, streaming read/write, patch, create directory, move, copy, remove |
+| Commands | bounded foreground execution, optional process start/control, working-directory validation             |
+| Output   | independent stdout/stderr cursors, retained-range disclosure, truncation, bounded pages                |
+| Ports    | provider-local port observation and bounded wait                                                       |
+| State    | synchronous fixed optional portable state dump                                                         |
 
-Providers advertise an immutable entered descriptor containing their supported operation families and safe provider identity. Harness intersects that descriptor with its mount access ceiling. A descriptor never carries credentials, state payload, native handles, or Host mutation authority.
+An immutable entered descriptor declares supported operation families and safe
+Provider identity. Harness intersects that descriptor with its mount access ceiling.
+The descriptor carries no credential, state payload, native handle, or lifecycle
+authority.
 
-Every side-effecting operation returns typed evidence sufficient to distinguish known completion from unknown outcome where the backend can do so. Provider-native exceptions are translated to stable bounded errors.
+## Concurrency and Foundation Authority
 
-## Lifecycle State Machine
-
-The process-local adapter lifecycle is conceptual:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Constructed
-    Constructed --> Entering: enter()
-    Constructed --> Warming: warmup()
-    Constructed --> Destroying: destroy()
-    Entering --> Entered: ready
-    Entering --> Failed: failure or cancellation
-    Warming --> Warmed: ready
-    Warming --> Failed: failure or cancellation
-    Entered --> Closing: close()
-    Warmed --> Closing: close()
-    Failed --> Closing: close()
-    Closing --> Closed: local resources released
-    Closing --> CloseFailed: cleanup failure
-    Destroying --> Destroyed: target absence confirmed
-    Destroying --> Failed: failure or unknown outcome
-    Destroyed --> Closing: close local lifecycle resources
-```
-
-`dump_state()` is available in every state after construction. Its return can change as soon as create, replacement, or destroy has a known outcome.
-
-An adapter does not transition from `Closed` back to `Entered`. Re-entry always constructs another fresh adapter from state.
-
-## Host State Authority
-
-The provider package defines state values but not their durable authority. A Host selects state before construction and publishes state after execution.
-
-For a Host-managed Environment:
-
-- current Host state wins, including authoritative `None`;
-- deleted or authoritative absent Host association suppresses stale portable fallback;
-- Harness continuation state is adopted only through an explicit unmanaged/import flow;
-- changed values publish last-write-wins;
-- equal values do not write;
-- displaced targets and provider-discoverable orphans are handled by Host prune.
-
-These are behavioral requirements. No standard Host record, Thread-link model, prune-candidate model, database table, foreign key, lock, or fencing field is part of this package.
-
-## Unconditional Finalization
-
-A Host treats execution, checkpointing, state publication, and local cleanup as independent outcomes.
-
-```mermaid
-sequenceDiagram
-    participant Host
-    participant Environment
-    participant Store as Host state authority
-
-    Host->>Environment: fresh adapter from supplied state
-    Host->>Environment: enter/use
-    Note over Host,Environment: success, failure, cancellation, or checkpoint failure
-    Host->>Environment: dump_state()
-    Host->>Environment: close() if still needed
-    Host->>Store: publish only when supplied != dumped
-```
-
-Publication is attempted from unconditional finalization even when execution, cancellation, checkpointing, or close fails. Because `dump_state()` always returns the adapter's last validated cache without refresh, a later lifecycle or observation failure cannot hide already known changed state. The Host reports independent execution, publication, and cleanup failures without pretending one erased another.
-
-Equal-state no-op prevents an older completing Run from overwriting a concurrent changed state merely because it finished later. A genuinely changed later value can win under ordinary last-write-wins and can orphan the displaced target. Explicit Host prune is the repair mechanism; the common contract adds no global lock or exactly-once creation guarantee.
-
-## Concurrency
-
-- Independent Runs use independent Environment instances.
-- A provider can permit several adapters to re-enter the same backing target when its target and operation semantics support it.
-- Provider-local operation serialization and generation checks protect native handles within each adapter.
-- Harness mount IDs and leases protect Run-local routing across mount replacement.
-- Hosts decide whether to serialize state publication or lifecycle policy. The shared contract requires only changed-only last-write-wins semantics.
-- Inline child execution borrows the already entered parent Harness facade and does not construct, enter, close, or publish another Environment.
-- Async child execution is an independent Run and therefore uses fresh adapters selected from Host state.
+- Controls and Environments are fresh per bounded operation scope.
+- Independent Runs never share process-local instances, even when Foundation policy maps
+  them to the same backing target.
+- Inline child execution borrows the already-entered parent Harness facade.
+- Foundation persists authoritative target state before admitting data-plane access when
+  the Provider produces state; stateless attached targets remain authoritative
+  through their validated target specification and target record.
+- A portable Harness copy is recovery context only; it cannot override an
+  authoritative Foundation target record.
+- Foundation owns lifecycle phases, active-use accounting, retention deadlines, operation
+  claims, fencing, and orphan repair. None is encoded into this shared package's
+  state envelope.
 
 ## Failure Semantics
 
-| Condition                                  | Required behavior                                                    |
-| ------------------------------------------ | -------------------------------------------------------------------- |
-| Invalid configuration, Provider key, state | Fail before external effects                                         |
-| Missing required runtime collaborator      | Fail before target mutation where possible                           |
-| No state                                   | Apply documented provider no-state semantics                         |
-| Exact compatible target exists             | Re-enter                                                             |
-| Exact target authoritatively absent        | Create replacement only when provider supports it                    |
-| Target unavailable or outcome unknown      | Fail without speculative create                                      |
-| Target metadata incompatible               | Fail conflict; do not adopt, mutate, or destroy                      |
-| Entry fails after create/replacement       | Preserve changed known state                                         |
-| Operation cancellation                     | Preserve unknown-outcome evidence; do not assume rollback            |
-| State refresh or observation fails         | Retain the last validated cache; `dump_state()` still returns it     |
-| Close fails                                | Report cleanup failure; never escalate to backing-target destruction |
-| Destroy outcome unknown                    | Retain state for later inspection/retry                              |
-
-## Security and Dependencies
-
-- Runtime collaborators are explicit trusted process-local values.
-- Credentials are read as late as the provider requires and are never serialized into state.
-- State selectors are revalidated against desired configuration and current provider evidence before use.
-- Direct Local relies on the embedding OS account and does not claim adversarial filesystem isolation.
-- EIP-backed providers authenticate fresh sessions and validate descriptor identity and method support before admitting operations.
-- Docker container IDs and E2B sandbox IDs can be sensitive Host state even though they are not bearer credentials; model-facing surfaces omit them.
-- Raw PIDs remain provider runtime details. Logical Agent-managed process references belong to Agent/Capability state, not Environment re-entry state.
-- Blocking SDK and filesystem work stays off the event loop and uses bounded timeouts.
-
-## Compatibility
-
-`EnvironmentState.state_version` owns provider payload compatibility. Providers reject unsupported versions and expose explicit migrations only when they can preserve target identity and semantics safely.
-
-The direct pre-release replacement removes Resource, attachment, Provider binding, lifecycle capability, pause, reconcile-action, and ephemeral-scope APIs. Context exit is permanently non-destructive. No compatibility wrapper may recreate Run-owned target lifetime.
+| Condition                                   | Required behavior                                                           |
+| ------------------------------------------- | --------------------------------------------------------------------------- |
+| Invalid call options, target spec, or state | Fail before external effects                                                |
+| Managed create response is lost             | Preserve operation identity and reconcile; do not issue a new target        |
+| Attached target is absent or stopped        | Fail without create, start, resume, or replacement                          |
+| Exact managed target is absent before use   | Report absence to Foundation lifecycle policy; Environment does not replace |
+| Readiness deadline expires                  | Preserve known state and report typed timeout                               |
+| Retain is unsupported                       | Fail capability validation; do not simulate a guarantee                     |
+| Destroy outcome is unknown                  | Preserve state and operation slot for reconciliation                        |
+| Environment close fails                     | Report local cleanup failure; never escalate to target destruction          |
 
 ## Invariants
 
-01. State is supplied before entry.
-02. Construction performs no external I/O.
-03. One adapter serves one independent Run or Host lifecycle operation.
-04. Confirmed absence and unknown evidence are distinct.
-05. Every known create or replacement is immediately cached; synchronous `dump_state()` returns that cache without external I/O or failure.
-06. State contains no credential, PID, live client, or Host persistence model.
-07. Close releases only process-local resources.
-08. Only explicit Host policy invokes destroy.
-09. State publication is independent from successful Harness checkpoint production.
-10. Equal state does not write; changed state is last-write-wins.
-11. Orphan cleanup is explicit Host prune behavior.
-12. Harness owns multi-mount routing but no provider target lifecycle.
+01. Required managed state exists before Environment construction and data-plane
+    entry; stateless attached Providers use `None`.
+02. Only Control performs provider target lifecycle I/O.
+03. Managed create and destroy require a Foundation-authorized managed target
+    specification.
+04. Attached targets may be observed and retained but never destroyed or replaced.
+05. Lifecycle phase changes follow confirmed observation, not request dispatch.
+06. Repeated operation IDs identify the same digest and target generation.
+07. Environment entry and close are permanently non-destructive.
+08. Present state contains no credentials, live clients, Foundation persistence
+    model, or
+    ownership claim.
+09. Harness owns multi-mount routing but no Provider target lifecycle.
+10. No separate operation table, Resource wrapper, runtime attachment, or lifecycle
+    Provider is prescribed by this package.

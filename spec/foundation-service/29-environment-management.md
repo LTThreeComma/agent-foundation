@@ -1,351 +1,191 @@
-# Environment Connections, Targets, and Runtime Attachments
+# Environment Providers, Revisions, Targets, and Runtime
 
 ## Design Position
 
-Foundation manages references to customer-owned Environments and the bounded
-retention required to keep an already-existing provider target alive while accepted
-or running Runs use it. It does not own general provider-side target lifecycle.
+Foundation manages the complete runtime lifecycle of an Environment target selected
+for a Run. It supports two ownership modes:
 
-Every Foundation Environment, named or inline, identifies an already-existing target.
-Foundation validates and freezes that connection, globally correlates the target,
-authorizes its use, opens a process-local attachment for each independent RunAttempt,
-and closes only the local attachment. When the selected Foundation integration
-declares bounded retention, Foundation can extend an existing target's alive-until
-deadline while at least one associated Run is `accepted` or `running`. It never
-creates, starts, resumes, replaces, pauses, stops, or destroys the provider target.
+- **managed**: Foundation creates, observes, retains, and destroys the exact target;
+- **attached**: Foundation attaches to, observes, and where supported retains an
+  existing external target, but never destroys, replaces, starts, resumes, pauses, or
+  stops it.
+
+The configuration plane and runtime plane are separate. `Environment` and immutable
+`EnvironmentRevision` records describe reusable desired configuration.
+`EnvironmentTarget` represents one concrete runtime sandbox, container, or attached
+workspace selected for one root Run execution family. Publishing a revision performs
+no provider target I/O and creates no target.
+
+A target is materialized only when a Run using a named revision or inline
+Environment is accepted. Every independent root Run gets a new managed target; an
+Environment revision is a template, not a singleton sandbox or a pool key. Replacement
+RunAttempts for the same Run reuse its target. Async children using `shared_root`
+bind to the same target. A Retry, Continue, fork, or `dedicated` async child is a new
+Run and receives a new target.
 
 The shared [`a13n-environment-provider`](../agent-environment-provider/README.md)
-contract remains broader. An `EnvironmentProvider` can support creation, re-entry,
-warmup, replacement, destruction, and state export for other Hosts. Foundation does
-not narrow or modify that contract and does not call those lifecycle paths.
-Foundation owns separate attachment, target-identity, and retention integration
-adapters. Those adapters may delegate bounded provider-specific operations to a
-selected provider package without adding Foundation policy to the shared package.
-
-Harness receives one fresh process-local `Environment` adapter as its default
-`workspace` mount. The adapter's entry attaches to the exact accepted target, and its
-close releases only process-local clients, sessions, carriers, and handles.
+package supplies the single Provider plugin, provider-side lifecycle Control,
+optional portable state, and data-plane Environment. Foundation owns Provider
+connections, Environment configuration and revisions, durable lifecycle policy,
+association, authorization, scheduling, persistence, and reconciliation; Provider
+code owns native API mapping but no Foundation resource or state machine.
 
 ## Boundaries
 
-| Concern                                                    | Owner                                        | Contract                                                                                   |
-| ---------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Workspace Environment identity and immutable revisions     | Foundation                                   | Reusable connection definitions, credential references, and access ceilings                |
-| Global external-target correlation and active-use count    | Foundation                                   | One tenant-neutral `EnvironmentTarget` per canonical provider identity                     |
-| Provider-side target creation and general lifecycle        | Customer and provider                        | Outside Foundation; Foundation performs only declared bounded retention                    |
-| Generic Provider capabilities                              | `a13n-environment-provider`                  | May include create, re-entry, warmup, replacement, state, and destroy                      |
-| Foundation attachment capability                           | Foundation integration adapter               | Validates a connection and constructs an adapter that can only attach to the exact target  |
-| Foundation target identity and retention policy            | Foundation integration adapter               | Canonicalizes global identity and declares whether bounded keepalive is required           |
-| Foundation retention capability                            | Foundation integration adapter               | Idempotently extends one existing target's bounded alive-until deadline                    |
-| Provider catalog and exact package lock                    | Foundation distribution or operator boundary | Trusted code selection; catalog presence grants no Workspace authority                     |
-| Workspace Provider selection                               | Foundation authorization                     | Enables one exact trusted provider package lock                                            |
-| Secret storage and current eligibility                     | [Secret Management](27-secret-management.md) | Resolves fresh values without persisting them in a connection                              |
-| Agent selection and immutable Run execution configuration  | Foundation                                   | At most one primary connection, exact provider lock, Secret references, and access ceiling |
-| Run-to-Environment correlation and active-count transition | Foundation                                   | One immutable binding per Run; accepted/running membership updates the target atomically   |
-| Fresh runtime collaborators and attachment adapters        | Worker                                       | Constructed for one independent RunAttempt and never persisted                             |
-| Target keepalive claim and external operation              | Worker                                       | Per-target PostgreSQL lease and fenced, transaction-free Provider call                     |
-| Multi-mount routing, entry, portable snapshots, and close  | Harness                                      | Run-local bound facade; close never mutates the provider-side target lifecycle             |
-| Background process control and active completion readiness | Harness                                      | Run-owned controller; killed and released before adapter close                             |
-| EIP session and daemon enforcement                         | Agent-envd and its client                    | Daemon generation and bounded Environment operations                                       |
+| Concern                                             | Owner                                        |
+| --------------------------------------------------- | -------------------------------------------- |
+| Trusted Provider discovery and exact package lock   | Foundation deployment and Provider catalog   |
+| Provider account, endpoint, and credential bindings | `EnvironmentProviderConnection`              |
+| Reusable Environment metadata and current revision  | `Environment`                                |
+| Immutable managed recipe or attached reference      | `EnvironmentRevision` or inline config       |
+| Concrete target identity, state, and lifecycle      | `EnvironmentTarget`                          |
+| Run-to-target active-use relation                   | `RunEnvironmentBinding`                      |
+| Lifecycle policy, operation claim, and fencing      | Foundation                                   |
+| Native create, attach, observe, retain, destroy I/O | `EnvironmentControl`                         |
+| Exact-target file, shell, process, output, port I/O | shared `Environment` data-plane adapter      |
+| Multi-mount policy and adapter entry/close          | Harness                                      |
+| Provider Secret storage and current eligibility     | [Secret Management](27-secret-management.md) |
 
-Provider discovery, package upload, schema validity, target-identifier possession,
-or a prior successful attachment does not authorize Provider or target use. API input
-and stored data never supply an arbitrary Python import target.
+Neither a Provider key, connection ID, target ID, portable state, nor Run binding is
+an authorization grant. Foundation reauthorizes the exact tenant resources and
+credential sources at each lifecycle or RunAttempt boundary.
 
-## Foundation Provider Capabilities
+## One Shared Provider Abstraction
 
-Foundation exposes a safe catalog of deployment-trusted Environment provider
-packages and Foundation-owned integration adapters. A package can implement the
-generic `EnvironmentProvider` contract and any other capabilities it needs without
-declaring Foundation target identity or retention policy. To be selectable by
-Foundation, an integration adapter exposes the following Foundation-owned
-capability:
+Foundation uses the shared `EnvironmentProvider` directly. It does not define a
+Foundation-only attachment Provider or a second lifecycle Provider.
 
 ```python
-# Conceptual Foundation integration protocol; not part of
-# a13n-environment-provider.
-class FoundationEnvironmentAttachProvider(Protocol):
-    provider_key: str
-    connection_versions: frozenset[str]
-    identity_schema_version: str
-    retention_behavior: Literal["none", "while_execution_active"]
+provider = catalog.require(provider_key)
+connection_options = provider.validate_connection_options(...)
+target_spec = provider.validate_target_spec(
+    connection_options=connection_options,
+    specification=effective_provider_target_spec,
+)
 
-    def validate_connection(
-        self,
-        *,
-        schema_version: str,
-        parameters: JsonObject,
-    ) -> BaseModel: ...
+# Pure dependency binding; no provider I/O.
+control = provider.create_control(
+    connection_options=connection_options,
+    credentials=current_credentials,
+    runtime=fresh_runtime,
+)
 
-    def target_identity(
-        self,
-        *,
-        connection: BaseModel,
-    ) -> FoundationEnvironmentTargetIdentity: ...
-
-    def create_attachment_environment(
-        self,
-        *,
-        connection: BaseModel,
-        runtime: object,
-    ) -> Environment: ...
-
-
-class FoundationEnvironmentTargetIdentity(BaseModel):
-    namespace: JsonObject
-    target_key: str
-
-
-class FoundationEnvironmentRetentionProvider(Protocol):
-    async def ensure_retained_until(
-        self,
-        *,
-        connection: BaseModel,
-        runtime: object,
-        deadline: datetime,
-        operation_id: str,
-    ) -> datetime: ...
+# Also pure; exact target already exists and is ready.
+environment = provider.create_environment(
+    connection_options=connection_options,
+    target_spec=target_spec,
+    state=current_target_state,
+    credentials=current_credentials,
+    runtime=fresh_runtime,
+)
 ```
 
-`validate_connection()`, `target_identity()`, and
-`create_attachment_environment()` are deterministic and perform no filesystem,
-subprocess, daemon, network, SDK, or provider API I/O. The returned value is a fresh,
-single-use implementation of the shared `Environment` interface. Its `enter()` path:
+`EnvironmentControl` handles create, attach, observe, readiness, retain, and destroy.
+It is a short-lived connection-bound client held only by Foundation's trusted
+lifecycle path; Harness, Agent UI, and Agent code never receive it. `Environment` is
+the existing `a13n-environment-provider` data-plane interface used by Harness. Its
+`enter()` and `close()` connect to and release an exact ready target without changing
+target lifecycle.
 
-1. resolves and inspects only the exact target named by the validated connection;
-2. establishes fresh operation clients, an EIP session, readiness, and provider
-   facets;
-3. fails if the target is missing, stopped, paused, inaccessible, incompatible, or
-   otherwise unavailable; and
-4. never falls back to generic Provider create, start, resume, replacement, or
-   recovery behavior.
-
-Foundation never calls the generic Provider's `create_environment()`, `warmup()`, or
-`destroy()` methods. `a13n-environment-provider` does not define
-`identity_schema_version`, `target_identity()`, `retention_behavior`, or
-`ensure_retained_until()`. Foundation ships adapters for the shared built-ins; an
-extension can ship its Foundation integration separately from its generic Provider.
-An adapter may delegate existing pure validation, target-key, and attach-only
-operations to a provider implementation, but attachment and retention remain
-separate conformance boundaries. The attachment's `dump_state()` output is not
-Foundation authority. A Foundation attachment returns `None` from `dump_state()`
-because the exact connection is already frozen in `EnvironmentExecutionConfig`;
-Harness therefore publishes no provider target state for this mount.
-
-`target_identity()` returns the bounded canonical identity of the external target.
-`provider_key`, `identity_schema_version`, canonical `namespace`, and `target_key`
-together identify one target across the whole Foundation deployment. For E2B the
-target key is the Sandbox ID. A Provider whose native ID is not globally unique must
-include every non-secret provider namespace component required for global
-unambiguity; Organization, Workspace, package revision, credentials, and mutable
-connection options must not enter the identity. The target key is not a credential,
-ownership proof, authorization token, or tenant boundary.
-
-For the shared Direct Local, Local Envd, and Docker built-ins, Foundation's adapter
-uses identity schema `1`, maps the Provider's existing pure `target_key()` result to
-an empty namespace, and declares `retention_behavior="none"`. The shared Provider
-package remains unchanged and owns none of these Foundation metadata declarations.
-
-`retention_behavior="none"` means Foundation never invokes a retention operation for
-that integration. `while_execution_active` means Foundation automatically retains
-the target while at least one associated Run is `accepted` or `running`; this is
-Foundation integration policy and has no per-Run or per-Workspace override. Such an
-integration must expose `FoundationEnvironmentRetentionProvider`, or registration
-and selection fail closed.
-
-`ensure_retained_until()` performs external I/O and has these constraints:
-
-1. `operation_id` is idempotent, and repeating it never shortens a previously
-   requested deadline;
-2. a later request is monotonic and can only extend bounded retention;
-3. the returned instant is the Provider's acknowledged alive-until observation and
-   is no earlier than the acknowledged request;
-4. it operates only on the exact target in `connection`; and
-5. it never creates, starts, resumes, replaces, pauses, stops, or destroys a target.
-
-A timeout or unknown result is retried with the same operation identity. Operation
-generation changes only when Foundation intentionally issues a later deadline, not
-because an acknowledgement was lost.
+Foundation owns the persistent split between `EnvironmentProviderConnection` and
+Environment revision or inline configuration. The shared package does not model
+those resources: Foundation resolves them into Provider-owned connection options and
+an effective target specification immediately before validation and invocation.
+Provider validation and both constructors are deterministic and perform no external
+I/O. Lifecycle methods run outside database transactions. A Control has no access to
+Foundation ORM models, repositories, database sessions, Run policy, retention
+windows, or tenant authorization.
 
 ## Provider Catalog and Workspace Selection
 
-Each Foundation catalog entry contains bounded display metadata, supported
-connection versions and JSON Schemas, identity-schema version, retention behavior,
-non-secret runtime credential requirements, operation families, and an exact
-dependency lock. Reading the catalog performs no import, credential, filesystem,
-daemon, network, or provider-target I/O.
+Foundation exposes a safe deployment-trusted catalog. Each entry includes:
 
+- stable Provider key and display metadata;
+- Provider-owned connection-option and target-option JSON Schemas and versions;
+- managed, attached, retain, artifact, resource, network, and operation capabilities;
+- required runtime credential binding names; and
+- exact dependency/package lock and compatibility evidence.
+
+Catalog reads import no Provider code and perform no credential or provider I/O.
 Provider code comes from fixed
 [distribution composition](02-distribution-composition-and-extensions.md) or an
-immutable managed Environment Provider package revision. Managed revisions reuse the
-upload, hashing, immutable object storage, dependency validation, content-addressed
-cache, and conflict handling defined for
-[managed Harness plugins](36-managed-harness-plugins-and-runtime.md), but remain a
-separate extension kind with their own identities, entry point, locks,
-authorization, and runtime contract.
+immutable managed Environment Provider package revision. Managed Provider artifacts
+reuse the upload, hashing, object storage, dependency validation, cache, and conflict
+substrate defined for
+[managed Harness plugins](36-managed-harness-plugins-and-runtime.md), but keep a
+separate extension identity and entry-point group.
 
-Foundation reuses the artifact substrate, not the `HarnessPluginPackage` product
-identity or Harness plugin SPI. One selected package contributes exactly one
-Foundation attachment capability and, when it declares
-`while_execution_active`, one retention capability. It may also contribute the
-generic `EnvironmentProvider` entry point, but Foundation selection does not grant
-authority to call its broader lifecycle methods. Publication validates non-executing
-metadata, including the required retention entry point, without importing code. A
-Worker loads only the exact verified artifact on demand and rejects conflicting
-Provider keys, distributions, or top-level packages; a process never reloads an
-implementation.
-
-The deployment-authenticated operator API publishes and reads package revisions:
+Operator-only package publication routes remain outside the tenant API:
 
 ```http
 POST /internal/v1/environment-provider-package-revisions
 GET /internal/v1/environment-provider-package-revisions/{package_revision_id}
 ```
 
-These routes are outside `/api/v1`, public OpenAPI, SDKs, tenant RoleBindings, and
-browser sessions. Upload grants trusted in-process code-execution authority.
-Untrusted Providers require a separate out-of-process protocol and security boundary.
+Workspace Provider selection enables one exact catalog/package lock. Selection is a
+trust and availability gate, not a credential or target configuration. Disabling a
+selection blocks new connections, revisions, and Runs. It does not abandon cleanup:
+Foundation may still load the exact retained lock and resolve the connection's
+workspace-owned lifecycle credentials to reconcile or destroy existing managed
+targets.
 
-Workspace users view the safe catalog and enable an exact entry:
+Provider code is trusted in-process worker code. Upload therefore grants code
+execution authority and is deployment-operator-only. Untrusted Providers require a
+separate out-of-process protocol and security boundary.
+
+## Provider Connections
+
+`EnvironmentProviderConnection` is a Workspace resource that binds a Provider
+account or local control-plane endpoint to lifecycle credentials:
 
 ```python
-# Conceptual Foundation domain schema; not a wire or ORM model.
-class EnvironmentProviderSelection:
+class EnvironmentProviderConnection:
+    id: EnvironmentProviderConnectionId
     organization_id: OrganizationId
     workspace_id: WorkspaceId
+    name: str
+
     provider_key: str
     provider_package_revision_id: EnvironmentProviderPackageRevisionId | None
     provider_lock: DependencyLock
-    enabled: bool
-    updated_at: datetime
-```
-
-The Workspace selection is the user-management surface for an uploaded package. GET
-returns a strong ETag and changes require `If-Match`; it has no generic version
-counter. Users can inspect catalog revisions, enable or disable one exact lock, and
-later select it from Environment revisions. Selection never mutates or deletes the
-operator-published package revision.
-
-Only an enabled selection can create a revision, accept a Run configuration, test a
-revision, or reconstruct a RunAttempt. Disabling it does not delete retained
-connections or bindings, but later use fails closed without substituting another
-package, Provider, or target.
-
-## Connection Definition
-
-Foundation owns the serializable connection envelope:
-
-```python
-class EnvironmentConnectionSpec:
-    provider_key: str
     schema_version: str
-    parameters: JsonObject
-```
+    configuration: JsonObject
+    credential_bindings: Mapping[str, WorkspaceSecretCredential]
 
-`parameters` is validated by the selected Foundation attachment capability. It
-contains the exact non-secret provider target reference and any non-secret namespace
-or connection options required to attach. Unlike generic
-`EnvironmentProviderSpec.configuration`, it can and normally does contain an existing
-provider target ID.
-
-The envelope and provider-owned parameter model reject unknown fields. Values are
-bounded canonical JSON. Every supported schema identifies exactly one existing target;
-it cannot describe a target to create, a fallback target, or a target-selection query.
-
-The connection contains no credential value, SDK client, bearer URL, resolved
-short-lived endpoint, EIP session, PID, process handle, Harness mount ID, RunAttempt
-authority, lifecycle receipt, or Foundation record identity. A target ID can still be
-sensitive tenant data and follows the protected projection rules below.
-
-## Global Environment Target Model
-
-`EnvironmentTarget` is Foundation's internal, deployment-global correlation and
-keepalive-coordination record for one external target. It is not a tenant resource,
-an authorization object, or a public Environment. In particular it contains no
-`organization_id`, `workspace_id`, owning Principal, credential reference, or
-Provider package version.
-
-```python
-type EnvironmentTargetRetentionBehavior = Literal[
-    "none",
-    "while_execution_active",
-]
-type EnvironmentTargetStatus = Literal["active", "idle", "retired"]
-
-
-class EnvironmentTarget:
-    id: EnvironmentTargetId
-    provider_key: str
-    identity_schema_version: str
-    target_key: str
-    target_identity_digest_sha256: str
-    retention_behavior: EnvironmentTargetRetentionBehavior
-
-    status: EnvironmentTargetStatus
-    active_run_count: int
-    idle_at: datetime | None
-    retire_after: datetime | None
-
-    keeper_claim_generation: int
-    keeper_owner_worker_generation: str | None
-    keeper_lease_expires_at: datetime | None
-    keeper_source_binding_id: RunEnvironmentBindingId | None
-
-    operation_generation: int
-    operation_id: str | None
-    requested_alive_until: datetime | None
-    acknowledged_alive_until: datetime | None
-    next_keepalive_at: datetime | None
-    last_error: SafeProviderError | None
-
+    enabled: bool
+    version: int
+    created_by: PrincipalRef
     created_at: datetime
     updated_at: datetime
 ```
 
-The canonical target-identity document contains `provider_key`,
-`identity_schema_version`, canonical `namespace`, and canonical `target_key`.
-Foundation stores its SHA-256 digest and enforces uniqueness on
-`(provider_key, identity_schema_version, target_identity_digest_sha256)`.
-`target_key` remains protected data used for exact correlation; the canonical
-namespace stays in the immutable connection rather than becoming another public
-target projection. Digest equality neither grants access nor reveals the target to a
-caller.
+The connection identifies an account, API endpoint, region/default profile, Docker
+engine profile, or equivalent Provider control plane. It is not an E2B sandbox ID,
+Docker container ID, target selection query, Environment preset, or Run binding. One
+connection can operate many targets in the authorized Provider account.
 
-The same row owns the materialized active-Run count, lifecycle status, Keeper lease,
-and latest external-operation observation. There is no separate retention, Keeper,
-target-owner, or target-state table. Claim generation fences Worker ownership;
-operation generation and `operation_id` fence and deduplicate one external deadline
-extension. Lease fields and source binding are either all absent or describe the
-current claim. `operation_id` is a stable Foundation-generated `envkop_...` identity
-for one operation generation. A stale generation cannot update operation
-observations.
+`configuration`, Provider identity, exact package lock, and credential binding names
+and Secret IDs are immutable. Changing account, endpoint, package lock, schema, or
+credential source creates a new connection. The value of a referenced Workspace
+Secret can rotate in place under the Secret contract without changing connection
+identity. `name` and `enabled` are mutable under ETag/`If-Match` concurrency.
 
-`active_run_count` is non-negative. It is greater than zero exactly when
-`status="active"`; both `idle` and `retired` require zero. `idle_at` is set when the
-last active Run leaves the active set. `retire_after` is a Foundation record-lifecycle
-deadline chosen to cover the current Keeper lease, any in-flight requested deadline,
-Provider timeout, and a bounded safety margin. `acknowledged_alive_until` is only the
-latest Provider observation. Those instants have different meanings and never
-collapse into one `expires_at` field.
+Lifecycle credentials must use `WorkspaceSecretCredential`; invoking-User Secrets
+are rejected. Foundation may need the credential after the invoking User disappears
+in order to retain or destroy a managed target. Provider connection values contain
+no plaintext secret, live client, session, exact target ID, or short-lived endpoint.
 
-Revision creation calls the integration adapter's pure `target_identity()` function and upserts the target
-in the same short transaction that publishes the revision. Inline selection performs
-the same idempotent short upsert during Run-admission preflight so the immutable
-execution configuration can contain the resolved target ID; the final acceptance
-transaction revalidates and activates that row. A newly inserted zero-count row starts
-`idle` with bounded retirement fields. If acceptance later fails, the unreferenced row
-is only a safe cleanup candidate and grants no Run authority. The upsert discloses
-neither whether another tenant already referenced the target nor any other tenant
-fact. A package whose retention behavior conflicts with an existing row under the
-same identity schema is incompatible; it must use a reviewed identity-schema
-migration rather than silently reinterpret the row.
+Disabling a connection blocks new revision publication, inline selection, target
+creation, and attachment. It does not revoke or erase already accepted Runs, and it
+does not block required reconciliation or managed cleanup. Deleting an underlying
+Secret causes new work to fail and cleanup to retry with a bounded operator-visible
+error; Foundation never marks an unknown managed target destroyed merely because
+credentials are unavailable.
 
-## Workspace Environment and Revision Model
+## Environment and Revision Configuration
 
-The API resource named `Environment` is a Foundation-owned reusable connection
-definition, not the shared process-local adapter and not the provider target itself.
-It has stable identity for naming, authorization, archival, and current-revision
-selection. An `EnvironmentRevision` is an immutable connection revision.
+The public `Environment` resource is reusable static configuration identity and
+metadata. It is not the shared process-local adapter and not a concrete target.
 
 ```python
 class FoundationEnvironment:
@@ -357,602 +197,583 @@ class FoundationEnvironment:
     version: int
     current_revision_id: EnvironmentRevisionId
     archived_at: datetime | None
+    created_by: PrincipalRef
+    created_at: datetime
+    updated_at: datetime
+```
 
+Changing effective configuration publishes a new immutable revision and advances the
+head. Name, description, and archive state are mutable metadata only.
 
-type EnvironmentAccess = Literal["read_only", "read_write", "full"]
+### Common managed create configuration
 
+```python
+class ManagedEnvironmentConfiguration:
+    mode: Literal["managed"]
+    artifact: EnvironmentArtifact
+    resources: EnvironmentResources | None
+    runtime: EnvironmentExecutionRequirements
+    network: EnvironmentNetworkConfiguration
+    initialization: EnvironmentInitializationConfiguration | None
+    provider_options: EnvironmentProviderOptions
+    access: EnvironmentAccess
+```
 
+The common fields are deliberately bounded:
+
+| Field            | Portable meaning                                                       |
+| ---------------- | ---------------------------------------------------------------------- |
+| `artifact`       | Immutable OCI image, Provider template, snapshot, or blueprint ref     |
+| `resources`      | Requested CPU, memory, disk, and process ceilings                      |
+| `runtime`        | Architecture, logical working directory, and envd runtime contract     |
+| `network`        | Egress class and explicitly exposed provider-local ports               |
+| `initialization` | Reviewed bootstrap profile and literal or Secret-backed runtime values |
+| `access`         | Maximum Harness file, shell, process, output, and port permissions     |
+
+Each Provider declares which common variants it supports and validates their mapping
+with the selected connection. Unsupported values fail revision publication or inline
+admission; they are never ignored or approximated.
+
+`provider_options` is a tagged `{provider_key, schema_version, options}` object owned
+by the Provider. It carries reviewed native fields that do not have honest portable
+semantics—for example Docker pull policy and mounts, or E2B timeout and metadata. It
+rejects unknown keys and raw SDK keyword dictionaries. Provider options cannot
+override common ownership, Secret, network, access, operation-correlation, or cleanup
+rules.
+
+The artifact is where dependencies are installed. Foundation does not accept generic
+apt, pip, npm, arbitrary Dockerfile, or unbounded shell setup lists and does not build
+an image or E2B template during Run admission. Changing dependencies, image,
+template, bootstrap profile, or Provider options publishes another revision.
+
+### Attached configuration
+
+```python
+class AttachedEnvironmentConfiguration:
+    mode: Literal["attached"]
+    target: JsonObject
+    expected_artifact: EnvironmentArtifact | None
+    expected_runtime: EnvironmentExecutionContract
+    provider_options: EnvironmentProviderOptions
+    access: EnvironmentAccess
+```
+
+`target` contains the exact non-secret Provider reference, such as one sandbox ID,
+container ID, or authorized local path. During attach, Provider validation may
+normalize it into `EnvironmentState` when later access needs an independent portable
+selector. Direct Local and Local Envd retain no state because validated configuration
+already identifies their Host workspace. Attachment never transfers ownership.
+Attached configuration rejects managed resource, create, and destruction fields.
+
+An attached target must already be ready. Missing, stopped, paused, inaccessible,
+incompatible, or ambiguous evidence fails without create, start, resume, replacement,
+or destructive mutation.
+
+### Immutable revision
+
+```python
 class EnvironmentRevision:
     id: EnvironmentRevisionId
-    environment_id: EnvironmentId
+    organization_id: OrganizationId
     workspace_id: WorkspaceId
+    environment_id: EnvironmentId
     version: int
-    environment_target_id: EnvironmentTargetId
-    target_key: str
-    connection: EnvironmentConnectionSpec
-    provider_package_revision_id: EnvironmentProviderPackageRevisionId | None
+    provider_connection_id: EnvironmentProviderConnectionId
+    configuration: ManagedEnvironmentConfiguration | AttachedEnvironmentConfiguration
+    content_digest: str
+    source_revision_id: EnvironmentRevisionId | None
+    created_by: PrincipalRef
+    created_at: datetime
+```
+
+`provider_connection_id` selects the immutable Provider account/endpoint and its
+credential source; it never contains or denotes a concrete sandbox ID. For managed
+mode, the revision is only a target create recipe. The actual native ID appears later
+in `EnvironmentTarget.provider_state`. For attached mode, the exact external ID is
+part of `configuration.target` because attachment itself is the declared preset.
+
+Revision creation performs pure Provider validation and freezes exact Provider lock,
+connection ID, normalized configuration, access ceiling, required Secret references,
+and digest. It performs no provider I/O, creates no target, and stores no
+`environment_target_id`.
+
+Inline Environment selection uses the same discriminated managed-or-attached schema
+and `provider_connection_id`, but creates no reusable Environment or revision. The
+accepted Run freezes the canonical inline value and digest. This contract preserves
+the current Agent/Run Environment selection surface; the independent question of
+moving that selection to Thread topology is outside this change.
+
+## Accepted Execution Configuration
+
+`EnvironmentExecutionConfig` inside `EffectiveAgentConfig` freezes:
+
+- source kind and named `environment_revision_id` or canonical inline configuration;
+- `provider_connection_id`, Provider key, exact package/runtime lock, and schema
+  versions;
+- normalized managed-or-attached configuration and content digest;
+- access ceiling and runtime Secret requirements; and
+- ownership mode.
+
+No Secret value, live client, Provider target ID, `EnvironmentState`, lifecycle
+phase, operation receipt, or process-local adapter enters this snapshot. Current
+authorization, connection eligibility, Secret eligibility, and package availability
+are rechecked at admission and execution boundaries without changing the frozen
+selection.
+
+## Runtime Target Model
+
+`EnvironmentTarget` is a Workspace-scoped internal runtime record. It represents one
+concrete target for one root Run execution family, not a reusable global target and
+not a public Environment.
+
+```python
+type EnvironmentTargetOwnership = Literal["managed", "attached"]
+type EnvironmentTargetPhase = Literal[
+    "pending",
+    "provisioning",
+    "ready",
+    "idle",
+    "destroying",
+    "retired",
+]
+type EnvironmentTargetOperationKind = Literal[
+    "create",
+    "attach",
+    "retain",
+    "destroy",
+]
+type EnvironmentTargetOperationPhase = Literal[
+    "claimed",
+    "dispatched",
+    "outcome_unknown",
+]
+
+
+class EnvironmentTarget:
+    id: EnvironmentTargetId
+    organization_id: OrganizationId
+    workspace_id: WorkspaceId
+    environment_root_run_id: RunId
+    provider_connection_id: EnvironmentProviderConnectionId
+    provider_key: str
     provider_lock: DependencyLock
-    credential_bindings: tuple[EnvironmentCredentialBinding, ...]
-    access: EnvironmentAccess = "full"
-    logical_digest_sha256: str
+    ownership: EnvironmentTargetOwnership
+
+    environment_revision_id: EnvironmentRevisionId | None
+    inline_environment_digest: str | None
+    configuration_digest: str
+    provider_state: EnvironmentState | None
+    phase: EnvironmentTargetPhase
+    active_binding_count: int
+    target_generation: int
+
+    idle_at: datetime | None
+    retire_after: datetime | None
+    retained_until: datetime | None
+
+    operation_kind: EnvironmentTargetOperationKind | None
+    operation_id: str | None
+    operation_request_digest: str | None
+    operation_phase: EnvironmentTargetOperationPhase | None
+    operation_claim_generation: int
+    operation_owner_worker_generation: str | None
+    operation_lease_expires_at: datetime | None
+    operation_started_at: datetime | None
+    next_operation_at: datetime | None
+    last_observed_at: datetime | None
+    last_error: SafeProviderError | None
+
+    created_at: datetime
+    updated_at: datetime
 ```
 
-Creation atomically creates revision `1`. Connection, credential-reference, exact
-package-lock, or access changes create a higher revision. Mutable display metadata
-changes do not. Restoring old configuration copies it into a new revision, and
-canonical semantic no-ops create nothing. Existing Runs retain their accepted
-revision or inline execution configuration; an edit never mutates active or resumable
-work in place.
+Exactly one source reference is present. The target copies the immutable execution
+configuration digest and exact Provider lock required for reconstruction. Managed
+`provider_state` becomes non-null as soon as create confirms exact native identity.
+An attached stateful Provider publishes state after validating and normalizing the
+configured reference. Direct Local and Local Envd remain `provider_state=None`; their
+frozen attached configuration and target row are the authoritative Foundation
+identity. Any present state is protected data and the authoritative Foundation copy.
+Null `provider_state` does not encode target absence or readiness; `phase` and the
+confirmed Provider observation own that distinction.
 
-Revision creation resolves the enabled Workspace selection, validates the exact
-connection schema and access ceiling, derives the canonical target identity, upserts
-and references its `EnvironmentTarget`, and captures the exact package lock without
-performing external I/O. Trusted capability loading follows the selected
-distribution's runtime boundary and never uses a caller-supplied import target.
-Validation proves only that the connection is well-formed. Target existence and
-readiness are checked when a test or RunAttempt attaches. A revision contains no live
-adapter, generic Provider state, Harness state, or lifecycle operation; mutable
-target coordination remains owned by the referenced `EnvironmentTarget`. A
-referenced revision cannot be deleted.
+There is no uniqueness constraint over provider-native target identity. Two attached
+Run families can intentionally reference the same external sandbox while retaining
+independent authorization and active-use accounting. Foundation never globally
+deduplicates targets across Runs, Workspaces, or Organizations and never discloses
+whether another tenant supplied the same native ID.
 
-## Credential Bindings
+`active_binding_count` is non-negative. `ready` requires a positive count; `idle`,
+`destroying`, and `retired` require zero. `pending` and `provisioning` normally have
+the owner binding already counted while the accepted Run waits for readiness.
 
-Connection parameters contain no credential values. Each catalog-declared runtime
-credential requirement is bound to exactly one non-secret source:
+`retire_after` is set to `idle_at + 10 minutes`. Idle is a non-reusable cleanup grace,
+not a warm pool: no new Run or child can acquire an idle target. Managed targets
+transition through destroy and become `retired` only after absence is confirmed.
+Attached targets become locally `retired` after the grace without a Provider destroy.
+
+## Run Binding Instead of a Separate Use Lease
+
+The existing `RunEnvironmentBinding` owns active-use membership; Foundation defines
+no `EnvironmentUseLease` table.
 
 ```python
-class EnvironmentCredentialBinding:
-    requirement_key: str
-    credential: SecretCredentialSource
-```
+type RunEnvironmentBindingRole = Literal["owner", "shared_child"]
 
-`SecretCredentialSource` is the shared non-secret selector defined by the
-[Secret credential-reference contract](27-secret-management.md#credential-references).
-Environment bindings add only the Provider requirement key; they do not create
-Environment-specific variants of the same Secret reference.
 
-Every RunAttempt and connection test reauthorizes the Workspace selection,
-Environment use, credential source, owning principal, and current Secret eligibility.
-Foundation decrypts values only after closing the authorization transaction and
-supplies them to one process-local runtime builder. Secret rotation therefore affects
-the next independent attachment without creating another revision.
-
-Secret values and value-derived data never enter revisions, bindings, Run state,
-events, Items, logs, traces, metric labels, or API responses. Missing or denied
-credentials fail closed.
-
-## Environment Selection and Inline Parameters
-
-An `AgentConfig` selects at most one primary exact Environment revision:
-
-```python
-class EnvironmentSelection:
-    environment_revision_id: EnvironmentRevisionId
-```
-
-A typed Run override can replace that selection with another exact revision or one
-inline connection. Explicit null clears the Environment; omission inherits the Agent
-Revision:
-
-```python
-class InlineEnvironmentSelection:
-    connection: EnvironmentConnectionSpec
-    credential_bindings: tuple[EnvironmentCredentialBinding, ...] = ()
-    access: EnvironmentAccess = "full"
-```
-
-The value of `config_override.environment` for an inline selection has exactly these
-fields:
-
-| Field                                   | Required | Meaning                                                                                  |
-| --------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
-| `connection.provider_key`               | yes      | Selected namespaced provider key                                                         |
-| `connection.schema_version`             | yes      | Version of the Foundation connection schema                                              |
-| `connection.parameters`                 | yes      | Provider-specific existing-target reference and non-secret attachment options            |
-| `credential_bindings`                   | no       | One non-secret Secret source per declared runtime credential requirement; defaults empty |
-| `credential_bindings[].requirement_key` | yes      | Catalog-declared credential requirement name                                             |
-| `credential_bindings[].credential`      | yes      | `workspace_secret` or `invoking_user_secret` reference                                   |
-| `access`                                | no       | `read_only`, `read_write`, or `full`; defaults to `full`                                 |
-
-There is no Foundation `environment_id` or `environment_revision_id` in an inline
-selection. The provider-side target identifier is inside
-`connection.parameters`. The complete Run request fragment for E2B attachment version
-`1` is:
-
-```json
-{
-  "config_override": {
-    "environment": {
-      "connection": {
-        "provider_key": "a13n.e2b",
-        "schema_version": "1",
-        "parameters": {
-          "sandbox_id": "customer-created-sandbox-id"
-        }
-      },
-      "credential_bindings": [
-        {
-          "requirement_key": "api_key",
-          "credential": {
-            "source": "workspace_secret",
-            "secret_id": "sec_0123456789abcdef"
-          }
-        }
-      ],
-      "access": "full"
-    }
-  }
-}
-```
-
-`sandbox_id` is required and names an already-created E2B Sandbox. Foundation does
-not accept an image, template, CPU, memory, timeout, auto-pause, or creation option in
-this schema. An E2B attachment that requires a non-secret region or account namespace
-uses an explicit connection-schema field or a new schema version; Foundation never
-infers that namespace from credentials.
-
-Inline selection passes the same provider-selection, schema, credential-reference,
-access, and authorization validation as a named revision, but creates no reusable
-`Environment` or `EnvironmentRevision`. Foundation exposes no public multi-Environment
-topology, mount-name map, default-mount selector, mutable Environment-head selector,
-or per-Agent Environment policy document in the first version.
-
-## Accepted Execution Configuration and Run Binding
-
-Agent Revision creation resolves an exact named selection into an immutable execution
-configuration. Run acceptance resolves the final exact or inline selection into
-`EffectiveAgentConfig.environment`:
-
-```python
-class EnvironmentExecutionConfig:
-    schema_version: Literal["1"]
-    source_environment_revision_id: EnvironmentRevisionId | None
-    environment_target_id: EnvironmentTargetId
-    target_key: str
-    connection: EnvironmentConnectionSpec
-    provider_package_revision_id: EnvironmentProviderPackageRevisionId | None
-    provider_lock: DependencyLock
-    credential_bindings: tuple[EnvironmentCredentialBinding, ...]
-    access: EnvironmentAccess
-    logical_digest_sha256: str
-```
-
-This immutable value is the authority for the exact connection used by the Run. A
-named selection records its source revision; an inline selection records `None`.
-Neither form follows a later Environment revision, package selection, or Workspace
-default.
-
-Every accepted Run with a non-null Environment also receives one immutable relational
-binding:
-
-```python
 class RunEnvironmentBinding:
     id: RunEnvironmentBindingId
     organization_id: OrganizationId
     workspace_id: WorkspaceId
     run_id: RunId
-    mount_name: Literal["workspace"]
-    source_environment_revision_id: EnvironmentRevisionId | None
     environment_target_id: EnvironmentTargetId
-    provider_key: str
-    target_key: str
-    environment_execution_config_digest_sha256: str
-    created_at: datetime
+    role: RunEnvironmentBindingRole
+    environment_revision_id: EnvironmentRevisionId | None
+    environment_execution_digest: str
+    bound_at: datetime
+    released_at: datetime | None
 ```
 
-The binding is inserted atomically with the Run. `id` is a Foundation-generated
-`envb_...` identity and is the unique identity of this Run's binding, including for
-inline selections. The exact target identity is owned by the referenced
-`EnvironmentTarget`; `target_key` is a protected immutable correlation snapshot kept
-for rolling compatibility and attachment verification, not a second identity or
-authorization boundary. The exact connection and credential references remain owned
-by `EffectiveAgentConfig.environment`. The binding stores only the immutable Run
-relation and matching execution-config correlation, so it is not a second mutable
-configuration authority.
+There is at most one binding per Run. The owner binding belongs to
+`environment_root_run_id`; a `shared_child` binding belongs to an async child using
+`shared_root`. Binding insertion and count increment occur in the same short
+transaction. The first terminal transition of a bound Run sets `released_at` and
+decrements the count in the same transaction; replay is a no-op.
 
-There is no uniqueness constraint that prevents multiple Organizations, Workspaces,
-Runs, Threads, revisions, or inline selections from binding to the same target.
-Provider concurrency rules are checked when each RunAttempt attaches. Possessing a
-binding ID, target ID, target key, or identity digest grants no authority.
+Bindings are immutable except for their one-way release timestamp. They contain no
+heartbeat, renewable expiry, worker ownership, credential, or process-local adapter.
+Run state, not a second lease row, determines whether use remains active.
 
-A replacement RunAttempt reuses the same Run binding and exact execution
-configuration. Retry creates another Run and therefore another binding while copying
-the accepted execution configuration. An ordinary continuation or fork creates a new
-binding from its own accepted effective configuration, even when it points to the
-same customer-owned target.
+## Admission and Materialization
 
-The relational responsibilities are therefore:
+Run admission performs pure validation and database writes only:
 
-| Table                             | Information owned                                                                                                      |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `environment_provider_selections` | One Workspace's enabled exact trusted attachment-provider package lock                                                 |
-| `environment_targets`             | Global target identity, active-Run count, lifecycle status, Keeper lease, and latest bounded retention observation     |
-| `environments`                    | Stable reusable name, metadata, lifecycle, version, and current revision                                               |
-| `environment_revisions`           | Immutable exact connection, credential references, access ceiling, provider package lock, target reference, and digest |
-| `run_environment_bindings`        | Immutable Run relation, optional source revision, target reference, provider correlation, and execution-config digest  |
+1. resolve and authorize the exact named revision or inline configuration;
+2. require its Provider selection and connection to be enabled and compatible;
+3. freeze `EnvironmentExecutionConfig` in the accepted Run;
+4. create one `pending` `EnvironmentTarget` for a new root/dedicated Run; and
+5. create its owner `RunEnvironmentBinding` and set count to one in the same short
+   transaction.
 
-No Foundation table represents target creation, complete provider runtime state,
-attachment sessions, target ownership, or destructive cleanup. `environment_targets`
-records only correlation and the bounded retention coordination defined here.
+Admission makes no provider API call and holds no transaction across package loading,
+credential resolution, or other external I/O. A lifecycle Worker later claims the
+target, resolves current workspace lifecycle credentials, constructs a fresh
+Control, and performs managed create or attached attach. A RunAttempt cannot enter
+Harness until the target is durably `ready`. It supplies the recorded
+`provider_state`, including `None`, to the pure Environment constructor; the Provider
+rejects missing required state or unexpected state for a stateless configuration.
 
-The relational schema preserves these constraints and access paths:
+For managed mode, `pending -> provisioning` records a create intent. The state moves
+to `ready` only after create identity and readiness are confirmed and state is
+persisted. For attached mode, attach performs no mutation and the same transition
+occurs only after exact target readiness is confirmed. A lost response leaves the
+target in `provisioning` with an operation slot for reconciliation; it never becomes
+`ready` merely because a request was sent.
 
-1. `(provider_key, identity_schema_version, target_identity_digest_sha256)` is
-   unique, while Provider package revision and tenant IDs are absent from that key;
-2. `active_run_count >= 0`, `status="active"` exactly when the count is positive, and
-   `idle` or `retired` exactly when it is zero;
-3. Keeper owner, lease expiry, and source binding are all present or all absent, and
-   every generation is non-negative and monotonic;
-4. a source binding references the same target and is merely operation provenance,
-   not a foreign-key transfer of tenant authority;
-5. one binding exists at most once for `(run_id, mount_name)`, and its target and
-   execution-config digest are immutable; and
-6. the due-target index begins with retention behavior, status,
-   `next_keepalive_at`, and lease expiry, while the source-selection path begins with
-   binding target ID and joins indexed Run status and creation order.
+If the owner Run becomes terminal before materialization completes, the binding is
+released. A managed create that is later confirmed is still recorded and proceeds to
+idle cleanup and destroy. An attached late success proceeds to local idle retirement.
+Foundation never drops a possibly-created target from durable accounting.
 
-## Active Run Accounting and Target Lifecycle
+A confirmed permanent create, attach, compatibility, or authorization failure, or
+expiration of the owning Run's fixed admission/recovery deadline, seals that Run as
+failed and releases its binding in one transaction. An unknown Provider outcome is
+not a confirmed permanent failure: Foundation first preserves operation identity and
+reconciles it, because failing the Run does not remove cleanup responsibility for a
+possibly-created managed target.
 
-A Run contributes one unit to its binding's `EnvironmentTarget` exactly while the
-Run status is `accepted` or `running`. The count is a transactionally maintained
-aggregate over immutable bindings, not a periodic `EXISTS` query and not a count of
-RunAttempts, Harness Runs, Workers, attachments, Threads, or Workspaces.
+When failure evidence also confirms that no managed target exists, or an attach
+finishes without establishing an attached target, Foundation moves the zero-count
+record directly to `retired`. When a managed identity is already known, releasing
+the last binding moves it to non-reusable `idle` so ordinary destroy policy removes
+it. An unknown create outcome may remain `provisioning` with zero active bindings
+until reconciliation establishes identity or confirmed absence.
 
-| Run operation or transition                              | Target count effect                                                 |
-| -------------------------------------------------------- | ------------------------------------------------------------------- |
-| Accept a Run with an Environment                         | Increment its target once; activate an idle or retired row          |
-| `accepted -> running`                                    | None                                                                |
-| RunAttempt replacement, retryable backoff, or handoff    | None; these remain the same `running` Run                           |
-| `accepted/running -> waiting/completed/failed/cancelled` | Decrement once                                                      |
-| Retry, Continue, fork, or automatic successor            | A new Run and binding increment their selected target independently |
-| Async child with `shared_root`                           | The independent child Run increments the same target                |
-| Async child with `dedicated`                             | The independent child Run increments its different target           |
-| Async child with `none`, or an inline Harness child      | No new binding and no target-count change                           |
+## Attempt, Successor, Fork, and Child Semantics
 
-Run acceptance inserts the binding and increments the target in the same final short
-transaction. A sealing or pre-execution terminal transaction changes the Run status
-and decrements its target in that same transaction. Updates derive the delta from the
-locked old and requested new Run status, so replaying an accepted acceptance identity
-or terminal transition cannot increment or decrement twice. A failed transaction
-changes neither fact, and the count cannot become negative.
+- A replacement `RunAttempt` for the same Run reuses the same binding, target, and
+  optional provider state. It creates a fresh process-local Environment adapter.
+- A Retry, Continue, deferred-action successor, or fork is a new Run. If it inherits
+  an Environment selection, it creates a new target and owner binding.
+- An async child with `shared_root` inserts a `shared_child` binding to the root's
+  current `ready` target and increments its count atomically. It cannot bind after
+  the target enters idle.
+- An async child with `dedicated` uses its frozen child Environment selection and
+  creates its own target and owner binding.
+- `none` creates no target or binding.
+- Inline child execution borrows the already-entered parent Harness facade and
+  creates no Run, target, binding, or count contribution.
 
-When a decrement changes the count to zero, the same transaction sets
-`status="idle"`, records `idle_at`, clears `next_keepalive_at`, and sets a bounded
-`retire_after` late enough to cover the current Keeper lease, the requested external
-deadline and call timeout, and a safety margin. It does not call the Provider or
-cancel an in-flight external operation. A later Run acceptance locks and reuses the
-same row, increments the count, sets `status="active"`, clears the idle retirement
-fields, and makes `next_keepalive_at` immediately due when retention is required.
+`shared_root` requires an equal Provider target and an equal or narrower access
+ceiling. A child cannot widen the root's Environment authority. Parent-first
+completion releases only the parent's binding; the target remains ready while any
+accepted or running shared child binding remains active.
 
-After `retire_after`, a bounded Worker scan can change an unchanged zero-count idle
-row to `retired`; this is a Foundation tombstone transition and performs no Provider
-operation. A retired row can still reactivate if the same target is referenced again.
-Physical deletion is handled by the Environment domain's ordinary control-role
-retention reconciler only after all of these are true:
+## Runtime Entry and Finalization
 
-- no EnvironmentRevision references the target;
-- no retained `RunEnvironmentBinding` references the target;
-- no unexpired Keeper lease or operation result-acceptance window remains; and
-- the target's audit and tombstone retention periods have elapsed.
+For each claimed independent RunAttempt, the Worker:
 
-Run lifecycle transactions extend the repository's canonical lock order: lock the
-relevant Thread, Run, and RunAttempt rows first, then every affected
-`EnvironmentTarget` in stable target-ID order, and only then lock Thread-inbox
-counters, inbox entries, or queued-submission rows. A Keeper never locks a target and
-then a Run. It selects a source optimistically and revalidates the Run before locking
-the target in the claim transaction.
-
-## Environment Keepalive Execution
-
-The `worker` role owns a supervised `EnvironmentKeepaliveLoop` alongside the
-`WorkerExecutionLoop`; it is not a RunAttempt child task and uses separately bounded
-concurrency so keepalive cannot consume Agent execution slots. There is no fixed
-Keeper instance and no deployment-wide leader. Every compatible Worker, or every
-compatible lock-scoped Runner in `runner` mode, competes for a lease on one target at
-a time.
-
-```mermaid
-flowchart LR
-    Runs[accepted or running Runs] -->|atomic count| Target[(EnvironmentTarget)]
-    Target -->|due candidate| Workers{Compatible Worker or Runner}
-    Workers -->|short claim transaction| Lease[(target lease and generations)]
-    Lease -->|outside transaction| Provider[ensure_retained_until]
-    Provider -->|fenced completion transaction| Target
-    Runs -. best-effort wakeup .-> Redis[Redis hint]
-    Redis -. scan promptly .-> Workers
-```
-
-The due scan reads only target-row state:
-
-```text
-status = active
-AND active_run_count > 0
-AND retention_behavior = while_execution_active
-AND next_keepalive_at <= now
-AND keeper lease is absent or expired
-```
-
-PostgreSQL is authoritative for demand, claim, fencing, acknowledgement, idle, and
-retirement. Run acceptance and active-set exit can publish a best-effort Redis wakeup
-hint, but every Worker performs a bounded periodic scan so lost hints cannot strand a
-target.
-
-The claiming Worker discovers credentials and exact executable code from active Run
-bindings rather than storing either on the global target. It considers bindings whose
-Runs are currently `accepted` or `running`, ordered by `(Run.created_at, binding.id)`,
-and selects the first candidate for which the Run Principal, Workspace Provider
-selection, exact package lock, connection, and every Secret reference remain valid.
-This authorization grants one operation through that binding only; it does not make
-the target belong to the candidate's tenant. If all candidates are invalid, the loop
-records a bounded safe error and a bounded retry time on the target without exposing
-candidate or tenant data.
-
-In `on_demand` mode the Worker verifies and loads the source binding's exact Provider
-lock before claim. In `runner` mode only the Runner for that exact lock scans and
-claims the candidate; the Supervisor treats a due compatible Keeper candidate as a
-reason to start or retain the corresponding Runner even when it has no RunAttempt.
-An incompatible Worker or Runner never claims and never substitutes another package.
-
-The operation follows three boundaries:
-
-1. Detached preparation chooses and authorizes a candidate without retaining a
-   database session across package loading, Secret resolution, or other external I/O.
-2. A short claim transaction locks and revalidates the source Run before the target,
-   verifies that both are still eligible, increments `keeper_claim_generation`, and
-   writes owner Worker generation, lease expiry, source binding, requested deadline,
-   and operation identity. A fresh deadline increments `operation_generation`; a
-   retry or lease takeover of an unknown outcome preserves the same operation
-   generation, ID, and deadline while changing only claim ownership.
-3. The Worker resolves fresh Secret values, calls `ensure_retained_until()` outside
-   every transaction, and uses a short compare-and-swap transaction over target ID,
-   claim generation, operation generation, operation ID, and owner to record the
-   acknowledgement or bounded failure and compute `next_keepalive_at`.
-
-Immediately before the external call, invalid source authority causes the Worker to
-release or replace the source under another short claim transaction. It never borrows
-a non-active Run, another target, a disabled package, or another tenant's credentials
-without that tenant's still-active authorized binding. The requested alive-until
-window, call timeout, lease, retry backoff, and scheduling safety margin are finite
-deployment bounds; successful scheduling refreshes before the acknowledged deadline.
-
-A Provider timeout or unknown outcome retains and retries the same operation
-identity. Worker loss permits takeover only after the recorded lease expires. A stale
-or late caller cannot commit after a newer claim generation, although its monotonic
-Provider call may produce one bounded extra retention window. It can never terminate
-the target or accumulate an unbounded extension.
-
-Worker drain stops new keepalive claims. An owned call may finish and commit while
-the Worker remains within its drain deadline; otherwise the Worker stops extending
-the lease and another compatible instance takes over after expiry. Per-target
-Provider errors affect only that target and do not make the Worker unready. An
-unexpected exit of the supervised `EnvironmentKeepaliveLoop` is a critical Worker
-component failure.
-
-## RunAttempt Attachment
-
-Run acceptance performs no provider-target I/O. For each claimed independent
-RunAttempt, the Worker:
-
-1. reads the optional exact `EnvironmentExecutionConfig` and corresponding
-   `RunEnvironmentBinding`, verifies their digests and common target reference, and
-   recomputes the connection's canonical identity against the protected target row;
-2. when the configuration is absent, supplies no Environment mount and performs no
-   Environment, Provider, credential, or attachment work;
-3. when present, reauthorizes Environment use, Workspace Provider selection, access,
-   principal eligibility, and every credential source;
-4. resolves fresh Secret values and process-local runtime collaborators outside the
-   authorization transaction;
-5. resolves the exact trusted Foundation attachment capability, revalidates the
-   connection, and constructs one fresh attach-only `Environment` adapter without
+1. reads the exact execution config, binding, target, Provider lock, and optional
+   state and verifies all digests and fences;
+2. reauthorizes Environment use and resolves fresh runtime and Provider credentials;
+3. performs no Environment work when the Run has no binding;
+4. constructs one fresh shared-package `Environment` for the exact target without
    external I/O;
-6. wraps it in a lightweight Harness `EnvironmentMount` with the accepted access
-   ceiling and supplies it as the default `workspace` mount;
-7. lets Harness allocate a fresh opaque mount ID, enter the exact target, route
-   operations, and close the adapter; and
-8. releases any still-open process-local resources during unconditional finalization.
+5. supplies it as Harness mount `workspace` under the accepted access ceiling;
+6. lets Harness enter, route operations, snapshot non-`None` fixed portable state,
+   and close the adapter non-destructively; and
+7. releases remaining process-local clients during unconditional finalization.
 
-Foundation persists no `EnvironmentState`, current Thread-to-target association,
-attachment session, SDK client, EIP session, mount ID, or complete Provider health
-record. The target row's bounded retention observation is not attachment state and is
-never used to retarget a Run. `HarnessState.environment_states` is not used to select
-or retarget a Foundation attachment. Worker loss discards only process-local
-attachment state; a replacement Attempt attaches again to the same frozen target.
+Harness `EnvironmentState` is recovery context, not target authority. Foundation
+always reconstructs from the target's frozen configuration and optional
+`EnvironmentTarget.provider_state`; a stale Harness copy cannot retarget the Run or
+roll back a newer lifecycle observation. For Direct Local and Local Envd, an
+authoritative `provider_state=None` suppresses any stale portable fallback.
 
-Foundation does not supply `HostedProcessRunCapability`. When effective Environment
-actions expose background shell, Harness tracks the process only inside that logical
-Run, enqueues final-completion readiness while the Run remains active, and
-kills/releases remaining process-local work before adapter close. Foundation stores
-no process reference, output cursor, status, result, or wake fact in Run state and
-starts no successor Run for process completion.
+Worker loss discards only process-local Environment and EIP sessions. A replacement
+Attempt re-enters the same exact ready target. If observation proves the target
+absent or incompatible, the Attempt fails and lifecycle reconciliation decides the
+target outcome; data-plane Environment never creates a replacement.
 
-## Continuation, Fork, and Child Semantics
+Foundation does not supply `HostedProcessRunCapability`. When Environment actions
+expose background shell, Harness owns logical process tracking within the Run and
+kills/releases remaining process-local work before adapter close.
 
-A new Run that inherits an Environment configuration receives a new binding to the
-same exact external target and contributes its own active count while accepted or
-running. Foundation never creates a target to isolate a continuation, fork, or child
-automatically.
+## Idle, Retention, and Retirement
 
-- `none` gives the child no Environment.
-- `shared_root` requires the root's exact connection and provider lock and permits
-  only an equal or narrower access ceiling. The child receives its own Run binding to
-  the same target and increments that target when child acceptance commits.
-- `dedicated` requires the child Agent's frozen configuration to name another exact
-  customer-created target. It means independently selected, not
-  Foundation-provisioned or Foundation-destroyed, and increments that target.
-- Inline child execution borrows the already-entered parent Harness facade and creates
-  no separate binding, count contribution, or attachment.
+When the last binding releases, the same transaction sets the target to `idle`,
+records `idle_at`, and fixes `retire_after = idle_at + 10 minutes`. The target cannot
+be rebound. The grace absorbs terminal-transition races, delayed provider
+observations, and process cleanup; it is not reusable capacity.
 
-A fork that inherits the source effective configuration binds to the same target. A
-fork that must use a different sandbox supplies an explicit compatible Environment
-override naming that already-existing target.
+While bindings are active, and through the idle grace when provider expiry could
+precede cleanup, the lifecycle Worker monotonically calls Control `retain()` early
+enough to cover its bounded scheduling margin. `retained_until` records only a
+confirmed Provider observation. A Provider with no expiration returns a confirmed
+no-op observation. An attached Provider that cannot guarantee retention reports that
+capability at validation time; Foundation does not simulate the guarantee.
 
-## Agent Input and Managed Skill Preparation
+At `retire_after`:
 
-Managed Skill materialization is Host preparation, not an Agent tool call. It uses the
-fresh entered Harness Environment facade, is content-addressed, writes a completion
-manifest last, and may be repeated after a later attachment without exposing a
-partial catalog.
+- a managed target starts or reconciles `destroy`; only confirmed absence changes
+  `destroying -> retired` and clears current state as allowed by the Provider codec;
+- an attached target performs no destructive call and changes `idle -> retired`
+  locally, preserving or omitting optional state according to its Provider; and
+- an unknown managed destroy remains `destroying` with state and operation evidence
+  retained for retry.
 
-[`environment_path` Agent input delivery](17-agent-input.md#binary-source-and-delivery)
-requires a writable default mount. The Worker reads the accepted URL, authorized
-source binding path, or exact immutable Asset into private local staging and transfers
-it through the active default Environment's authorized file-write operation to the
-deterministic logical path below `/workspace/.a13n/inputs/`. Only that Environment path
-enters Agent input; the Worker staging path is never exposed.
+Retired rows are tombstones and audit/recovery evidence. Physical deletion is a
+separate bounded retention policy and requires no remaining Run, binding, event, or
+trace reference.
 
-A replacement RunAttempt derives whether to rewrite the path from the Run's existing
-charged model-request usage. Zero prior model requests causes another bounded source
-read and deterministic replacement; a positive total assumes that input preparation
-already wrote the path and performs no file inspection or rewrite. Foundation stores
-no separate materialization status.
+## Durable Operation Slot and Idempotency
 
-External Environment effects absent from the latest complete Run or continuation
-publication are not recoverable execution state and can repeat after replacement.
-Foundation does not infer rollback from RunAttempt cancellation, reconstruct external
-effects from message history, or maintain a generic tool invocation ledger.
+`EnvironmentLifecycleOperation` is an in-memory shared Provider request value, not a
+Foundation table. The current operation fields on `EnvironmentTarget` are sufficient
+because only one lifecycle mutation may be in flight for one target.
+
+The Worker protocol has three boundaries:
+
+1. detached preparation selects an eligible target and loads the exact Provider lock
+   without holding a database session;
+2. a short transaction locks and revalidates the target, increments claim generation,
+   and writes operation kind, stable operation ID, request digest, target generation,
+   owner Worker generation, and lease; and
+3. the Worker resolves credentials and calls Control outside every transaction, then
+   commits confirmed evidence through compare-and-swap on target ID, target
+   generation, operation ID, digest, claim generation, and owner.
+
+`operation_phase="dispatched"` records that the request may have reached the
+Provider. Timeout, cancellation, connection loss, or Worker death changes it to
+`outcome_unknown` when possible but does not roll back target phase. A takeover after
+lease expiry reuses the same operation ID and digest. Provider implementations use a
+native idempotency key or deterministic operation correlation and must reconcile
+before retrying mutation.
+
+A confirmed result is applied in one fenced transaction. It validates and stores any
+returned state and observation, advances `target_generation` when exact target
+identity appears or is cleared, performs the corresponding target-phase transition,
+records `last_observed_at`, safe error outcome, and any bounded retry
+`next_operation_at`, and clears the current operation and claim fields. Domain
+lifecycle events retain the committed transition; the target row does not keep an
+unbounded call history.
+
+A new operation ID is allocated only for a new logical request: initial create or
+attach, a later retain deadline, or destroy. Reusing an ID with another digest or
+target generation is rejected. A stale caller cannot commit after a newer claim even
+if its monotonic retain call caused one bounded extra extension.
+
+There is no `EnvironmentLifecycleOperation` history table. Durable target phase,
+current operation evidence, Run bindings, domain events, and ordinary observability
+provide the required operational audit. A future compliance-grade immutable provider
+call ledger would be a separate cross-cutting audit feature, not part of target
+lifecycle correctness.
+
+## Lifecycle Worker
+
+`EnvironmentLifecycleLoop` is a critical supervised Worker component with bounded
+capacity independent from RunAttempt execution. It handles:
+
+- pending create or attach;
+- readiness observation and unknown-outcome reconciliation;
+- active and idle-grace retention;
+- due managed destruction and attached local retirement; and
+- bounded orphan discovery for Provider-owned operation correlations.
+
+In `on_demand`, `runner`, and `all` modes, only a process compatible with the exact
+Provider lock can claim the target. Supervisor materialization treats a due lifecycle
+candidate as work even when no RunAttempt is runnable. Worker drain stops new claims;
+an in-flight operation can commit within its drain deadline, otherwise another
+compatible Worker takes over after lease expiry.
+
+Per-target Provider failures update only bounded safe target error and backoff. They
+do not make the Worker globally unready. Unexpected lifecycle-loop exit is a critical
+Worker failure. All SDK, Docker, filesystem, and subprocess work is async or kept off
+the event loop and bounded by finite timeouts.
+
+## Snapshots and Checkpoints
+
+Foundation defines no `EnvironmentSnapshot` table. Provider images, E2B templates,
+and provider-native snapshots referenced by an immutable revision are artifact
+inputs, not per-Run lifecycle records.
+
+If Foundation later captures mutable runtime filesystem or process state as a product
+feature, the domain object is `EnvironmentCheckpoint`. It must define capture
+consistency, ownership, retention, restore compatibility, encryption, billing, and
+garbage collection before it can influence recovery. No current Run, Retry, Continue,
+fork, or target cleanup behavior assumes such a checkpoint exists.
 
 ## Management API
 
 The public `/api/v1` surface follows the shared
 [Management API](16-management-api.md):
 
-| Resource                     | Route shape                                                                                                 |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Provider catalog             | `GET /environment-providers`, `GET /environment-providers/{provider_key}`                                   |
-| Workspace Provider selection | `GET/PUT /workspaces/{workspace_id}/environment-providers/{provider_key}`                                   |
-| Environments                 | `POST/GET /workspaces/{workspace_id}/environments`, `GET/PATCH /environments/{environment_id}`              |
-| Revisions                    | `POST/GET /environments/{environment_id}/revisions`, `GET /environment-revisions/{environment_revision_id}` |
-| Attachment test              | `POST /environment-revisions/{environment_revision_id}/test`                                                |
+| Resource             | Route shape                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider catalog     | `GET /environment-providers`, `GET /environment-providers/{provider_key}`                                                                      |
+| Workspace selection  | `GET/PUT /workspaces/{workspace_id}/environment-providers/{provider_key}`                                                                      |
+| Provider connections | `POST/GET /workspaces/{workspace_id}/environment-provider-connections`, `GET/PATCH /environment-provider-connections/{provider_connection_id}` |
+| Connection test      | `POST /environment-provider-connections/{provider_connection_id}/test`                                                                         |
+| Environments         | `POST/GET /workspaces/{workspace_id}/environments`, `GET/PATCH /environments/{environment_id}`                                                 |
+| Revisions            | `POST/GET /environments/{environment_id}/revisions`, `GET /environment-revisions/{environment_revision_id}`                                    |
 
-`EnvironmentTarget` has no public list, detail, mutation, retirement, or
-keepalive API. Users observe an association only through an Environment revision or
-Run they are independently authorized to read. No response reveals whether another
-Organization or Workspace references the same target.
+Connection test reauthorizes the exact connection, resolves fresh credentials,
+constructs a Control, and calls its bounded non-mutating `probe_connection()`. It
+creates, lists, attaches, retains, starts, or destroys no target and persists no
+health session.
+
+Revision publication performs only pure schema and capability validation. There is
+no generic revision `test` route: testing a managed recipe by creating a target would
+have real cost and lifecycle effects, while attached readiness is correctly observed
+when a Run materializes its target.
+
+`EnvironmentTarget` has no public list, create, mutation, retain, or destroy route.
+An authorized Run detail can expose only a safe Environment summary: ownership,
+phase, timestamps, and bounded safe error. It omits native target ID, complete state,
+connection configuration, Secret references, operation receipts, claim/lease data,
+and evidence about any other Run.
 
 Provider catalog reads authorize `environment_provider.read`; Workspace selection
-mutation authorizes `environment_provider.select`; Environment and revision reads
-authorize `environment.read`; create, metadata mutation, revision publication, and
-archive mutation authorize `environment.manage`; an attachment test authorizes
-`environment.test`; and an explicit Run selection authorizes `environment.use` in
-addition to Agent invocation. These stable actions and built-in grants are owned by
-the IAM [registry](33-identity-and-access-management.md#stable-action-registry).
+and connection lifecycle authorize `environment_provider.select`; Environment and
+revision reads authorize `environment.read`; authoring and archive mutations
+authorize `environment.manage`; connection test authorizes `environment.test`; Run
+selection authorizes `environment.use` in addition to Agent invocation. Exact grants
+remain in the IAM [registry](33-identity-and-access-management.md#stable-action-registry).
 
-The synchronous `test` endpoint reauthorizes the exact revision and current
-credential sources, opens an attachment to the exact existing target, verifies
-bounded readiness, and closes local resources. It performs external I/O but never
-creates, starts, resumes, replaces, pauses, stops, destroys, or keepalives the target,
-and it retains no health or attachment state.
+## Built-in Provider Mapping
 
-An authorized revision-detail read can return its protected non-secret connection so
-that the user can manage it. That detail can therefore contain the provider target ID
-inside `connection.parameters`; returning it requires `environment.read` on the exact
-resource and private no-store handling. Collection, event, Run, and model-facing
-projections contain only safe summaries and expose no Secret value, target key,
-target identity digest, global target ID, connection parameter, runtime object,
-adapter, attachment detail, Keeper error, or import path.
+| Provider     | Connection means                             | Managed recipe / attached reference             | Control behavior                                                         |
+| ------------ | -------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------ |
+| Direct Local | Allowed Host roots and operation policy      | Attached exact root only                        | Attach/observe; retain no-op; never destroy                              |
+| Local Envd   | Allowed workspaces and envd runtime policy   | Attached exact workspace only                   | Attach/observe; retain no-op; never destroy workspace                    |
+| Docker       | One local Engine and bootstrap profile       | OCI image recipe or exact existing container ID | Create/observe/retain no-op/destroy owned; attached never start/destroy  |
+| E2B          | One account/API endpoint and API-key binding | Template recipe or exact existing sandbox ID    | Create/observe/native retain/destroy owned; attached observe/retain only |
 
-## Built-in Provider Consequences
-
-- Foundation's Direct Local adapter declares `retention_behavior="none"`, attaches an explicitly
-  authorized existing Host root, never interprets it as sandbox isolation, and does
-  not delete its files.
-- Foundation's Local Envd adapter declares `retention_behavior="none"` and attaches an explicitly
-  authorized existing workspace. A process-local envd carrier can be opened and
-  closed as transport, but Foundation does not create, delete, or own the workspace.
-- Foundation's Docker adapter declares `retention_behavior="none"` and requires an exact existing
-  container ID. Foundation does not create, start, restart, replace, stop, or remove
-  the container.
-- Foundation's E2B integration declares `retention_behavior="while_execution_active"` and requires an exact
-  existing Sandbox ID. Foundation may only extend its bounded timeout through
-  `ensure_retained_until()`; it does not create, start, resume, pause, replace, stop,
-  or destroy the Sandbox.
-
-The generic providers may still support broader lifecycle behavior outside
-Foundation. Their generic behavior does not weaken these Foundation consequences.
-
-## Verification
-
-Specification examples and later implementation tests cover at least:
-
-- global identity deduplication across Organizations, Workspaces, named revisions,
-  and inline selections without tenant-data disclosure;
-- parent and child concurrency, parent-first completion, accepted queueing, Retry,
-  Continue, waiting, and every terminal Run transition;
-- exact `shared_root`, `dedicated`, `none`, and inline-child count behavior;
-- duplicate terminal submissions and concurrent transitions without a negative or
-  repeated count delta;
-- simultaneous multi-Worker claims, lease-expiry takeover, stale acknowledgement,
-  and unknown Provider outcomes retried with one operation identity;
-- deterministic source-binding selection and safe switching after Principal,
-  Provider selection, package lock, or Secret invalidation;
-- idle reactivation, retired tombstones, and reference-aware physical deletion;
-- `on_demand`, `runner`, `all`, and drain behavior, including independent keepalive
-  capacity and Runner materialization for a due historical lock; and
-- missing, stopped, or paused targets failing without create, start, resume,
-  replacement, stop, pause, or destroy.
+Local Docker is accepted only in all-in-one or otherwise explicit single-host Worker
+profiles where Control and data-plane placement share the same Engine. Multi-Worker
+remote placement for a Unix-socket Docker target is outside this contract and is not
+approximated with random Worker scheduling.
 
 ## Failure Semantics
 
-| Failure                                                        | Foundation outcome                                                                                                    |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Invalid Provider key, connection schema, lock, or access       | No Environment revision or Run is accepted                                                                            |
-| Target identity or retention metadata is inconsistent          | Publication, selection, revision creation, or admission fails without merging different targets                       |
-| Archived, disabled, denied, or raced selection                 | Acceptance, test, Attempt reconstruction, or Keeper source selection fails closed without substitution                |
-| Missing, inactive, or denied credential                        | Test, Attempt, or Keeper source records a bounded safe credential failure                                             |
-| Canonical target identity differs from the frozen reference    | Fail before attachment or keepalive; do not retarget                                                                  |
-| Target missing, stopped, paused, inaccessible, or incompatible | Test or Attempt fails; Keeper records a safe error and never creates, starts, resumes, replaces, or mutates lifecycle |
-| Provider reports unknown attachment outcome                    | Attempt fails; retry attaches again only to the same target                                                           |
-| Provider reports unknown keepalive outcome                     | Preserve the operation identity and retry under the lease and fencing contract                                        |
-| All active source bindings are currently unusable              | Record a bounded target error and back off; do not borrow inactive or unauthorized credentials                        |
-| Keeper Worker disappears                                       | Its lease expires and another compatible Worker or Runner can take over                                               |
-| Late Keeper acknowledgement                                    | Generation CAS rejects the write; at worst the monotonic call caused one bounded extra extension                      |
-| Provider rejects concurrent attachment                         | The affected Attempt fails with a bounded conflict                                                                    |
-| Harness checkpoint or continuation publication fails           | Attachment finalization still closes process-local resources                                                          |
-| Adapter close fails                                            | Report bounded cleanup failure; never escalate to provider-target destruction                                         |
-| Agent Environment result is absent from the latest checkpoint  | Recovery cannot classify the external operation outcome; re-driven Agent work can repeat                              |
+| Failure                                              | Foundation outcome                                                         |
+| ---------------------------------------------------- | -------------------------------------------------------------------------- |
+| Invalid Provider, connection, options, or capability | Reject connection, revision, inline selection, or Run before effects       |
+| Disabled selection or connection                     | Block new work; preserve exact-lock reconciliation and managed cleanup     |
+| Missing lifecycle Secret                             | Keep target intent/state, record safe error, and retry; never fake destroy |
+| Managed create response lost                         | Keep provisioning and the same operation ID; reconcile before retry        |
+| Attached target absent, stopped, or incompatible     | Fail the owning Run without create, start, resume, or replacement          |
+| Readiness fails after managed identity is known      | Persist state, fail or back off the Run, and retain cleanup responsibility |
+| Provider target disappears during a Run              | Fail Attempt; Environment does not create a replacement                    |
+| Retain outcome unknown                               | Preserve prior observation and retry the same logical operation            |
+| Managed destroy outcome unknown                      | Remain destroying with state and operation evidence                        |
+| Late operation result                                | Generation compare-and-swap rejects stale commit                           |
+| Environment close fails                              | Report local cleanup failure; lifecycle remains under Control policy       |
+
+## Verification
+
+Implementation tests cover at least:
+
+- pure revision/inline validation with no target creation;
+- a distinct managed target for two Runs using the same revision;
+- same-Run Attempt replacement reusing one target and fresh Environment objects;
+- Retry, Continue, fork, `dedicated`, `shared_root`, `none`, and inline-child target
+  behavior;
+- parent-first completion and exactly-once binding release/count decrement;
+- zero-count non-reusable idle, fixed ten-minute grace, managed destroy, and attached
+  local retirement;
+- create and destroy responses lost before commit, lease takeover, repeated operation
+  IDs, digest mismatch, and stale fencing;
+- state persisted before readiness failure and late create success after Run failure;
+- Direct Local and Local Envd reaching `ready` and entering data-plane use with
+  `provider_state=None` and no Harness state entry;
+- connection disable/Secret rotation/Secret loss without abandoning managed cleanup;
+- attached target protection against create, start, resume, replacement, stop, and
+  destroy;
+- provider option unknown fields and unsupported common fields failing closed;
+- local Docker single-host placement enforcement; and
+- target/private-state redaction from collection, Run, event, trace, and model-facing
+  projections.
 
 ## Security and Compatibility
 
-Provider publication, Workspace selection, Environment authoring, Environment use,
-Secret access, Keeper execution, and Agent tool access are separate authorities. A
-model cannot select Providers, revisions, Secrets, target identities, Keeper sources,
-runtime collaborators, or attachment parameters.
+Provider publication, Workspace selection, Provider connection management,
+Environment authoring, Environment use, Secret resolution, lifecycle execution, and
+Agent tool access are separate authorities. Model content cannot select Providers,
+connections, Secrets, targets, operation IDs, or runtime collaborators.
 
-Provider code is trusted in-process code with worker-role authority. Exact locks and
-operator-only publication do not sandbox it. Connection parameters, target keys,
-target IDs, identity digests, source-binding correlation, and safe Keeper errors are
-protected data. Secret values, native clients, and EIP sessions remain process-local.
-The global target row is never a cross-tenant discovery or authorization surface.
+Connection configuration, target references, native IDs, provider state, operation
+receipts, and safe Provider errors are protected data. Secret values and live clients
+remain process-local. Runtime Secret delivery is distinct from Provider lifecycle
+credentials and follows the exact accepted Run requirements.
 
-The Foundation connection schema, target identity schema, retention behavior,
-retention-operation contract, package lock, Run binding schema, Harness mount
-contract, EIP, and Foundation APIs evolve independently from the generic Provider
-configuration and `EnvironmentState` codecs. An incompatible exact lock, identity,
-or connection version fails before model, tool, or Keeper work and never falls back
-to another revision, Provider, target, or generic lifecycle path.
-
-This contract retains the existing-target and attach-only boundary while adding one
-Foundation-specific bounded retention operation. It does not restore the pre-release
-Foundation desired-configuration or current Host `EnvironmentState` design, and it
-does not remove or deprecate broader capabilities from
-`a13n-environment-provider`.
+This is a direct pre-release contract. Foundation supports only managed targets it
+creates and owns and explicitly attached targets it never destroys. It carries no
+attach-only compatibility adapter, deployment-global target deduplication,
+Environment use-lease table, lifecycle-operation table, snapshot table, or
+lifecycle-capable Environment shim.
 
 ## Invariants
 
-01. Every Foundation Environment connection names an already-existing customer-owned target.
-02. Foundation never creates, starts, resumes, replaces, pauses, stops, or destroys a provider target; its only target-lifecycle operation is monotonic bounded retention declared by the Provider.
-03. The generic Environment Provider contract remains broader and independently reusable.
-04. One deployment-global, tenant-neutral `EnvironmentTarget` represents each canonical provider target identity.
-05. Named revisions and inline selections use the same `EnvironmentConnectionSpec` and pure target-identity derivation.
-06. Inline selection creates no reusable Environment or EnvironmentRevision, but it upserts and references the global target during Run admission.
-07. Every accepted Run with an Environment has one immutable `RunEnvironmentBinding` and contributes exactly one active count until it leaves `accepted` or `running`.
-08. A binding ID identifies the Run relation; a target ID, target key, or identity digest identifies correlation; none grants authority.
-09. `active_run_count > 0` exactly when target status is `active`, and replayed Run transitions never apply the count delta twice.
-10. An AgentRevision and accepted Run select at most one primary Environment; Harness receives it as the default `workspace` mount.
-11. Validation, target-identity derivation, and fresh adapter construction perform no external I/O; target observation begins only during test or entry.
-12. Every independent RunAttempt receives a fresh attach-only adapter for the same frozen target.
-13. Harness entry and close are Run-local; close releases only process-local resources.
-14. Foundation persists no complete current Provider state, attachment session, client, EIP session, or mount ID; target retention observations cannot retarget a Run.
-15. Secret values, live clients, and native handles never enter connections, targets, bindings, Run state, or continuation.
-16. A Keeper derives current authority from an active binding, executes outside database transactions, and can commit only under its current PostgreSQL generation and lease.
-17. Missing or unavailable targets fail closed without creation, recovery, destructive lifecycle mutation, or substitution.
+01. A Provider connection selects an account or endpoint, never a sandbox/container.
+02. An Environment revision is immutable desired configuration and has no target ID.
+03. Provider target I/O begins only after a Run creates a target intent and binding.
+04. Every independent root/dedicated Run receives a distinct managed target.
+05. Replacement Attempts reuse; Retry, Continue, fork, and dedicated Runs do not.
+06. `shared_root` is the only async Run policy that adds another binding to the same
+    target.
+07. `RunEnvironmentBinding` is the sole active-use record; no use-lease table exists.
+08. Target phase advances only from confirmed Provider evidence.
+09. One target stores at most one current lifecycle operation slot.
+10. Managed targets are destroyed only by Control after active count reaches zero and
+    idle grace expires.
+11. Attached targets are never destroyed, replaced, started, resumed, paused, or
+    stopped by Foundation.
+12. Idle targets are non-reusable and retire after a fixed ten-minute cleanup grace.
+13. Environment construction, entry, and close never mutate backing-target lifecycle.
+14. Foundation frozen target configuration and optional provider state override any
+    portable Harness copy.
+15. Dependencies are baked into immutable artifacts; Run admission is not a package
+    build pipeline.
+16. No Environment snapshot semantics exist without a separately specified
+    `EnvironmentCheckpoint` domain.

@@ -162,12 +162,19 @@ Full Control is the omission fallback only while creating a root Thread for comp
 For each captured Project root, the App:
 
 1. resolves the exact Provider and approved Host adapter;
-2. loads current Host-authoritative state under the complete binding key;
-3. asks the adapter to materialize root-specific validated Provider configuration;
-4. creates a fresh pre-entry-inert `Environment` adapter;
+2. loads current Host-authoritative optional state under the complete binding key;
+3. asks the adapter to materialize root-specific validated Provider call inputs for an
+   already prepared or stateless local target;
+4. constructs a fresh pre-entry-inert `Environment` adapter;
 5. constructs the deterministic Harness Project mount set;
 6. adds the dedicated user Skill mount when the Run root Agent selects `skills`, unless an exact Host-path-preserving Project mount already owns that root; and
 7. creates fresh selected Environment Run Extensions around that aggregate.
+
+Agent UI never constructs or receives `EnvironmentControl`. Its built-in Direct Local
+and Local Envd profiles use an existing Host workspace and produce no
+`EnvironmentState`; a custom profile must likewise provide an already prepared exact
+target and any required compatible state. Managed target creation, retention, and
+destruction belong exclusively to Foundation.
 
 The Provider configuration and adapter do not own the Project root list. The adapter receives one root at a time, can reject roots it cannot represent, and explicitly declares whether aggregate paths preserve Host spelling. The user Skill root follows [Environment Skill Sources](02b-environment-skill-sources.md). It ordinarily uses a separate Host-owned Direct Local file-only route, but reuses an equal Host-path-preserving Project mount rather than creating a route conflict; neither form changes Project roots or adds separate Project Environment-state publication.
 
@@ -185,7 +192,7 @@ The same adapter decision applies to the dedicated Direct Local user Skill mount
 
 ## Host-authoritative Environment State
 
-Full Control and Sandbox bind Project roots directly as Provider configuration, preserve their Host paths in the Harness aggregate namespace, and ordinarily retain no portable re-entry state. Their identical path presentation does not change their distinct Direct Local and isolated EIP execution authority. A stateful Provider can return `EnvironmentState` for one root.
+Full Control and Sandbox bind Project roots directly through validated Provider configuration, preserve their Host paths in the Harness aggregate namespace, and produce no portable `EnvironmentState`. Their identical path presentation does not change their distinct Direct Local and isolated EIP execution authority. A stateful custom Provider can return `EnvironmentState` for one root.
 
 Agent UI uses one private binding identity:
 
@@ -196,7 +203,13 @@ Thread ID
 + normalized Project root path
 ```
 
-The profile digest reuses the accepted generation's canonical normalized content for `provider_key`, Provider schema version, Provider configuration, Host adapter key, and adapter configuration. It excludes filename, YAML formatting, comments, and display-only fields. State lookup, supplied-state comparison, and publication use exactly that identity. Existing authoritative `None` does not permit fallback from `HarnessState.environment_states`. Continuation Environment state is a portable observation only and can be adopted only through an explicit import boundary.
+The profile digest reuses the accepted generation's canonical normalized content for
+`provider_key`, Provider call-option schema versions, normalized configuration, Host
+adapter key, and adapter configuration. It excludes filename, YAML formatting,
+comments, and display-only fields. Optional-state lookup uses exactly that identity.
+Authoritative `None` for a stateless Provider does not permit fallback from
+`HarnessState.environment_states`. Continuation Environment state is a portable
+observation only and can be adopted only through an explicit import boundary.
 
 Changing the selected Environment profile or any behavior-affecting normalized content produces a different state identity. Presentation-only edits preserve it. Switching back to the same compatible identity can recover its previous state. Removing and later restoring the same Project root behaves similarly. State is never shared merely because two Threads select the same Project.
 
@@ -214,15 +227,16 @@ sequenceDiagram
     Caller->>App: input plus optional Thread configuration patch
     App->>Store: apply patch and load prior continuation
     App->>Project: capture current ordered roots
-    App->>Provider: load state and create fresh adapters
+    App->>Provider: load optional state and construct fresh Environment adapters
     App->>Harness: Run with captured mounts and extensions
     Harness-->>App: result and HarnessState
-    App->>Provider: close and read final cached state
-    App->>Store: compare-and-select changed Environment state
+    App->>Provider: close process-local Environment
     App->>Store: publish and select continuation
 ```
 
-Cleanup precedes final state reading. Environment-state publication occurs after failure or cancellation when a changed final value is known. Equal state performs no write. Environment-state and continuation publication are independent facts and do not roll one another back.
+Environment cleanup is non-destructive and cannot publish a lifecycle change. Agent
+UI does not create or update Provider target state through Control; its optional
+state is fixed input and portable continuation context for the prepared target.
 
 ## Async Child Environments
 
@@ -246,18 +260,18 @@ Model-visible root Thread tools can list and inspect Threads, start or continue 
 
 ## Failure Semantics
 
-| Failure                                                           | Outcome                                                                     |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Invalid or inaccessible Project root                              | Candidate generation or Run capture fails before native execution           |
-| Current directory matches no first root                           | A launch surface receives an unmatched result without creating a Project    |
-| Current directory is equally ambiguous                            | A launch surface receives an ambiguous result without choosing arbitrarily  |
-| Project removed from accepted generation                          | Existing Thread remains inspectable; next Run requires reassignment         |
-| Stale Thread configuration version                                | Patch and admission are rejected without partial changes                    |
-| Provider, Host adapter, or required Sandbox isolation unavailable | Run capture or preparation fails; Full Control is not substituted           |
-| Current Environment state invalid                                 | Admission fails explicitly                                                  |
-| Adapter entry or extension entry fails                            | Harness reports Run failure; known changed cached state is still considered |
-| Cleanup or state publication fails                                | Failure is reported independently from continuation selection               |
-| Continuation publication conflicts                                | Prior or concurrent continuation remains current                            |
+| Failure                                                           | Outcome                                                                    |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Invalid or inaccessible Project root                              | Candidate generation or Run capture fails before native execution          |
+| Current directory matches no first root                           | A launch surface receives an unmatched result without creating a Project   |
+| Current directory is equally ambiguous                            | A launch surface receives an ambiguous result without choosing arbitrarily |
+| Project removed from accepted generation                          | Existing Thread remains inspectable; next Run requires reassignment        |
+| Stale Thread configuration version                                | Patch and admission are rejected without partial changes                   |
+| Provider, Host adapter, or required Sandbox isolation unavailable | Run capture or preparation fails; Full Control is not substituted          |
+| Current Environment state invalid                                 | Run preparation fails explicitly                                           |
+| Adapter entry or extension entry fails                            | Harness reports Run failure; authoritative target state remains unchanged  |
+| Cleanup or state publication fails                                | Failure is reported independently from continuation selection              |
+| Continuation publication conflicts                                | Prior or concurrent continuation remains current                           |
 
 ## Invariants
 
@@ -273,7 +287,8 @@ Model-visible root Thread tools can list and inspect Threads, start or continue 
 10. Every independent Run receives fresh Environment adapters and Run Extensions.
 11. Environment state is isolated by Thread, Environment profile behavior, adapter, and root path.
 12. Steering never changes an active Run's captured composition.
-13. Destructive Provider lifecycle remains outside ordinary Run cleanup.
+13. Provider target lifecycle is unavailable to Agent UI and remains outside ordinary
+    Run cleanup.
 14. A selected Skills Capability adds only Environment-routed Skill sources and, unless an exact Host-path-preserving Project mount already covers it, the dedicated user Skill mount; it does not broaden a Project Provider's Host paths.
 15. Full Control and Sandbox preserve the same canonical Host path spelling while retaining Direct Local versus required-isolation EIP execution authority.
 16. Sandbox failure never falls back to Full Control or disabled isolation.

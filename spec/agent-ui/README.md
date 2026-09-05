@@ -36,7 +36,7 @@ Read `01`, `01a`, `02`, `02a`, and `02b`, then [Harness Capability Model](../age
 
 ### Integrate Environments
 
-Read `01a`, `02b`, and `04`, then [Provider Specifications and Catalog](../agent-environment-provider/01-provider-specs-and-catalog.md) and [Environment Re-entry Lifecycle](../agent-environment-provider/02-resource-management-and-attachments.md).
+Read `01a`, `02b`, and `04`, then [Provider Contracts and Catalog](../agent-environment-provider/01-provider-specs-and-catalog.md) and [Lifecycle Control and Runtime Access](../agent-environment-provider/02-resource-management-and-attachments.md).
 
 ### Implement a Surface
 
@@ -50,7 +50,12 @@ Read `05`. A surface calls `AgentUiApp` commands and queries and consumes detach
 04. Every Thread owns independent mutable metadata and sticky-configuration heads. Omitted configuration changes retain the previous selection; an admitted Run captures one immutable resolved composition that later file, Project, or Thread changes cannot alter.
 05. `AgentUiApp` owns configuration mutation preconditions, detached Project and Thread projections, Host-authoritative Environment state, process-local root receipts and deferred response, async child execution, and live presentation.
 06. Harness and Pydantic AI own native Agent construction, Agent loops, public stream items, results, Capability behavior, and `HarnessState` continuation semantics.
-07. The Environment Provider package owns Provider configuration, fresh adapter construction, `EnvironmentState` codecs, and non-destructive `close()`. Agent UI owns Project-root binding, runtime collaborators, current state, and changed-only publication.
+07. The Environment Provider package owns Provider call-input validation, fresh
+    Environment construction, `EnvironmentState` codecs, and non-destructive
+    Environment `close()`. Agent UI owns Project-root binding, runtime collaborators,
+    and optional prepared-target state, but never constructs `EnvironmentControl` or
+    owns Provider target lifecycle. Managed creation, retention, destruction, and
+    their durable authority belong to Foundation.
 08. Every independent root or async child Run receives fresh Model, Harness Plugin, MCP, Provider-runtime, Environment-adapter, and Environment Run Extension collaborators. Run-owned shell processes never survive their Harness Run.
 09. Root and child continuation checkpoints are independent authorities. Compact AG-UI child display is inspection history and never reconstructs `HarnessState`.
 10. Saved root and child facts never imply current-process liveness. Root receipts and all control availability are process-local; Agent UI does not infer liveness or silently replay work.

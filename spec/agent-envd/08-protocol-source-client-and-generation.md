@@ -151,13 +151,19 @@ Normal reader iteration maintains a local count and SHA-256 and calls `file.clos
 
 ## Provider and Harness Boundaries
 
-The shared Environment Provider package owns Provider specifications, fresh Environment adapters, portable state codecs, and EIP session sources for trusted stdio, Host-dialed HTTP, or an accepted reverse-WebSocket carrier. It imports no Harness or Pydantic AI type and uses vendor SDKs only for backing-target lifecycle and bootstrap.
+The shared Environment Provider package owns Provider call-option contracts, fresh
+Foundation-held lifecycle Controls, data-plane Environment adapters, portable state
+codecs, and EIP session sources for trusted stdio, Host-dialed HTTP, or an accepted
+reverse-WebSocket carrier. It imports no Harness, Pydantic AI, or Foundation
+persistence type. Controls use vendor SDKs only for external backing-target calls;
+Foundation applies their results to its lifecycle state, while Environments use EIP
+for Agent operations.
 
 The Provider package's EIP-backed `Environment` implementation owns provider-neutral path, descriptor, command, process, output-reference, receipt, cancellation, and error translation. It wraps opaque EIP selectors with the entered adapter and daemon generation before any model-facing projection. Harness consumes that Environment directly; incompatible Provider or state variants fail before Harness entry.
 
 Harness model-output policy is not serialized as EIP command policy. Envd always captures bounded raw command output through its spool; the Harness decides how much to read, redact, inline, truncate, or expose through its own logical reference. The client and provider packages know neither Harness virtual paths nor model/tool metadata.
 
-A Host owns current `EnvironmentState`, selects entry, warmup, destroy, cleanup, and prune policy, and invokes those operations on fresh adapters without assuming Foundation Service behavior. Direct Local Environments do not depend on envd.
+A Host owns current `EnvironmentState | None`, lifecycle, cleanup, and prune policy. It invokes create, attach, observe, retain, and managed destroy through fresh Controls, then constructs fresh exact-target Environments from validated configuration plus optional state for data-plane entry without assuming Foundation Service behavior. Local Envd produces no independent state, and Direct Local Environments do not depend on envd.
 
 ## Executable Distribution and Installation
 

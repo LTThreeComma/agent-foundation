@@ -4,7 +4,7 @@
 
 Harness integrates already constructed `Environment` instances from `a13n-environment-provider`. It owns Run-local multi-mount routing, access ceilings, mount-incarnation fencing, readiness aggregation, model projection, portable state aggregation, and non-destructive cleanup. It does not discover Providers, construct provider targets, or choose backing-target retention and destruction policy.
 
-The Environment Provider package owns the only shared lifecycle entities: `EnvironmentProvider`, `Environment`, and `EnvironmentState`. Harness adds only lightweight mount configuration and a process-local bound aggregate. Those Harness values are not provider lifecycle entities.
+Harness consumes only the Provider package's `Environment` and `EnvironmentState` data-plane contracts. Harness adds only lightweight mount configuration and a process-local bound aggregate. Those Harness values are not provider lifecycle entities.
 
 Every independent Harness Run receives fresh Environment instances. Harness enters them before Agent input production and closes them after the terminal Run fence. `close()` releases local adapter resources and never destroys a Docker container, E2B sandbox, Host workspace, or other backing target. Inline child execution borrows the parent Run's entered facade; an async child is an independent Run and receives fresh adapters from its Host.
 
@@ -272,7 +272,7 @@ class HarnessState(BaseModel):
 
 There is no `EnvironmentMapState` or `EnvironmentMountState` type.
 
-Keys are Harness mount names. Values are imported `a13n-environment-provider` `EnvironmentState` envelopes. Singular Environment input uses `workspace`. A mount whose adapter returns `None` is omitted; Direct Local and Local Envd are normally stateless.
+Keys are Harness mount names. Values are imported `a13n-environment-provider` `EnvironmentState` envelopes. Singular Environment input uses `workspace`. A mount whose adapter returns `None` is omitted; Direct Local and Local Envd are stateless.
 
 Export rules:
 
@@ -284,9 +284,9 @@ Export rules:
 
 The mapping contains no default mount, desired mount definition, access policy, working directory, aggregate mount path, mount ID, provider generation, credential, handle, lease, pending mutation, change sequence, Host Thread association, or retention policy.
 
-Harness does not use this mapping to construct or authorize adapters. A Host selects already constructed adapters before Run entry. For managed Environments, Host current state wins, including authoritative `None`, and suppresses stale portable fallback. A Host may adopt the mapping only through an explicit unmanaged/import flow where no Host authority exists.
+Harness does not use this mapping to construct or authorize adapters. A Host selects already constructed adapters before Run entry. Host current state wins, including authoritative `None`, and suppresses stale portable fallback. A Host may adopt the mapping only through an explicit unmanaged/import flow where no Host authority exists.
 
-State export is a continuation observation, not durable publication. Host finalization independently compares each adapter's supplied and dumped values and publishes changed state even after execution, cancellation, checkpoint, or close failure. Equal state performs no Host write.
+State export is a continuation observation, not durable publication. A data-plane Environment receives fixed `EnvironmentState | None`, so Harness export cannot report a backing-target state transition or override newer Host-authoritative state.
 
 ## File Surface
 

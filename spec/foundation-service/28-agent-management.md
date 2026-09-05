@@ -232,9 +232,8 @@ One Run request may carry a finite typed `config_override`. It is request data, 
 
 ```python
 class InlineEnvironmentSelection:
-    connection: EnvironmentConnectionSpec
-    credential_bindings: tuple[EnvironmentCredentialBinding, ...] = ()
-    access: EnvironmentAccess = "full"
+    provider_connection_id: EnvironmentProviderConnectionId
+    configuration: ManagedEnvironmentConfiguration | AttachedEnvironmentConfiguration
 
 
 type EnvironmentOverride = EnvironmentSelection | InlineEnvironmentSelection
@@ -398,7 +397,7 @@ A parent config declares each named child edge with a stable `agent_id`, optiona
 
 Advancing a child Agent later does not change an existing parent Revision. The parent adopts new child behavior only through another parent Revision. Workers recursively reconstruct the exact finite graph into Harness `SubagentDefinition` values. A Run Override may patch the managed child roster by stable local name; acceptance resolves and freezes the complete resulting graph before work starts.
 
-An asynchronous hosted child receives its own Thread, Run, RunAttempts, fresh `RunBindings`, an immutable Environment binding selected through its frozen child policy, an attach-only adapter for the exact customer-owned target, the exact child Revision, and a compatible Runtime lock under [Async Subagents](34-async-subagents.md). An inline child remains process-local Harness execution and borrows the active Environment facade.
+An asynchronous hosted child receives its own Thread, Run, RunAttempts, fresh `RunBindings`, an Environment target and immutable binding selected through its frozen child policy, a fresh exact-target data-plane adapter, the exact child Revision, and a compatible Runtime lock under [Async Subagents](34-async-subagents.md). An inline child remains process-local Harness execution and borrows the active Environment facade.
 
 ## Run Selection and Reconstruction
 
@@ -411,12 +410,12 @@ Durable acceptance:
 3. validates that the exact Revision belongs to the Agent, remains retained and executable, and satisfies current authorization and compatibility requirements;
 4. applies the typed config override and capability overlay and resolves every final selection, including every Skill binding to an exact Revision lock;
 5. freezes the complete non-secret `EffectiveAgentConfig`, encrypted sensitive payload, and exact Runtime lock;
-6. when an Environment is selected, creates one immutable `RunEnvironmentBinding` to its exact existing target; and
+6. when an Environment is selected, creates one per-root-Run `EnvironmentTarget` intent and immutable owner `RunEnvironmentBinding`; and
 7. persists `agent_id`, exact `agent_revision_id`, selector kind, effective-config digest, and `runtime_lock_digest` on the accepted execution state.
 
 Historical AgentRevisions remain invocable under the stable Agent's current lifecycle gate. Their pinned Skill selections remain exact; their unpinned selections resolve current Revisions within the `skill_id` bindings frozen in that historical AgentRevision. Ingress and Schedule definitions store the stable Agent identity and resolve the current AgentRevision for each occurrence. Retry, waiting feedback, and other successor operations preserve source Skill locks where required but still pass current Skill lifecycle gates before a new Run is accepted. Recovery and Worker replacement of an already accepted Run use its exact Revision and effective configuration.
 
-For each outbound model request, the Worker or Runner rechecks the current Model and Model Provider lifecycle and resolves the Provider's current configuration and credential as defined by Model Management. For each execution attempt, the current `RunAttemptExecutor` in the selected Worker or Runner verifies the exact Runtime lock, records bounded compatibility identities, reauthorizes mutable authorities required by their owning contracts, constructs fresh Models, Plugins, `RunBindings`, and an attach-only Environment adapter, and enters the Harness only after the current attempt fence authorizes effects. An accepted Run's exact Skill package locks remain internally readable even if the Skill is later deleted. Deployment code may change between attempts, but one accepted Run never silently changes its snapshotted upstream model, calling API, model profile/limits, Plugin code, dependencies, other managed-resource Revisions, child graph, tool surface, output contract, Environment connection, provider target, or retry budgets.
+For each outbound model request, the Worker or Runner rechecks the current Model and Model Provider lifecycle and resolves the Provider's current configuration and credential as defined by Model Management. For each execution attempt, the current `RunAttemptExecutor` in the selected Worker or Runner verifies the exact Runtime lock and ready Environment target, records bounded compatibility identities, reauthorizes mutable authorities required by their owning contracts, and constructs fresh Models, Plugins, `RunBindings`, and an exact-target Environment adapter before entering Harness. An accepted Run's exact Skill package locks remain internally readable even if the Skill is later deleted. Deployment code may change between attempts, but one accepted Run never silently changes its snapshotted upstream model, calling API, model profile/limits, Plugin code, dependencies, other managed-resource Revisions, child graph, tool surface, output contract, Environment configuration, target, or retry budgets.
 
 ## Managed Harness Plugin Reference
 
@@ -474,7 +473,7 @@ Atomically creating and advancing immutable Revisions removes a mutable draft/de
 03. Metadata and lifecycle mutations use strong ETags and never advance the Agent version or rewrite Revisions.
 04. Every accepted Run pins one exact AgentRevision and one immutable `EffectiveAgentConfig`; retry, waiting, recovery, and Worker replacement never remerge current Agent state.
 05. Revision and effective-config content contain only serializable Foundation data and exact references, never Python objects, callable handlers, credential values, arbitrary import targets, or Plugin artifacts.
-06. Current credentials, authorization, Secret eligibility, attachment-capability availability, `RunBindings`, and Environment adapters are resolved or constructed freshly for every execution attempt without changing the frozen connection or Run binding.
+06. Current credentials, authorization, Secret eligibility, Provider availability, `RunBindings`, and Environment adapters are resolved or constructed freshly for every execution attempt without changing the frozen configuration, target, or Run binding.
 07. Historical AgentRevision invocation never falls back to another AgentRevision; only explicitly unpinned Skill bindings and other owner-defined mutable selections resolve at new Run acceptance.
 08. Restore copies retained content into a new later Revision and never moves the Agent head backward.
 09. ProtocolConfig is Agent-owned Revision content rather than another resource, digest, or per-Agent protocol switch.

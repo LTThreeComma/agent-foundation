@@ -92,7 +92,7 @@ If a Host-path-preserving Project root is exactly the resolved user Skill root, 
 
 In either layout, Agent UI exposes no user path beyond the selected Project roots and the exact `~/.agents/skills` directory. It does not implicitly mount `~`, `~/.agents`, or sibling user files.
 
-The dedicated mount uses the release-owned Direct Local Provider with file operations only. Its Provider permissions and Harness permission ceiling allow read and write file operations, as explicitly selected for this user-owned Skill directory, but no shell, process, port, output, or arbitrary Host-path operation. It is fresh and stateless for each independent Run, is not the default working mount, and does not participate in Project Environment-state publication.
+The dedicated mount uses the release-owned Direct Local Provider with file operations only. Its Provider permissions and Harness permission ceiling allow read and write file operations, as explicitly selected for this user-owned Skill directory, but no shell, process, port, output, or arbitrary Host-path operation. It is freshly attached with deterministic exact-root state for each independent Run, is not the default working mount, and does not participate in Project Environment-state publication.
 
 The `user-skills` mount is ordinarily present for every selected Project Environment profile because it is a separate Host-owned local mount. Exact equality with a Host-path-preserving Project root is the only omission. Selecting Sandbox, a remote profile, or another isolated Project profile does not copy the user Skill directory into that Provider; access remains routed through the dedicated Direct Local file-only mount, and Project commands cannot execute through it.
 

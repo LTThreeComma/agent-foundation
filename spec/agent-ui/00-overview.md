@@ -100,7 +100,7 @@ The receipt returns before preparation completes. It supports exact current-proc
 
 `HarnessState` preserves the conversation and Capability namespaces across composition changes. An unavailable or incompatible newly selected component fails the new Run explicitly; Agent UI does not silently substitute the previous component or reset state.
 
-Environment-state publication and continuation selection are independent completion boundaries. Known changed state is published after adapter cleanup even when execution or continuation publication fails.
+Environment target-state publication and continuation selection are independent completion boundaries. Confirmed Control state is published before the data-plane adapter enters Harness; adapter cleanup cannot mutate lifecycle state.
 
 ## Async Child Flow
 
