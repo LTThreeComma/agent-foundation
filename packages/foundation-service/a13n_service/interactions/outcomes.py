@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
 
 from a13n_harness import SafeFailure
 from sqlalchemy import select
@@ -24,7 +23,12 @@ from ._outcome_transitions import (
     validate_outcome_candidate_scope,
 )
 from ._transitions import charge_attempt_usage, terminalize_attempt
-from .attempts import AttemptContext, AttemptMutationError, lock_attempt_authority, read_attempt_authority
+from .attempts import (
+    AttemptContext,
+    AttemptMutationError,
+    lock_attempt_authority,
+    read_attempt_lease,
+)
 from .domain import RunAttemptStatus, RunStatus
 from .inbox import ThreadControlSignalPublisher
 from .inbox_persistence import apply_run_outcome, lock_inbox_related_runs
@@ -44,6 +48,16 @@ class RunOutcomeReceipt:
     thread_version: int
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedRunOutcome:
+    """Process-local proof of exact immutable output verification, not lease authority."""
+
+    state: StoredRunState
+    organization_id: str
+    run_id: str
+    verifier: object = field(repr=False)
+
+
 class RunOutcomeService:
     """Seal state-first successful outcomes and interrupt-driven cancellation."""
 
@@ -61,6 +75,7 @@ class RunOutcomeService:
         self._payloads = payloads
         self._control_signals = control_signals
         self._clock = clock
+        self._verifier = object()
 
     async def commit_state_outcome(
         self,
@@ -71,9 +86,29 @@ class RunOutcomeService:
     ) -> RunOutcomeReceipt:
         """Adopt an already-published waiting or completed state candidate."""
 
-        now = assume_utc(self._clock())
+        verified = await self.verify_state_outcome(authority, state)
+        return await self.commit_verified_state_outcome(
+            authority, verified, expected_thread_version=expected_thread_version
+        )
+
+    async def commit_verified_state_outcome(
+        self,
+        authority: AttemptContext,
+        verified: VerifiedRunOutcome,
+        *,
+        expected_thread_version: int,
+    ) -> RunOutcomeReceipt:
+        """Revalidate current authority and commit without holding a lease gate over object I/O."""
+
+        if (
+            verified.verifier is not self._verifier
+            or verified.organization_id != authority.organization_id
+            or verified.run_id != authority.run_id
+        ):
+            raise RunOutcomeError("Output verification does not belong to this Run and outcome service")
+        state = verified.state
         validate_outcome_candidate(state, authority)
-        await self._verify_output_payload(authority, state, expected_thread_version, now)
+        now = assume_utc(self._clock())
         async with transaction(self._sessions) as database:
             run, attempt, thread = await lock_attempt_authority(
                 database,
@@ -225,27 +260,26 @@ class RunOutcomeService:
         await self._best_effort_signal(organization_id=organization_id, thread_id=cancelled_thread_id)
         return receipt
 
-    async def _verify_output_payload(
+    async def verify_state_outcome(
         self,
         authority: AttemptContext,
         state: StoredRunState,
-        expected_thread_version: int,
-        now: datetime,
-    ) -> None:
-        candidate = state.envelope.outcome_candidate
-        if not isinstance(candidate, CompletedOutcomeCandidate) or candidate.output_object is None:
-            return
+    ) -> VerifiedRunOutcome:
+        """Verify immutable output outside the caller's relational CAS serialization."""
+
+        validate_outcome_candidate(state, authority)
         async with short_session(self._sessions) as database:
-            run, _, thread = await read_attempt_authority(database, authority, now)
-            if thread.version != expected_thread_version:
-                raise RunOutcomeError("Thread outcome precondition changed")
+            run, _, thread = await read_attempt_lease(database, authority, self._clock())
             validate_outcome_candidate_scope(state, run, thread)
-        await self._payloads.verify_reference(
-            authority.organization_id,
-            authority.run_id,
-            "output",
-            candidate.output_object,
-        )
+        candidate = state.envelope.outcome_candidate
+        if isinstance(candidate, CompletedOutcomeCandidate) and candidate.output_object is not None:
+            await self._payloads.verify_reference(
+                authority.organization_id,
+                authority.run_id,
+                "output",
+                candidate.output_object,
+            )
+        return VerifiedRunOutcome(state, authority.organization_id, authority.run_id, self._verifier)
 
     async def _best_effort_signal(self, *, organization_id: str, thread_id: str) -> None:
         if self._control_signals is None:

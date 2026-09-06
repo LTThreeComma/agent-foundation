@@ -131,6 +131,8 @@ class RunAttemptControl:
         self._state = state
         self._inbox = inbox
         self._gate = _RunControlGate()
+        # Relational CAS receipts share a lock; object and Harness I/O do not.
+        self._authority_lock = asyncio.Lock()
         self._gate.delivery_gate = (
             _DeliveryGate.first_response
             if envelope.input_disposition == "pending" and envelope.host.deferred is not None
@@ -182,15 +184,17 @@ class RunAttemptControl:
                 )
             self._gate.identity = identity
             try:
-                mutation = await self._execution.enter_harness(
-                    self._context,
-                    preparation=preparation,
-                    harness_run_id=identity.run_id,
-                )
+                async with self._authority_lock:
+                    self._require_open()
+                    mutation = await self._execution.enter_harness(
+                        self._context,
+                        preparation=preparation,
+                        harness_run_id=identity.run_id,
+                    )
+                    self._advance(mutation)
             except AttemptAuthorityError:
                 await self._fence()
                 raise
-            self._advance(mutation)
 
     async def after_stream_entry(self) -> None:
         """Honor a pre-existing handoff at the first direct complete boundary."""
@@ -237,8 +241,10 @@ class RunAttemptControl:
                     return
                 if not waiting_first_request:
                     await self._offer_pending(boundary)
-                mutation = await self._execution.increment_model_request(self._context)
-                self._advance(mutation)
+                async with self._authority_lock:
+                    self._require_open()
+                    mutation = await self._execution.increment_model_request(self._context)
+                    self._advance(mutation)
             except AttemptAuthorityError:
                 await self._fence()
                 raise
@@ -312,11 +318,13 @@ class RunAttemptControl:
         async with self._gate.lock:
             self._require_open()
             try:
-                decision = await self._execution.commit_preparation_success(self._context)
-                self._advance(decision.mutation)
-                if isinstance(decision, AttemptPreparationRejected):
-                    self._gate.phase = _CoordinatorPhase.terminal
-                return decision
+                async with self._authority_lock:
+                    self._require_open()
+                    decision = await self._execution.commit_preparation_success(self._context)
+                    self._advance(decision.mutation)
+                    if isinstance(decision, AttemptPreparationRejected):
+                        self._gate.phase = _CoordinatorPhase.terminal
+                    return decision
             except AttemptAuthorityError:
                 await self._fence()
                 raise
@@ -324,10 +332,9 @@ class RunAttemptControl:
     async def renew_lease(self) -> None:
         """Renew only this exact Attempt under the same serialized authority context."""
 
-        async with self._gate.lock:
-            if self._gate.phase in {_CoordinatorPhase.terminal, _CoordinatorPhase.yielded}:
+        async with self._authority_lock:
+            if self._gate.phase in {_CoordinatorPhase.terminal, _CoordinatorPhase.yielded, _CoordinatorPhase.fenced}:
                 return
-            self._require_open()
             self._advance(
                 await self._execution.heartbeat(
                     self._context,
@@ -339,7 +346,11 @@ class RunAttemptControl:
         """Reread durable control facts and offer active input only after stream entry."""
 
         async with self._gate.lock:
-            if self._gate.phase in {_CoordinatorPhase.terminal, _CoordinatorPhase.yielded}:
+            if self._gate.phase in {
+                _CoordinatorPhase.terminal,
+                _CoordinatorPhase.yielded,
+                _CoordinatorPhase.handoff_ready,
+            }:
                 return
             self._require_open()
             try:
@@ -379,17 +390,23 @@ class RunAttemptControl:
                 if reason is None:  # pragma: no cover - maintained by the private gate
                     raise RuntimeError("handoff-ready control is missing its reason")
                 try:
-                    mutation = await self._execution.yield_attempt(self._context, reason)
-                    self._advance(mutation)
-                    self._gate.phase = _CoordinatorPhase.yielded
-                    return mutation
+                    async with self._authority_lock:
+                        if self._gate.phase is not _CoordinatorPhase.handoff_ready:
+                            raise AttemptAuthorityError("Attempt lost authority before yielding")
+                        mutation = await self._execution.yield_attempt(self._context, reason)
+                        self._advance(mutation)
+                        self._gate.phase = _CoordinatorPhase.yielded
+                        return mutation
                 except AttemptAuthorityError:
                     await self._fence()
                     raise
             self._require_open()
             try:
                 if result.status == "cancelled":
-                    receipt = await committer.reconcile_cancelled(self._context)
+                    async with self._authority_lock:
+                        self._require_open()
+                        receipt = await committer.reconcile_cancelled(self._context)
+                        self._gate.phase = _CoordinatorPhase.terminal
                     _require_terminal_disposition(receipt, RunTerminalDisposition.cancelled)
                 else:
                     await self._validate_authority()
@@ -397,7 +414,10 @@ class RunAttemptControl:
                         failure = result.failure
                         if failure is None:  # pragma: no cover - enforced by HarnessRunResult
                             raise RuntimeError("failed Harness result is missing its failure")
-                        receipt = await committer.commit_failure(self._context, failure)
+                        async with self._authority_lock:
+                            self._require_open()
+                            receipt = await committer.commit_failure(self._context, failure)
+                            self._gate.phase = _CoordinatorPhase.terminal
                         _require_terminal_disposition(
                             receipt,
                             RunTerminalDisposition.retrying,
@@ -407,7 +427,11 @@ class RunAttemptControl:
                         projection = await adapter.project(result)
                         await self._publish_terminal(projection)
                         await self._confirm_state()
-                        receipt = await committer.commit_state_outcome(self._context, self._state)
+                        commit = await committer.prepare_state_outcome(self._context, self._state)
+                        async with self._authority_lock:
+                            self._require_open()
+                            receipt = await commit(self._context)
+                            self._gate.phase = _CoordinatorPhase.terminal
                         expected = (
                             RunTerminalDisposition.completed
                             if isinstance(projection.candidate, CompletedOutcomeCandidate)
@@ -423,7 +447,7 @@ class RunAttemptControl:
     async def authority_lost(self) -> None:
         """Terminally fence local control after lease authority cannot be confirmed."""
 
-        async with self._gate.lock:
+        async with self._authority_lock:
             if self._gate.phase in {
                 _CoordinatorPhase.fenced,
                 _CoordinatorPhase.terminal,
@@ -435,7 +459,7 @@ class RunAttemptControl:
     async def close_admission(self) -> None:
         """Prevent later control work during executor teardown."""
 
-        async with self._gate.lock:
+        async with self._authority_lock:
             if self._gate.phase is _CoordinatorPhase.active:
                 await self._fence()
 
@@ -452,10 +476,14 @@ class RunAttemptControl:
         await self._confirm_state()
 
     async def _validate_authority(self) -> None:
-        self._advance(await self._execution.validate(self._context))
+        async with self._authority_lock:
+            self._require_open()
+            self._advance(await self._execution.validate(self._context))
 
     async def _confirm_state(self) -> None:
-        self._advance(await self._inbox.confirm_checkpoint(self._context, self._state))
+        async with self._authority_lock:
+            self._require_open()
+            self._advance(await self._inbox.confirm_checkpoint(self._context, self._state))
 
     async def _checkpoint(
         self,
@@ -520,12 +548,15 @@ class RunAttemptControl:
         return RunStateEnvelope.model_validate(payload)
 
     async def _publish(self, successor: RunStateEnvelope) -> None:
-        self._state = await self._execution.publish_checkpoint(
-            self._context,
-            self._states,
+        await self._validate_authority()
+        published = await self._states.replace(
             self._state,
             successor,
+            run_attempt_id=self._context.run_attempt_id,
+            fence=self._context.fence,
         )
+        await self._validate_authority()
+        self._state = published
         self._gate.offered.clear()
 
     async def _offer_pending(self, boundary: HarnessHookBoundary) -> None:
@@ -537,6 +568,7 @@ class RunAttemptControl:
         if self._gate.offered:
             return ()
         entries = tuple(await self._inbox.read_eligible(self._context))
+        await self._validate_authority()
         _validate_delivery_batch(entries, self._state.envelope)
         return entries
 
@@ -588,7 +620,9 @@ class RunAttemptControl:
 
     async def _quiesce_for_handoff(self) -> None:
         await self._require_driver().cancel()
-        self._gate.phase = _CoordinatorPhase.handoff_ready
+        async with self._authority_lock:
+            self._require_open()
+            self._gate.phase = _CoordinatorPhase.handoff_ready
 
     async def _fence(self) -> None:
         self._gate.phase = _CoordinatorPhase.fenced

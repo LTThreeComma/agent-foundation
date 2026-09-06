@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -79,11 +80,13 @@ class RunTerminalReceipt:
 class RunTerminalCommitter(Protocol):
     """Own the final fenced outcome and active-control race transactions."""
 
-    async def commit_state_outcome(
+    async def prepare_state_outcome(
         self,
         authority: AttemptContext,
         state: StoredRunState,
-    ) -> RunTerminalReceipt: ...
+    ) -> Callable[[AttemptContext], Awaitable[RunTerminalReceipt]]:
+        """Verify object references, then return a DB-only commit using fresh authority."""
+        ...
 
     async def commit_failure(
         self,

@@ -112,21 +112,6 @@ class _Execution(AttemptExecutionService):
         self.trace.append("attempt:model")
         return _receipt(context, attempt_delta=1)
 
-    async def publish_checkpoint(
-        self,
-        context: AttemptContext,
-        states: RunStateStore,
-        current: StoredRunState,
-        successor: RunStateEnvelope,
-    ) -> StoredRunState:
-        self.trace.append("attempt:checkpoint")
-        return await states.replace(
-            current,
-            successor,
-            run_attempt_id=context.run_attempt_id,
-            fence=context.fence,
-        )
-
 
 @dataclass
 class _Inbox:
@@ -222,6 +207,12 @@ class _Adapter:
 @dataclass
 class _Committer:
     trace: list[str]
+
+    async def prepare_state_outcome(self, authority, state):
+        async def commit(current):
+            return await self.commit_state_outcome(current, state)
+
+        return commit
 
     async def commit_state_outcome(
         self,

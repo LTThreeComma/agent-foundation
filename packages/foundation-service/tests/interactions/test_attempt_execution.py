@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -37,7 +38,7 @@ from a13n_service.interactions.domain import (
 from a13n_service.interactions.initialization import RunStateSeed, initialize_start_state
 from a13n_service.interactions.models import RunAttemptRecord, RunRecord, ThreadRecord
 from a13n_service.interactions.objects import RunObjectIntegrityError, RunPayloadStore, RunStateStore
-from a13n_service.interactions.outcomes import RunOutcomeService
+from a13n_service.interactions.outcomes import RunOutcomeError, RunOutcomeService
 from a13n_service.interactions.scheduling import AttemptScheduler, ClaimedAttempt, SealedClaim, WorkerClaim
 from a13n_service.interactions.state import (
     CompletedOutcomeCandidate,
@@ -48,6 +49,7 @@ from a13n_service.interactions.state import (
 )
 from a13n_service.lifecycle import LifecycleEventRecord
 from a13n_service.storage import ObjectStore, short_session
+from anyio import Event, create_task_group, fail_after
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -937,3 +939,83 @@ async def test_external_tool_scope_rechecks_durable_attempt_and_principal(
         )
     with pytest.raises((AttemptAuthorityError, AuthorizationError)):
         await runtime._scope(context)
+
+
+@pytest.mark.parametrize("lease_expires", [False, True])
+async def test_output_verification_uses_fresh_lease_and_versions_before_sealing(
+    interaction_sessions, interaction_object_store: ObjectStore, monkeypatch, lease_expires: bool
+) -> None:
+    states, run, envelope = await _accept_root(interaction_sessions, interaction_object_store)
+    claim = await AttemptScheduler(interaction_sessions, clock=lambda: NOW, lifecycle=test_lifecycle_writer()).claim(
+        run.id, _worker()
+    )
+    assert isinstance(claim, ClaimedAttempt)
+    now = NOW + timedelta(seconds=1)
+    execution = AttemptExecutionService(interaction_sessions, clock=lambda: now, lifecycle=test_lifecycle_writer())
+    authority = _authority(claim)
+    prepared = await execution.commit_preparation_success(authority)
+    assert isinstance(prepared, AttemptPreparationAccepted)
+    entered = await execution.enter_harness(authority, preparation=prepared, harness_run_id="harness-output-check")
+    authority = replace(
+        authority, expected_run_version=entered.run_version, expected_attempt_version=entered.attempt_version
+    )
+    payloads = RunPayloadStore(interaction_object_store)
+    reference = await payloads.create(
+        ORGANIZATION_ID,
+        RunPayloadEnvelope(run_id=run.id, payload_kind="output", payload_schema_version="1", payload={"answer": 42}),
+    )
+    candidate = _completed_state(
+        envelope, claim.attempt.id, claim.attempt.fence, outcome=CompletedOutcomeCandidate(output_object=reference)
+    )
+    stored = await execution.publish_checkpoint(
+        authority, states, await states.read(ORGANIZATION_ID, run.id), candidate
+    )
+    outcomes = RunOutcomeService(interaction_sessions, payloads, clock=lambda: now, lifecycle=test_lifecycle_writer())
+    reading, release = Event(), Event()
+    verify_reference = payloads.verify_reference
+    reads = 0
+
+    async def slow_verify(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        reading.set()
+        await release.wait()
+        return await verify_reference(*args, **kwargs)
+
+    monkeypatch.setattr(payloads, "verify_reference", slow_verify)
+    verified = []
+
+    async def verify():
+        verified.append(await outcomes.verify_state_outcome(authority, stored))
+
+    with fail_after(5):
+        async with create_task_group() as tasks:
+            tasks.start_soon(verify)
+            await reading.wait()
+            receipt = await execution.heartbeat(authority, lease_duration=timedelta(seconds=30))
+            refreshed = replace(
+                authority,
+                expected_run_version=receipt.run_version,
+                expected_attempt_version=receipt.attempt_version,
+                lease_expires_at=receipt.lease_expires_at,
+            )
+            if lease_expires:
+                now = receipt.lease_expires_at
+            release.set()
+    with pytest.raises(AttemptAuthorityError):
+        await outcomes.commit_verified_state_outcome(authority, verified[0], expected_thread_version=1)
+    another_service = RunOutcomeService(
+        interaction_sessions, payloads, clock=lambda: now, lifecycle=test_lifecycle_writer()
+    )
+    with pytest.raises(RunOutcomeError, match="Output verification"):
+        await another_service.commit_verified_state_outcome(refreshed, verified[0], expected_thread_version=1)
+    if lease_expires:
+        with pytest.raises(AttemptAuthorityError):
+            await outcomes.commit_verified_state_outcome(refreshed, verified[0], expected_thread_version=1)
+        async with short_session(interaction_sessions) as database:
+            record = await database.get(RunRecord, run.id)
+            assert record is not None and record.status == "running" and record.to_resource().sealed_state is None
+    else:
+        result = await outcomes.commit_verified_state_outcome(refreshed, verified[0], expected_thread_version=1)
+        assert result.run_status is RunStatus.completed and result.thread_version == 2
+    assert reads == 1

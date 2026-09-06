@@ -6,18 +6,22 @@ import hashlib
 from dataclasses import dataclass
 from typing import Literal
 
+from a13n_logging import get_logger
 from pydantic import TypeAdapter
 
-from a13n_service.storage import ObjectConflict, ObjectInfo, ObjectStore
+from a13n_service.agents.domain import canonical_digest
+from a13n_service.storage import ObjectConflict, ObjectInfo, ObjectNotFound, ObjectStore, ObjectStoreUnavailable
 from a13n_service.storage.codec import DurableObjectCodecError, canonical_model_bytes, decode_canonical_model
 
-from .domain import RunPayloadObjectRef
+from .domain import Run, RunPayloadObjectRef, RunStatus
 from .state import RunPayloadEnvelope, RunStateEnvelope, validate_state_successor
 
 RUN_STATE_CONTENT_TYPE = "application/vnd.converge.run-state+json"
 RUN_PAYLOAD_CONTENT_TYPE = "application/vnd.converge.run-payload+json"
 DEFAULT_MAX_STATE_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
+
+logger = get_logger(__name__)
 
 _STATE_ADAPTER = TypeAdapter(RunStateEnvelope)
 _PAYLOAD_ADAPTER = TypeAdapter(RunPayloadEnvelope)
@@ -59,11 +63,12 @@ class RunStateStore:
         digest = hashlib.sha256(body).hexdigest()
         key = run_state_key(organization_id, envelope.run_id)
         try:
-            info = await self._objects.put(
+            info = await self._put_state(
                 key,
                 body,
-                content_type=RUN_STATE_CONTENT_TYPE,
-                metadata=_state_metadata(envelope, digest, writer_fence=0),
+                envelope=envelope,
+                digest=digest,
+                writer_fence=0,
                 if_none_match=True,
             )
         except ObjectConflict as error:
@@ -71,6 +76,13 @@ class RunStateStore:
         _verify_info(info, key=key, body=body, content_type=RUN_STATE_CONTENT_TYPE)
         _verify_state_metadata(info, envelope=envelope, digest=digest)
         return StoredRunState(envelope, info, digest, body, 0)
+
+    async def read_run(self, run: Run) -> StoredRunState:
+        """Read exact Run-owned bytes and verify any relationally selected seal."""
+
+        state = await self.read(run.organization_id, run.id, expected_thread_id=run.thread_id)
+        validate_run_state_reference(run, state)
+        return state
 
     async def read(
         self,
@@ -114,11 +126,12 @@ class RunStateStore:
         self._require_bounded(body)
         digest = hashlib.sha256(body).hexdigest()
         try:
-            info = await self._objects.put(
+            info = await self._put_state(
                 state.info.key,
                 body,
-                content_type=RUN_STATE_CONTENT_TYPE,
-                metadata=_state_metadata(successor, digest, writer_fence=fence),
+                envelope=successor,
+                digest=digest,
+                writer_fence=fence,
                 if_match=state.info.version,
             )
         except ObjectConflict as error:
@@ -126,6 +139,45 @@ class RunStateStore:
         _verify_info(info, key=state.info.key, body=body, content_type=RUN_STATE_CONTENT_TYPE)
         _verify_state_metadata(info, envelope=successor, digest=digest)
         return StoredRunState(successor, info, digest, body, fence)
+
+    async def _put_state(
+        self,
+        key: str,
+        body: bytes,
+        *,
+        envelope: RunStateEnvelope,
+        digest: str,
+        writer_fence: int,
+        if_none_match: bool = False,
+        if_match: str | None = None,
+    ) -> ObjectInfo:
+        try:
+            return await self._objects.put(
+                key,
+                body,
+                content_type=RUN_STATE_CONTENT_TYPE,
+                metadata=_state_metadata(envelope, digest, writer_fence=writer_fence),
+                if_none_match=if_none_match,
+                if_match=if_match,
+            )
+        except (ObjectStoreUnavailable, TimeoutError) as error:
+            # A lost response can follow a durable write. Never repeat a mutation
+            # using its old token, or accept another writer's bytes as our receipt.
+            try:
+                observed = await self._objects.stat(key)
+                actual, info = await _read_object(self._objects, key, max_bytes=self._max_state_bytes)
+            except (ObjectNotFound, ObjectStoreUnavailable, TimeoutError) as read_error:
+                raise error from read_error
+            if info.version != observed.version:
+                raise StaleStateWriter("Run state changed during write reconciliation") from error
+            if actual != body:
+                if info.version != if_match:
+                    raise StaleStateWriter("Run state changed after an uncertain write") from error
+                raise error
+            _verify_info(info, key=key, body=body, content_type=RUN_STATE_CONTENT_TYPE)
+            _verify_state_metadata(info, envelope=envelope, digest=digest)
+            logger.info("run_state_write_reconciled", extra={"run_id": envelope.run_id, "writer_fence": writer_fence})
+            return info
 
     def _require_bounded(self, body: bytes) -> None:
         if len(body) > self._max_state_bytes:
@@ -276,6 +328,38 @@ async def _read_object(objects: ObjectStore, key: str, *, max_bytes: int) -> tup
     return body, info
 
 
+def validate_run_state_reference(run: Run, state: StoredRunState) -> None:
+    """Verify detached state against its relational owner and immutable seal."""
+
+    envelope = state.envelope
+    if (
+        state.info.key != run_state_key(run.organization_id, run.id)
+        or envelope.run_id != run.id
+        or envelope.thread_id != run.thread_id
+        or envelope.agent_id != run.agent_id
+        or envelope.agent_revision_id != run.agent_revision_id
+        or envelope.runtime_lock_digest != run.runtime_lock_digest
+        or envelope.effective_agent_config.content_digest != run.effective_agent_config_digest
+        or canonical_digest(
+            envelope.effective_agent_config.model_dump(mode="json", by_alias=True, exclude={"content_digest"})
+        )
+        != run.effective_agent_config_digest
+        or envelope.effective_agent_config.resolved_model.execution.observation() != run.model_execution_observation
+    ):
+        raise RunObjectIntegrityError("Run state does not match its accepted execution selection")
+    seal = run.sealed_state
+    if seal is not None and (
+        state.digest_sha256 != seal.digest_sha256
+        or state.info.size != seal.size_bytes
+        or state.info.content_type != seal.content_type
+        or envelope.schema_version != seal.envelope_schema_version
+        or envelope.harness_schema_version != seal.harness_schema_version
+        or envelope.checkpoint_seq != seal.checkpoint_seq
+        or (run.status in {RunStatus.waiting, RunStatus.completed} and envelope.checkpoint_kind != run.status.value)
+    ):
+        raise RunObjectIntegrityError("Run state does not match the relationally selected sealed state")
+
+
 def _state_metadata(envelope: RunStateEnvelope, digest: str, *, writer_fence: int) -> dict[str, str]:
     return {
         "schema-version": envelope.schema_version,
@@ -326,4 +410,5 @@ __all__ = [
     "run_payload_key",
     "run_state_key",
     "validate_run_payload_reference",
+    "validate_run_state_reference",
 ]

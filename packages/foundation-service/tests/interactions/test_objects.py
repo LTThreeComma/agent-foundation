@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
-from a13n_service.interactions.domain import RunPayloadObjectRef
+from a13n_service.interactions.domain import RunPayloadObjectRef, RunStatus, SealedRunState
 from a13n_service.interactions.objects import (
     RunObjectIntegrityError,
     RunPayloadStore,
@@ -11,12 +11,13 @@ from a13n_service.interactions.objects import (
     StaleStateWriter,
     validate_run_payload_reference,
 )
-from a13n_service.interactions.state import RunPayloadEnvelope, RunStateEnvelope
-from a13n_service.storage import ObjectStore
+from a13n_service.interactions.state import CompletedOutcomeCandidate, RunPayloadEnvelope, RunStateEnvelope
+from a13n_service.storage import ObjectStore, ObjectStoreUnavailable
 from a13n_service.storage.codec import DurableObjectCodecError, decode_canonical_model
 from pydantic import TypeAdapter
 
 from .conftest import ORGANIZATION_ID, initial_state, progress_state
+from .test_acceptance import _accepted_run
 
 pytestmark = pytest.mark.anyio
 
@@ -175,3 +176,122 @@ def test_codec_rejects_noncanonical_and_duplicate_json() -> None:
         decode_canonical_model(b'{"b":1,"a":2}', adapter)
     with pytest.raises(DurableObjectCodecError, match="strict UTF-8 JSON"):
         decode_canonical_model(b'{"a":1,"a":2}', adapter)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("digest_sha256", "f" * 64),
+        ("size_bytes", 1),
+        ("content_type", "application/json"),
+        ("envelope_schema_version", "2"),
+        ("harness_schema_version", "unknown"),
+        ("checkpoint_seq", 99),
+    ],
+)
+async def test_run_state_read_verifies_every_selected_seal_field(
+    interaction_object_store: ObjectStore, field: str, value: str | int
+) -> None:
+    store = RunStateStore(interaction_object_store)
+    initial = await store.create(ORGANIZATION_ID, initial_state())
+    envelope = progress_state(initial.envelope).model_copy(
+        update={"checkpoint_kind": "completed", "outcome_candidate": CompletedOutcomeCandidate(output="done")}
+    )
+    state = await store.replace(
+        initial,
+        envelope,
+        run_attempt_id=envelope.last_checkpoint_run_attempt_id,
+        fence=1,
+    )
+    run = _accepted_run(
+        run_id=envelope.run_id, thread_id=envelope.thread_id, idempotency_key="sealed", request_fingerprint="a" * 64
+    ).model_copy(
+        update={
+            "status": RunStatus.completed,
+            "sealed_state": SealedRunState(
+                digest_sha256=state.digest_sha256,
+                size_bytes=len(state.body),
+                content_type=state.info.content_type,
+                envelope_schema_version=envelope.schema_version,
+                harness_schema_version=envelope.harness_schema_version,
+                checkpoint_seq=envelope.checkpoint_seq,
+            ),
+        }
+    )
+    assert await store.read_run(run) == state
+    assert run.sealed_state is not None
+    altered = run.model_copy(update={"sealed_state": run.sealed_state.model_copy(update={field: value})})
+    with pytest.raises(RunObjectIntegrityError, match="sealed state"):
+        await store.read_run(altered)
+
+
+@pytest.mark.parametrize("operation", ["create", "checkpoint"])
+@pytest.mark.parametrize("failure", [TimeoutError, ObjectStoreUnavailable])
+async def test_state_write_lost_response_recovers_exact_committed_receipt(
+    object_store: ObjectStore, monkeypatch, operation: str, failure: type[Exception]
+) -> None:
+    store = RunStateStore(object_store)
+    initial = initial_state()
+    state = None
+    if operation != "create":
+        state = await store.create(ORGANIZATION_ID, initial)
+    put = object_store.put
+    committed = []
+
+    async def lose_response(*args, **kwargs):
+        committed.append(await put(*args, **kwargs))
+        raise failure("write response lost")
+
+    monkeypatch.setattr(object_store, "put", lose_response)
+    if operation == "create":
+        result = await store.create(ORGANIZATION_ID, initial)
+    else:
+        assert state is not None
+        result = await store.replace(state, progress_state(initial), run_attempt_id="rat_1234567890abcdef", fence=1)
+    assert len(committed) == 1
+    assert result.info == committed[0]
+    assert await store.read(ORGANIZATION_ID, initial.run_id) == result
+
+
+async def test_uncommitted_write_failure_preserves_original_token(object_store: ObjectStore, monkeypatch) -> None:
+    store = RunStateStore(object_store)
+    original = await store.create(ORGANIZATION_ID, initial_state())
+
+    async def fail_before_commit(*args, **kwargs):
+        raise ObjectStoreUnavailable("not committed")
+
+    monkeypatch.setattr(object_store, "put", fail_before_commit)
+    with pytest.raises(ObjectStoreUnavailable, match="not committed"):
+        await store.replace(original, progress_state(original.envelope), run_attempt_id="rat_1234567890abcdef", fence=1)
+    assert await store.read(ORGANIZATION_ID, original.envelope.run_id) == original
+
+
+@pytest.mark.parametrize("changed", ["writer", "metadata"])
+async def test_uncertain_write_never_adopts_another_writer_or_corrupt_metadata(
+    object_store: ObjectStore, monkeypatch, changed: str
+) -> None:
+    store = RunStateStore(object_store)
+    original = await store.create(ORGANIZATION_ID, initial_state())
+    put = object_store.put
+
+    async def change_after_commit(*args, **kwargs):
+        info = await put(*args, **kwargs)
+        if changed == "writer":
+            monkeypatch.setattr(object_store, "put", put)
+            current = await store.read(ORGANIZATION_ID, original.envelope.run_id)
+            await store.replace(
+                current, progress_state(current.envelope, fence=2), run_attempt_id="rat_1234567890abcdef", fence=2
+            )
+        else:
+            await put(
+                info.key,
+                args[1],
+                content_type=info.content_type,
+                metadata={**info.metadata, "writer-fence": "999"},
+                if_match=info.version,
+            )
+        raise TimeoutError("write response lost")
+
+    monkeypatch.setattr(object_store, "put", change_after_commit)
+    with pytest.raises(StaleStateWriter if changed == "writer" else RunObjectIntegrityError):
+        await store.replace(original, progress_state(original.envelope), run_attempt_id="rat_1234567890abcdef", fence=1)

@@ -412,6 +412,18 @@ async def read_attempt_authority(
     authority: AttemptContext,
     now: datetime,
 ) -> tuple[RunRecord, RunAttemptRecord, ThreadRecord]:
+    records = await read_attempt_lease(database, authority, now)
+    _validate_versions(records[0], records[1], authority)
+    return records
+
+
+async def read_attempt_lease(
+    database: AsyncSession,
+    authority: AttemptContext,
+    now: datetime,
+) -> tuple[RunRecord, RunAttemptRecord, ThreadRecord]:
+    """Validate read authority without treating a concurrent heartbeat as lease loss."""
+
     result = await database.execute(
         select(RunRecord, RunAttemptRecord, ThreadRecord)
         .join(
@@ -431,7 +443,6 @@ async def read_attempt_authority(
         raise AttemptAuthorityError("Attempt authority was not found")
     run, attempt, thread = row
     _validate_lease(run, attempt, thread, authority, now)
-    _validate_versions(run, attempt, authority)
     return run, attempt, thread
 
 

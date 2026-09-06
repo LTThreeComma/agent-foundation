@@ -49,6 +49,7 @@ from a13n_service.interactions.state import (
     RunStateEnvelope,
 )
 from a13n_service.storage import ObjectStore
+from anyio import Event, create_task_group, fail_after
 from pydantic import TypeAdapter
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability, Capability
@@ -73,6 +74,10 @@ class _RecordingAttemptExecution(AttemptExecutionService):
     trace: list[str]
     yielded: RunAttemptYieldReason | None = None
 
+    async def heartbeat(self, authority, *, lease_duration):
+        self.trace.append("attempt:heartbeat")
+        return _receipt(authority, attempt_delta=1)
+
     async def validate(self, authority: AttemptContext) -> AttemptMutationReceipt:
         self.trace.append("attempt:validate")
         return _receipt(authority)
@@ -93,21 +98,6 @@ class _RecordingAttemptExecution(AttemptExecutionService):
     async def increment_model_request(self, authority: AttemptContext) -> AttemptMutationReceipt:
         self.trace.append("attempt:model")
         return _receipt(authority, attempt_delta=1)
-
-    async def publish_checkpoint(
-        self,
-        authority: AttemptContext,
-        states: RunStateStore,
-        current: StoredRunState,
-        successor: RunStateEnvelope,
-    ) -> StoredRunState:
-        self.trace.append("attempt:checkpoint")
-        return await states.replace(
-            current,
-            successor,
-            run_attempt_id=authority.run_attempt_id,
-            fence=authority.fence,
-        )
 
     async def yield_attempt(
         self,
@@ -165,6 +155,12 @@ class _RecordingTerminalCommitter:
     states: list[StoredRunState] = field(default_factory=list)
     failures: list[SafeFailure] = field(default_factory=list)
     cancelled: int = 0
+
+    async def prepare_state_outcome(self, authority, state):
+        async def commit(current):
+            return await self.commit_state_outcome(current, state)
+
+        return commit
 
     async def commit_state_outcome(
         self,
@@ -507,10 +503,19 @@ async def test_waiting_gate_survives_internal_model_recovery(
 
 async def test_planned_handoff_checkpoints_and_cancels_before_model_io(
     interaction_object_store: ObjectStore,
+    monkeypatch,
 ) -> None:
     trace: list[str] = []
     calls: list[tuple[ModelMessage, ...]] = []
     states, stored = await _stored_state(interaction_object_store, initial_state())
+    replace_state = states.replace
+
+    async def record_checkpoint(*args, **kwargs):
+        published = await replace_state(*args, **kwargs)
+        trace.append("state:checkpoint")
+        return published
+
+    monkeypatch.setattr(states, "replace", record_checkpoint)
     bindings = RunBindings.embedded()
     execution = _RecordingAttemptExecution(trace)
     projector = _RecordingEventProjector()
@@ -524,14 +529,17 @@ async def test_planned_handoff_checkpoints_and_cancels_before_model_io(
     )
     await coordinator.request_handoff(RunAttemptYieldReason.service_drain)
 
-    result, mutation = await _consume(
+    result = await _run(
         control=coordinator,
         bindings=bindings,
         state=stored,
         model=_model(trace, calls),
         projector=projector,
-        outcome_adapter=_outcome_adapter(interaction_object_store),
-        terminal_committer=terminal,
+    )
+    await coordinator.renew_lease()
+    await coordinator.reconcile()
+    mutation = await coordinator.finalize(
+        result, adapter=_outcome_adapter(interaction_object_store), committer=terminal
     )
     assert result.status == "cancelled"
     assert isinstance(mutation, AttemptMutationReceipt)
@@ -544,7 +552,7 @@ async def test_planned_handoff_checkpoints_and_cancels_before_model_io(
 
     assert execution.yielded is RunAttemptYieldReason.service_drain
     assert mutation.run_version == coordinator.current_context.expected_run_version
-    assert trace.index("attempt:checkpoint") < trace.index("attempt:yield")
+    assert trace.index("state:checkpoint") < trace.index("attempt:heartbeat") < trace.index("attempt:yield")
 
 
 async def test_driver_projects_events_and_control_commits_one_completed_result(
@@ -846,3 +854,79 @@ def _business_prompts(messages: tuple[ModelMessage, ...]) -> list[str]:
             ):
                 prompts.append(part.content)
     return prompts
+
+
+@pytest.mark.parametrize("lose_authority", [False, True])
+async def test_slow_checkpoint_keeps_lease_live_and_fences_dispatch(
+    interaction_sessions, interaction_object_store: ObjectStore, monkeypatch, lose_authority: bool
+) -> None:
+    from a13n_service.interactions.inbox import DatabaseThreadInboxReconciler
+    from a13n_service.interactions.models import RunAttemptRecord
+    from a13n_service.interactions.scheduling import AttemptScheduler, ClaimedAttempt
+    from a13n_service.storage import short_session
+
+    from tests.lifecycle_support import test_lifecycle_writer
+
+    from .test_attempt_execution import _accept_root, _authority, _worker
+
+    states, run, _ = await _accept_root(interaction_sessions, interaction_object_store)
+    claim = await AttemptScheduler(interaction_sessions, clock=lambda: NOW, lifecycle=test_lifecycle_writer()).claim(
+        run.id, _worker()
+    )
+    assert isinstance(claim, ClaimedAttempt)
+    stored = await states.read(ORGANIZATION_ID, run.id)
+    execution = AttemptExecutionService(
+        interaction_sessions, clock=lambda: NOW + timedelta(seconds=1), lifecycle=test_lifecycle_writer()
+    )
+
+    async def unexpected_input(entry):
+        raise AssertionError("No input was accepted in this test")
+
+    control = RunAttemptControl(
+        context=_authority(claim),
+        execution=execution,
+        states=states,
+        state=stored,
+        inbox=DatabaseThreadInboxReconciler(interaction_sessions, unexpected_input, clock=lambda: NOW),
+    )
+    await control.commit_preparation()
+    writing, release = Event(), Event()
+    original_put = interaction_object_store.put
+
+    async def slow_put(*args, **kwargs):
+        writing.set()
+        await release.wait()
+        return await original_put(*args, **kwargs)
+
+    monkeypatch.setattr(interaction_object_store, "put", slow_put)
+    calls: list[tuple[ModelMessage, ...]] = []
+    results = []
+
+    async def execute():
+        results.append(
+            await _run(control=control, bindings=RunBindings.embedded(), state=stored, model=_model([], calls))
+        )
+
+    with fail_after(5):
+        async with create_task_group() as tasks:
+            tasks.start_soon(execute)
+            await writing.wait()
+            before = control.current_context.expected_attempt_version
+            await control.renew_lease()
+            assert control.current_context.expected_attempt_version == before + 1
+            await execution.validate(control.current_context)
+            async with short_session(interaction_sessions) as database:
+                attempt = await database.get(RunAttemptRecord, claim.attempt.id)
+                assert attempt is not None and attempt.version == before + 1
+            if lose_authority:
+                await control.authority_lost()
+            release.set()
+    if lose_authority:
+        assert calls == []
+        assert results[0].status != "completed"
+        assert control.current_state == stored
+    else:
+        assert len(calls) == 1
+        assert results[0].status == "completed"
+        assert control.current_state.envelope.input_disposition == "applied"
+        await execution.validate(control.current_context)
