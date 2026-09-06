@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from a13n_service.hooks.management import HookSubscriptionService
     from a13n_service.iam import RequestAuthenticator
     from a13n_service.interactions.lifecycle import LifecycleWriter
+    from a13n_service.interactions.worker import WorkerExecutionLoop
     from a13n_service.lifecycle.service import LifecycleEventService
     from a13n_service.models.model_factory import NativeModelFactory
     from a13n_service.models.provider_service import ModelProviderService
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from a13n_service.observability import ObservabilityRuntime
     from a13n_service.plugins.materialization import PluginRuntimeMaterializer
     from a13n_service.plugins.on_demand import OnDemandPluginRuntime
+    from a13n_service.plugins.runner_bootstrap import BootstrappedPluginRuntime
     from a13n_service.plugins.runner_supervisor import PluginRunnerSupervisor
     from a13n_service.plugins.service import PluginService
     from a13n_service.run_stream import RedisRunStream, RunReplayStore
@@ -71,13 +73,14 @@ class WorkerRuntime:
 
     external_tools: ExternalToolRuntime
     plugin_materializer: PluginRuntimeMaterializer
-    plugin_runtime: OnDemandPluginRuntime | PluginRunnerSupervisor
+    plugin_runtime: OnDemandPluginRuntime | PluginRunnerSupervisor | BootstrappedPluginRuntime
     native_model_factory: NativeModelFactory
     skill_runtime: SkillRuntimePreparer
     environment_maintenance: EnvironmentMaintenanceLoop
     environments: EnvironmentLifecycle
     run_stream: RedisRunStream
     run_replay: RunReplayStore
+    execution_loop: WorkerExecutionLoop | None = None
 
 
 @dataclass(slots=True)

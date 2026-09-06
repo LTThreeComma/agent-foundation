@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import secrets
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from a13n_harness import SafeFailure
 from packaging.utils import canonicalize_name
+from pydantic import SecretStr
 
 from a13n_service.ids import new_object_id
+from a13n_service.settings import Settings
 
 from .commands import PluginRuntimeCommandFailure
 from .materialization import PluginRuntimeMaterializationError, PluginRuntimeMaterializer
@@ -24,6 +28,14 @@ from .runner_protocol import (
     write_runner_message,
 )
 from .runtime import PluginRuntimeLock
+
+
+def _settings_value(value: object) -> str:
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError("Runner execution settings contain an unsupported value")
 
 
 @dataclass(slots=True)
@@ -80,6 +92,7 @@ class PluginRunnerSupervisor:
         command_timeout_seconds: float = 30,
         shutdown_timeout_seconds: float = 30,
         max_processes: int = 8,
+        execution_settings: Settings | None = None,
     ) -> None:
         if min(ready_timeout_seconds, command_timeout_seconds, shutdown_timeout_seconds) <= 0:
             raise ValueError("Runner Supervisor timeouts must be positive")
@@ -90,6 +103,7 @@ class PluginRunnerSupervisor:
         self._command_timeout_seconds = command_timeout_seconds
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._max_processes = max_processes
+        self._execution_settings = execution_settings
         self._runners: dict[str, _RunnerProcess] = {}
         self._operations: dict[str, _StagedOperation] = {}
         self._lock = asyncio.Lock()
@@ -106,6 +120,18 @@ class PluginRunnerSupervisor:
 
     async def __aenter__(self) -> PluginRunnerSupervisor:
         return self
+
+    async def ensure_execution_runtime(self, runtime_lock: PluginRuntimeLock) -> None:
+        """Activate an exact lock already referenced by accepted Runs, including older locks."""
+
+        async with self._lock:
+            self._require_open()
+            runner = await self._ensure_runner(runtime_lock)
+            if runner.active_runtime_version is None:
+                await runner.request(
+                    "ACTIVATE", "ACTIVE", timeout_seconds=self._command_timeout_seconds, runtime_version=0
+                )
+                runner.active_runtime_version = 0
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         del exc_type, exc, traceback
@@ -274,6 +300,11 @@ class PluginRunnerSupervisor:
             raise _failure("plugin_runtime_staging_unavailable", "Runner control listener is unavailable.")
         port = int(socket.getsockname()[1])
         environment = os.environ.copy()
+        if self._execution_settings is not None:
+            environment["FOUNDATION_RUNNER_EXECUTION_SETTINGS"] = json.dumps(
+                self._execution_settings.model_dump(mode="python"),
+                default=_settings_value,
+            )
         environment.update(
             {
                 "FOUNDATION_RUNNER_CONTROL_HOST": "127.0.0.1",
@@ -355,6 +386,20 @@ class PluginRunnerSupervisor:
     async def _stop_runner(self, runner: _RunnerProcess) -> None:
         try:
             if runner.process.returncode is None:
+                if runner.active_runtime_version is not None:
+                    drain_timeout = self._shutdown_timeout_seconds
+                    if self._execution_settings is not None:
+                        drain_timeout += (
+                            self._execution_settings.worker_drain_seconds
+                            + self._execution_settings.worker_cleanup_seconds
+                            + self._execution_settings.environment_operation_timeout_seconds
+                        )
+                    await runner.request(
+                        "DRAIN",
+                        "DRAINED",
+                        timeout_seconds=drain_timeout,
+                        reason="service_drain" if self._closed else "runner_rotation",
+                    )
                 await runner.request(
                     "SHUTDOWN",
                     "EXITING",

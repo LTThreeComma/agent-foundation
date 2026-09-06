@@ -147,3 +147,22 @@ async def test_large_stream_uses_bounded_chunks(object_store: ObjectStore) -> No
     found = await object_store.stat("large")
     assert found.size == 10 * 1024 * 1024
     assert len(await _read(object_store, "large")) == found.size
+
+
+async def test_identical_body_publications_fence_old_versions(object_store: ObjectStore) -> None:
+    initial = await object_store.put("same-body", b"canonical state", metadata={"writer": "1"})
+    claimed = await object_store.put(
+        "same-body", b"canonical state", metadata={"writer": "2"}, if_match=initial.version
+    )
+    assert initial.version != claimed.version
+    assert await _read(object_store, "same-body") == b"canonical state"
+    assert (await object_store.stat("same-body")).metadata == {"writer": "2"}
+    with pytest.raises(ObjectConflict):
+        await object_store.put("same-body", b"stale progress", if_match=initial.version)
+    repeated = await object_store.put(
+        "same-body", b"canonical state", metadata={"writer": "2"}, if_match=claimed.version
+    )
+    assert repeated.version not in {initial.version, claimed.version}
+    page = await object_store.list(prefix="same-body")
+    assert page.items[0].size == len(b"canonical state")
+    assert page.items[0].version == repeated.version

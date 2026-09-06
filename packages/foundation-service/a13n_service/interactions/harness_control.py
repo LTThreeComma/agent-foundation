@@ -5,14 +5,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from functools import cache
 from typing import Literal, Protocol
 
 from a13n_harness import AgentContext, AgentDefinition, HarnessState, RunInputValue
-from pydantic_ai import CallToolsNode, RunContext
+from a13n_harness.errors import DefinitionError
+from pydantic_ai import Agent, CallToolsNode, RunContext
+from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
     CapabilityOrdering,
+    Instrumentation,
     NodeResult,
 )
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -101,6 +105,8 @@ class RunControlPort(Protocol):
 
     async def after_stream_entry(self) -> None: ...
 
+    async def record_delivery(self, enqueue_id: str) -> None: ...
+
     async def bind_model_attempt(self, binding: HarnessContextBinding) -> None: ...
 
     async def before_model_request(
@@ -142,6 +148,13 @@ class RunControlCapability(AbstractCapability[AgentContext]):
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="outermost")
+
+    def for_agent(self, agent: AbstractAgent[AgentContext, object]) -> AbstractCapability[AgentContext]:
+        # Pydantic has already sorted the complete construction tree, including plugins.
+        leaves: list[AbstractCapability[AgentContext]] = []
+        agent.root_capability.apply(leaves.append)
+        validate_control_order(leaves)
+        return self
 
     async def for_run(
         self,
@@ -202,6 +215,56 @@ def compose_run_control[OutputT](
             *definition.capabilities,
         )
     )
+
+
+def validate_control_order(capabilities: Sequence[AbstractCapability[AgentContext]]) -> None:
+    """Reject a control replacement or a feature wrapper outside Foundation hooks."""
+
+    controls = [cap for cap in capabilities if cap.id == RUN_CONTROL_CAPABILITY_ID]
+    if len(controls) != 1 or type(controls[0]) is not RunControlCapability:
+        raise DefinitionError(
+            "Foundation control Capability identity is invalid.", code="foundation_control_identity_mismatch"
+        )
+    # Harness validates the exact types and provenance behind these reserved IDs.
+    infrastructure = {
+        "a13n.tool-execution-boundary",
+        "a13n.lifecycle-events",
+        "a13n.steering",
+        "a13n.model-context-coordinator",
+    }
+    hooks = ("before_model_request", "after_model_request", "after_node_run")
+    for cap in capabilities:
+        if cap is controls[0]:
+            return
+        # Pydantic inserts its native enqueue drain before user hooks; it must
+        # finish before Foundation checkpoints the complete request messages.
+        if type(cap) in _native_anonymous_capabilities():
+            continue
+        if cap.id in infrastructure or isinstance(cap, Instrumentation):
+            continue
+        if any(getattr(type(cap), hook) is not getattr(AbstractCapability, hook) for hook in hooks):
+            raise DefinitionError(
+                "A Capability wraps the mandatory Foundation control hooks.",
+                code="foundation_control_order_invalid",
+            )
+
+
+@cache
+def _native_anonymous_capabilities() -> frozenset[type[AbstractCapability[AgentContext]]]:
+    """Discover auto-injected native hooks through the public baseline Agent tree.
+
+    Anonymous infrastructure has no stable public class export. Use exact types
+    from a bare Agent rather than importing private queue implementations or
+    admitting arbitrary anonymous feature Capabilities.
+    """
+    types: set[type[AbstractCapability[AgentContext]]] = set()
+
+    def collect(capability: AbstractCapability[AgentContext]) -> None:
+        if capability.id is None:
+            types.add(type(capability))
+
+    Agent(deps_type=AgentContext).root_capability.apply(collect)
+    return frozenset(types)
 
 
 __all__ = [

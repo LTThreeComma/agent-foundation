@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx2
 import pytest
@@ -21,10 +21,13 @@ from a13n_service.models.provider_adapters.base import ProviderOperationError
 from a13n_service.models.provider_runtime import LiveProviderResolver, RuntimeProvider
 from a13n_service.models.provider_service import ModelProviderService
 from a13n_service.models.providers import built_in_provider_registry
+from a13n_service.models.runtime import LiveProviderModel
 from a13n_service.models.service import ModelService
+from a13n_service.models.service_common import ModelError
 from a13n_service.storage import short_session
 from google.auth.credentials import AnonymousCredentials
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.bedrock import BedrockConverseModel
 from pydantic_ai.models.bedrock_mantle import BedrockMantleChatModel, BedrockMantleResponsesModel
@@ -32,6 +35,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import ORG_ID, WORKSPACE_ID, actor, protector
@@ -350,3 +354,31 @@ async def test_switch_to_unauthenticated_provider_clears_material_and_advances_g
         provider_id=provider.id,
     )
     assert resolved.credential is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_header", ["thread-current", "thread-other"])
+async def test_only_current_harness_correlation_is_allowed_at_model_dispatch(session_header: str) -> None:
+    native = TestModel()
+    resolver = Mock(spec=LiveProviderResolver)
+    resolver.resolve = AsyncMock(return_value=Mock())
+    factory = Mock(spec=NativeModelFactory)
+    factory.build.return_value = native
+    model = LiveProviderModel(
+        initial=native,
+        snapshot=_snapshot("openai.responses"),
+        organization_id=ORG_ID,
+        workspace_id=WORKSPACE_ID,
+        provider_resolver=resolver,
+        model_factory=factory,
+        harness_thread_id="thread-current",
+    )
+    settings = {"extra_headers": {"x-session-id": session_header}}
+    if session_header == "thread-current":
+        await model.request([], settings, ModelRequestParameters())
+        resolver.resolve.assert_awaited_once()
+    else:
+        with pytest.raises(ModelError):
+            await model.request([], settings, ModelRequestParameters())
+        resolver.resolve.assert_not_awaited()
+    assert settings == {"extra_headers": {"x-session-id": session_header}}

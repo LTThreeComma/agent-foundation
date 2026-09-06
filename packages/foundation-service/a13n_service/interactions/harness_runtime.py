@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from inspect import isawaitable
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -38,7 +39,7 @@ from anyio import to_thread
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import EnqueuedMessagesEvent, ModelMessage
 from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -53,6 +54,7 @@ from .harness_control import (
     HarnessRunIdentity,
     RunControlPort,
     compose_run_control,
+    validate_control_order,
 )
 from .state import RunStateEnvelope
 
@@ -185,7 +187,7 @@ class HarnessInvocation[OutputT]:
 class HarnessEventProjector(Protocol):
     """Project one canonical public Harness stream item into live presentation."""
 
-    def project(self, event: HarnessEvent | HarnessRunResultEvent[Any]) -> None: ...
+    def project(self, event: HarnessEvent | HarnessRunResultEvent[Any]) -> Awaitable[None] | None: ...
 
     def project_environment(self, observation: EnvironmentHookObservation) -> None: ...
 
@@ -300,6 +302,7 @@ class HarnessDriver:
         binding: HarnessContextBinding | None,
     ) -> AsyncIterator[HarnessHookBoundary]:
         self._require_context(ctx)
+        validate_control_order(tuple(ctx.capabilities.values()))
         if binding is None:
             raise RunError(
                 "Foundation run-control hook is missing its ModelAttempt binding.",
@@ -372,14 +375,16 @@ class HarnessDriver:
                     )
                 terminal = item.result
                 if self._control.terminal_observation_allowed:
-                    self._project_live(item)
+                    await self._project_live(item)
                 continue
             if terminal is not None:
                 raise RunError(
                     "Harness stream emitted an observation after its terminal result.",
                     code="foundation_stream_event_after_terminal",
                 )
-            self._project_live(item)
+            if isinstance(item.event, EnqueuedMessagesEvent):
+                await self._control.record_delivery(item.event.enqueue_id)
+            await self._project_live(item)
         if terminal is None:
             raise RunError(
                 "Harness stream ended without a terminal result.",
@@ -387,9 +392,11 @@ class HarnessDriver:
             )
         return terminal
 
-    def _project_live(self, item: HarnessEvent | HarnessRunResultEvent[Any]) -> None:
+    async def _project_live(self, item: HarnessEvent | HarnessRunResultEvent[Any]) -> None:
         try:
-            self._projector.project(item)
+            projected = self._projector.project(item)
+            if isawaitable(projected):
+                await projected
         except Exception:
             logger.exception(
                 "Harness live observation projection failed",

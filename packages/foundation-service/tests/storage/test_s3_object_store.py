@@ -1,7 +1,7 @@
 from typing import Any, cast
 
 import pytest
-from a13n_service.storage.object_store import ObjectConflict, ObjectStoreUnavailable, S3ObjectStore
+from a13n_service.storage.object_store import ByteRange, ObjectConflict, ObjectStoreUnavailable, S3ObjectStore
 from botocore.exceptions import ClientError
 
 pytestmark = pytest.mark.anyio
@@ -59,3 +59,19 @@ async def test_unconditional_delete_is_idempotent_when_endpoint_returns_not_foun
     store = S3ObjectStore(cast(Any, _DeleteClient(error)), "bucket")
 
     await store.delete("missing")
+
+
+async def test_legacy_unframed_s3_object_remains_readable_and_replaceable(s3_object_store: S3ObjectStore) -> None:
+    store = s3_object_store
+    await store._client.put_object(Bucket=store._bucket, Key="legacy", Body=b"legacy body", Metadata={"writer": "old"})
+    legacy = await store.stat("legacy")
+    assert legacy.size == 11
+    async with store.open("legacy") as reader:
+        assert b"".join([chunk async for chunk in reader]) == b"legacy body"
+    async with store.open("legacy", byte_range=ByteRange(1, 4)) as reader:
+        assert b"".join([chunk async for chunk in reader]) == b"ega"
+    replacement = await store.put("legacy", b"legacy body", metadata={"writer": "new"}, if_match=legacy.version)
+    assert replacement.version != legacy.version
+    assert replacement.size == 11
+    async with store.open("legacy", byte_range=ByteRange(1, 4)) as reader:
+        assert b"".join([chunk async for chunk in reader]) == b"ega"

@@ -13,13 +13,17 @@ from a13n_harness import (
     HarnessRunResult,
     HarnessState,
     RunInputValue,
+    SafeFailure,
 )
 from a13n_harness.errors import RunError
+from a13n_logging import get_logger
 from pydantic_ai.capabilities import NodeResult
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import DeferredToolRequests
 from pydantic_graph import End
+
+from a13n_service.storage import ObjectStoreUnavailable
 
 from .attempts import (
     AttemptAuthorityError,
@@ -44,7 +48,7 @@ from .harness_results import (
     RunTerminalDisposition,
     RunTerminalReceipt,
 )
-from .objects import RunStateStore, StoredRunState
+from .objects import RunStateStore, StaleStateWriter, StoredRunState
 from .state import (
     CompletedOutcomeCandidate,
     ConsumedThreadInboxEntry,
@@ -52,6 +56,8 @@ from .state import (
     RunStateEnvelope,
     RunStateOutcomeCandidate,
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,10 +108,14 @@ class _RunControlGate:
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     identity: HarnessRunIdentity | None = None
-    offered: list[ConsumedThreadInboxEntry] = field(default_factory=list)
+    offered: dict[str, ConsumedThreadInboxEntry] = field(default_factory=dict)
+    delivered: set[str] = field(default_factory=set)
     delivery_gate: _DeliveryGate = _DeliveryGate.open
     handoff_reason: RunAttemptYieldReason | None = None
     phase: _CoordinatorPhase = _CoordinatorPhase.active
+    pending_checkpoint: RunStateEnvelope | None = None
+    checkpoint_confirmed: bool = False
+    model_attempt_bound: bool = False
 
 
 class RunAttemptControl:
@@ -123,8 +133,6 @@ class RunAttemptControl:
         envelope = state.envelope
         if envelope.run_id != context.run_id or envelope.thread_id != context.thread_id:
             raise ValueError("Run state and Attempt context must name the same Run and Thread")
-        if envelope.outcome_candidate is not None:
-            raise ValueError("A sealed outcome candidate cannot start active run control")
         self._context = context
         self._execution = execution
         self._states = states
@@ -146,6 +154,10 @@ class RunAttemptControl:
         """Suppress the synthetic cancellation used only to quiesce a planned handoff."""
 
         return self._gate.phase is not _CoordinatorPhase.handoff_ready
+
+    @property
+    def handoff_ready(self) -> bool:
+        return self._gate.phase is _CoordinatorPhase.handoff_ready
 
     def bind_executor(
         self,
@@ -203,15 +215,25 @@ class RunAttemptControl:
             self._require_open()
             driver = self._require_driver()
             try:
-                if self._gate.handoff_reason is None:
+                if self._gate.handoff_reason is None or self._state.envelope.input_disposition == "pending":
                     return
                 await self._prepare_boundary()
                 await self._checkpoint_state(await driver.export_state())
                 await self._confirm_state()
-                await self._quiesce_for_handoff()
+                await self._try_handoff()
+            except (ObjectStoreUnavailable, TimeoutError) as error:
+                await self._defer_handoff(error)
             except AttemptAuthorityError:
                 await self._fence()
                 raise
+
+    async def record_delivery(self, enqueue_id: str) -> None:
+        """Observe native incorporation; only a subsequent checkpoint consumes it."""
+
+        async with self._gate.lock:
+            self._require_open()
+            if enqueue_id in self._gate.offered:
+                self._gate.delivered.add(enqueue_id)
 
     async def bind_model_attempt(self, binding: HarnessContextBinding) -> None:
         async with self._gate.lock:
@@ -219,6 +241,7 @@ class RunAttemptControl:
             self._require_driver().validate_binding(binding)
             try:
                 await self._validate_authority()
+                self._gate.model_attempt_bound = True
             except AttemptAuthorityError:
                 await self._fence()
                 raise
@@ -231,14 +254,17 @@ class RunAttemptControl:
         async with self._gate.lock:
             self._require_boundary(boundary)
             try:
-                await self._prepare_boundary()
                 waiting_first_request = self._gate.delivery_gate is _DeliveryGate.first_response
-                if not waiting_first_request:
-                    await self._checkpoint(boundary, request_context.messages)
-                    await self._confirm_state()
-                if self._gate.handoff_reason is not None:
-                    await self._quiesce_for_handoff()
-                    return
+                try:
+                    await self._prepare_boundary()
+                    if not waiting_first_request:
+                        await self._checkpoint(boundary, request_context.messages)
+                        await self._confirm_state()
+                except (ObjectStoreUnavailable, TimeoutError) as error:
+                    await self._defer_handoff(error)
+                if self._gate.handoff_reason is not None and not waiting_first_request and not self._gate.offered:
+                    if await self._try_handoff():
+                        return
                 if not waiting_first_request:
                     await self._offer_pending(boundary)
                 async with self._authority_lock:
@@ -294,10 +320,12 @@ class RunAttemptControl:
                 await self._confirm_state()
                 if self._gate.delivery_gate is _DeliveryGate.first_tool_batch:
                     self._gate.delivery_gate = _DeliveryGate.open
-                if self._gate.handoff_reason is not None:
-                    await self._quiesce_for_handoff()
+                if self._gate.handoff_reason is not None and not self._gate.offered:
+                    await self._try_handoff()
                 else:
                     await self._offer_pending(boundary)
+            except (ObjectStoreUnavailable, TimeoutError) as error:
+                await self._defer_handoff(error)
             except AttemptAuthorityError:
                 await self._fence()
                 raise
@@ -357,14 +385,15 @@ class RunAttemptControl:
                 await self._prepare_boundary()
                 if (
                     self._gate.identity is None
+                    or not self._gate.model_attempt_bound
                     or self._gate.delivery_gate is not _DeliveryGate.open
                     or self._gate.handoff_reason is not None
                 ):
                     return
                 driver = self._require_driver()
                 for entry in await self._eligible_entries():
-                    await driver.steer(entry.input)
-                    self._gate.offered.append(entry.receipt)
+                    enqueue_id = await driver.steer(entry.input)
+                    self._gate.offered[enqueue_id] = entry.receipt
             except AttemptAuthorityError:
                 await self._fence()
                 raise
@@ -444,6 +473,29 @@ class RunAttemptControl:
                 await self._fence()
                 raise
 
+    async def recover_outcome(self, committer: RunTerminalCommitter) -> RunTerminalReceipt:
+        """Adopt a prior complete candidate under the newly claimed object writer fence."""
+
+        async with self._gate.lock:
+            await self._prepare_boundary()
+            commit = await committer.prepare_state_outcome(self._context, self._state)
+            async with self._authority_lock:
+                self._require_open()
+                receipt = await commit(self._context)
+                self._gate.phase = _CoordinatorPhase.terminal
+                return receipt
+
+    async def fail_execution(self, committer: RunTerminalCommitter, failure: SafeFailure) -> RunTerminalReceipt:
+        """Classify a root-task failure using current authority, including pre-Harness failures."""
+
+        async with self._gate.lock:
+            await self._validate_authority()
+            async with self._authority_lock:
+                self._require_open()
+                receipt = await committer.commit_failure(self._context, failure)
+                self._gate.phase = _CoordinatorPhase.terminal
+                return receipt
+
     async def authority_lost(self) -> None:
         """Terminally fence local control after lease authority cannot be confirmed."""
 
@@ -483,7 +535,9 @@ class RunAttemptControl:
     async def _confirm_state(self) -> None:
         async with self._authority_lock:
             self._require_open()
+            self._gate.checkpoint_confirmed = False
             self._advance(await self._inbox.confirm_checkpoint(self._context, self._state))
+            self._gate.checkpoint_confirmed = True
 
     async def _checkpoint(
         self,
@@ -493,21 +547,22 @@ class RunAttemptControl:
         await self._checkpoint_state(await boundary.export_state(messages))
 
     async def _checkpoint_state(self, harness: HarnessState) -> None:
+        await self._retry_publication()
         prior = self._state.envelope
-        receipts = (*prior.host.consumed_inbox_entries, *self._gate.offered)
+        receipts = (*prior.host.consumed_inbox_entries, *self._delivered_receipts())
         host = HostContinuationState(consumed_inbox_entries=receipts)
         if prior.input_disposition == "applied" and prior.harness == harness and prior.host == host:
-            self._gate.offered.clear()
             return
         await self._publish(self._successor(harness, host, "progress", None))
 
     async def _publish_terminal(self, projection: HarnessOutcomeProjection) -> None:
+        await self._retry_publication()
         prior = self._state.envelope
         host = HostContinuationState(
             deferred=projection.deferred,
             consumed_inbox_entries=(
                 *prior.host.consumed_inbox_entries,
-                *self._gate.offered,
+                *self._delivered_receipts(),
             ),
         )
         checkpoint_kind = "completed" if isinstance(projection.candidate, CompletedOutcomeCandidate) else "waiting"
@@ -549,6 +604,7 @@ class RunAttemptControl:
 
     async def _publish(self, successor: RunStateEnvelope) -> None:
         await self._validate_authority()
+        self._gate.pending_checkpoint = successor
         published = await self._states.replace(
             self._state,
             successor,
@@ -556,13 +612,49 @@ class RunAttemptControl:
             fence=self._context.fence,
         )
         await self._validate_authority()
+        self._accept_publication(published)
+
+    def _accept_publication(self, published: StoredRunState) -> None:
         self._state = published
-        self._gate.offered.clear()
+        self._gate.pending_checkpoint = None
+        self._gate.checkpoint_confirmed = False
+        consumed = set(published.envelope.host.consumed_inbox_entries)
+        for enqueue_id, receipt in tuple(self._gate.offered.items()):
+            if receipt in consumed:
+                del self._gate.offered[enqueue_id]
+                self._gate.delivered.discard(enqueue_id)
+
+    async def _retry_publication(self) -> None:
+        candidate = self._gate.pending_checkpoint
+        if candidate is None:
+            return
+        await self._validate_authority()
+        observed = await self._states.read(
+            self._context.organization_id, self._context.run_id, expected_thread_id=self._context.thread_id
+        )
+        await self._validate_authority()
+        if observed.envelope == candidate and observed.writer_fence == self._context.fence:
+            self._accept_publication(observed)
+        elif observed.info.version == self._state.info.version and observed.body == self._state.body:
+            await self._publish(candidate)
+        else:
+            raise StaleStateWriter("Run state changed during checkpoint reconciliation")
+
+    async def _defer_handoff(self, error: Exception) -> None:
+        if self._gate.handoff_reason is None:
+            raise error
+        await self._validate_authority()
+        logger.info("run_handoff_checkpoint_pending", extra={"run_attempt_id": self._context.run_attempt_id})
+
+    def _delivered_receipts(self) -> tuple[ConsumedThreadInboxEntry, ...]:
+        return tuple(
+            receipt for enqueue_id, receipt in self._gate.offered.items() if enqueue_id in self._gate.delivered
+        )
 
     async def _offer_pending(self, boundary: HarnessHookBoundary) -> None:
         for entry in await self._eligible_entries():
-            await boundary.enqueue(entry.input, priority="asap")
-            self._gate.offered.append(entry.receipt)
+            enqueue_id = await boundary.enqueue(entry.input, priority="asap")
+            self._gate.offered[enqueue_id] = entry.receipt
 
     async def _eligible_entries(self) -> tuple[AdaptedThreadInboxEntry, ...]:
         if self._gate.offered:
@@ -618,11 +710,19 @@ class RunAttemptControl:
             lease_expires_at=mutation.lease_expires_at,
         )
 
-    async def _quiesce_for_handoff(self) -> None:
+    async def _try_handoff(self) -> bool:
+        if self._gate.pending_checkpoint is not None or not self._gate.checkpoint_confirmed or self._gate.offered:
+            return False
+        async with self._authority_lock:
+            self._require_open()
+            if not await self._execution.can_handoff(self._context):
+                self._gate.handoff_reason = None
+                return False
         await self._require_driver().cancel()
         async with self._authority_lock:
             self._require_open()
             self._gate.phase = _CoordinatorPhase.handoff_ready
+        return True
 
     async def _fence(self) -> None:
         self._gate.phase = _CoordinatorPhase.fenced

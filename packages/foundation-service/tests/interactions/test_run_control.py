@@ -73,6 +73,10 @@ pytestmark = pytest.mark.anyio
 class _RecordingAttemptExecution(AttemptExecutionService):
     trace: list[str]
     yielded: RunAttemptYieldReason | None = None
+    handoff_permitted: bool = True
+
+    async def can_handoff(self, authority: AttemptContext) -> bool:
+        return self.handoff_permitted
 
     async def heartbeat(self, authority, *, lease_duration):
         self.trace.append("attempt:heartbeat")
@@ -547,12 +551,148 @@ async def test_planned_handoff_checkpoints_and_cancels_before_model_io(
     assert coordinator.terminal_observation_allowed
     assert coordinator.current_state.envelope.input_disposition == "applied"
     assert terminal.states == []
+    assert _business_prompts(coordinator.current_state.envelope.harness.message_history) == ["accepted input"]
     assert terminal.failures == []
     assert terminal.cancelled == 0
 
     assert execution.yielded is RunAttemptYieldReason.service_drain
     assert mutation.run_version == coordinator.current_context.expected_run_version
     assert trace.index("state:checkpoint") < trace.index("attempt:heartbeat") < trace.index("attempt:yield")
+
+
+async def test_steer_during_tool_is_not_consumed_before_it_enters_checkpoint(interaction_object_store):
+    trace: list[str] = []
+    calls: list[tuple[ModelMessage, ...]] = []
+    states, stored = await _stored_state(interaction_object_store, initial_state())
+    inbox = _RecordingThreadInbox(trace)
+    coordinator = RunAttemptControl(
+        context=_context(stored.envelope.thread_id),
+        execution=_RecordingAttemptExecution(trace),
+        states=states,
+        state=stored,
+        inbox=inbox,
+    )
+
+    async def step() -> str:
+        inbox.entries = (_inbox_entry(),)
+        inbox._delivered = False
+        await coordinator.reconcile()
+        await coordinator.request_handoff(RunAttemptYieldReason.service_drain)
+        return "stepped"
+
+    checkpoints: list[RunStateEnvelope] = []
+    replace_state = states.replace
+
+    async def record_checkpoint(*args, **kwargs):
+        published = await replace_state(*args, **kwargs)
+        checkpoints.append(published.envelope)
+        return published
+
+    states.replace = record_checkpoint
+    result = await _run(
+        control=coordinator,
+        bindings=RunBindings.embedded(),
+        state=stored,
+        model=_tool_model(trace, calls),
+        capabilities=(Capability(id="test.step", tools=[Tool(step, name="_step")]),),
+    )
+    for checkpoint in checkpoints:
+        if _inbox_entry().receipt in checkpoint.host.consumed_inbox_entries:
+            assert "new direction" in _business_prompts(checkpoint.harness.message_history)
+    if result.status == "cancelled":
+        assert "new direction" in _business_prompts(coordinator.current_state.envelope.harness.message_history)
+    else:
+        assert "new direction" in _business_prompts(calls[-1])
+
+
+@pytest.mark.parametrize("write_committed", [False, True])
+async def test_handoff_reconciles_uncertain_checkpoint_before_later_boundary(
+    interaction_object_store, monkeypatch, write_committed
+):
+    from a13n_service.storage import ObjectStoreUnavailable
+
+    trace: list[str] = []
+    calls: list[tuple[ModelMessage, ...]] = []
+    states, stored = await _stored_state(interaction_object_store, initial_state())
+    original_replace = states.replace
+    attempted: list[RunStateEnvelope] = []
+
+    async def lose_first_response(prior, successor, **kwargs):
+        attempted.append(successor)
+        if len(attempted) == 1:
+            if write_committed:
+                await original_replace(prior, successor, **kwargs)
+            raise ObjectStoreUnavailable("Unconfirmed checkpoint")
+        return await original_replace(prior, successor, **kwargs)
+
+    monkeypatch.setattr(states, "replace", lose_first_response)
+    control = RunAttemptControl(
+        context=_context(stored.envelope.thread_id),
+        execution=_RecordingAttemptExecution(trace),
+        states=states,
+        state=stored,
+        inbox=_RecordingThreadInbox(trace),
+    )
+    await control.request_handoff(RunAttemptYieldReason.service_drain)
+    result = await _run(
+        control=control,
+        bindings=RunBindings.embedded(),
+        state=stored,
+        model=_tool_model(trace, calls),
+        capabilities=(Capability(id="test.step", tools=[Tool(_step)]),),
+    )
+    assert result.status == "cancelled"
+    assert len(calls) == 1
+    assert control.current_state.envelope.checkpoint_seq == 2
+    assert _business_prompts(control.current_state.envelope.harness.message_history) == ["accepted input"]
+    if not write_committed:
+        assert attempted[0] == attempted[1]
+
+
+async def test_exhausted_handoff_budget_keeps_harness_running(interaction_object_store):
+    trace: list[str] = []
+    calls: list[tuple[ModelMessage, ...]] = []
+    states, stored = await _stored_state(interaction_object_store, initial_state())
+    execution = _RecordingAttemptExecution(trace, handoff_permitted=False)
+    control = RunAttemptControl(
+        context=_context(stored.envelope.thread_id),
+        execution=execution,
+        states=states,
+        state=stored,
+        inbox=_RecordingThreadInbox(trace),
+    )
+    await control.request_handoff(RunAttemptYieldReason.service_drain)
+    result = await _run(control=control, bindings=RunBindings.embedded(), state=stored, model=_model(trace, calls))
+    assert result.output_or_raise() == "turn-1"
+    assert execution.yielded is None
+
+
+async def test_waiting_handoff_preserves_isolated_first_request(interaction_object_store):
+    trace: list[str] = []
+    calls: list[tuple[ModelMessage, ...]] = []
+    states, stored = await _stored_state(interaction_object_store, _waiting_gate_state())
+    control = RunAttemptControl(
+        context=_context(stored.envelope.thread_id),
+        execution=_RecordingAttemptExecution(trace),
+        states=states,
+        state=stored,
+        inbox=_RecordingThreadInbox(trace, entries=(_inbox_entry(),)),
+    )
+    await control.request_handoff(RunAttemptYieldReason.service_drain)
+    result = await _run(
+        control=control,
+        bindings=RunBindings.embedded(),
+        state=stored,
+        model=_model(trace, calls),
+        capabilities=(
+            Capability(id="test.external", tools=[Tool(_step, name="external_step", requires_approval=True)]),
+        ),
+    )
+    assert _business_prompts(calls[0]) == ["accepted input"]
+    if result.status == "cancelled":
+        assert "new direction" in _business_prompts(control.current_state.envelope.harness.message_history)
+    else:
+        assert "new direction" in _business_prompts(calls[-1])
 
 
 async def test_driver_projects_events_and_control_commits_one_completed_result(

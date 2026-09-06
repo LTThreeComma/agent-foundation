@@ -41,11 +41,25 @@ from .api import (
     ObjectStoreUnavailable,
     ObjectSummary,
     iter_parts,
+    iter_source,
     normalize_metadata,
     validate_conditions,
     validate_key,
     validate_list_request,
 )
+
+# Keep logical bodies byte-exact while giving every publication a fresh ETag,
+# including metadata-only writer claims. Legacy unframed objects remain readable.
+# S3's ETag hashes only physical content, never user metadata.
+_ENVELOPE_ENCODING = "a13n-object-v1"
+_ENVELOPE_MAGIC = b"a13nobj1"
+_ENVELOPE_SIZE = len(_ENVELOPE_MAGIC) + 16
+
+
+async def _framed_source(source: ObjectSource) -> AsyncIterator[bytes]:
+    yield _ENVELOPE_MAGIC + uuid.uuid4().bytes
+    async for chunk in iter_source(source):
+        yield chunk
 
 
 class S3ObjectStore:
@@ -67,7 +81,7 @@ class S3ObjectStore:
         validate_key(key)
         validate_conditions(if_none_match=if_none_match, if_match=if_match)
         normalized_metadata = normalize_metadata(metadata)
-        parts = iter_parts(source, self._multipart_part_size).__aiter__()
+        parts = iter_parts(_framed_source(source), self._multipart_part_size).__aiter__()
         first = await anext(parts, None)
         second = await anext(parts, None)
         try:
@@ -100,15 +114,33 @@ class S3ObjectStore:
         validate_key(key)
         request: GetObjectRequestTypeDef = {"Bucket": self._bucket, "Key": key}
         if byte_range is not None:
-            end = "" if byte_range.end_exclusive is None else str(byte_range.end_exclusive - 1)
-            request["Range"] = f"bytes={byte_range.start}-{end}"
+            head = await self._head(key)
+            offset = _body_offset(head.get("ContentEncoding"))
+            size = head["ContentLength"] - offset
+            if byte_range.start >= size:
+                raise InvalidObjectRequest("object range starts outside its body")
+            end = "" if byte_range.end_exclusive is None else str(byte_range.end_exclusive + offset - 1)
+            request["Range"] = f"bytes={byte_range.start + offset}-{end}"
+            request["IfMatch"] = _etag(head.get("ETag"))
         try:
             response = await self._client.get_object(**request)
         except (BotoCoreError, ClientError) as error:
             raise _translate_error(error, key) from error
         body = response["Body"]
         try:
-            size = _response_object_size(response.get("ContentRange"), response["ContentLength"])
+            offset = _body_offset(response.get("ContentEncoding"))
+            size = _response_object_size(response.get("ContentRange"), response["ContentLength"]) - offset
+            if size < 0:
+                raise ObjectStoreUnavailable("S3 object envelope is truncated")
+            if offset and byte_range is None:
+                header = bytearray()
+                while len(header) < offset:
+                    chunk = await body.read(offset - len(header))
+                    if not chunk:
+                        raise ObjectStoreUnavailable("S3 object envelope is truncated")
+                    header.extend(chunk)
+                if not header.startswith(_ENVELOPE_MAGIC):
+                    raise ObjectStoreUnavailable("S3 object envelope is invalid")
             info = ObjectInfo(
                 key=key,
                 size=size,
@@ -124,15 +156,21 @@ class S3ObjectStore:
                 if inspect.isawaitable(closed):
                     await cast(Awaitable[None], closed)
 
-    async def stat(self, key: str) -> ObjectInfo:
-        validate_key(key)
+    async def _head(self, key: str):
         try:
-            response = await self._client.head_object(Bucket=self._bucket, Key=key)
+            return await self._client.head_object(Bucket=self._bucket, Key=key)
         except (BotoCoreError, ClientError) as error:
             raise _translate_error(error, key) from error
+
+    async def stat(self, key: str) -> ObjectInfo:
+        validate_key(key)
+        response = await self._head(key)
+        size = response["ContentLength"] - _body_offset(response.get("ContentEncoding"))
+        if size < 0:
+            raise ObjectStoreUnavailable("S3 object envelope is truncated")
         return ObjectInfo(
             key=key,
-            size=response["ContentLength"],
+            size=size,
             content_type=response.get("ContentType"),
             metadata=dict(response.get("Metadata", {})),
             modified_at=_utc(response["LastModified"]),
@@ -163,17 +201,15 @@ class S3ObjectStore:
             response = await self._client.list_objects_v2(**request)
         except (BotoCoreError, ClientError) as error:
             raise _translate_error(error, prefix) from error
-        items = tuple(
-            ObjectSummary(
-                key=value["Key"],
-                size=value["Size"],
-                modified_at=_utc(value["LastModified"]),
-                version=_etag(value.get("ETag")),
-            )
-            for value in response.get("Contents", [])
-        )
+        items = []
+        for value in response.get("Contents", []):
+            try:
+                info = await self.stat(value["Key"])
+            except ObjectNotFound:
+                continue  # A concurrent deletion does not invalidate the page cursor.
+            items.append(ObjectSummary(info.key, info.size, info.modified_at, info.version))
         token = response.get("NextContinuationToken")
-        return ObjectPage(items, _encode_cursor(prefix, token) if token else None)
+        return ObjectPage(tuple(items), _encode_cursor(prefix, token) if token else None)
 
     async def check_compatibility(self) -> None:
         try:
@@ -250,6 +286,7 @@ class S3ObjectStore:
             "Bucket": self._bucket,
             "Key": key,
             "Metadata": metadata,
+            "ContentEncoding": _ENVELOPE_ENCODING,
         }
         if content_type is not None:
             request["ContentType"] = content_type
@@ -275,6 +312,7 @@ class S3ObjectStore:
             "Bucket": self._bucket,
             "Key": key,
             "Metadata": metadata,
+            "ContentEncoding": _ENVELOPE_ENCODING,
         }
         if content_type is not None:
             create_request["ContentType"] = content_type
@@ -380,3 +418,7 @@ def _decode_cursor(cursor: str, prefix: str) -> str:
         return value["token"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise InvalidObjectRequest("invalid S3 object list cursor") from error
+
+
+def _body_offset(content_encoding: str | None) -> int:
+    return _ENVELOPE_SIZE if content_encoding == _ENVELOPE_ENCODING else 0

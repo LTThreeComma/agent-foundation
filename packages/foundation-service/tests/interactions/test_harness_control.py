@@ -201,3 +201,14 @@ async def test_harness_rejects_a_duplicate_reserved_control_id() -> None:
         HarnessBuilder(instrumentation=None).build(compose_run_control(_definition(duplicate), coordinator, driver))
 
     assert error.value.code == "agent_build_failed"
+
+
+async def test_harness_rejects_a_feature_wrapper_outside_foundation_control() -> None:
+    class IncompatibleWrapper(_OuterRecordingCapability):
+        def get_ordering(self) -> CapabilityOrdering:
+            return CapabilityOrdering(position="outermost", wraps=(RunControlCapability,))
+
+    with pytest.raises(DefinitionError, match="Foundation control"):
+        HarnessBuilder(instrumentation=None).build(
+            compose_run_control(_definition(IncompatibleWrapper()), _RecordingCoordinator(), _RecordingDriver())
+        )
