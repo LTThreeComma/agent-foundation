@@ -418,8 +418,6 @@ class RunAttempt(StrictModel):
                 raise ValueError("running Attempt requires Harness identity and timestamp")
         elif (self.harness_run_id is None) != (self.started_at is None):
             raise ValueError("terminal Attempt Harness identity and timestamp must be present together")
-        if self.status is RunAttemptStatus.succeeded and self.harness_run_id is None:
-            raise ValueError("succeeded Attempt must have entered Harness")
         if self.status is RunAttemptStatus.yielded:
             if self.yield_reason is None or self.failure is not None:
                 raise ValueError("yielded Attempt requires only a yield reason")

@@ -271,6 +271,10 @@ except ObjectConflict:
 
 S3 endpoints must support AWS-compatible conditional writes and deletes, range reads, head requests, and ordered `ListObjectsV2` pagination. Startup rejects endpoints that silently ignore these conditions. The local adapter provides the common behavior for exactly one writing service process.
 
+Each successful object publication receives a fresh opaque version, including an identical-body overwrite. The S3 adapter stores a private nonce-bearing envelope and exposes the original body, size, metadata, and ranges through `ObjectStore`; it also reads existing unframed S3 objects. Access service objects through `ObjectStore`, rather than treating physical bucket bytes as application payloads.
+
+When upgrading from a release without this S3 envelope, drain old writers and replace all object readers before enabling new writes. Old binaries cannot read the new physical encoding. The outcome-recovery migration also permits successful Attempts without Harness entry; deploy compatible readers before enabling those Workers. Downgrading that constraint intentionally fails if such Attempts exist, so retain the expanded schema and roll forward in that case.
+
 Metadata keys are normalized to lowercase and, like S3 REST metadata, keys and values must be ASCII. Keys must also be valid HTTP field names. Returned metadata mappings are immutable.
 
 ## Filesystem Usage

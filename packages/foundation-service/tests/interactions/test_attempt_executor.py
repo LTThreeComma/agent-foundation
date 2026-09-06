@@ -29,6 +29,7 @@ from a13n_service.interactions.attempts import (
     AttemptPreparationRejected,
     AttemptPreparationResult,
 )
+from a13n_service.interactions.domain import RunAttemptYieldReason
 from a13n_service.interactions.environment_observation import EnvironmentHookObservation
 from a13n_service.interactions.harness_control import HarnessContextBinding, HarnessHookBoundary, HarnessRunIdentity
 from a13n_service.interactions.harness_results import (
@@ -46,7 +47,7 @@ from a13n_service.interactions.objects import RunStateStore, StoredRunState
 from a13n_service.interactions.run_control import AdaptedThreadInboxEntry, RunAttemptControl
 from a13n_service.interactions.state import CompletedOutcomeCandidate, ConsumedThreadInboxEntry, RunStateEnvelope
 from a13n_service.storage import ObjectStore
-from anyio import Event, create_task_group, sleep_forever
+from anyio import Event, create_task_group, sleep, sleep_forever
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -106,6 +107,13 @@ class _Execution(AttemptExecutionService):
         assert preparation.run_attempt_id == context.run_attempt_id
         assert harness_run_id
         self.trace.append("attempt:enter")
+        return _receipt(context, run_delta=1, attempt_delta=1)
+
+    async def can_handoff(self, context: AttemptContext) -> bool:
+        return True
+
+    async def yield_attempt(self, context: AttemptContext, reason: RunAttemptYieldReason) -> AttemptMutationReceipt:
+        self.trace.append("attempt:yield")
         return _receipt(context, run_delta=1, attempt_delta=1)
 
     async def increment_model_request(self, context: AttemptContext) -> AttemptMutationReceipt:
@@ -507,7 +515,72 @@ async def test_active_reconciliation_uses_driver_steer_without_consuming_receipt
         _preparation(context),
     )
 
+    await control.bind_model_attempt(HarnessContextBinding(object(), object(), object()))
     await control.reconcile()
 
     assert driver.steered == ["steer"]
     assert control.current_state.envelope.host.consumed_inbox_entries == ()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_handoff_closes_runtime_while_renewing_before_yield(
+    interaction_object_store,
+    monkeypatch,
+    cleanup_fails,
+):
+    trace = []
+    envelope = initial_state()
+    states, stored = await _stored_state(interaction_object_store, envelope)
+    context = _context(envelope.thread_id)
+    execution = _Execution(trace)
+    control = RunAttemptControl(context=context, execution=execution, states=states, state=stored, inbox=_Inbox(trace))
+    driver = HarnessDriver(HarnessBuilder(instrumentation=None), control=control, projector=_Projector())
+    wakeups = _Wakeups(trace)
+    capacity = _CapacitySlot(trace)
+    invocation = HarnessInvocation(
+        definition=AgentDefinition(agent=AgentSpec(), output_type=str, model=FunctionModel(stream_function=_model)),
+        input=ImmediateHarnessInput("accepted input"),
+        collaborators=HarnessCollaborators(
+            instance=AgentInstanceContext(
+                identity=AgentIdentityRef(issuer="foundation", subject="test-user"),
+                agent_instance_id="instance-1",
+                actor="user:test-user",
+            )
+        ),
+    )
+
+    class Cleanup:
+        async def close(self, context, control, driver):
+            trace.append("cleanup:start")
+            await sleep(0.01)
+            if cleanup_fails:
+                raise RuntimeError("cleanup unavailable")
+            trace.append("cleanup:end")
+
+    monkeypatch.setattr(
+        "a13n_service.interactions.attempt_executor.prepare_run_environment", AsyncMock(return_value=None)
+    )
+    await control.request_handoff(RunAttemptYieldReason.service_drain)
+    executor = RunAttemptExecutor(
+        environments=Mock(spec=EnvironmentLifecycle),
+        context=context,
+        control=control,
+        driver=driver,
+        preparer=_Preparer(context, invocation, wakeups, execution.heartbeat_seen, trace),
+        wakeups=wakeups,
+        adapter=_Adapter(),
+        committer=_Committer(trace),
+        cleanup=Cleanup(),
+        capacity_slot=capacity,
+    )
+    if cleanup_fails:
+        with pytest.raises((ExceptionGroup, RuntimeError)):
+            await executor.run()
+        assert "attempt:yield" not in trace
+    else:
+        await executor.run()
+        start, end = trace.index("cleanup:start"), trace.index("cleanup:end")
+        assert "attempt:heartbeat" in trace[start:end]
+        assert end < trace.index("attempt:yield") < trace.index("capacity:release")
+    assert wakeups.stopped.is_set()
+    assert capacity.releases == 1

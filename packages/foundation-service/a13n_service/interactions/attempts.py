@@ -136,6 +136,14 @@ class AttemptExecutionService:
             attempt.version += 1
             return _receipt(run, attempt)
 
+    async def can_handoff(self, authority: AttemptContext) -> bool:
+        """Check the current handoff budget before stopping local execution."""
+
+        now = assume_utc(self._clock())
+        async with short_session(self._sessions) as database:
+            run, _, _ = await read_attempt_authority(database, authority, now)
+            return run.handoffs_completed < run.max_handoffs
+
     async def enter_harness(
         self,
         authority: AttemptContext,

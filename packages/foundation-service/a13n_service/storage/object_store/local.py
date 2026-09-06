@@ -178,7 +178,6 @@ class LocalObjectStore:
         content_type: str | None,
         metadata: dict[str, str],
     ) -> ObjectInfo:
-        digest = hashlib.sha256()
         size = 0
         modified_at = utc_now()
         file = await anyio.open_file(path, "xb", limiter=self._limiter)
@@ -186,10 +185,9 @@ class LocalObjectStore:
             await to_thread.run_sync(lambda: os.chmod(path, 0o600), limiter=self._limiter)
             await file.write(b"\x00" * _BODY_OFFSET)
             async for chunk in iter_source(source):
-                digest.update(chunk)
                 size += len(chunk)
                 await file.write(chunk)
-            version = digest.hexdigest()
+            version = uuid.uuid4().hex
             header = _encode_header(key, size, content_type, metadata, modified_at, version)
             await file.seek(0)
             await file.write(_MAGIC + struct.pack(">I", len(header)) + header)

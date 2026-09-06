@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from .runner_bootstrap import PluginRunnerBootstrapError, bootstrap_materialized_runtime
@@ -23,6 +24,7 @@ _GENERATION = "FOUNDATION_RUNNER_GENERATION"
 
 async def run_runner_process(runtime_root: Path, runtime_lock_digest: str) -> None:
     host, port, token, generation = _consume_control_environment()
+    execution_settings = os.environ.pop("FOUNDATION_RUNNER_EXECUTION_SETTINGS", "")
     try:
         reader, writer = await asyncio.open_connection(host, port, limit=64 * 1024 + 1)
     except (OSError, ValueError) as error:
@@ -60,27 +62,44 @@ async def run_runner_process(runtime_root: Path, runtime_lock_digest: str) -> No
             runtime_lock_digest=runtime_lock_digest,
             provenance=provenance,
         )
-        while True:
-            command = await read_runner_message(reader)
-            command_type = command.get("type")
-            if command_type == "ACTIVATE":
-                runtime_version = command.get("runtime_version")
-                if not isinstance(runtime_version, int) or isinstance(runtime_version, bool) or runtime_version < 0:
-                    raise PluginRunnerProtocolError("Runner activation version is invalid")
-                await write_runner_message(
-                    writer,
-                    "ACTIVE",
-                    generation=generation,
-                    runtime_lock_digest=runtime_lock_digest,
-                    runtime_version=runtime_version,
-                )
-            elif command_type == "DRAIN":
-                await write_runner_message(writer, "DRAINED", generation=generation)
-            elif command_type == "SHUTDOWN":
-                await write_runner_message(writer, "EXITING", generation=generation)
-                return
-            else:
-                raise PluginRunnerProtocolError("Runner control command is unsupported")
+        async with AsyncExitStack() as worker_scope:
+            worker = None
+            while True:
+                command = await read_runner_message(reader)
+                command_type = command.get("type")
+                if command_type == "ACTIVATE":
+                    runtime_version = command.get("runtime_version")
+                    if not isinstance(runtime_version, int) or isinstance(runtime_version, bool) or runtime_version < 0:
+                        raise PluginRunnerProtocolError("Runner activation version is invalid")
+                    if execution_settings and worker is None:
+                        from a13n_service.process.runner import open_runner_worker
+                        from a13n_service.settings import Settings
+
+                        worker = await worker_scope.enter_async_context(
+                            open_runner_worker(Settings.model_validate_json(execution_settings), runtime)
+                        )
+                    await write_runner_message(
+                        writer,
+                        "ACTIVE",
+                        generation=generation,
+                        runtime_lock_digest=runtime_lock_digest,
+                        runtime_version=runtime_version,
+                    )
+                elif command_type == "DRAIN":
+                    if worker is not None and worker.execution_loop is not None:
+                        from a13n_service.interactions.domain import RunAttemptYieldReason
+
+                        await worker.execution_loop.drain(
+                            RunAttemptYieldReason(command.get("reason", "runner_rotation"))
+                        )
+                    await worker_scope.aclose()
+                    worker = None
+                    await write_runner_message(writer, "DRAINED", generation=generation)
+                elif command_type == "SHUTDOWN":
+                    await write_runner_message(writer, "EXITING", generation=generation)
+                    return
+                else:
+                    raise PluginRunnerProtocolError("Runner control command is unsupported")
     finally:
         writer.close()
         await writer.wait_closed()

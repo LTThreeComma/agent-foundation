@@ -132,6 +132,7 @@ class LiveProviderModel(WrapperModel):
         workspace_id: str,
         provider_resolver: LiveProviderResolver,
         model_factory: NativeModelFactory,
+        harness_thread_id: str | None = None,
     ) -> None:
         super().__init__(initial)
         self._snapshot = snapshot
@@ -139,6 +140,7 @@ class LiveProviderModel(WrapperModel):
         self._workspace_id = workspace_id
         self._provider_resolver = provider_resolver
         self._model_factory = model_factory
+        self._harness_thread_id = harness_thread_id
 
     async def __aenter__(self) -> LiveProviderModel:
         return self
@@ -160,7 +162,7 @@ class LiveProviderModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        validate_settings(self._snapshot.model_api, cast(JsonObject, dict(model_settings or {})))
+        self._validate_request_settings(model_settings)
         model = await self._fresh()
         async with model:
             return await model.request(messages, model_settings, model_request_parameters)
@@ -173,11 +175,23 @@ class LiveProviderModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
         run_context: Any = None,
     ) -> AsyncIterator[StreamedResponse]:
-        validate_settings(self._snapshot.model_api, cast(JsonObject, dict(model_settings or {})))
+        self._validate_request_settings(model_settings)
         model = await self._fresh()
         async with model:
             async with model.request_stream(messages, model_settings, model_request_parameters, run_context) as stream:
                 yield stream
+
+    def _validate_request_settings(self, settings: ModelSettings | None) -> None:
+        value = dict(settings or {})
+        headers = value.get("extra_headers")
+        if isinstance(headers, dict) and self._harness_thread_id is not None:
+            headers = dict(headers)
+            if headers.get("x-session-id") == self._harness_thread_id:
+                del headers["x-session-id"]
+            value["extra_headers"] = headers
+        # Accepted caller settings retain the strict schema. Only Harness's exact
+        # fresh Thread correlation is permitted in addition at the outbound boundary.
+        validate_settings(self._snapshot.model_api, cast(JsonObject, value))
 
 
 class SnapshotRunModelResolver:
@@ -201,7 +215,6 @@ class SnapshotRunModelResolver:
         context: ModelResolutionContext[AgentContext],
         model_id: str,
     ) -> PydanticModel[Any]:
-        del context
         if model_id != self._snapshot.model_id:
             raise ModelResolutionError(
                 "The requested Model does not match the accepted Run snapshot.",
@@ -221,6 +234,7 @@ class SnapshotRunModelResolver:
             workspace_id=self._workspace_id,
             provider_resolver=self._provider_resolver,
             model_factory=self._model_factory,
+            harness_thread_id=context.deps.thread_id,
         )
 
 

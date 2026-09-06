@@ -699,7 +699,7 @@ async def _accept_root(
         request_fingerprint="1" * 64,
         status=RunStatus.accepted,
         input_kind=RunInputKind.agent_input,
-        input={"schema_version": "1", "content": "hello"},
+        input={"schema_version": "1", "content": [{"type": "text", "text": "hello"}]},
         created_at=NOW,
         updated_at=NOW,
     )

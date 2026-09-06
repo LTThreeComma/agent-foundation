@@ -119,7 +119,10 @@ class RunOutcomeService:
             if thread.version != expected_thread_version:
                 raise RunOutcomeError("Thread outcome precondition changed")
             validate_outcome_candidate_scope(state, run, thread)
-            if attempt.status != RunAttemptStatus.running.value:
+            recovering_candidate = state.envelope.last_checkpoint_fence < authority.fence
+            if attempt.status != RunAttemptStatus.running.value and not (
+                attempt.status == RunAttemptStatus.leased.value and recovering_candidate
+            ):
                 raise AttemptMutationError("a successful outcome requires Harness entry")
             envelope = state.envelope
             candidate = envelope.outcome_candidate

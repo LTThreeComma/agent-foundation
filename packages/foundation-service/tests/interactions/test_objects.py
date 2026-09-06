@@ -73,13 +73,16 @@ async def test_object_version_and_fence_reject_stale_state_writers(
     assert second_checkpoint.writer_fence == 2
 
 
-async def test_state_read_rejects_metadata_fence_that_disagrees_with_envelope(
+async def test_state_read_rejects_metadata_fence_older_than_envelope(
     interaction_object_store: ObjectStore,
 ) -> None:
     store = RunStateStore(interaction_object_store)
     created = await store.create(ORGANIZATION_ID, initial_state())
+    created = await store.replace(
+        created, progress_state(created.envelope), run_attempt_id="rat_1234567890abcdef", fence=1
+    )
     metadata = dict(created.info.metadata)
-    metadata["writer-fence"] = "1"
+    metadata["writer-fence"] = "0"
     await interaction_object_store.put(
         created.info.key,
         created.body,
@@ -88,7 +91,7 @@ async def test_state_read_rejects_metadata_fence_that_disagrees_with_envelope(
         if_match=created.info.version,
     )
 
-    with pytest.raises(RunObjectIntegrityError, match="writer fence does not match"):
+    with pytest.raises(RunObjectIntegrityError, match="writer fence is older"):
         await store.read(ORGANIZATION_ID, created.envelope.run_id)
 
 
@@ -293,5 +296,20 @@ async def test_uncertain_write_never_adopts_another_writer_or_corrupt_metadata(
         raise TimeoutError("write response lost")
 
     monkeypatch.setattr(object_store, "put", change_after_commit)
-    with pytest.raises(StaleStateWriter if changed == "writer" else RunObjectIntegrityError):
+    with pytest.raises(StaleStateWriter):
         await store.replace(original, progress_state(original.envelope), run_attempt_id="rat_1234567890abcdef", fence=1)
+
+
+async def test_writer_claim_preserves_pending_input_and_fences_prior_versions(interaction_object_store):
+    store = RunStateStore(interaction_object_store)
+    initial = await store.create(ORGANIZATION_ID, initial_state())
+    claimed = await store.claim_writer(initial, fence=2)
+    restored = await store.read(ORGANIZATION_ID, initial.envelope.run_id)
+    assert restored == claimed
+    assert restored.body == initial.body
+    assert restored.envelope.input_disposition == "pending"
+    assert restored.envelope.checkpoint_seq == 0
+    assert restored.writer_fence == 2
+    assert restored.info.version != initial.info.version
+    with pytest.raises(StaleStateWriter):
+        await store.replace(initial, progress_state(initial.envelope), run_attempt_id="rat_1234567890abcdef", fence=1)

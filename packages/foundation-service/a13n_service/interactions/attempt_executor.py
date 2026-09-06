@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Protocol
 
-from a13n_harness import EnvironmentAccess, EnvironmentMount
+from a13n_harness import EnvironmentAccess, EnvironmentMount, SafeFailure
 from anyio import TASK_STATUS_IGNORED, CancelScope, create_task_group, fail_after, move_on_after, sleep
 from anyio.abc import TaskStatus
 
 from a13n_service.environments.lifecycle import EnvironmentLifecycle
 from a13n_service.environments.runtime import prepare_run_environment
+from a13n_service.storage.object_store import ObjectStoreUnavailable
 
 from .attempts import (
     AttemptAuthorityError,
@@ -90,6 +91,9 @@ class ControlWatcher:
         await self._reconcile()
         task_status.started()
         while True:
+            # A Redis-compatible in-process backend may complete every await inline.
+            # Keep teardown cancellable even when control has already terminalized.
+            await sleep(0)
             signal = await self._wakeups.receive()
             await self._reconcile()
             with fail_after(self._context.reconciliation_timeout.total_seconds()):
@@ -133,6 +137,7 @@ class RunAttemptExecutor[OutputT]:
     async def run(self) -> RunTerminalReceipt | AttemptMutationReceipt | AttemptPreparationRejected:
         finalization: RunTerminalReceipt | AttemptMutationReceipt | AttemptPreparationRejected | None = None
         environment = None
+        runtime_closed = False
         try:
             async with create_task_group() as tasks:
                 self._control.bind_executor(self._driver, tasks.cancel_scope.cancel)
@@ -154,13 +159,35 @@ class RunAttemptExecutor[OutputT]:
                     decision = await self._control.commit_preparation()
                     if isinstance(decision, AttemptPreparationRejected):
                         finalization = decision
+                    elif self._control.current_state.envelope.outcome_candidate is not None:
+                        finalization = await self._control.recover_outcome(self._committer)
                     else:
                         candidate = await self._driver.run(invocation, preparation=decision)
+                        if self._control.handoff_ready:
+                            with fail_after(self._context.cleanup_timeout.total_seconds()):
+                                if environment is not None:
+                                    await environment.close()
+                                await self._cleanup.close(self._control.current_context, self._control, self._driver)
+                            runtime_closed = True
                         finalization = await self._control.finalize(
                             candidate,
                             adapter=self._adapter,
                             committer=self._committer,
                         )
+                except AttemptAuthorityError:
+                    raise
+                except Exception as error:
+                    if self._control.handoff_ready:
+                        raise
+                    finalization = await self._control.fail_execution(
+                        self._committer,
+                        SafeFailure(
+                            code="attempt_dependency_unavailable"
+                            if isinstance(error, (ObjectStoreUnavailable, OSError, TimeoutError))
+                            else "attempt_execution_failed",
+                            message="The RunAttempt could not complete execution.",
+                        ),
+                    )
                 finally:
                     with CancelScope(shield=True):
                         await self._control.close_admission()
@@ -171,9 +198,10 @@ class RunAttemptExecutor[OutputT]:
         finally:
             try:
                 with move_on_after(self._context.cleanup_timeout.total_seconds(), shield=True):
-                    if environment is not None:
-                        await environment.close()
-                    await self._cleanup.close(self._control.current_context, self._control, self._driver)
+                    if not runtime_closed:
+                        if environment is not None:
+                            await environment.close()
+                        await self._cleanup.close(self._control.current_context, self._control, self._driver)
             finally:
                 self._capacity_slot.release()
 
