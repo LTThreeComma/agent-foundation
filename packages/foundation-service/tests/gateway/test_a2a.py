@@ -20,7 +20,6 @@ from a13n_service.endpoint_policy import EndpointPolicy
 from a13n_service.gateway.a2a import A2AError, A2AService
 from a13n_service.gateway.a2a_import import A2APartImporter
 from a13n_service.gateway.a2a_push import (
-    A2A_PUSH_ENABLED_SESSION_INFO_KEY,
     A2APushMaterial,
     A2APushPublisher,
     _event_status,
@@ -783,14 +782,15 @@ async def test_disabled_a2a_does_not_append_push_outbox(
         task_id=task.id,
         requested=a2a.TaskPushNotificationConfig(url="https://8.8.8.8/a2a-events"),
     )
-    lifecycle_interaction_sessions.configure(
-        info={A2A_PUSH_ENABLED_SESSION_INFO_KEY: False},
-    )
     async with short_session(lifecycle_interaction_sessions) as database:
         binding = await database.get(A2ATaskBindingRecord, task.id)
     assert binding is not None
 
-    await _complete_run(lifecycle_interaction_sessions, objects, run_id=binding.current_run_id)
+    from tests.sql_capture import capture_sql
+
+    with capture_sql(lifecycle_interaction_sessions) as statements:
+        await _complete_run(lifecycle_interaction_sessions, objects, run_id=binding.current_run_id, a2a_enabled=False)
+    assert not any("a2a_" in statement for statement in statements)
 
     async with short_session(lifecycle_interaction_sessions) as database:
         delivery = await database.scalar(select(OutboxRecord.id).where(OutboxRecord.destination_kind == "a2a_push"))
