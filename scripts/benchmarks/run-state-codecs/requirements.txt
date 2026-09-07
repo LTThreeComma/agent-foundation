@@ -1,0 +1,4 @@
+# Benchmark-only additions/pins; production dependencies and uv.lock are unchanged.
+lz4==4.4.5
+zstandard==0.25.0
+pillow==12.3.0
