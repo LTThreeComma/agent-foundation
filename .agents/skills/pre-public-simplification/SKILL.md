@@ -31,12 +31,13 @@ Migration files and history, including initial schema revisions, may be edited d
 
 Generate new or replacement revisions through the owning disposable-database workflow and review them. Direct edits to existing revisions need no extra revision recording the edit. Validate the migration graph, expected heads, clean-database upgrade, and parity with ORM metadata. The exception ends when this mode expires or requirements to preserve data or deployed schemas emerge.
 
-## Choose the Least Overall Complexity
+## Choose a Clear, Coherent Design
 
-- Reduce the concepts, rules, states, branches, and dependencies a maintainer must understand, and the places that must change together. Line counts and file splitting alone do not establish improvement.
-- Give shared rules and facts clear owners. Consolidate semantic duplication while preserving real differences in ownership, lifecycle, and external protocols; name concepts by meaning.
-- Prefer direct flows and small shared functions. Extra abstractions, frameworks, options, and execution paths need concrete current justification. Extensibility should make a realistic change local and understandable.
-- Include runtime, storage, network, recovery, operational, and contributor costs. Remove obvious waste; support performance trade-offs with measurements or an explicit capacity model. Separate assumptions from evidence and account for known bottlenecks.
+- Reduce the concepts, states, branches, dependencies, and coordinated edits a maintainer must understand. Judge improvement through realistic use and maintenance tasks, not line counts or layer counts.
+- Give shared rules clear owners and use domain terms consistently across interfaces, implementation, and documentation. Preserve real lifecycle, protocol, and security differences when consolidating duplication.
+- Prefer direct flows and cohesive functions and modules. Keep interfaces predictable and state, side effects, resource lifetimes, and failure handling traceable. Abstractions and options need current justification and should make a realistic change easier.
+- Explain necessary concepts and prerequisites so readers can follow common workflows before unrelated mechanisms or exceptional cases. Necessary complexity should have understandable boundaries.
+- Include runtime, storage, network, recovery, operational, and maintenance costs. Support performance trade-offs with measurements or an explicit capacity model; distinguish assumptions from evidence and account for known bottlenecks.
 
 ## Explain Before and After
 
