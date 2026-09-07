@@ -166,6 +166,7 @@ async def build_worker_runtime(
         http,
         clients.credentials,
     )
+
     skills = SkillRuntimePreparer(shared.storage.sessions, execution.skill_package_store)
     assets = AssetObjectStore(
         shared.storage.objects,

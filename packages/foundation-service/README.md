@@ -58,7 +58,7 @@ Connector Provider types are explicitly registered through `Components.connector
 
 `POST /api/v1/connector-providers/{connector_provider_id}/discover-connectors` reads the exact account's current directory under `connector_provider.read`. It creates no connections and publishes no tool catalog. Discovery and setup revalidation share a 30-second deadline and bounds of 128 pages, 2,048 directory entries, and 16 MiB across toolkit and auth-config responses. Composio v3.1 combines `/toolkits` with project `/auth_configs` using cursor pagination. Explicit configured allowlists filter the results. Only hosted OAuth supported by both the toolkit and current account is advertised; third-party credential input and upstream secret fields are excluded.
 
-Connection setup selects `connector_provider_id` and `connector_key`. Each operation constructs a fresh Provider runtime and binds the verified external account plus its opaque user correlation before inspection, live tool discovery, execution, or revocation. Construction and close never create or revoke accounts, and close does not dispose the process-owned HTTP client. Composio pins dated versions in tool-list, tool-detail, and execute requests. Worker composition supplies `external_tools` to the host's `HarnessDriver`. Each Attempt receives one upstream MCP capability per authorized source; credentials and resource authority are rechecked for dispatch.
+Connection setup selects `connector_provider_id` and `connector_key`. Each operation constructs a fresh Provider runtime and binds the verified external account plus its opaque user correlation before inspection, live tool discovery, execution, or revocation. Construction and close never create or revoke accounts, and close does not dispose the process-owned HTTP client. Composio pins dated versions in tool-list, tool-detail, and execute requests. Worker composition supplies external tools to the Attempt preparation scope. Each Attempt receives one upstream MCP capability per authorized source; credentials and resource authority are rechecked for dispatch.
 
 The registered account adapter follows the [Composio v3.1 reference](https://docs.composio.dev/reference). The service does not expose an unfenced public tool-execute endpoint.
 
@@ -96,6 +96,14 @@ Workers use one Environment lifecycle and maintenance loop. Configure all worker
 Logical allocation does not start a target or consume capacity. First use atomically reserves capacity before Provider I/O; exhausted admission returns `environment_capacity_exceeded`. Limits never evict existing targets. Maintenance persists observed expiry, schedules retention and renewal deadlines, and backs off failures for 30 seconds. Provider latency and due volume can delay maintenance beyond one poll interval. Estimate a due burst as `due_targets * average_operation_seconds / concurrency`, plus database and polling time. A bounded queue keeps available workers processing later batches while another target is slow.
 
 The initial Environment schema includes observed expiry and a Workspace/ownership/status index for admission counts. Initialize a fresh development database for this schema; superseded development schemas and target-identity encodings have no upgrade path.
+
+## Hosted Subagents
+
+Set `subagent_mode` in the Agent configuration to `inline` (the default) or `async`. Both use the selected named `subagents` graph. Inline descendants execute inside the parent Attempt and borrow its Environment. Async delegation creates an independently scheduled child Run; its own configured mode governs further delegation. Each child uses its own frozen Model settings, Skills, Plugins, and Connector/MCP selections. Native ingress contexts are not inherited by children.
+
+Parent Run acceptance freezes the complete child execution graph. Later Model defaults or Skill heads do not change that accepted graph; current resource authorization and credentials are still checked during execution. Retry and recovery reuse the accepted snapshots. The Attempt closes its tools, input sources, and Environment object before releasing authority or committing its outcome.
+
+The `control` and `all` roles publish sealed child results, request configured child cancellation, and accept eligible parent successors. `FOUNDATION_SUBAGENT_RECONCILE_POLL_INTERVAL_SECONDS` defaults to 1 second; `FOUNDATION_SUBAGENT_RECONCILE_DRAIN_SECONDS` defaults to 30 seconds. Run at least one control-capable process for this reconciliation.
 
 ## Observability and Trace Query
 
