@@ -14,7 +14,7 @@ Open an issue before implementing a change with unresolved product, architecture
 
 Do not add proposals, RFC drafts, discussion logs, or progress tracking to `spec/`. Once an issue reaches an accepted conclusion, update the specification directly in the same pull request as the implementation or as a focused specification pull request.
 
-Before changing service code, persistence, migrations, streaming endpoints, workers, logging, or container behavior, read [DEVELOPMENT.md](DEVELOPMENT.md) and the directly owning specification.
+Before changing service code, persistence, migrations, streaming endpoints, workers, logging, or container behavior, read the relevant sections of [DEVELOPMENT.md](DEVELOPMENT.md) and the directly owning specification. Use specification indexes to locate an unknown owner; reuse relevant context already read.
 
 ## Local Setup
 
@@ -85,7 +85,26 @@ Use the Makefile as the stable development interface:
 | `make check`                | Apply formatting, then run fast checks with four parallel workers |
 | `make check-all`            | Run the complete component gates, including tests and builds      |
 
-Use `make format` when you want to apply formatting changes alone. `make check` applies the same formatters before running the fast validation gate. Installed pre-commit hooks also format supported changed files automatically; if a hook rewrites a file during commit, review and stage that result before committing again. Run the full local gate before opening or updating a broad pull request:
+Choose local validation from the affected behavior and dependencies:
+
+- For prose-only Markdown changes, including `AGENTS.md`, specifications, and skill documentation, run the configured file hooks on explicit changed paths:
+
+  ```bash
+  uv run --locked pre-commit run --files <changed-files>
+  git diff --check
+  ```
+
+  Review changed relative links and section anchors. For changed skills, also check frontmatter and whether the description and reference routing match the intended task scope. Application tests are unnecessary when only prose changes.
+
+- For a change confined to a component, use its relevant Make targets and focused behavior tests. Include affected consumers when a contract changes.
+
+- For implementation changes spanning components, or changes to shared protocol implementations, workspace dependency configuration, build infrastructure, or validation tooling, run `make check-all` before opening or updating the pull request. File count alone does not make a prose-only change require the full gate.
+
+- Run `make docs-build` for changes to `docs/`, navigation, or site configuration. Image and migration changes also require the checks defined in their owning engineering contracts.
+
+Reuse successful checks while their relevant source, dependency, and configuration inputs remain unchanged. After formatting or fixes, rerun affected checks; broaden validation when failures or unresolved risks justify it. Report unavailable checks and failures accurately. These local check choices do not remove required CI checks.
+
+Use `make format` when you want to format the whole repository. `make check` applies the same repository-wide formatters before running the fast validation gate; it is useful for broad development feedback but is not a prerequisite for every commit. Installed pre-commit hooks format supported changed files automatically; if a hook rewrites a file during commit, review and stage that result before committing again. The full local gate remains:
 
 ```bash
 make check-all

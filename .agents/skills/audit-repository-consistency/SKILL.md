@@ -1,6 +1,6 @@
 ---
 name: audit-repository-consistency
-description: Audit a repository or revision range for spec-code gaps, inconsistent shared concepts, semantic duplication, and removable code. Use for repository consistency or architecture-conformance reviews; report evidence-backed findings and remediate only when requested.
+description: Use for repository or revision-range audits of spec-code consistency, shared concepts, semantic duplication, or removable code.
 ---
 
 # Repository Consistency Audit
@@ -70,7 +70,7 @@ Classify candidates as confirmed removable, redundant and consolidatable, obsole
 
 ## Validate and Report
 
-For each candidate, read its complete owning contract and implementation path, trace alternate and cross-language consumers, and inspect relevant tests. Try to falsify it by looking for intentional isolation or compatibility requirements. Run the narrowest useful non-mutating checks; for review-only work, avoid formatting gates that rewrite the worktree.
+For each candidate, read the owning contract sections and complete implementation path needed to establish its behavior, and inspect relevant tests. Trace alternate and cross-language consumers when they can affect the conclusion. Try to falsify the finding by looking for intentional isolation or compatibility requirements; expand the investigation when the evidence is incomplete. Run the narrowest useful non-mutating checks; for review-only work, avoid formatting gates that rewrite the worktree.
 
 Report actionable findings by severity, with a short statement of target/full commit ID, baseline/full commit ID or full audit, and worktree scope. Give each finding:
 

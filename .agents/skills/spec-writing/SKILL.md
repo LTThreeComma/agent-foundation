@@ -1,6 +1,6 @@
 ---
 name: spec-writing
-description: Author, review, or reorganize accepted technical contracts under spec/, including domain models, lifecycles, APIs, protocols, ownership, security, and compatibility. Use when a task changes or evaluates those contracts; ordinary implementation details do not require a spec rewrite.
+description: Use when authoring, reviewing, or reorganizing accepted technical contracts under spec/.
 ---
 
 # Specification Authoring
@@ -9,7 +9,7 @@ Maintain `spec/` as the current, internally consistent accepted design. Follow `
 
 ## Establish Authority
 
-Read `spec/README.md`, the relevant subsystem index/reading path, and the documents that own changed concepts. Search affected terms, states, schemas, and claims across `spec/`. Reuse context already read.
+Start with the sections that own the affected concepts. Use `spec/README.md` and subsystem indexes when the owner or cross-component scope is unclear. Search affected terms, states, schemas, and claims across `spec/`, and read dependent contracts when their meaning is affected. Reuse context already read.
 
 Use the accepted outcome supplied by the user or concluded discussion. Do not infer a new product or architecture decision from implementation behavior alone. If material alternatives remain unresolved, identify the decision and continue independent authorized work; keep the unsettled design out of `spec/`. The Issue-to-PR workflow does not itself authorize posting to GitHub.
 
@@ -40,12 +40,4 @@ Use a diagram or table when it clarifies the contract. Prefer Mermaid for archit
 - Distinguish process-local observations from durable facts and transport delivery from execution authority.
 - Make security and compatibility failures explicit. Remove stale text, orphan sections, duplication, and editing residue so the result stands alone without issue history.
 
-For spec-only changes, format the affected files and run:
-
-```bash
-uv run --locked mdformat --number <changed-spec-files>
-make lint
-git diff --check -- spec
-```
-
-For accompanying implementation or shared tooling, complete the applicable repository/component gates. Reuse valid results and rerun checks when their inputs change. Report validation and unresolved decisions without claiming that formatting proves semantic correctness.
+Follow [Local Validation](../../../CONTRIBUTING.md#local-validation) for prose-only changes and accompanying implementation or tooling. Report validation and unresolved decisions without claiming that formatting proves semantic correctness.

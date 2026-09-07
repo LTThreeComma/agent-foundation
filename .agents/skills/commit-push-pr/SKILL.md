@@ -1,6 +1,6 @@
 ---
 name: commit-push-pr
-description: Prepare focused commits, push branches, and create or update GitHub pull requests when requested. Perform only the stages authorized by the user; a commit-only request does not include pushing or opening a PR.
+description: Use when the user requests commits, branch pushes, or GitHub pull request creation or updates.
 ---
 
 # Commit, Push, and Pull Request
@@ -19,9 +19,9 @@ Unresolved material design questions follow the contribution workflow; this skil
 
 ## Validate the Intended Change
 
-Use the repository's fast gate, `make check`, and complete additional checks required by `CONTRIBUTING.md`, `AGENTS.md`, and the affected component. The fast gate does not replace `make docs-build` for site changes, `make check-all` for broad changes, or relevant image/migration validation.
+Use [Local Validation](../../../CONTRIBUTING.md#local-validation) to select checks for the intended change and complete applicable component requirements. The Git handoff does not itself require another `make check` or a broader test run.
 
-Reuse successful checks that still cover the same source state. If formatting or fixes alter relevant inputs, review the diff and rerun the affected checks. Record unavailable checks and failures accurately; do not represent them as passing or bypass hooks with `--no-verify`.
+Reuse successful implementation-stage checks while their relevant inputs remain unchanged. If formatting or fixes alter those inputs, review the diff and rerun the affected checks. Record unavailable checks and failures accurately; do not represent them as passing or bypass hooks with `--no-verify`.
 
 Before staging, run `git diff --check`. Stage explicit intended paths and review both the staged diff and `git diff --cached --stat`.
 
@@ -39,7 +39,7 @@ Do not create empty or duplicate commits, add agent co-author trailers, or inven
 
 ## Push
 
-Confirm the destination remote and branch, then push with upstream tracking where needed; for a confirmed `origin` destination:
+Verify the destination remote and branch from the request and repository configuration, then push with upstream tracking where needed; for a verified `origin` destination:
 
 ```bash
 git push -u origin HEAD
@@ -63,7 +63,7 @@ Use the scoped Conventional Commit format for the PR title, summarizing the comp
 
 Explain the problem, resulting behavior, material compatibility implications, and exact validation outcomes. If no template exists, a short summary and validation section suffice. Pass multiline content with `--body-file` using a temporary file outside the repository. Do not claim a missing check passed or omit a known blocker.
 
-Inspect `gh pr checks` once after creating or updating the PR. Report CI as pending, passing, or failed; wait or monitor only when requested. Before retrying an uncertain PR creation, query existing PRs again.
+Inspect `gh pr checks` after creating or updating the PR. A request to create a PR can end with CI status reported as pending. A request to make the PR ready to merge includes waiting for required checks and fixing failures caused by the change; it does not authorize merging. Report external blockers and unmet review requirements accurately. Before retrying an uncertain PR creation, query existing PRs again.
 
 ## Handoff
 
