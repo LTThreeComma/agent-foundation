@@ -1,4 +1,3 @@
-<multi-edit-tool>
 <best-practices>
 - Prefer `multi_edit` over multiple edits to the same file.
 - Do not issue concurrent edits to the same file; combine them in one call.
@@ -6,4 +5,3 @@
 - Edits apply sequentially, so earlier edits must not invalidate later matches.
 - Avoid overlapping replacements; one failed edit leaves the file unchanged.
 </best-practices>
-</multi-edit-tool>

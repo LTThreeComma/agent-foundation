@@ -1,4 +1,3 @@
-<grep-tool>
 <best-practices>
 - Use a specific include pattern or root for faster, cleaner results.
 - Prefer `glob` first when candidate file names are not yet known.
@@ -6,4 +5,3 @@
 - Increase per-file or total result limits only after narrowing the search.
 - Include hidden or ignored paths only when the target is likely there.
 </best-practices>
-</grep-tool>

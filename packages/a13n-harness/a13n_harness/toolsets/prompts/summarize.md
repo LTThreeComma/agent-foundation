@@ -1,4 +1,3 @@
-<summarize-guidelines>
 <overview>
 Use `summarize` for an explicit semantic handoff when continuity would improve by moving to a fresh context. Notes and tasks remain separately projected as current structured state.
 </overview>
@@ -25,4 +24,3 @@ Explain the transition naturally. Do not mention context windows or token limits
 <files-to-inspect>
 List only files likely to require immediate inspection after continuation. Paths are reminders; contents are not loaded.
 </files-to-inspect>
-</summarize-guidelines>

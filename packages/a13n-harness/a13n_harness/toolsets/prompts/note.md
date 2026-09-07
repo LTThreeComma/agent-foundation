@@ -1,4 +1,3 @@
-<note-guidelines>
 <overview>
 Notes preserve structured working facts for the current session. Tasks preserve structured execution state; handoff summaries preserve narrative continuity and the next step.
 </overview>
@@ -17,4 +16,3 @@ Notes preserve structured working facts for the current session. Tasks preserve 
 - Do not store a complete handoff summary as a note.
 - Before `summarize`, reconcile stale notes and task statuses rather than copying all notes or tasks into the summary.
 </best-practices>
-</note-guidelines>
