@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     for owner, selections in batches.items():
         workers = args.workers
         if workers is None:
-            workers = 7 if owner == Path("packages/foundation-service/tests") else 2
+            workers = 7 if owner == Path("packages/a13n-service/tests") else 2
         print(f"\n==> {owner} ({workers} workers)", flush=True)
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-n", str(workers), "--dist", "loadgroup", *selections],

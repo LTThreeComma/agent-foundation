@@ -12,8 +12,8 @@ import pytest
 from scripts.run_python_tests import main
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
-SERVICE = "packages/foundation-service/tests"
-UI = "packages/agent-ui/tests"
+SERVICE = "packages/a13n-service/tests"
+UI = "packages/a13n-harness-ui/tests"
 
 
 @pytest.fixture
@@ -107,15 +107,15 @@ def test_pytest_groups_by_file_and_preserves_explicit_cross_file_groups(tmp_path
 
 def test_full_frontend_check_and_python_packaging_share_one_build() -> None:
     result = subprocess.run(
-        ["make", "--dry-run", "agent-ui-webui-check-all", "python-build"],
+        ["make", "--dry-run", "a13n-harness-ui-webui-check-all", "python-build"],
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("npm --prefix apps/agent-ui run build\n") == 1
-    assert result.stdout.count("npm --prefix apps/agent-ui run check\n") == 1
-    assert "npm --prefix apps/agent-ui run check:all" not in result.stdout
-    assert "scripts/prepare-agent-ui-assets.py" in result.stdout
+    assert result.stdout.count("npm --prefix apps/a13n-harness-ui run build\n") == 1
+    assert result.stdout.count("npm --prefix apps/a13n-harness-ui run check\n") == 1
+    assert "npm --prefix apps/a13n-harness-ui run check:all" not in result.stdout
+    assert "scripts/prepare-a13n-harness-ui-assets.py" in result.stdout
     assert "uv build --all-packages" in result.stdout
