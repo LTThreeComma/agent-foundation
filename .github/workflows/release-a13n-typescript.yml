@@ -63,7 +63,7 @@ jobs:
     name: Publish a13n for TypeScript to npm
     needs: build
     runs-on: ubuntu-latest
-    environment: a13n-typescript-npm
+    environment: sdk-typescript-npm
     permissions:
       contents: read
       id-token: write
@@ -86,7 +86,7 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          published="$(npm view a13n version 2>/dev/null || true)"
+          published="$(npm view @converge.ai/a13n version 2>/dev/null || true)"
           if [ -z "$published" ]; then
             exit 0
           fi
