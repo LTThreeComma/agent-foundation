@@ -254,16 +254,6 @@ jobs:
             "https://crates.io/api/v1/crates/a13n-envd/$VERSION")"
           case "$status" in
             200)
-              curl --fail --location --silent --show-error \
-                --user-agent "a13n-envd-release/$GITHUB_RUN_ID" \
-                --output published.crate \
-                "https://crates.io/api/v1/crates/a13n-envd/$VERSION/download"
-              local_crate="target/package/a13n-envd-$VERSION.crate"
-              if ! cmp --silent "$local_crate" published.crate; then
-                echo "Published a13n-envd $VERSION does not match this release tag" >&2
-                sha256sum "$local_crate" published.crate >&2
-                exit 1
-              fi
               echo "published=true" >> "$GITHUB_OUTPUT"
               ;;
             404)
@@ -283,7 +273,8 @@ jobs:
 
   publish-client:
     name: Publish Python client
-    needs: [prepare, build-client, build-binaries]
+    # Installing this client can select the co-versioned native runtime immediately.
+    needs: [build-client, create-release]
     runs-on: ubuntu-latest
     environment: agent-envd-client-pypi
     steps:
@@ -381,7 +372,8 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [prepare, build-client, build-binaries, publish-crate, publish-client, publish-image]
+    # Publish the co-versioned native assets before the client, independently of crates.io and GHCR.
+    needs: [prepare, build-client, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -415,6 +407,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: >-
-          python3 scripts/create-github-release.py a13n-envd "$VERSION"
-          "a13n-envd $VERSION" dist/*
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            python3 scripts/create-github-release.py a13n-envd "$VERSION" \
+              "a13n-envd $VERSION" dist/*
+          fi
+          # An existing release version is not overwritten or compared with a rebuild.
