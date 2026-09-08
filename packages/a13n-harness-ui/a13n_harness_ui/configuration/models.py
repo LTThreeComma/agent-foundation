@@ -111,9 +111,9 @@ class TerminalDisplayConfiguration(StrictModel):
 class ToolsConfiguration(StrictModel):
     """Application-owned built-in tool switches and terminal question waiting policy."""
 
-    enable_user_input: bool = True
-    user_input_timeout_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
-    enable_codeact: bool = False
+    enable_ask_user_question: bool = True
+    ask_user_question_timeout_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
+    enable_codeact: bool = True
 
 
 class SubagentsConfiguration(StrictModel):
@@ -132,7 +132,7 @@ class SubagentsConfiguration(StrictModel):
 class HarnessUiDocument(StrictModel):
     """Root ``a13n-harness-ui.yaml`` document."""
 
-    schema_version: Literal["2"] = "2"
+    schema_version: Literal["1"] = "1"
     process: ProcessConfiguration = Field(default_factory=ProcessConfiguration)
     defaults: GlobalDefaults = Field(default_factory=GlobalDefaults)
     display: TerminalDisplayConfiguration = Field(default_factory=TerminalDisplayConfiguration)
