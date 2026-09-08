@@ -202,7 +202,7 @@ async def test_wrong_workspace_and_forged_attempt_cannot_publish(
         await publisher.publish(
             wrong_scope, invocation_id="tool-invalid", filename="report.txt", media_type=None, body=_body()
         )
-    wrong_attempt = replace(scope.current_attempt(), fence=scope.current_attempt().fence + 1)
+    wrong_attempt = replace(scope.current_attempt(), attempt_number=scope.current_attempt().attempt_number + 1)
     with pytest.raises(AttemptAuthorityError):
         await publisher.publish(
             replace(scope, current_attempt=lambda: wrong_attempt),

@@ -22,7 +22,7 @@ from a13n_service.iam import (
 from a13n_service.iam.audit import security_audit_record
 from a13n_service.iam.domain import PrincipalRef, PrincipalType
 from a13n_service.ids import new_object_id
-from a13n_service.interactions.attempts import AttemptContext, lock_attempt_lease, read_attempt_lease
+from a13n_service.interactions.attempts import AttemptContext, lock_attempt_authority, read_attempt_authority
 from a13n_service.interactions.models import RunRecord, SessionRecord
 from a13n_service.object_retention.persistence import require_object_publications
 from a13n_service.storage import short_session, transaction
@@ -207,7 +207,7 @@ class AgentAssetPublisher:
     async def _authorize(
         self, database: AsyncSession, scope: AssetPublicationScope, *, lock: bool
     ) -> AuthenticatedActor:
-        check = lock_attempt_lease if lock else read_attempt_lease
+        check = lock_attempt_authority if lock else read_attempt_authority
         run, _, _ = await check(database, scope.current_attempt(), self._clock())
         session = await database.get(SessionRecord, run.session_id)
         if (
