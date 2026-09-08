@@ -33,7 +33,7 @@ def capability_panel(name: object, event: Mapping[str, object]) -> CapabilityPan
             return None
         if len(before) + len(after) > 128 * 1024 or before.count("\n") + after.count("\n") > 2000:
             return CapabilityPanel(
-                f"Edit · applied · {path} · {event.get('tool_call_id')}",
+                f"Edit · {path} · applied",
                 "Unified diff omitted: comparison budget exceeded. Actual before/after text follows.\n"
                 + f"--- {path} (before)\n{before}\n+++ {path} (after)\n{after}",
                 "edit",
@@ -42,17 +42,9 @@ def capability_panel(name: object, event: Mapping[str, object]) -> CapabilityPan
             before.splitlines(keepends=True), after.splitlines(keepends=True), fromfile=path, tofile=path
         )
         body = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines)
-        return CapabilityPanel(
-            f"Edit · applied · {path} · {event.get('tool_call_id')}", body or "Empty file created.\n", "edit"
-        )
-    if name == "a13n.shell.status":
-        callback = " · completion notification" if event.get("callback") else ""
-        code = event.get("exit_code")
-        return CapabilityPanel(
-            f"Shell · {event.get('process_id') or event.get('tool_call_id') or 'foreground'} · {event.get('phase')}{callback}",
-            f"Exit code: {code}" if code is not None else "",
-            "shell",
-        )
+        added = sum(line.startswith("+") and not line.startswith("+++") for line in body.splitlines())
+        removed = sum(line.startswith("-") and not line.startswith("---") for line in body.splitlines())
+        return CapabilityPanel(f"Edit · {path} · +{added} -{removed}", body or "Empty file created.\n", "edit")
     return None
 
 
@@ -72,11 +64,30 @@ def tool_preview(arguments: str) -> str:
     except ValueError:
         return arguments[:240]
     if isinstance(value, dict):
-        for key in ("command", "file_path", "path", "query", "pattern", "subject"):
+        for key in ("command", "file_path", "path", "query", "pattern", "subject", "process_id"):
             if isinstance(value.get(key), str):
                 return value[key][:500]
         return ", ".join(value)[:160]
     return str(value)[:160]
+
+
+def shell_outcome(status: Mapping[str, object]) -> str:
+    """Only highlight noteworthy outcomes; routine process phases stay in details."""
+    phase = status.get("phase")
+    labels = {
+        "timed_out": "timed out",
+        "cancelled": "cancelled",
+        "signaled": "interrupted",
+        "failed": "failed",
+        "unknown": "status unavailable",
+        "missing": "process unavailable",
+    }
+    if isinstance(phase, str) and phase in labels:
+        return labels[phase]
+    code = status.get("exit_code")
+    if isinstance(code, int) and code != 0:
+        return "failed"
+    return ""
 
 
 def tool_result(name: str, text: str) -> str:
@@ -90,6 +101,8 @@ def tool_result(name: str, text: str) -> str:
             state = "failed · no edit confirmed" if name in {"edit", "multi_edit"} else "failed"
         elif value.get("ok") is True and name in {"edit", "multi_edit"}:
             state = "completed"
+        if name.startswith("shell") and isinstance(value.get("status"), dict):
+            state = shell_outcome(value["status"]) or state
         text = json.dumps(value, ensure_ascii=False, indent=2)
     return f"{state}\n{text}"
 
@@ -106,10 +119,13 @@ def shell_result_preview(text: str, command: str, max_lines: int) -> str | None:
     phase = status.get("phase")
     if not isinstance(phase, str):
         return None
-    code = status.get("exit_code")
-    lines = [phase + (f" · exit {code}" if isinstance(code, int) else "")]
-    if command:
-        lines.append("$ " + " ".join(command.split())[:500])
+    outcome = shell_outcome(status) or ("failed" if value.get("ok") is False else "")
+    title = " ".join(command.split())[:500] or "result"
+    lines = [title]
+    if outcome:
+        # Panel titles can be clipped on narrow terminals. A failure must remain
+        # visible independently of command length and available output.
+        lines.append(f"Result · {outcome}")
     for stream in ("stderr", "stdout"):
         page = value.get(stream)
         if not isinstance(page, dict):
@@ -117,11 +133,13 @@ def shell_result_preview(text: str, command: str, max_lines: int) -> str | None:
         output = page.get("text")
         if isinstance(output, str) and output.strip():
             parts = output.strip().splitlines()
-            lines.extend(f"{stream}  {line}" for line in parts[:max_lines])
-            if len(parts) > max_lines:
-                lines.append(f"{stream}  … more output · Ctrl+O details")
+            if stream == "stderr":
+                lines.append("stderr:")
+            lines.extend(parts[: min(max_lines, 3)])
+            if len(parts) > min(max_lines, 3):
+                lines.append("… more output · Ctrl+O details")
         if page.get("coverage") in {"partial", "unknown"} or page.get("content_complete") is False:
-            lines.append(f"{stream}  [output {page.get('coverage', 'incomplete')}]")
+            lines.append(f"[output {page.get('coverage', 'incomplete')} · {stream}]")
     if value.get("disclosure"):
         lines.append("[Output disclosure · Ctrl+O details]")
     return "\n".join(lines)
