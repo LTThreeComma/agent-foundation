@@ -104,10 +104,12 @@ class AgentReconstructor:
     ) -> AgentDefinition[Any]:
         """Reconstruct the accepted root snapshot and its exact immutable child graph."""
 
-        if effective_config.resolved_subagents and subagent_capability.async_enabled != (
-            effective_config.subagent_mode == "async"
-        ):
-            raise AgentDefinitionReconstructionError("subagent_mode_mismatch")
+        self.validate(
+            agent_id=agent_id,
+            agent_revision_id=agent_revision_id,
+            effective_config=effective_config,
+            subagent_capability=subagent_capability,
+        )
         root = AgentDefinitionReconstructionContext(
             agent_id=agent_id,
             agent_revision_id=agent_revision_id,
@@ -115,42 +117,58 @@ class AgentReconstructor:
             is_root=True,
             config=effective_config,
         )
-        occurrence_count = [0]
-        return self._definition(
-            root,
-            subagent_capability=subagent_capability,
-            active_revision_ids=(),
-            depth=0,
-            occurrence_count=occurrence_count,
-        )
+        return self._definition(root, subagent_capability=subagent_capability)
+
+    def validate(
+        self,
+        *,
+        agent_id: str,
+        agent_revision_id: str,
+        effective_config: EffectiveAgentConfig,
+        subagent_capability: SubagentCapability,
+    ) -> None:
+        """Validate the frozen graph and factories without constructing live plugins."""
+
+        if effective_config.resolved_subagents and subagent_capability.async_enabled != (
+            effective_config.subagent_mode == "async"
+        ):
+            raise AgentDefinitionReconstructionError("subagent_mode_mismatch")
+        pending: list[tuple[str, EffectiveAgentConfig, tuple[str, ...]]] = [(agent_revision_id, effective_config, ())]
+        count = 0
+        while pending:
+            revision_id, config, ancestors = pending.pop()
+            count += 1
+            if len(ancestors) > MAX_SUBAGENT_DEPTH:
+                raise AgentDefinitionReconstructionError("subagent_graph_too_deep")
+            if revision_id in ancestors:
+                raise AgentDefinitionReconstructionError("subagent_cycle")
+            if count > MAX_SUBAGENT_NODES:
+                raise AgentDefinitionReconstructionError("subagent_graph_too_large")
+            self._verify_effective_config(config)
+            if set(config.child_configs) != {edge.child_agent_revision_id for edge in config.resolved_subagents}:
+                raise AgentDefinitionReconstructionError("subagent_snapshot_mismatch")
+            for selection in config.resolved_plugin_versions:
+                if not _registration_matches(self._registrations.get(selection.plugin_key), selection):
+                    raise AgentDefinitionReconstructionError(
+                        "plugin_factory_provenance_mismatch", path=f"plugins.{selection.instance_name}"
+                    )
+            _output_type(config.output_spec)
+            for edge in config.resolved_subagents:
+                child = config.child_configs[edge.child_agent_revision_id]
+                if child.agent_id != edge.child_agent_id:
+                    raise AgentDefinitionReconstructionError("subagent_agent_mismatch", path=f"subagents.{edge.name}")
+                pending.append((edge.child_agent_revision_id, child.effective_config, (*ancestors, revision_id)))
 
     def _definition(
         self,
         node: AgentDefinitionReconstructionContext,
         *,
         subagent_capability: SubagentCapability,
-        active_revision_ids: tuple[str, ...],
-        depth: int,
-        occurrence_count: list[int],
     ) -> AgentDefinition[Any]:
-        if depth > MAX_SUBAGENT_DEPTH:
-            raise AgentDefinitionReconstructionError("subagent_graph_too_deep")
-        if node.agent_revision_id in active_revision_ids:
-            raise AgentDefinitionReconstructionError("subagent_cycle")
-        occurrence_count[0] += 1
-        if occurrence_count[0] > MAX_SUBAGENT_NODES:
-            raise AgentDefinitionReconstructionError("subagent_graph_too_large")
-
         config = node.config
-        self._verify_effective_config(config)
-        if set(config.child_configs) != {edge.child_agent_revision_id for edge in config.resolved_subagents}:
-            raise AgentDefinitionReconstructionError("subagent_snapshot_mismatch")
-        active_path = (*active_revision_ids, node.agent_revision_id)
         child_definitions: list[SubagentDefinition] = []
         for edge in config.resolved_subagents:
             child = config.child_configs[edge.child_agent_revision_id]
-            if child.agent_id != edge.child_agent_id:
-                raise AgentDefinitionReconstructionError("subagent_agent_mismatch", path=f"subagents.{edge.name}")
             child_definition = self._definition(
                 AgentDefinitionReconstructionContext(
                     agent_id=edge.child_agent_id,
@@ -160,9 +178,6 @@ class AgentReconstructor:
                     config=child.effective_config,
                 ),
                 subagent_capability=SubagentCapability(),
-                active_revision_ids=active_path,
-                depth=depth + 1,
-                occurrence_count=occurrence_count,
             )
             child_definitions.append(
                 SubagentDefinition(
@@ -246,12 +261,6 @@ class AgentReconstructor:
         return capabilities
 
     def _create_plugin(self, selection: ResolvedPluginVersion) -> AbstractHarnessPlugin:
-        registration = self._registrations.get(selection.plugin_key)
-        if not _registration_matches(registration, selection):
-            raise AgentDefinitionReconstructionError(
-                "plugin_factory_provenance_mismatch",
-                path=f"plugins.{selection.instance_name}",
-            )
         try:
             return self._plugin_catalog.create_plugin(
                 HarnessPluginFactoryContext(

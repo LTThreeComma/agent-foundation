@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from typing import Any
@@ -26,15 +26,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from a13n_service.agents.reconstruction import AgentDefinitionReconstructionContext, AgentReconstructor
 from a13n_service.connectivity.execution import ExternalToolRuntime
 from a13n_service.environments.lifecycle import EnvironmentLifecycle
-from a13n_service.environments.runtime import prepare_run_environment
+from a13n_service.environments.runtime import prepare_run_environment, validate_run_environment
 from a13n_service.models.model_factory import NativeModelFactory
 from a13n_service.models.provider_runtime import LiveProviderResolver
 from a13n_service.models.runtime import SnapshotRunModelResolver
-from a13n_service.skills.runtime import SkillRuntimePreparer
+from a13n_service.skills.runtime import PreparedSkillRuntime, SkillRuntimePreparer
 from a13n_service.storage import short_session
 from a13n_service.subagents.result_delivery import AsyncSubagentResultMaterializer
 
-from .agent_resources import prepare_agent_resources
+from .agent_resources import prepare_agent_resources, validate_agent_resources
 from .attempt_resources import attempt_resource_stack
 from .attempts import AttemptContext
 from .control_domain import ThreadInboxEntry, ThreadInboxKind, WaitingRunContinueInput, WaitingRunFeedback
@@ -70,7 +70,7 @@ class WorkerAttemptPreparer:
         async_results: AsyncSubagentResultMaterializer,
         environments: EnvironmentLifecycle,
         external_tools: ExternalToolRuntime,
-        subagent_capability: SubagentCapability,
+        subagent_capability: Callable[[], SubagentCapability],
     ) -> None:
         self._subagent_capability = subagent_capability
         self._environments = environments
@@ -86,10 +86,28 @@ class WorkerAttemptPreparer:
         self._model_factory = model_factory
         self._skills = skills
         self._async_results = async_results
-        config = control.current_state.envelope.effective_agent_config
-        self._mapper = AgentInputMapper(
-            sources, {"native": native_input_adapter}, max_binary_bytes=config.protocol.limits.max_input_bytes
+        self._prepared_skills: dict[str, PreparedSkillRuntime] | None = None
+
+    async def validate(self, context: AttemptContext) -> None:
+        """Claim the final recovery state and validate it before admitting continuation."""
+        await self._control.claim_state(self._run)
+        config = self._control.current_state.envelope.effective_agent_config
+        AgentReconstructor(self._catalog).validate(
+            agent_id=self._run.agent_id,
+            agent_revision_id=self._run.agent_revision_id,
+            effective_config=config,
+            subagent_capability=self._subagent_capability(),
         )
+        self._prepared_skills = await validate_agent_resources(
+            sessions=self._sessions,
+            run=self._run,
+            workspace_id=self._workspace_id,
+            config=config,
+            current_context=lambda: self._control.current_context,
+            skills=self._skills,
+            external_tools=self._external_tools,
+        )
+        await validate_run_environment(self._environments, self._control.current_context)
 
     @asynccontextmanager
     async def prepare(self, context: AttemptContext) -> AsyncIterator[HarnessInvocation[Any]]:
@@ -110,13 +128,13 @@ class WorkerAttemptPreparer:
     async def _prepare(self, context: AttemptContext, stack: AsyncExitStack) -> HarnessInvocation[Any]:
         run = self._run
         config = self._control.current_state.envelope.effective_agent_config
+        if self._prepared_skills is None:
+            raise RuntimeError("Attempt dependencies have not been validated")
         resources = await prepare_agent_resources(
-            sessions=self._sessions,
             run=run,
-            workspace_id=self._workspace_id,
             config=config,
             current_context=lambda: self._control.current_context,
-            skills=self._skills,
+            skills=self._prepared_skills,
             external_tools=self._external_tools,
             stack=stack,
         )
@@ -129,7 +147,7 @@ class WorkerAttemptPreparer:
             agent_id=run.agent_id,
             agent_revision_id=run.agent_revision_id,
             effective_config=config,
-            subagent_capability=self._subagent_capability,
+            subagent_capability=self._subagent_capability(),
         )
         payload = (
             run.input
@@ -232,7 +250,12 @@ class WorkerAttemptPreparer:
         return value
 
     async def _map(self, accepted: AcceptedAgentInput, instance_id: str) -> RunInputValue | None:
-        return await self._mapper.map(
+        mapper = AgentInputMapper(
+            self._sources,
+            {"native": native_input_adapter},
+            max_binary_bytes=self._control.current_state.envelope.effective_agent_config.protocol.limits.max_input_bytes,
+        )
+        return await mapper.map(
             accepted,
             input_instance_id=instance_id,
             adapter=self._control.current_state.envelope.effective_agent_config.input_adapter,

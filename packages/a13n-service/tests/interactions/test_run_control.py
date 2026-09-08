@@ -22,6 +22,7 @@ from a13n_harness import (
     SafeFailure,
 )
 from a13n_harness.capabilities import CompactionCapability, CompactionPolicy
+from a13n_harness.capabilities.context import _COMPACTION_PROMPT
 from a13n_service.interactions.attempts import (
     AttemptContext,
     AttemptExecutionService,
@@ -45,6 +46,7 @@ from a13n_service.interactions.inbox_delivery import AdaptedThreadInboxEntry
 from a13n_service.interactions.objects import RunPayloadStore, RunStateStore, StoredRunState
 from a13n_service.interactions.run_control import RunAttemptControl
 from a13n_service.interactions.state import (
+    CompletedOutcomeCandidate,
     ConsumedThreadInboxEntry,
     DeferredContinuationState,
     HostContinuationState,
@@ -78,6 +80,9 @@ class _RecordingAttemptExecution(AttemptExecutionService):
     trace: list[str]
     yielded: RunAttemptYieldReason | None = None
     handoff_permitted: bool = True
+
+    async def commit_preparation_success(self, authority: AttemptContext):
+        return _preparation(authority)
 
     async def can_handoff(self, authority: AttemptContext) -> bool:
         return self.handoff_permitted
@@ -452,7 +457,13 @@ async def test_compaction_precedes_receipt_publication_without_losing_incorporat
 
     async def stream(messages, info):
         nonlocal compact_calls, ordinary_calls
-        if info.model_settings and info.model_settings.get("tool_choice") == "none":
+        # Compaction preserves model settings for provider prompt-cache reuse.
+        if any(
+            isinstance(part, UserPromptPart) and part.content == _COMPACTION_PROMPT
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ):
             compact_calls += 1
             if compact_calls == 1:
                 assert "new direction" in _business_prompts(tuple(messages))
@@ -620,6 +631,8 @@ async def test_uncertain_terminal_checkpoint_keeps_input_pending_until_recovery(
         inbox=inbox,
     )
     if write_committed:
+        await replacement.commit_preparation()
+        await replacement.reconcile_recovery_state()
         await replacement.recover_outcome(_RecordingTerminalCommitter())
     else:
         calls = []
@@ -1282,3 +1295,37 @@ async def test_slow_checkpoint_keeps_lease_live_and_fences_dispatch(
         assert results[0].status == "completed"
         assert control.current_state.envelope.input_disposition == "applied"
         await execution.validate(control.current_context)
+
+
+async def test_recovery_receipt_repair_preserves_terminal_candidate(interaction_object_store):
+    entry = _inbox_entry()
+    states, initial = await _stored_state(interaction_object_store, initial_state())
+    candidate = CompletedOutcomeCandidate(output="already finished")
+    envelope = progress_state(initial.envelope).model_copy(
+        update={
+            "harness": HarnessState.new(
+                thread_id=initial.envelope.thread_id,
+                message_history=[ModelRequest(parts=[UserPromptPart(entry.tagged_input(RUN_ID))])],
+            ),
+            "checkpoint_kind": "completed",
+            "outcome_candidate": candidate,
+        }
+    )
+    stored = await states.replace(initial, envelope, run_attempt_id=ATTEMPT_ID, fence=1)
+    inbox = _RecordingThreadInbox([], entries=(entry,))
+    control = RunAttemptControl(
+        context=_context(stored.envelope.thread_id),
+        execution=_RecordingAttemptExecution([]),
+        states=states,
+        state=stored,
+        inbox=inbox,
+    )
+    await control.commit_preparation()
+    await control.reconcile_recovery_state()
+    repaired = control.current_state.envelope
+    assert repaired.checkpoint_kind == "completed"
+    assert repaired.outcome_candidate == candidate
+    assert repaired.harness == envelope.harness
+    assert repaired.host.consumed_inbox_entries == (entry.receipt,)
+    assert inbox.entries == ()
+    await control.recover_outcome(_RecordingTerminalCommitter())

@@ -161,6 +161,26 @@ class ExternalToolRuntime:
             deepcopy(protected_inputs),
         )
 
+    async def validate(
+        self,
+        current_context: Callable[[], AttemptContext],
+        *,
+        child_agent_id: str | None = None,
+        selections: FrozenRunConnectivity | None = None,
+    ) -> None:
+        """Check retained scope and connection eligibility without opening tool clients."""
+        async with short_session(self._sessions) as session:
+            scope = await self._scope_in_session(session, current_context(), child_agent_id=child_agent_id)
+            selected = scope.selections if selections is None else selections
+            for selection in (*selected.connector_connection_selections, *selected.mcp_connection_selections):
+                await self._selections.require_current_source(
+                    session,
+                    actor=scope.actor,
+                    organization_id=scope.organization_id,
+                    workspace_id=scope.workspace_id,
+                    selection=selection,
+                )
+
     @asynccontextmanager
     async def capabilities(
         self, current_context: Callable[[], AttemptContext]

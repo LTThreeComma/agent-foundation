@@ -300,7 +300,9 @@ async def test_worker_child_uses_own_model_and_tools_and_delivers_result(
                 await loop.wait_stopped()
                 tasks.cancel_scope.cancel()
         assert "Harness live observation projection failed" not in caplog.text
-        assert parse_contexts.call_count == (2 if mode == "inline" else 3)
+        # Validate each scope before admission, then reconstruct it once for
+        # execution. Individual tool requests must not reparse retained context.
+        assert parse_contexts.call_count == (4 if mode == "inline" else 6)
         assert set(observed_models) == {MODEL_ID, CHILD_MODEL_ID}
         assert len(child_requests) == (2 if request_limit is None else 1)
         connector_calls.assert_awaited_once()

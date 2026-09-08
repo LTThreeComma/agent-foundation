@@ -99,10 +99,6 @@ class WorkerAttempts:
                 if owner is None:
                     raise ValueError("Run Session is unavailable")
                 workspace_id = owner.workspace_id
-            state = await self._states.read_run(run)
-            await self._execution.validate(context)
-            state = await self._states.claim_writer(state, fence=context.fence)
-            await self._execution.validate(context)
 
         correlation = RunAttemptCorrelation(
             organization_id=run.organization_id,
@@ -114,7 +110,7 @@ class WorkerAttempts:
             run_attempt_number=attempt.attempt_number,
             agent_id=run.agent_id,
             agent_revision_id=run.agent_revision_id,
-            model_id=state.envelope.effective_agent_config.resolved_model.execution.model_id,
+            model_id=run.model_execution_observation.model_id,
             replaces_run_attempt_id=attempt.replaces_run_attempt_id,
         )
         trace_scope = (
@@ -134,7 +130,6 @@ class WorkerAttempts:
                 context=context,
                 execution=self._execution,
                 states=self._states,
-                state=state,
                 inbox=DatabaseThreadInboxReconciler(sessions, materialize),
             )
             sources = WorkerInputSources(
@@ -145,12 +140,15 @@ class WorkerAttempts:
                 run,
                 workspace_id,
             )
-            config = state.envelope.effective_agent_config
-            subagent_capability = (
-                self._subagents.capability(run=run, authority=control)
-                if config.subagent_mode == "async" and config.resolved_subagents
-                else SubagentCapability()
-            )
+
+            def subagent_capability() -> SubagentCapability:
+                config = control.current_state.envelope.effective_agent_config
+                return (
+                    self._subagents.capability(run=run, authority=control)
+                    if config.subagent_mode == "async" and config.resolved_subagents
+                    else SubagentCapability()
+                )
+
             preparer = WorkerAttemptPreparer(
                 sessions=sessions,
                 run=run,
@@ -175,23 +173,26 @@ class WorkerAttempts:
                 control=control,
                 projector=projector,
             )
-            limits = state.envelope.effective_agent_config.protocol.limits
+
+            def outcome_adapter() -> StoredHarnessOutcomeAdapter:
+                config = control.current_state.envelope.effective_agent_config
+                limits = config.protocol.limits
+                return StoredHarnessOutcomeAdapter(
+                    organization_id=context.organization_id,
+                    run_id=context.run_id,
+                    payloads=self._payloads,
+                    max_output_bytes=limits.max_output_bytes,
+                    inline_output_bytes=min(65536, limits.max_output_bytes),
+                    client_tool_surface=[tool.model_dump(mode="json") for tool in config.client_tools],
+                )
+
             executor = RunAttemptExecutor(
                 context=context,
                 control=control,
                 driver=driver,
                 preparer=preparer,
                 wakeups=AttemptControlWakeups(self._signals, context),
-                adapter=StoredHarnessOutcomeAdapter(
-                    organization_id=context.organization_id,
-                    run_id=context.run_id,
-                    payloads=self._payloads,
-                    max_output_bytes=limits.max_output_bytes,
-                    inline_output_bytes=min(65536, limits.max_output_bytes),
-                    client_tool_surface=[
-                        tool.model_dump(mode="json") for tool in state.envelope.effective_agent_config.client_tools
-                    ],
-                ),
+                adapter=outcome_adapter,
                 committer=self._committer,
                 capacity_slot=slot,
             )

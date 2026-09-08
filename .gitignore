@@ -3,6 +3,9 @@ discussion/
 local-reference/
 tmp/
 
+# Local runtime storage and caches
+/var/
+
 # Python bytecode and native extensions
 __pycache__/
 *.py[cod]
@@ -18,6 +21,7 @@ wheels/
 
 # Python environments
 .env
+/dev/live_tests/.state/
 .env.*
 !.env.example
 !.env.harness.example

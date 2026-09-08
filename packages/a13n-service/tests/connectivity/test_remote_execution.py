@@ -1,6 +1,7 @@
 """Exercise the real upstream client, capability and transport hooks together."""
 
 import json
+from unittest.mock import AsyncMock, Mock
 
 import httpx2
 import pytest
@@ -10,7 +11,7 @@ from a13n_service.connectivity.execution import AttemptToolScope
 from a13n_service.connectivity.mcp.models import MCPConnectionRecord
 from a13n_service.connectivity.mcp.transport import RemoteTransport
 from a13n_service.connectivity.selection_domain import MCPConnectionToolSelection
-from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
+from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError, FrozenRunConnectivity
 from a13n_service.endpoint_policy import EndpointPolicy
 from a13n_service.storage import transaction
 from pydantic_ai import Agent
@@ -50,6 +51,33 @@ async def remote_runtime(connectivity_sessions, credential_protector, external_r
     policy = EndpointPolicy()
     transport = RemoteTransport(policy, transport=httpx2.MockTransport(server))
     return external_runtime_factory(ConnectorProviderRegistry(()), transport, policy), server
+
+
+@pytest.mark.parametrize("child", [False, True])
+async def test_recovery_admission_checks_current_connections_without_opening_clients(
+    remote_runtime, connectivity_sessions, monkeypatch, child
+):
+    runtime, server = remote_runtime
+    selection = MCPConnectionToolSelection(mcp_connection_id=MCP_CONNECTION_ID, tools=("search",))
+    selected = FrozenRunConnectivity((), (selection,))
+    scope = AttemptToolScope(actor(), ORG_ID, WORKSPACE_ID, FrozenRunConnectivity((), ()) if child else selected, ())
+    read_scope = AsyncMock(return_value=scope)
+    monkeypatch.setattr(runtime, "_scope_in_session", read_scope)
+    open_clients = Mock(side_effect=AssertionError("Recovery validation must not open tool clients"))
+    monkeypatch.setattr(runtime, "_capabilities", open_clients)
+    context = Mock()
+    arguments = {"child_agent_id": "agt_child", "selections": selected} if child else {}
+
+    await runtime.validate(lambda: context, **arguments)
+    assert read_scope.await_args.args[1] is context
+    assert read_scope.await_args.kwargs["child_agent_id"] == ("agt_child" if child else None)
+    async with transaction(connectivity_sessions) as session:
+        source = await session.get(MCPConnectionRecord, MCP_CONNECTION_ID)
+        source.status = "disabled"
+    with pytest.raises(ConnectivitySelectionError, match="mcp_connection_unavailable"):
+        await runtime.validate(lambda: context, **arguments)
+    open_clients.assert_not_called()
+    assert server.calls == []
 
 
 async def test_selected_remote_tool_uses_call_guard_and_revocation_stops_dispatch(remote_runtime):
