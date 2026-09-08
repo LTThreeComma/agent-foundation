@@ -185,7 +185,7 @@ Build difference is neither authority nor compatibility proof. Every claimant st
 
 Before attempting the claim transaction, the execution loop reserves one slot from its bounded local `RunAttemptExecutor` capacity. It releases the slot when the claim loses or no Attempt is created. When the claim succeeds, ownership of that slot transfers to the new executor until its complete cleanup finishes. A loop with no slot does not claim and later queue the Attempt in process memory; the Run remains available to other compatible claimants. The slot is admission control only and never grants or extends RunAttempt authority.
 
-There is no separate scheduler claim, recovery controller, or Redis ownership handoff. A `WorkerExecutionLoop` establishes or replaces the current selection in one short transaction that:
+There is no separate scheduler claim, recovery controller, or Redis execution-ownership handoff. A `WorkerExecutionLoop` establishes or replaces the current selection in one short transaction that:
 
 1. locks or conditionally updates the candidate Run and, when present, its exact selected attempt;
 2. revalidates the candidate shape, Thread current selection, Run status, `available_at`, lease expiry, fixed execution deadline, applicable execution or handoff count, aggregate known usage, and any reason-specific build-preference eligibility;
@@ -433,7 +433,7 @@ The Agent decides its next action through ordinary model output. A re-driven or 
 
 [RunAttempt Executor Lifetime](14-harness-runtime-integration.md#runattempt-executor-lifetime) owns `AttemptContext`, task and object structure, reconstruction, stream ownership, cancellation, and cleanup. [Active Execution](19-agent-control-active-execution.md) owns watcher reconciliation and signal acknowledgement; [Environment Management](29-environment-management.md#run-binding-and-recovery) owns Environment reconstruction and lifecycle. This contract defines no second integration profile.
 
-Attempt authority requires that only the current leased and fenced Attempt enter and publish, exactly one executor own it in the claiming process, and at most one `harness_run_id` be bound before its first live observation. No database session or lock spans reconstruction, provider calls, Harness work, streaming, waits, or cleanup. The reserved capacity remains with the executor until its structured cleanup finishes. Replacement creates fresh process-local values under the integration contract; no prior Worker's live execution is restored. Active-control hooks follow their owning FIFO and waiting-delivery contract, and Redis remains only a wakeup optimization.
+Attempt authority requires that only the current leased and fenced Attempt enter execution, exactly one executor own it in the claiming process, and at most one `harness_run_id` be bound before its first Harness observation. Presentation publication follows [Run Stream fencing](24-lifecycle-and-stream-persistence.md#publication-activation-and-fencing). No database session or lock spans reconstruction, provider calls, Harness work, streaming, waits, or cleanup. The reserved capacity remains with the executor until its structured cleanup finishes. Replacement creates fresh process-local values under the integration contract; no prior Worker's live execution is restored. Active-control hooks follow their owning FIFO and waiting-delivery contract, where Redis is only a wakeup optimization.
 
 ## Retry Semantics
 
