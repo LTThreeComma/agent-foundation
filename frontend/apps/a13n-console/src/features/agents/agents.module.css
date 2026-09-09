@@ -1,0 +1,151 @@
+.version {
+  font-size: 11px;
+  color: var(--a13n-secondary);
+  font-family: var(--a13n-mono);
+}
+.editor {
+  display: grid;
+  gap: 28px;
+  max-width: 1040px;
+}
+.main {
+  min-width: 0;
+  display: grid;
+  gap: 28px;
+  align-content: start;
+  max-width: 840px;
+}
+.saveBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 0 20px;
+  border-bottom: 1px solid var(--a13n-border-soft);
+}
+.historyActions > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section {
+  display: grid;
+  gap: 14px;
+}
+.section h2,
+.capability h2 {
+  font-size: 13px;
+  font-weight: 550;
+  margin: 0;
+}
+.section > p,
+.capability p {
+  font-size: 12px;
+  color: var(--a13n-secondary);
+  margin: 0;
+  line-height: 1.65;
+}
+
+.section textarea {
+  padding: 18px;
+  border-color: var(--a13n-border-soft);
+  font-size: 14px;
+  line-height: 1.8;
+  border-radius: 9px;
+}
+.section:has(textarea) {
+  gap: 10px;
+}
+.section:has(textarea) > div {
+  margin-top: 6px;
+}
+.advanced {
+  border-top: 1px solid var(--a13n-border-soft);
+  font-size: 12px;
+}
+.advanced summary {
+  cursor: pointer;
+  padding: 18px 0;
+  color: var(--a13n-secondary);
+}
+.advanced > div {
+  display: grid;
+  gap: 20px;
+  padding-bottom: 20px;
+}
+.capability {
+  border-top: 1px solid var(--a13n-border-soft);
+  padding-top: 22px;
+}
+.capability header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.capability p {
+  margin-top: 4px;
+}
+.capabilityItems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+.capabilityItems > span {
+  border: 1px solid var(--a13n-border-soft);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.capabilityItems > small {
+  color: var(--a13n-muted);
+  font-size: 11px;
+}
+.selections {
+  display: grid;
+  gap: 18px;
+}
+.selections > div {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--a13n-border-soft);
+}
+.savePanel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.saveStatus {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--a13n-secondary);
+}
+.savePanel p {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 11px;
+}
+.savePanel p strong {
+  color: var(--a13n-text);
+  font-weight: 500;
+}
+@media (max-width: 760px) {
+  .saveBar {
+    gap: 12px;
+    padding-bottom: 16px;
+  }
+  .savePanel {
+    gap: 10px;
+  }
+  .savePanel p {
+    display: none;
+  }
+}
