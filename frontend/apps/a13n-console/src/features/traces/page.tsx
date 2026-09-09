@@ -1,27 +1,35 @@
+import {
+  Button,
+  ChoiceField,
+  DisclosureSection,
+  FormField,
+  Input,
+} from "a13n-ui";
+import { formatLocalDateTime } from "../../shared/local-date-time";
+
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { useQuery } from "@tanstack/react-query";
-import { Button, Input, SelectField } from "a13n-ui";
-import { useTranslation } from "react-i18next";
+import { DateTimeField } from "../../shared/date-time-field";
+
 import { ApiError } from "@converge.ai/a13n";
+import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { data, type Schema } from "../../shared/api";
+import { Pagination, ResourceTable, useCursor } from "../../shared/collection";
 import {
-  Page,
-  ErrorNotice,
   Empty,
+  ErrorNotice,
   Loading,
+  Page,
   StateBadge,
   Timestamp,
 } from "../../shared/feedback";
-import { Table, Pagination, useCursor } from "../../shared/collection";
-import styles from "../../shared/shared.module.css";
+import traceStyles from "./traces.module.css";
 function localTime(date: Date) {
   if (!Number.isFinite(date.getTime())) date = new Date();
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
+  return formatLocalDateTime(date);
 }
 export function TracesPage() {
   const { t } = useTranslation(),
@@ -56,7 +64,7 @@ export function TracesPage() {
       )}
     >
       <form
-        className={styles.filters}
+        className={traceStyles.filterForm}
         onSubmit={(event) => {
           event.preventDefault();
           const start = new Date(from),
@@ -85,62 +93,79 @@ export function TracesPage() {
           });
         }}
       >
-        <Input
-          label={t("From")}
-          type="datetime-local"
-          value={from}
-          onChange={(event) => setFrom(event.target.value)}
-          required
-        />
-        <Input
-          label={t("To")}
-          type="datetime-local"
-          value={to}
-          onChange={(event) => setTo(event.target.value)}
-          required
-        />
-        <Input
-          label={t("Search content")}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          maxLength={512}
-        />
-        <SelectField
-          label={t("Search in")}
-          placeholder={t("Select content")}
-          value={searchIn}
-          onValueChange={(value) => {
-            if (
-              value === "input" ||
-              value === "output" ||
-              value === "input_output"
-            )
-              setSearchIn(value);
-          }}
-          options={[
-            { value: "input_output", label: t("Input and output") },
-            { value: "input", label: t("Input") },
-            { value: "output", label: t("Output") },
-          ]}
-        />
-        <Input
-          label={t("Thread ID")}
-          value={thread}
-          onChange={(event) => setThread(event.target.value)}
-        />
-        <Input
-          label={t("Run ID")}
-          value={run}
-          onChange={(event) => setRun(event.target.value)}
-        />
-        <Input
-          label={t("Attempt ID")}
-          value={attempt}
-          onChange={(event) => setAttempt(event.target.value)}
-        />
-        <Button type="submit" variant="primary">
-          {t("Apply filters")}
-        </Button>
+        <div className={traceStyles.primaryFilters}>
+          <DateTimeField
+            label={t("From")}
+            value={from}
+            onValueChange={setFrom}
+            clearable={false}
+          />
+          <DateTimeField
+            label={t("To")}
+            value={to}
+            onValueChange={setTo}
+            clearable={false}
+          />
+          <FormField className="min-w-0 w-full" label={t("Search content")}>
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              maxLength={512}
+            />
+          </FormField>
+          <Button type="submit" variant="outline">
+            {t("Apply filters")}
+          </Button>
+        </div>
+        <DisclosureSection
+          className={traceStyles.moreFilters}
+          defaultOpen={Boolean(
+            searchParams.get("thread_id") ||
+            searchParams.get("run_id") ||
+            searchParams.get("run_attempt_id"),
+          )}
+          title={<>{t("More filters")}</>}
+        >
+          <div className={traceStyles.advancedFilters}>
+            <ChoiceField
+              placeholder={t("Select content")}
+              value={searchIn}
+              className="min-w-0"
+              onValueChange={(value) => {
+                if (
+                  value === "input" ||
+                  value === "output" ||
+                  value === "input_output"
+                )
+                  setSearchIn(value);
+              }}
+              label={t("Search in")}
+              options={[
+                { value: "input_output", label: t("Input and output") },
+                { value: "input", label: t("Input") },
+                { value: "output", label: t("Output") },
+              ]}
+            />
+            <FormField className="min-w-0 w-full" label={t("Thread ID")}>
+              <Input
+                value={thread}
+                onChange={(event) => setThread(event.target.value)}
+              />
+            </FormField>
+            <FormField className="min-w-0 w-full" label={t("Run ID")}>
+              <Input
+                value={run}
+                onChange={(event) => setRun(event.target.value)}
+              />
+            </FormField>
+            <FormField className="min-w-0 w-full" label={t("Attempt ID")}>
+              <Input
+                value={attempt}
+                onChange={(event) => setAttempt(event.target.value)}
+              />
+            </FormField>
+          </div>
+        </DisclosureSection>
       </form>
       <ErrorNotice error={error} />
       <TraceList filters={filters} page={page} />
@@ -195,7 +220,13 @@ export function TraceList({
           "The trace backend is not configured or is temporarily unavailable. Run execution is independent of trace query.",
         )}
         action={
-          <Button onClick={() => void query.refetch()}>{t("Try again")}</Button>
+          <Button
+            variant="outline"
+            onClick={() => void query.refetch()}
+            type="button"
+          >
+            {t("Try again")}
+          </Button>
         }
       />
     );
@@ -205,7 +236,7 @@ export function TraceList({
     );
   return query.data?.items.length ? (
     <>
-      <Table
+      <ResourceTable
         items={query.data.items}
         columns={[
           {

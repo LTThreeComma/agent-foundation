@@ -1,35 +1,36 @@
-import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router";
 import { useClient } from "../../auth/context";
 import { useAccess } from "../../layout/workspace";
 import { representation } from "../../shared/api";
+import { ResourceTable } from "../../shared/collection";
+import { CopyableId } from "../../shared/copy";
 import { Timestamp } from "../../shared/feedback";
 import { Confirm } from "../../shared/form";
-import { Table } from "../../shared/collection";
-import { CreateWorkspace } from "./create-workspace";
+import { PageActions } from "../../shared/page-actions";
 import styles from "../../shared/shared.module.css";
+import { CreateWorkspace } from "./create-workspace";
 export function Workspaces() {
   const { organization, workspaces } = useAccess(),
     client = useClient(),
     { t } = useTranslation();
   return (
     <div className={styles.stack}>
-      <div className={styles.toolbar}>
-        <p className={styles.muted}>
-          {t("Separate agents, resources, and access into workspaces.")}
-        </p>
+      <PageActions>
         <CreateWorkspace organizationId={organization.id} />
-      </div>
-      <Table
+      </PageActions>
+      <ResourceTable
         items={workspaces}
         columns={[
           {
             label: t("Name"),
             render: (item) => (
-              <Link to={`/workspaces/${item.id}/settings`}>
-                {item.name}
-                <small>{item.id}</small>
-              </Link>
+              <>
+                <Link to={`/workspaces/${item.id}/settings`}>{item.name}</Link>
+                <small>
+                  <CopyableId value={item.id} />
+                </small>
+              </>
             ),
           },
           {
@@ -38,6 +39,7 @@ export function Workspaces() {
           },
           {
             label: t("Actions"),
+            align: "right",
             render: (item) => (
               <Confirm
                 title={t("Delete workspace")}

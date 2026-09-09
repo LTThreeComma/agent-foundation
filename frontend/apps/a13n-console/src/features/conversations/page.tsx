@@ -1,29 +1,32 @@
+import { Button, ChoiceField } from "a13n-ui";
+
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
   Link,
   Navigate,
-  useLocation,
   Outlet,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
 } from "react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Select } from "a13n-ui";
-import { MessageSquare, Plus, ArrowLeft } from "lucide-react";
+
+import { ArrowLeft, MessageSquare, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { allPages, commandHeaders, data, type Schema } from "../../shared/api";
-import { Empty, ErrorNotice, Loading, Timestamp } from "../../shared/feedback";
 import { Pagination, useCursor } from "../../shared/collection";
+import { Empty, ErrorNotice, Loading, Timestamp } from "../../shared/feedback";
+import { useIdempotency } from "../../shared/idempotency";
 import { conversationQueries, invalidateConversation, runPath } from "./api";
 import { Composer } from "./composer";
+import styles from "./conversations.module.css";
+import { SessionIdentity } from "./identity";
+import { useConversationNotifications } from "./notifications";
 import { OptionsComposer, RunOptions, useRunOptions } from "./options";
 import { ThreadQueue } from "./queue";
-import { useIdempotency } from "../../shared/idempotency";
-import { useConversationNotifications } from "./notifications";
-import styles from "./conversations.module.css";
 
 export function ConversationsPage() {
   const { t } = useTranslation(),
@@ -53,11 +56,13 @@ export function ConversationsPage() {
           {can("agent.invoke") && (
             <Button
               variant="ghost"
-              size="sm"
               aria-label={t("New session")}
-              icon={<Plus size={16} />}
               onClick={() => navigate("new")}
-            />
+              size="icon-sm"
+              type="button"
+            >
+              {<Plus size={16} />}
+            </Button>
           )}
         </header>
         <ErrorNotice
@@ -110,20 +115,19 @@ function SessionLink({
       to={session.id}
       className={styles.sessionLink}
       aria-current={selected ? "page" : undefined}
-      title={session.id}
+      title={preview?.input_text || t("Untitled session")}
     >
       <div>
-        <MessageSquare size={14} />
         <strong>{preview?.input_text || t("Untitled session")}</strong>
+        <small>
+          <Timestamp value={session.updated_at} relative />
+        </small>
       </div>
       <p>
         {preview?.output_text
           ? preview.output_text.replace(/[`#*_>]/g, "").replace(/\s+/g, " ")
           : t("Open session")}
       </p>
-      <small>
-        <Timestamp value={session.updated_at} />
-      </small>
     </Link>
   );
 }
@@ -164,11 +168,12 @@ export function NewConversation() {
           </p>
         </div>
         <ErrorNotice error={agents.error} />
-        <Select
-          label={t("Agent")}
+        <ChoiceField
           placeholder={t("Choose an agent")}
           value={agentId}
           onValueChange={setAgentId}
+          label={t("Agent")}
+          hideLabel
           options={(agents.data ?? [])
             .filter((agent) => agent.enabled)
             .map((agent) => ({ value: agent.id, label: agent.name }))}
@@ -224,35 +229,37 @@ export function SessionLayout() {
   return (
     <div className={styles.sessionDetail}>
       <header className={styles.sessionHeader}>
-        <Link
-          className={styles.backToSessions}
-          to={`/workspaces/${workspace.id}/sessions`}
-        >
-          {t("Sessions")}
-        </Link>
-        <Select
-          size="sm"
-          variant="ghost"
-          label={t("Threads")}
-          placeholder={t("Thread")}
-          value={threadId ?? ""}
-          onValueChange={(id) => navigate(`threads/${id}`)}
-          options={(threads.data ?? []).map((thread, index) => ({
-            value: thread.id,
-            label: `${t(thread.origin_kind === "fork" ? "Branch" : "Thread")} ${index + 1}`,
-          }))}
-        />
-        {threadId && <RunHistory />}
-        {can("agent.invoke") && (
+        <SessionIdentity />
+        <div className={styles.sessionControls}>
           <Link
-            className={styles.newThread}
-            aria-label={t("New thread")}
-            to={`/workspaces/${workspace.id}/sessions/new?session=${sessionId}`}
+            className={styles.backToSessions}
+            to={`/workspaces/${workspace.id}/sessions`}
           >
-            <Plus size={14} />
-            <span>{t("New thread")}</span>
+            {t("Sessions")}
           </Link>
-        )}
+          <ChoiceField
+            placeholder={t("Thread")}
+            value={threadId ?? ""}
+            onValueChange={(id) => navigate(`threads/${id}`)}
+            label={t("Threads")}
+            hideLabel
+            options={(threads.data ?? []).map((thread, index) => ({
+              value: thread.id,
+              label: `${t(thread.origin_kind === "fork" ? "Branch" : "Thread")} ${index + 1}`,
+            }))}
+          />
+          {threadId && <RunHistory />}
+          {can("agent.invoke") && (
+            <Link
+              className={styles.newThread}
+              aria-label={t("New thread")}
+              to={`/workspaces/${workspace.id}/sessions/new?session=${sessionId}`}
+            >
+              <Plus size={14} />
+              <span>{t("New thread")}</span>
+            </Link>
+          )}
+        </div>
       </header>
       <ErrorNotice error={threads.error} retry={() => void threads.refetch()} />
       {threadId ? (
@@ -300,55 +307,47 @@ export function ThreadLayout() {
       />
       {thread.isPending ? (
         <Loading />
+      ) : runId ? (
+        <Outlet />
+      ) : selected ? (
+        <Navigate to={`runs/${selected}`} replace />
       ) : (
-        <>
-          {runId ? (
-            <Outlet />
-          ) : selected ? (
-            <Navigate to={`runs/${selected}`} replace />
-          ) : (
-            thread.data && (
-              <>
-                <Empty
-                  title={t("No runs yet")}
-                  description={t("This thread has not started a run.")}
-                />
-                {can("run.continue") && (
-                  <OptionsComposer
-                    label={t("Start run")}
-                    submit={async (intent, key) => {
-                      if (!intent.agent_id)
-                        throw new Error(t("Choose an agent in Run options."));
-                      const receipt = data(
-                        await client.http.POST(
-                          "/api/v1/threads/{thread_id}/runs",
-                          {
-                            params: {
-                              path: { thread_id: threadId },
-                              header: commandHeaders(workspace.id, key),
-                            },
-                            body: {
-                              ...intent,
-                              expected_thread_version: thread.data!.version,
-                            },
-                          },
-                        ),
-                      );
-                      void invalidateConversation(cache, workspace.id, {
-                        sessionId,
-                        threadId,
-                        runId: receipt.run?.run_id,
-                      });
-                      if (receipt.run)
-                        navigate(runPath(workspace.id, receipt.run));
-                    }}
-                  />
-                )}
-                <ThreadQueue thread={thread.data} canConsume />
-              </>
-            )
-          )}
-        </>
+        thread.data && (
+          <>
+            <Empty
+              title={t("No runs yet")}
+              description={t("This thread has not started a run.")}
+            />
+            {can("run.continue") && (
+              <OptionsComposer
+                label={t("Start run")}
+                submit={async (intent, key) => {
+                  if (!intent.agent_id)
+                    throw new Error(t("Choose an agent in Run options."));
+                  const receipt = data(
+                    await client.http.POST("/api/v1/threads/{thread_id}/runs", {
+                      params: {
+                        path: { thread_id: threadId },
+                        header: commandHeaders(workspace.id, key),
+                      },
+                      body: {
+                        ...intent,
+                        expected_thread_version: thread.data!.version,
+                      },
+                    }),
+                  );
+                  void invalidateConversation(cache, workspace.id, {
+                    sessionId,
+                    threadId,
+                    runId: receipt.run?.run_id,
+                  });
+                  if (receipt.run) navigate(runPath(workspace.id, receipt.run));
+                }}
+              />
+            )}
+            <ThreadQueue thread={thread.data} canConsume />
+          </>
+        )
       )}
     </>
   );
@@ -368,18 +367,15 @@ function RunHistory() {
       <Button
         size="sm"
         variant="ghost"
-        title={t("Run history could not be loaded.")}
         onClick={() => void runs.refetch()}
+        type="button"
       >
         {t("Retry history")}
       </Button>
     );
   return (
-    <Select
-      label={t("Run history")}
+    <ChoiceField
       placeholder={t("Run history")}
-      size="sm"
-      variant="ghost"
       value={runId}
       onValueChange={(id) =>
         navigate(
@@ -390,6 +386,8 @@ function RunHistory() {
           }),
         )
       }
+      label={t("Run history")}
+      hideLabel
       options={(runs.data ?? []).map((run, index) => ({
         value: run.id,
         label: `${t("Run")} ${runs.data!.length - index} · ${t(`state.${run.status}`, { defaultValue: run.status })}`,

@@ -1,15 +1,28 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Button, DisclosureSection, FormField, Input } from "a13n-ui";
+
+import { SearchPicker } from "a13n-ui";
+
 import { ApiError } from "@converge.ai/a13n";
-import { Input, Picker, Button } from "a13n-ui";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Link } from "react-router";
+
+import {
+  ArrowLeft,
+  Check,
+  Circle,
+  Layers,
+  Maximize2,
+  Minimize2,
+  Sparkles,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { jsonObject } from "../../shared/validation";
 import { ErrorNotice } from "../../shared/feedback";
-import { TextArea } from "../../shared/form";
-import { advancedConfig, buildConfig, type AgentConfig } from "./configuration";
+import { TextAreaField } from "../../shared/form";
+import { jsonObject } from "../../shared/validation";
 import styles from "./agents.module.css";
-import { useAgentChoices } from "./choices";
 import { AgentCapabilities } from "./capabilities";
-import { Check, Circle } from "lucide-react";
+import { useAgentChoices } from "./choices";
+import { advancedConfig, buildConfig, type AgentConfig } from "./configuration";
 
 export function AgentForm({
   initial: providedInitial,
@@ -23,6 +36,9 @@ export function AgentForm({
   reload,
   readonly = false,
   context,
+  primaryAction,
+  metadata,
+  back,
 }: {
   initial: AgentConfig;
   version?: number;
@@ -40,6 +56,9 @@ export function AgentForm({
   reload?: () => void;
   readonly?: boolean;
   context?: ReactNode;
+  primaryAction?: ReactNode;
+  metadata?: ReactNode;
+  back: string;
 }) {
   const [initial] = useState(providedInitial),
     [originalVersion] = useState(version);
@@ -53,6 +72,7 @@ export function AgentForm({
     ),
     [advanced, setAdvanced] = useState(advancedConfig(initial)),
     [expanded, setExpanded] = useState(false),
+    [instructionsExpanded, setInstructionsExpanded] = useState(false),
     [validation, setValidation] = useState<Error>();
   const [skills, setSkills] = useState(initial.skills ?? []),
     [mcp, setMcp] = useState(initial.mcp_tools ?? []),
@@ -103,144 +123,207 @@ export function AgentForm({
     JSON.stringify(connectors) !==
       JSON.stringify(initial.connector_tools ?? []);
   return (
-    <form onSubmit={save} className={styles.editor}>
-      <div className={styles.saveBar}>
-        <div className={styles.savePanel}>
-          <span className={styles.saveStatus} role="status">
-            {dirty ? <Circle size={12} /> : <Check size={14} />}{" "}
-            {t(dirty ? "Unsaved changes" : "All changes saved")}
-          </span>
-          {version !== undefined && (
+    <div className={styles.editorPage}>
+      <Link className={styles.back} to={back}>
+        <ArrowLeft size={14} />
+        {t("Agents")}
+      </Link>
+      <form onSubmit={save} className={styles.editor}>
+        <header className={styles.identity}>
+          <div className={styles.identityHeading}>
+            <span className={styles.agentIcon}>
+              <Sparkles size={18} strokeWidth={1.5} />
+            </span>
+            <h1>{creating ? t("Create agent") : initialName}</h1>
+          </div>
+          {(creating || initialDescription) && (
             <p>
-              {t("Current version")} <strong>v{version}</strong>
+              {creating
+                ? t("Start with clear instructions and the right model.")
+                : initialDescription}
             </p>
           )}
-          {!readonly && (
-            <Button
-              type="submit"
-              variant="primary"
-              loading={pending}
-              disabled={
-                pending || !dirty || !model || (creating && !name.trim())
-              }
-            >
-              {t(creating ? "Create agent" : "Save changes")}
-            </Button>
-          )}
-          {reload && dirty && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={pending}
-              onClick={reload}
-            >
-              {t("Discard changes")}
-            </Button>
-          )}
-        </div>
-        <div className={styles.historyActions}>{context}</div>
-      </div>
-      <fieldset disabled={pending || readonly} className="fieldset-reset">
-        <div className={styles.main}>
-          {creating && (
-            <section className={styles.section}>
-              <Input
-                label={t("Agent name")}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                required
-                maxLength={128}
-              />
-              <Input
-                label={t("Description")}
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                maxLength={4096}
+        </header>
+        <fieldset disabled={pending || readonly} className="fieldset-reset">
+          <div className={styles.main}>
+            {creating && (
+              <section className={styles.section}>
+                <FormField className="min-w-0 w-full" label={t("Agent name")}>
+                  <Input
+                    required={true}
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    maxLength={128}
+                  />
+                </FormField>
+                <FormField className="min-w-0 w-full" label={t("Description")}>
+                  <Input
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    maxLength={4096}
+                  />
+                </FormField>
+              </section>
+            )}
+            <section className={styles.modelProperty}>
+              <h2>{t("Model")}</h2>
+              <SearchPicker
+                label={t("Model")}
+                placeholder={t("Choose a model…")}
+                emptyMessage={t(
+                  "No models available. Configure a provider and model first.",
+                )}
+                value={model}
+                groups={[
+                  {
+                    label: t("Available models"),
+                    options:
+                      choices.data?.models.map((item) => ({
+                        value: item.key,
+                        label: item.name,
+                        icon: <Layers size={14} />,
+                        description: [
+                          ...new Set([item.key, item.upstream_model]),
+                        ]
+                          .filter((value) => value !== item.name)
+                          .join(" · "),
+                      })) ?? [],
+                  },
+                ]}
+                onValueChange={setModel}
               />
             </section>
-          )}
-          <section className={styles.section}>
-            <h2>{t("Model")}</h2>
-            <Picker
-              label={t("Model")}
-              placeholder={t("Choose a model…")}
-              emptyMessage={t(
-                "No models available. Configure a provider and model first.",
-              )}
-              value={model}
-              onValueChange={setModel}
-              groups={[
-                {
-                  label: t("Available models"),
-                  options:
-                    choices.data?.models.map((item) => ({
-                      value: item.key,
-                      label: item.name,
-                      description: `${item.key} · ${item.upstream_model}`,
-                    })) ?? [],
-                },
-              ]}
-            />
-          </section>
-          <section className={styles.section}>
-            <h2>{t("Instructions")}</h2>
-            <p>
-              {t(
-                "Define the agent's role, approach, and the outcomes you expect.",
-              )}
-            </p>
-            <TextArea
-              label={t("System instructions")}
-              hideLabel
-              value={instructions}
-              onChange={setInstructions}
-              rows={14}
-            />
-          </section>
-          <AgentCapabilities
-            choices={choices}
-            skills={skills}
-            setSkills={setSkills}
-            mcp={mcp}
-            setMcp={setMcp}
-            connectors={connectors}
-            setConnectors={setConnectors}
-          />
-          <details
-            className={styles.advanced}
-            open={expanded}
-            onToggle={(event) => setExpanded(event.currentTarget.open)}
-          >
-            <summary>{t("Advanced configuration")}</summary>
-            <div>
-              <TextArea
-                label={t("Model settings")}
-                hint={t(
-                  "Settings override the selected model's defaults. Use a JSON object.",
-                )}
-                code
-                value={settings}
-                onChange={setSettings}
-                rows={4}
+            <section className={styles.instructions}>
+              <header>
+                <h2>{t("Instructions")}</h2>
+                <div>
+                  <span>Markdown</span>
+                  <Button
+                    variant="ghost"
+                    aria-label={t(
+                      instructionsExpanded
+                        ? "Collapse instructions"
+                        : "Expand instructions",
+                    )}
+                    onClick={() =>
+                      setInstructionsExpanded(!instructionsExpanded)
+                    }
+                    size="icon-sm"
+                    type="button"
+                  >
+                    {instructionsExpanded ? (
+                      <Minimize2 size={14} />
+                    ) : (
+                      <Maximize2 size={14} />
+                    )}
+                  </Button>
+                </div>
+              </header>
+              <TextAreaField
+                label={t("System instructions")}
+                hideLabel
+                value={instructions}
+                onChange={setInstructions}
+                rows={instructionsExpanded ? 24 : 9}
               />
-              <TextArea
-                label={t("Configuration JSON")}
-                hint={t(
-                  "Input adapter, protocol, structured output, retries, subagents, and client tools.",
-                )}
-                code
-                value={advanced}
-                onChange={setAdvanced}
-                rows={18}
-              />
-              <ErrorNotice error={validation} />
-            </div>
-          </details>
-        </div>
-      </fieldset>
+              <footer>
+                <span>
+                  {t("The role, boundaries, and approach for this agent.")}
+                </span>
+                <span>
+                  {t("{{count}} characters", { count: instructions.length })}
+                </span>
+              </footer>
+            </section>
+            <AgentCapabilities
+              choices={choices}
+              skills={skills}
+              setSkills={setSkills}
+              mcp={mcp}
+              setMcp={setMcp}
+              connectors={connectors}
+              setConnectors={setConnectors}
+            />
+            <DisclosureSection
+              className={styles.advanced}
+              open={expanded}
+              onOpenChange={(isExpanded) =>
+                ((event) => setExpanded(event.currentTarget.open))({
+                  currentTarget: { open: isExpanded },
+                })
+              }
+              title={<>{t("Advanced configuration")}</>}
+            >
+              <div>
+                <TextAreaField
+                  label={t("Model settings")}
+                  hint={t(
+                    "Settings override the selected model's defaults. Use a JSON object.",
+                  )}
+                  code
+                  value={settings}
+                  onChange={setSettings}
+                  rows={4}
+                />
+                <TextAreaField
+                  label={t("Configuration JSON")}
+                  hint={t(
+                    "Input adapter, protocol, structured output, retries, subagents, and client tools.",
+                  )}
+                  code
+                  value={advanced}
+                  onChange={setAdvanced}
+                  rows={18}
+                />
+                <ErrorNotice error={validation} />
+              </div>
+            </DisclosureSection>
+          </div>
+        </fieldset>
 
-      <ErrorNotice error={error ?? choices.error} retry={reload} />
-    </form>
+        <aside className={styles.saveBar} aria-label={t("Agent actions")}>
+          {primaryAction}
+          <div className={styles.savePanel}>
+            <span className={styles.saveStatus} role="status">
+              {dirty ? <Circle size={12} /> : <Check size={14} />}{" "}
+              {t(dirty ? "Unsaved changes" : "All changes saved")}
+            </span>
+            {version !== undefined && (
+              <p>
+                {t("Current version")} <strong>v{version}</strong>
+              </p>
+            )}
+            {!readonly && (
+              <Button
+                type="submit"
+                variant="default"
+                disabled={
+                  pending || !dirty || !model || (creating && !name.trim())
+                }
+                loading={pending}
+              >
+                {t(creating ? "Create agent" : "Save changes")}
+              </Button>
+            )}
+            {reload && dirty && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={pending}
+                onClick={reload}
+              >
+                {t("Discard changes")}
+              </Button>
+            )}
+          </div>
+          {metadata}
+          <div className={styles.historyActions}>{context}</div>
+        </aside>
+        <div className={styles.editorError}>
+          <ErrorNotice error={error ?? choices.error} retry={reload} />
+        </div>
+      </form>
+    </div>
   );
 }

@@ -1,5 +1,8 @@
+import { ChoiceField, cn, ToggleGroup, ToggleGroupItem } from "a13n-ui";
+
+import { SettingsRow, SettingsSection } from "a13n-ui";
 import { Laptop, Moon, Sun } from "lucide-react";
-import { Select, SettingsRow, SettingsSection } from "a13n-ui";
+
 import { useTranslation } from "react-i18next";
 import { useAppearance } from "../../layout/appearance";
 import styles from "./settings.module.css";
@@ -9,28 +12,34 @@ export function Preferences() {
     { theme, setTheme } = useAppearance();
   return (
     <div className={styles.preferences}>
-      <SettingsSection
-        variant="plain"
-        title={t("Appearance")}
-        description={t("Make Console feel at home.")}
-      >
-        <div
-          className={styles.themeOptions}
-          role="group"
+      <SettingsSection title={t("Appearance")}>
+        <ToggleGroup
+          className={cn(styles.themeOptions, "w-full")}
+          value={[theme]}
+          variant="default"
+          onValueChange={(values) => {
+            const next = values[0];
+            if (next === "light" || next === "dark" || next === "system")
+              setTheme(next);
+          }}
           aria-label={t("Color theme")}
         >
           {(["light", "dark", "system"] as const).map((value) => {
             const Icon =
               value === "light" ? Sun : value === "dark" ? Moon : Laptop;
             return (
-              <button
+              <ToggleGroupItem
                 type="button"
                 key={value}
-                aria-pressed={theme === value}
-                onClick={() => setTheme(value)}
-                className={styles.themeChoice}
+                value={value}
+                className="h-auto min-w-0 flex-col gap-0 whitespace-normal p-1.5 sm:h-auto"
+                variant="default"
               >
-                <span className={styles.themePreview} data-preview={value}>
+                <span
+                  className={`${styles.themePreview} w-full shrink-0`}
+                  data-preview={value}
+                  aria-hidden="true"
+                >
                   <span />
                   <span>
                     <i />
@@ -38,8 +47,8 @@ export function Preferences() {
                     <i />
                   </span>
                 </span>
-                <span>
-                  <Icon size={14} />
+                <span className="flex items-center justify-center gap-2 pt-2 pb-1 text-xs">
+                  <Icon className="size-3.5" />
                   {t(
                     value === "light"
                       ? "Light"
@@ -48,21 +57,22 @@ export function Preferences() {
                         : "System",
                   )}
                 </span>
-              </button>
+              </ToggleGroupItem>
             );
           })}
-        </div>
+        </ToggleGroup>
       </SettingsSection>
-      <SettingsSection variant="plain" title={t("Language and region")}>
+      <SettingsSection title={t("Language and region")}>
         <SettingsRow
           label={t("Display language")}
           description={t("Used for navigation, dates, and controls.")}
         >
-          <Select
-            label={t("Display language")}
+          <ChoiceField
             placeholder={t("Language")}
             value={i18n.resolvedLanguage ?? "en"}
             onValueChange={(value) => void i18n.changeLanguage(value)}
+            label={t("Display language")}
+            hideLabel
             options={[
               { value: "en", label: "English" },
               { value: "zh-CN", label: "简体中文" },
