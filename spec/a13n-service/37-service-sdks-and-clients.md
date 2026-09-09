@@ -87,6 +87,8 @@ The `a13n-service-cli` executable is the remote command-line client. Every netwo
 
 A CLI command exists only when its service operation and Rust SDK method are real. The CLI can offer interactive terminal presentation, follow a Run stream, or watch notifications, but Service defines no separate remote terminal product or remote Session model.
 
+[Agent Application Portability](41-agent-application-portability.md) owns the complete application authoring workflow: graph and Skill export, target bindings, change planning, dependency publication, and interrupted-publication reconciliation. The CLI composes this workflow through the Rust SDK while Service resource domains retain validation, authorization, concurrency, and Revision authority.
+
 ## Standard Protocol Clients
 
 Hosted AG-UI and A2A remain independently interoperable standards. a13n SDKs can add convenience factories or typed references for their URLs, but a client never needs Service-specific serialization to use a standard AG-UI Run or A2A Task. Such helpers cannot introduce another event model or hide standard protocol errors.
