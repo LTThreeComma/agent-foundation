@@ -18,7 +18,7 @@ Foundation owns resource transfer, not the definition of an application. Applica
 | Destination resources, authorization, lifecycle, and mutation preconditions        | Their existing Service domains and [Platform API Conventions](../api-conventions.md)                              |
 | Public resource operations and client composition                                  | [Service SDKs and Clients](37-service-sdks-and-clients.md)                                                        |
 
-The CLI composes transfer operations through the Rust SDK and public management APIs. Resource domains retain validation and mutation authority; neither a bundle nor a local import receipt grants access. Transfer owns no infrastructure provisioning, runtime plugin installation, continuous reconciliation controller, or migration of live work. It does not redefine Harness UI's local resource format or export arbitrary embedded Python Agents.
+Clients compose transfer operations through their Service SDKs and public management APIs; the CLI uses the Rust SDK. Resource domains retain validation and mutation authority; neither a bundle nor a local import receipt grants access. Transfer owns no infrastructure provisioning, runtime plugin installation, continuous reconciliation controller, or migration of live work. It does not redefine Harness UI's local resource format or export arbitrary embedded Python Agents.
 
 ## Resource Representations and Policies
 
@@ -67,6 +67,14 @@ Export resolves its requested roots to exact Revisions and collects their suppor
 Export does not read credential values, internal object keys, execution snapshots, or Worker caches. User-authored prompts and package files are carried as content; export does not claim to detect or remove secrets their authors put in them.
 
 Local validation checks format compatibility, content digests, typed references, dependency closure, graph cycles, and existing resource and package limits. Content paths stay inside the bundle root, including after path resolution, and Skill packaging follows the shared package rules. Validation performs no Service mutations and executes no bundle-supplied code.
+
+## Direct Copy
+
+Console exposes direct copy to a target Workspace within the same Service when the caller can read the source and create the required target resources. The user selects an exact AgentRevision, destination, and name for the new Agent, reviews the transfer preview, supplies missing target bindings, and confirms the copy. The client collects the resource representations and imports them without requiring the user to download and upload a bundle. Selecting a destination alone performs no mutations. The root receives a new Agent identity; mappings that would update a source resource are blocked.
+
+Direct copy uses the same dependency closure, typed references, explicit create/reuse/update choices, concurrency checks, and per-operation recovery as file-based import. The preview identifies copied resources and reused dependencies, including Skill key conflicts in the current Workspace. It never promises independent copies of resources explicitly reused. Avoiding a downloaded file does not remove the requirement to retain exact transfer inputs and operation evidence for interrupted or unknown mutations. Copy leaves source resources unchanged and establishes no synchronization with later source edits.
+
+The existing [Agent Duplicate operation](28-agent-management.md#creation-revision-and-restore) remains the simple same-Workspace operation: it creates one new Agent from the exact current Revision and retains that Revision's dependency selections. It does not recursively copy children or Skills. Direct resource copy is a client composition of transfer operations, not a change to Duplicate or a new hosted copy-job lifecycle. File export/import remains available for sharing and transfer between installations without requiring Console to manage another installation's authentication.
 
 ## Import Preview
 

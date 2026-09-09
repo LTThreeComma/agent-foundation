@@ -89,6 +89,8 @@ A CLI command exists only when its service operation and Rust SDK method are rea
 
 [Resource Transfer](41-resource-transfer.md) owns portable resource representations, bundle-local typed references, export, target binding and preview, dependency-ordered import, and partial-result recovery. The CLI composes these operations through the Rust SDK while Service resource domains retain validation, authorization, concurrency, and Revision authority. Applications own their manifests and product composition; the CLI introduces no application resource or lifecycle.
 
+Other first-party clients use their language SDKs to compose the same transfer behavior. Console's direct Workspace copy collects resource exports and imports them after preview without requiring a user-managed bundle file; it introduces no parallel copy semantics or server-side job resource.
+
 ## Standard Protocol Clients
 
 Hosted AG-UI and A2A remain independently interoperable standards. a13n SDKs can add convenience factories or typed references for their URLs, but a client never needs Service-specific serialization to use a standard AG-UI Run or A2A Task. Such helpers cannot introduce another event model or hide standard protocol errors.
