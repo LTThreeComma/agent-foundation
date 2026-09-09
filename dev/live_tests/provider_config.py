@@ -27,11 +27,20 @@ class ComposioSettings(Settings):
     toolkits: list[str] = Field(default_factory=lambda: ["github"], min_length=1)
 
 
+class FeishuAppSettings(Settings):
+    app_id: SecretStr = Field(min_length=1)
+    app_secret: SecretStr = Field(min_length=1)
+
+
 class OpenConnectorSettings(Settings):
     provider: Literal["openconnector"]
     project_api_key: SecretStr = Field(min_length=1)
     catalog_api_key: SecretStr = Field(min_length=1)
     services: list[str] = Field(default_factory=lambda: ["slack"], min_length=1)
+    # Used only by upstream live journeys, never provisioned into Foundation.
+    e2b_api_key: SecretStr | None = Field(default=None, min_length=1)
+    feishu_app: FeishuAppSettings | None = None
+    federated_connection_name: str | None = Field(default=None, min_length=1)
 
 
 class ModelSettings(Settings):

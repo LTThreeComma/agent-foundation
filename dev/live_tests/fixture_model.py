@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import management_model, round_two_model
+from . import management_model, recovery_model, round_two_model
 
 CASE_ID = r"^[a-f0-9]{32}$"
 SCENARIOS = (
@@ -35,6 +35,7 @@ SCENARIOS = (
     }
     | round_two_model.SCENARIOS
     | management_model.SCENARIOS
+    | recovery_model.SCENARIOS
 )
 
 
@@ -120,6 +121,8 @@ def fixture_router(root: Path, authenticate) -> APIRouter:
         async with await anyio.open_file(path / "model_requests", "a") as output:
             await output.write("request\n")
         tool_messages = [message for message in body["messages"] if message.get("role") == "tool"]
+        if case.scenario in recovery_model.SCENARIOS:
+            return await recovery_model.completion(case, path, body, texts, tool_messages)
         if case.scenario in management_model.SCENARIOS:
             return await management_model.completion(case, path, body, request)
         if case.scenario in round_two_model.SCENARIOS:

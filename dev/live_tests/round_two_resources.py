@@ -24,7 +24,10 @@ async def provision(client):
             "type": "openai_compatible",
             "name": "Round-two HTTP fixture",
             "credential": config["token"],
-            "configuration": {"base_url": config["control_url"] + "/__live__/model/v1", "auth_mode": "bearer"},
+            "configuration": {
+                "base_url": config.get("model_url", config["control_url"]) + "/__live__/model/v1",
+                "auth_mode": "bearer",
+            },
         },
     )
     config["model_provider_id"] = provider["id"]

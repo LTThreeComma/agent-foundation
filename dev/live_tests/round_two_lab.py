@@ -55,14 +55,39 @@ def free_origin():
         return f"http://127.0.0.1:{listener.getsockname()[1]}"
 
 
+def container_port():
+    # Avoid the host's usual ephemeral client range: Docker cannot reserve a
+    # port while the compatibility/setup requests are opening connections.
+    for _ in range(100):
+        port = 20000 + secrets.randbelow(10000)
+        with socket.socket() as listener:
+            try:
+                listener.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise RuntimeError("No available stable loopback port for a recovery container")
+
+
 class RoundTwoLab:
     def __init__(self, root: Path, config: dict, environment: dict):
         self.root, self.config, self.environment = root, config, environment
         self.worker_environment = dict(environment)
+        self.control_environment = dict(environment)
         self.proxies = {}
         self.processes = []
         self.workers = []
         self.origins = {}
+        self.controls = []
+
+    async def start_control(self, *, replica=False):
+        origin = free_origin() if replica else self.config["control_url"]
+        environment = {**self.control_environment, "LIVE_TEST_CONTROL_URL": origin}
+        process = await self.spawn("dev.live_tests.manage", "control", environment=environment)
+        self.controls.append(process)
+        self.origins[process] = origin
+        await self.ready(process, origin)
+        return process
 
     async def spawn(self, module, *arguments, environment=None):
         log_path = self.root / f"process-{len(self.processes)}.log"
@@ -166,8 +191,8 @@ class RoundTwoLab:
 
 
 @asynccontextmanager
-async def open_lab(*, suite="round-two", websocket_envd=False):
-    if suite not in {"core", "round-two", "management"}:
+async def open_lab(*, suite="round-two", websocket_envd=False, environment_overrides=None, recovery_options=None):
+    if suite not in {"core", "round-two", "management", "recovery"}:
         raise ValueError(f"Unknown live-test suite: {suite}")
     management = suite == "management"
     state = REPOSITORY / "dev" / "live_tests" / ".state" if suite == "core" else STATE
@@ -176,7 +201,7 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
     async with AsyncExitStack() as stack:
         print(f"Preparing {suite} lab; private logs: {root}", flush=True)
         storage_options = {}
-        if suite != "core":
+        if suite not in {"core", "recovery"}:
             settings = Settings()
             storage_options = {"endpoint_url": settings.object_endpoint_url, "region": settings.object_region}
         object_environment = await stack.enter_async_context(open_object_storage(**storage_options))
@@ -188,6 +213,10 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
         postgres = PostgresContainer("postgres:17-alpine")
         redis = RedisContainer("redis:8-alpine")
         for container in (postgres, redis):
+            if suite == "recovery":
+                # Bind immediately before start, on loopback only. Docker may
+                # reassign automatically published ports on container restart.
+                container.with_bind_ports(5432 if container is postgres else 6379, ("127.0.0.1", container_port()))
             stack.push_async_callback(anyio.to_thread.run_sync, container.stop)
             await anyio.to_thread.run_sync(container.start)
 
@@ -210,6 +239,11 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
             "timeout_seconds": 120,
             "encryption_key": base64.b64encode(secrets.token_bytes(32)).decode(),
         }
+        if suite == "recovery":
+            config.update(recovery_options or {})
+            config["recovery_faults"] = str(root / "faults")
+            config["model_url"] = free_origin()
+            (root / "faults").mkdir(mode=0o700)
         if websocket_envd:
             config["websocket_envd"] = True
         from .fixture_peer import certificate_context, create_certificate
@@ -260,7 +294,9 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
         )
         if management:
             environment["SSL_CERT_FILE"] = config["peer_ca_bundle"]
+        environment.update(environment_overrides or {})
         lab = RoundTwoLab(root, config, environment)
+        lab.containers = {"postgres": postgres, "redis": redis}
         for name, url, key in (
             ("postgres", database_url, "DATABASE_URL"),
             ("redis", redis_url, "REDIS_URL"),
@@ -274,10 +310,18 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
             credentials = parts.netloc.rsplit("@", 1)[0] + "@" if "@" in parts.netloc else ""
             replacement = urlunsplit(parts._replace(netloc=credentials + f"127.0.0.1:{proxy.local_port}"))
             lab.worker_environment[f"A13N_SERVICE_{key}"] = replacement
+            if suite == "recovery":
+                control_proxy = await stack.enter_async_context(TCPProxy(parts.hostname, parts.port or 80).listen())
+                lab.proxies["control." + name] = control_proxy
+                control_url = urlunsplit(parts._replace(netloc=credentials + f"127.0.0.1:{control_proxy.local_port}"))
+                lab.control_environment[f"A13N_SERVICE_{key}"] = control_url
         stack.push_async_callback(lab.close)
         if management:
             peer = await lab.spawn("dev.live_tests.fixture_peer")
             await lab.ready(peer, config["peer_url"], verify=certificate_context(config))
+        if suite == "recovery":
+            model = await lab.spawn("dev.live_tests.model_host")
+            await lab.ready(model, config["model_url"])
         await lab.command("a13n_service", "db", "upgrade")
         await lab.command("dev.live_tests.manage", "init")
         if suite != "core":
@@ -286,8 +330,7 @@ async def open_lab(*, suite="round-two", websocket_envd=False):
             await lab.command(
                 "dev.live_tests.manage", "init", environment={**environment, "LIVE_TEST_CONFIG": str(other_path)}
             )
-        control = await lab.spawn("dev.live_tests.manage", "control")
-        await lab.ready(control, config["control_url"])
+        await lab.start_control()
         http = await stack.enter_async_context(
             httpx2.AsyncClient(
                 base_url=config["control_url"],

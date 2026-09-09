@@ -185,6 +185,75 @@ authorization. Ordinary live-test targets never start Slack OAuth without
 local lab teardown does not remove remote test accounts. Manage those in the
 test Project's **Connected accounts** page after testing.
 
+### OOMOL hosted connection-flow matrix
+
+The hosted catalog observed on 2026-09-09 advertises five authentication types.
+Run one representative for each distinct connection process:
+
+| Authentication      | Representative    | Connection process                                                                                                         | Test boundary                                                   |
+| ------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `oauth2`            | Slack             | Project link, user consent, request polling, verified account, read-only action                                            | Foundation Control, Worker, and real Agent Run (`--live-slack`) |
+| `api_key`           | E2B               | Submit the user's API key; synchronous validation and active account; list at most one sandbox                             | OOMOL Project API                                               |
+| `custom_credential` | Feishu App Bot    | Submit `appId` and `appSecret`; synchronous validation/token acquisition; list at most one chat                            | OOMOL Project API                                               |
+| `no_auth`           | Hacker News       | Execute a public action with no third-party credential or account selector                                                 | OOMOL personal gateway                                          |
+| `federated`         | Alibaba Cloud STS | Configure OIDC trust and a role in the cloud console, connect it in OOMOL Console, then exchange for temporary credentials | OOMOL personal gateway; manual connection prerequisite          |
+
+These partitions describe connection processes, not every provider's underlying
+authentication protocol. API keys in headers/query strings and multi-field
+credentials such as Basic auth, app secrets, and signed keys share the respective
+synchronous gateway entry points. OAuth **System Client** and a custom OAuth
+client differ in administrator setup; end users follow the same link/consent/poll
+journey. A custom OAuth client is not a separate live journey here.
+
+The Foundation adapter deliberately exposes OAuth only. The other four tests
+call OOMOL directly and do **not** establish support in Foundation. The published
+[Project SDK](https://oomol.com/en/docs/project-connector/) exposes OAuth, API-key,
+and custom-credential connection methods. It has no federation connect method;
+the federation test verifies a manually connected, explicitly named account and
+its OIDC exchange, rather than claiming automated cloud trust setup.
+
+Extend the private `[connector]` configuration with only the test credentials you
+intend to upload to OOMOL. They are never provisioned into Foundation:
+
+```toml
+# Within the existing [connector] section:
+e2b_api_key = "<dedicated E2B test API key>"
+federated_connection_name = "<dedicated aliyun_sts connection alias>"
+
+[connector.feishu_app]
+app_id = "<test app ID>"
+app_secret = "<test app secret>"
+```
+
+Create corresponding E2B (`api_key`) and Feishu App Bot (`custom_credential`)
+Provider configs in the same [OOMOL test Project](https://console.oomol.com).
+Feishu must enable its app bot and grant `im:chat:read`; no test sends messages.
+For federation, use the
+[Alibaba Cloud STS connection page](https://console.oomol.com/app-connections?provider=aliyun_sts),
+configure a dedicated role's OIDC trust according to the displayed instructions,
+and save its Role ARN. No cloud IAM policy is modified by the automated test.
+The STS response is validated in memory and never printed or saved.
+
+```sh
+# Upstream matrix: catalog, synchronous credentials, public action, federation.
+LIVE_TEST_PROVIDERS_CONFIG=dev/live_tests/.state/openconnector.toml \
+  make live-test-providers LIVE_TEST_ARGS='--live-openconnector -k oomol'
+
+# Add the Foundation OAuth journey; a human must accept the consent screen.
+LIVE_TEST_PROVIDERS_CONFIG=dev/live_tests/.state/openconnector.toml \
+  make live-test-providers LIVE_TEST_ARGS='--live-openconnector --live-slack -k "oomol or openconnector_slack"'
+```
+
+Missing optional test credentials cause explicit skips, which are **not** passed
+connection tests. Configured but invalid credentials or missing Project Provider
+configs fail. Every synchronous test creates a fresh `live_` user and alias;
+logs identify these and any returned account ID for manual cleanup in the
+Project's Connected accounts page. The public Project SDK exposes no disconnect
+operation. A lost POST response is never retried and may have created a remote
+account; search by the logged alias even after failure. Existing federation
+connections are retained. Read actions validate the live input/output schemas
+and upstream execution receipt; a completed HTTP request alone is insufficient.
+
 ## Disposable local setup
 
 With Docker running, execute the first round without preparing `.env` or starting
@@ -471,3 +540,75 @@ native isolation. Reverse WebSocket uses an explicit, authenticated test Host
 listener and a connection SDK injected into its single Worker. This verifies
 Service/Harness execution through the production Provider without claiming
 cross-Worker connection routing or a production WebSocket ingress deployment.
+
+## Cross-store commit and recovery windows
+
+`make live-test-recovery` enables the recovery journeys in cases 32–39. Each case
+starts disposable PostgreSQL, Redis and pinned RustFS containers, independent
+Control/Worker processes, and a separate scripted-model process that survives a
+Control restart. This suite always owns its object server and does not use an
+ambient `.env` S3 endpoint. It uses no external Provider credentials. The Docker
+Environment case additionally requires `make image-sandbox` (or an explicit
+`LIVE_TEST_SANDBOX_IMAGE` already present locally).
+
+```sh
+make live-test-recovery
+make live-test-recovery LIVE_TEST_ARGS='-k pending_inbox'
+make live-test-recovery LIVE_TEST_ARGS='-k committed_object'
+make live-test-recovery LIVE_TEST_ARGS='-k collection_recovery'
+```
+
+The recovery labs have independent ports, buckets, credentials, proxies and
+process groups, so this suite also supports bounded parallel execution with
+`LIVE_TEST_ARGS='-n 3'`. Keep concurrency appropriate for local Docker capacity.
+The other live suites retain their documented execution requirements.
+
+| File                                | Fault boundary and acceptance evidence                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_32_state_commits.py`          | Initial object written before acceptance commit; committed acceptance with lost response; completed/waiting candidate before SQL seal; PUT committed with lost ACK and failed reconciliation read; cancellation or late Steer competes with a completion candidate. Assert exact idempotency, orphan collection, seals/digests, pending results, input consumption and model/effect counts. |
+| `test_33_inbox_recovery.py`         | Steer and real asynchronous child results are present in Host receipts while SQL remains pending, with full and summary-only histories. Same-content distinct Steer IDs remain distinct and ordered. Replacement Attempts adopt the candidate without another model request or reinjection, and repair exact checkpoint sequence/digest receipts.                                           |
+| `test_34_fences_and_handoff.py`     | SQL takeover before/after object writer claim, including late PUT ACK; atomic source seal/queue consumption/successor acceptance rollback; checkpoint before/after yield commit. Assert the accepted writer version, no duplicate queue successors, exact Thread versions and handoff/attempt accounting.                                                                                   |
+| `test_35_control_recovery.py`       | Worker-owned lifecycle projection before Redis, after Redis and before projection acknowledgement; real partial Lua activation; Control queue recovery crashes twice and overlaps; PostgreSQL/Redis container restarts and Redis data loss. Assert stable lifecycle IDs, explicit presentation gaps and independently retained execution state.                                             |
+| `test_36_integrity_and_effects.py`  | Missing/truncated state, digest/schema/identity mismatch, and tool effect committed before checkpoint. Corruption must fail before model/tool entry. Tool-owned idempotency retains one effect; an unowned effect may execute again after recovery.                                                                                                                                         |
+| `test_37_budgets_and_partitions.py` | Persistent attempts, planned handoffs, deadline and model-request limits; Control-only, Worker-only and both-role PostgreSQL/Redis/object partitions. Assert bounded accounting, settled Attempts, valid seals or the precise dependency failure, and a healthy subsequent Run.                                                                                                             |
+| `test_38_collection_recovery.py`    | GC before deletion and after lost delete ACK, delayed collector versus fresh publication, active publication leases, retained Run payload namespaces, and interrupted Asset cleanup. Assert both eventual removal of unowned objects and preservation of retained objects.                                                                                                                  |
+| `test_39_environment_recovery.py`   | Docker starts before lifecycle publication, then the Worker dies. Reconcile to one backing container, execute Shell work and retain the bind file after deletion. A separate crash after EIP initialization recovers the same target but asserts the active-session HTTP 409 and failed Run.                                                                                                |
+
+`recovery_faults.py` is installed only for the explicit recovery Host lifetime.
+One-shot, role/Run/key-selected barriers surround the actual SQL transaction,
+S3 CAS, receipt, Environment lifecycle or Redis operation. The parent waits for
+private hit evidence before killing its owned process. A lost ACK is injected
+only after the real operation returns. The partial-activation case executes the
+owning Lua script through its first write and then raises an error; it does not
+populate a fabricated Redis state. SIGSTOP/SIGCONT and selected shielded PUTs
+model requests already dispatched before ownership changes. Independent test
+connections read authority without relying on a failed Control or its proxy.
+
+The compaction variation uses the native Harness summarization path and a
+trusted definition capability with a small threshold. The default Harness
+compactor retains current-turn inputs. To exercise the stronger Service receipt
+contract, the recovery Host selects a **summary-only history policy** that omits
+those retained requests when building compacted history. The tests assert that
+raw Steer/child result text is absent from the final **message list**, while Host
+receipts survive. They do not claim that default compaction removes current-turn
+inputs or that no other Harness context field retains them. Recovery and receipt
+reconciliation use the ordinary Service implementation.
+
+Deadline and usage limits are accepted by a test Host policy before the initial
+SQL commit, because the current Native API does not let callers select those
+private execution-budget fields. Tests never edit an accepted Run's budget to
+force an outcome. GC tests shorten only the lab's minimum-age policy; lease
+expiry uses real time. Publication race setup uses the actual publication
+protocol against the lab's stores, including conditional writes and fencing.
+
+`test_recovery_support.py` checks fault selection across OS processes, exact
+hit/release isolation, real transaction rollback versus committed-but-unacknowledged
+writes, and instrumentation teardown without Docker. Default collection and
+`make live-test-check` do not enable any recovery fault or launch Service labs.
+
+Evidence is retained privately under `.state/recovery/<random-id>/`: boundary
+hits, operation identities, API/SQL snapshots, model observations and process
+logs. Report live execution separately from offline support checks. This matrix
+tracks commit windows and recovery transitions; it is not a line-coverage score,
+a guarantee of arbitrary tool exactly-once effects, or a backup/restore RPO/RTO
+exercise.

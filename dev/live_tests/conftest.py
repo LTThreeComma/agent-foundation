@@ -13,7 +13,13 @@ def pytest_addoption(parser):
     parser.addoption("--live-management", action="store_true", help="Run isolated Service/Harness management journeys")
     parser.addoption("--live-providers", action="store_true", help="Run configured real-provider integration journeys")
     parser.addoption("--live-slack", action="store_true", help="Authorize OpenConnector Slack and run a read-only tool")
+    parser.addoption(
+        "--live-openconnector",
+        action="store_true",
+        help="Run OOMOL upstream connection flows with private test credentials",
+    )
     parser.addoption("--live-environments", action="store_true", help="Run the five-backend Environment matrix")
+    parser.addoption("--live-recovery", action="store_true", help="Run precise cross-store crash and recovery journeys")
 
 
 @pytest.fixture
@@ -49,6 +55,16 @@ async def round_two(request):
 
     async with open_lab() as lab:
         yield lab
+
+
+@pytest.fixture
+async def recovery(request):
+    if not request.config.getoption("--live-recovery"):
+        pytest.skip("Opt in with make live-test-recovery; no cross-store faults run by default")
+    from .recovery_lab import open_recovery_lab
+
+    async with open_recovery_lab(**getattr(request, "param", {})) as journey:
+        yield journey
 
 
 @pytest.fixture

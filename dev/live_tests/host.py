@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -102,7 +103,12 @@ def local_app(config: dict, role: str):
         from .approval_plugin import Factory as ApprovalFactory
         from .resilience_plugin import Factory as ResilienceFactory
 
-        catalog = build_harness_plugin_factory_catalog(explicit_factories=(ApprovalFactory(), ResilienceFactory()))
+        factories = [ApprovalFactory(), ResilienceFactory()]
+        if config.get("recovery_faults"):
+            from .recovery_plugin import Factory as RecoveryFactory
+
+            factories.append(RecoveryFactory())
+        catalog = build_harness_plugin_factory_catalog(explicit_factories=tuple(factories))
         logger.info("Live-test Worker installed plugin factories: %s", ", ".join(catalog))
     app = create_app(
         settings,
@@ -114,6 +120,18 @@ def local_app(config: dict, role: str):
     )
     if reverse_envd is not None:
         reverse_envd.install(app)
+    if config.get("recovery_faults"):
+        from .recovery_faults import installed_faults
+
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def recovery_lifespan(application):
+            with installed_faults(config, role):
+                async with original_lifespan(application):
+                    yield
+
+        app.router.lifespan_context = recovery_lifespan
     if role == "control":
         app.include_router(fixture_router(Path(config["workspace_root"]), authenticate))
         app.include_router(inbox_router(config, authenticate))

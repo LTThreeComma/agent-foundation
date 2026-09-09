@@ -126,12 +126,16 @@ live-test-local: sync ## Run first-round HTTP journeys with owned Docker depende
 live-test-round-two: sync ## Run isolated HTTP fault/recovery journeys with Docker dependencies
 	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests --live-round-two -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
 
+.PHONY: live-test-recovery
+live-test-recovery: sync ## Run precise cross-store crash/reconciliation journeys with owned Docker dependencies
+	@uv run --locked python -m pytest dev/live_tests --live-recovery -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
+
 live-test-management: sync ## Run isolated Service/Harness management journeys with Docker dependencies
 	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests --live-management -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
 
 .PHONY: live-test-providers
 live-test-providers: sync ## Run optional configured real Providers in disposable local labs
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests/test_31_real_providers.py --live-providers -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
+	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests/test_31_real_providers.py dev/live_tests/test_36_openconnector_flows.py --live-providers -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
 
 live-test-check: sync ## Validate live-test support without contacting services
 	@uv run --locked ruff check --no-fix dev/live_tests

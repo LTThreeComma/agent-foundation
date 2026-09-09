@@ -354,7 +354,9 @@ async def _lock_event_workspace(
             SessionRecord.id == event.session_id,
             WorkspaceRecord.deleted_at.is_(None),
         )
-        .with_for_update()
+        # Lifecycle inserts already hold Session FK key-share locks. Lock only
+        # the Hook serialization owner, avoiding concurrent Session lock upgrades.
+        .with_for_update(of=WorkspaceRecord)
     )
     if workspace is None:
         raise HookSubscriptionInvariantError(

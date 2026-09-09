@@ -89,6 +89,33 @@ def test_openconnector_configuration_uses_two_private_keys(tmp_path):
         assert secret not in repr(config) + config.model_dump_json()
 
 
+def test_openconnector_upstream_credentials_are_private(tmp_path):
+    path = tmp_path / "settings.toml"
+    path.write_text(
+        '[connector]\nprovider="openconnector"\nproject_api_key="project-secret"\ncatalog_api_key="catalog-secret"\n'
+        'e2b_api_key="e2b-secret"\nfederated_connection_name="test-role"\n'
+        '[connector.feishu_app]\napp_id="test-app"\napp_secret="feishu-secret"\n'
+    )
+    settings = load_provider_settings(path).connector
+    assert settings.e2b_api_key.get_secret_value() == "e2b-secret"
+    assert settings.feishu_app.app_secret.get_secret_value() == "feishu-secret"
+    for secret in ("e2b-secret", "feishu-secret", "test-app"):
+        assert secret not in repr(settings) + settings.model_dump_json()
+
+
+@pytest.mark.anyio
+async def test_upstream_fixture_never_reads_credentials_without_explicit_opt_in(monkeypatch):
+    from . import test_36_openconnector_flows as flows
+
+    def unexpected_read():
+        raise AssertionError("Offline collection read upstream credentials")
+
+    monkeypatch.setattr(flows, "load_provider_settings", unexpected_read)
+    request = SimpleNamespace(config=SimpleNamespace(getoption=lambda option: option == "--live-providers"))
+    with pytest.raises(pytest.skip.Exception, match="--live-openconnector"):
+        await anext(flows.oomol.__wrapped__(request))
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("section,flag", [("model", ""), ("slack", ""), ("model", "--live-slack")])
 async def test_offline_fixture_does_not_read_private_configuration(monkeypatch, section, flag):
