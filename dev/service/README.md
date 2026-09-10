@@ -18,6 +18,13 @@ Langfuse stack, verifies Langfuse project authentication, applies committed
 migrations, and runs Service, the scripted model and Console. No `.env`, manual
 Langfuse project creation, API-key copying or OTEL exports are needed.
 
+`make setup`, also used by `make dev` and `make service-dev`, checks Docker before
+starting the containers. If the selected daemon is already ready, it proceeds
+immediately. On macOS, an unavailable local Docker Desktop daemon triggers an
+attempt to open Docker Desktop and wait up to 120 seconds for readiness. Docker
+must already be installed. On Linux or with another Docker endpoint, start the
+selected daemon yourself; the tools preserve your Docker context and `DOCKER_HOST`.
+
 Use `make setup` to prepare Python dependencies, infrastructure and schema without
 starting an application listener. It preserves existing data and credentials.
 Use `make service-dev` for Service and the scripted model without Console or its
