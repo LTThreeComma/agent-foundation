@@ -2977,6 +2977,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/workspaces/{workspace}/skills/{skill_key}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Skill By Key */
+    get: operations["get_workspaces_workspace_skills_skill_key"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/workspaces/{workspace}/threads": {
     parameters: {
       query?: never;
@@ -3814,6 +3831,13 @@ export interface components {
        */
       required?: boolean;
     };
+    /** Collection_EnvironmentProviderDefinition_ */
+    Collection_EnvironmentProviderDefinition_: {
+      /** Items */
+      items: components["schemas"]["EnvironmentProviderDefinition"][];
+      /** Next Cursor */
+      next_cursor?: string | null;
+    };
     /** Collection_EnvironmentProvider_ */
     Collection_EnvironmentProvider_: {
       /** Items */
@@ -3839,15 +3863,6 @@ export interface components {
     Collection_Environment_: {
       /** Items */
       items: components["schemas"]["Environment"][];
-      /** Next Cursor */
-      next_cursor?: string | null;
-    };
-    /** Collection_dict_ */
-    Collection_dict_: {
-      /** Items */
-      items: {
-        [key: string]: unknown;
-      }[];
       /** Next Cursor */
       next_cursor?: string | null;
     };
@@ -4692,6 +4707,31 @@ export interface components {
       updated_at: string;
       /** Workspace Id */
       workspace_id: string | null;
+    };
+    /** EnvironmentProviderDefinition */
+    EnvironmentProviderDefinition: {
+      /** Configuration Schema */
+      configuration_schema: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /** Configuration Versions */
+      configuration_versions: string[];
+      /** Credential Schema */
+      credential_schema: {
+        [key: string]: components["schemas"]["JsonValue"];
+      } | null;
+      /** Display Name */
+      display_name: string;
+      /** Requires Keepalive */
+      requires_keepalive: boolean;
+      /** Supports Destroy */
+      supports_destroy: boolean;
+      /** Supports Managed */
+      supports_managed: boolean;
+      /** Supports Stop */
+      supports_stop: boolean;
+      /** Type */
+      type: string;
     };
     /** EnvironmentSelection */
     EnvironmentSelection:
@@ -6857,14 +6897,19 @@ export interface components {
     };
     /** SessionPreview */
     SessionPreview: {
+      /** Agent Name */
+      agent_name: string | null;
       /** Input Text */
       input_text: string | null;
       /** Output Text */
       output_text: string | null;
       /** Run Id */
       run_id: string;
+      run_status: components["schemas"]["RunStatus"];
       /** Thread Id */
       thread_id: string;
+      /** Trigger Type */
+      trigger_type: string;
     };
     /** SessionResource */
     SessionResource: {
@@ -6876,6 +6921,8 @@ export interface components {
       /** Id */
       id: string;
       preview: components["schemas"]["SessionPreview"] | null;
+      /** Run Count */
+      run_count: number | null;
       /**
        * Updated At
        * Format: date-time
@@ -6946,9 +6993,45 @@ export interface components {
     /** SkillCollection */
     SkillCollection: {
       /** Items */
-      items: components["schemas"]["Skill"][];
+      items: components["schemas"]["SkillListItem"][];
       /** Next Cursor */
       next_cursor: string | null;
+    };
+    /** SkillListItem */
+    SkillListItem: {
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      created_by: components["schemas"]["PrincipalRef"];
+      /** Current Revision Id */
+      current_revision_id: string;
+      /** Deleted At */
+      deleted_at: string | null;
+      /** Id */
+      id: string;
+      /** Key */
+      key: string;
+      /** Name */
+      name: string;
+      /** Organization Id */
+      organization_id: string;
+      /**
+       * Source Kind
+       * @enum {string}
+       */
+      source_kind: "zip" | "github";
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+      updated_by: components["schemas"]["PrincipalRef"];
+      /** Version */
+      version: number;
+      /** Workspace Id */
+      workspace_id: string;
     };
     /** SkillPackageFile */
     SkillPackageFile: {
@@ -7597,10 +7680,15 @@ export interface components {
     };
     /** UpdateConnectorProviderRequest */
     UpdateConnectorProviderRequest: {
+      /** Credentials */
+      credentials?: {
+        [key: string]: string;
+      } | null;
       /** Expected Version */
       expected_version: number;
       /** Name */
       name?: string | null;
+      status?: components["schemas"]["ConnectorProviderStatus"] | null;
     };
     /** UpdateHookSubscriptionRequest */
     UpdateHookSubscriptionRequest: {
@@ -7663,6 +7751,10 @@ export interface components {
     };
     /** UpdateProviderRequest */
     UpdateProviderRequest: {
+      /** Credential */
+      credential?: {
+        [key: string]: components["schemas"]["JsonValue"];
+      } | null;
       /** Enabled */
       enabled?: boolean | null;
       /** Name */
@@ -9824,7 +9916,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["Collection_dict_"];
+          "application/json": components["schemas"]["Collection_EnvironmentProviderDefinition_"];
         };
       };
       /** @description Service error. */
@@ -9858,9 +9950,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": components["schemas"]["EnvironmentProviderDefinition"];
         };
       };
       /** @description Invalid request. */
@@ -19119,6 +19209,12 @@ export interface operations {
   get_workspaces_workspace_sessions: {
     parameters: {
       query?: {
+        q?: string | null;
+        agent_id?: string | null;
+        status?: components["schemas"]["RunStatus"][];
+        trigger_type?: string[];
+        updated_after?: string | null;
+        updated_before?: string | null;
         limit?: number;
         cursor?: string | null;
       };
@@ -19218,6 +19314,8 @@ export interface operations {
       query?: {
         limit?: number;
         cursor?: string | null;
+        q?: string | null;
+        source_kind?: ("zip" | "github") | null;
       };
       header?: never;
       path: {
@@ -19285,6 +19383,51 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SkillPublicationReceipt"];
+        };
+      };
+      /** @description Invalid request. */
+      400: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+      /** @description Service error. */
+      default: {
+        headers: {
+          "Retry-After"?: string;
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+    };
+  };
+  get_workspaces_workspace_skills_skill_key: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        skill_key: string;
+        workspace: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Skill"];
         };
       };
       /** @description Invalid request. */

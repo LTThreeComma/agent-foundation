@@ -17,7 +17,12 @@ import {
 } from "a13n-ui";
 
 import { ApiError } from "@converge.ai/a13n";
-import { AlertCircle, ArrowLeft, Inbox, RefreshCw } from "lucide-react";
+import {
+  WarningCircleIcon,
+  ArrowLeftIcon,
+  TrayIcon,
+  ArrowsClockwiseIcon,
+} from "@phosphor-icons/react";
 import { useState, type ReactNode } from "react";
 import { PageActionsTarget } from "./page-actions";
 
@@ -54,7 +59,7 @@ export function ErrorNotice({
       ].includes(error.code));
   return (
     <Alert variant="error" className="my-4">
-      <AlertCircle aria-hidden="true" />
+      <WarningCircleIcon aria-hidden="true" />
       <AlertTitle>
         {t(conflict ? "This resource changed" : "Something went wrong")}
       </AlertTitle>
@@ -75,7 +80,7 @@ export function ErrorNotice({
         )}
         {retry && (
           <Button size="sm" variant="outline" onClick={retry} type="button">
-            {<RefreshCw size={14} />}
+            {<ArrowsClockwiseIcon size={14} />}
             {t("Reload")}
           </Button>
         )}
@@ -85,6 +90,7 @@ export function ErrorNotice({
 }
 export function Page({
   title,
+  titleAction,
   description,
   actions,
   back,
@@ -92,6 +98,7 @@ export function Page({
   children,
 }: {
   title: string;
+  titleAction?: ReactNode;
   description?: string;
   actions?: ReactNode;
   back?: string;
@@ -107,13 +114,16 @@ export function Page({
       <div className={`${styles.page} ${className ?? ""}`}>
         {back && (
           <Link className={styles.back} to={back}>
-            <ArrowLeft size={14} />
+            <ArrowLeftIcon size={14} />
             {t("Back")}
           </Link>
         )}
         <header className={styles.pageHeader}>
           <div>
-            <h1>{title}</h1>
+            <div className={styles.titleRow}>
+              <h1>{title}</h1>
+              {titleAction}
+            </div>
             {description && <p>{description}</p>}
           </div>
           <div className={styles.actions} ref={setActionsTarget}>
@@ -138,7 +148,7 @@ export function Empty({
     <EmptyRoot>
       <EmptyHeader>
         <EmptyMedia variant="icon">
-          <Inbox aria-hidden="true" />
+          <TrayIcon aria-hidden="true" />
         </EmptyMedia>
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>

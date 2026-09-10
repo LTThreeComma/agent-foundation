@@ -1,13 +1,20 @@
+import { ProviderTypeField } from "../../shared/provider-type-field";
+import {
+  useResourceEditorState,
+  type ResourceEditorControl,
+} from "../../shared/resource-modal";
+import { ProviderEnabled } from "../../shared/provider-enabled";
+import { ProviderKeyLink } from "../../shared/provider-key-link";
+import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { ApiError } from "@converge.ai/a13n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
-  ChoiceField,
   FormField,
   Input,
-  Label,
+  SettingsSection,
+  SettingsRow,
   ModalFrame,
-  Switch,
 } from "a13n-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -22,14 +29,26 @@ export function SearchProviderEditor({
   scope,
   providerId,
   onSaved,
-}: {
+  controlledOpen,
+  onClose,
+  finalFocus,
+  extra,
+  readOnly = false,
+}: ResourceEditorControl & {
+  readOnly?: boolean;
+  extra?: React.ReactNode;
   scope: SearchScope;
   providerId?: string;
   onSaved?: (provider: Schema["SearchProvider"]) => void;
 }) {
-  const [open, setOpen] = useState(false),
-    { t } = useTranslation(),
+  const { t } = useTranslation(),
     client = useClient();
+  const { open, setOpen, modalProps } = useResourceEditorState({
+    controlledOpen,
+    onClose,
+    finalFocus,
+  });
+
   const api = searchApi(client, scope);
   const definitions = useQuery({
     queryKey: ["search-provider-types"],
@@ -44,21 +63,22 @@ export function SearchProviderEditor({
   });
   return (
     <ModalFrame
-      open={open}
-      onOpenChange={setOpen}
-      title={t(providerId ? "Edit search provider" : "Add search provider")}
+      {...modalProps}
+      title={t(
+        readOnly ? "Provider" : providerId ? "Edit provider" : "Add provider",
+      )}
       description={t(
-        "Save an API key once and reuse this provider across agents.",
+        "Credentials are stored securely and never returned by the service.",
       )}
       closeLabel={t("Close")}
       trigger={
-        <Button
-          type="button"
-          variant={providerId ? "outline" : "default"}
-          size="sm"
-        >
-          {t(providerId ? "Edit" : "Add search provider")}
-        </Button>
+        controlledOpen === undefined ? (
+          <ResourceEditorButton
+            editing={!!providerId}
+            createLabel="Add provider"
+            editLabel="Edit"
+          />
+        ) : undefined
       }
     >
       {open &&
@@ -67,9 +87,17 @@ export function SearchProviderEditor({
         ) : definitions.error || resource.error ? (
           <ErrorNotice error={definitions.error ?? resource.error} />
         ) : (
-          definitions.data && (
+          definitions.data &&
+          (readOnly ? (
+            <div className={styles.stack}>
+              <p>{resource.data?.value.name}</p>
+              {extra}
+            </div>
+          ) : (
             <SearchProviderForm
               scope={scope}
+              onCancel={() => setOpen(false)}
+              extra={extra}
               resource={providerId ? resource.data : undefined}
               definitions={definitions.data.items}
               onSaved={(provider) => {
@@ -77,7 +105,7 @@ export function SearchProviderEditor({
                 setOpen(false);
               }}
             />
-          )
+          ))
         ))}
     </ModalFrame>
   );
@@ -88,8 +116,12 @@ export function SearchProviderForm({
   resource,
   definitions,
   onSaved,
+  onCancel,
+  extra,
 }: {
   scope: SearchScope;
+  onCancel?: () => void;
+  extra?: React.ReactNode;
   resource?: { value: Schema["SearchProvider"]; etag?: string };
   definitions: Schema["SearchProviderDefinition"][];
   onSaved: (provider: Schema["SearchProvider"]) => void;
@@ -195,29 +227,20 @@ export function SearchProviderForm({
           onChange={(event) => setName(event.target.value)}
         />
       </FormField>
-      <ChoiceField
-        label={t("Provider type")}
+      <ProviderTypeField
+        definitions={definitions}
         value={type}
         disabled={!!original}
         onValueChange={(value) => {
           setType(value);
           setCredential("");
         }}
-        options={definitions.map((item) => ({
-          value: item.type,
-          label: item.display_name,
-        }))}
+        labelAction={
+          definition && <ProviderKeyLink href={definition.setup_url} />
+        }
       />
-      {definition && (
-        <a href={definition.setup_url} target="_blank" rel="noreferrer">
-          {t("Get an API key from {{provider}}", {
-            provider: definition.display_name,
-          })}{" "}
-          ↗
-        </a>
-      )}
       <FormField
-        label={t("API key")}
+        label={t("API Key")}
         description={t(
           original
             ? "Leave empty to keep the current credential."
@@ -232,11 +255,11 @@ export function SearchProviderForm({
           onChange={(event) => setCredential(event.target.value)}
         />
       </FormField>
-      <Label className="flex items-center gap-2">
-        <Switch checked={enabled} onCheckedChange={setEnabled} />
-        {t("Enabled")}
-      </Label>
-      <p>{t("Saving a provider does not test the key.")}</p>
+      {original && (
+        <SettingsSection>
+          <ProviderEnabled checked={enabled} onCheckedChange={setEnabled} />
+        </SettingsSection>
+      )}
       <ErrorNotice error={reloadError ?? save.error ?? reconcileError} />
       {conflict && (
         <Button
@@ -300,7 +323,9 @@ export function SearchProviderForm({
           ))}
         </div>
       )}
+      {extra}
       <FormActions
+        onCancel={onCancel}
         pending={save.isPending || reconciling || !!reconcileError}
       />
     </form>
@@ -324,16 +349,24 @@ export function SearchProviderTest({
   });
   return (
     <div>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        disabled={disabled || test.isPending}
-        onClick={() => test.mutate()}
-        title={t("Sends one test search and may consume provider quota.")}
+      <SettingsRow
+        stackOnNarrow={false}
+        label={t("Connection")}
+        description={t(
+          "Check the saved connection. May consume provider quota.",
+        )}
       >
-        {t(test.isPending ? "Testing…" : "Test provider")}
-      </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled || test.isPending}
+          onClick={() => test.mutate()}
+          title={t("Sends one test search and may consume provider quota.")}
+        >
+          {t(test.isPending ? "Testing…" : "Check connection")}
+        </Button>
+      </SettingsRow>
       {test.data && (
         <p role="status">
           {test.data.success

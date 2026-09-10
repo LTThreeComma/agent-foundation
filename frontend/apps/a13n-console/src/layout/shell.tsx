@@ -18,7 +18,7 @@ import {
   useSidebar,
   Wordmark,
 } from "a13n-ui";
-import { ChevronDown, Menu, X } from "lucide-react";
+import { CaretDownIcon, ListIcon, XIcon } from "@phosphor-icons/react";
 import { Suspense, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { NavLink, Outlet, useLocation } from "react-router";
@@ -39,7 +39,7 @@ function PageOutlet() {
 export function Shell() {
   const location = useLocation();
   const contextual =
-    /^\/[^/]+\/[^/]+\/(sessions|settings)(\/|$)/.test(location.pathname) ||
+    /^\/[^/]+\/[^/]+\/settings(\/|$)/.test(location.pathname) ||
     location.pathname === "/settings/profile" ||
     location.pathname === "/organization/settings";
   if (contextual)
@@ -56,23 +56,13 @@ export function Shell() {
 }
 function WorkspaceNavigation() {
   const { t } = useTranslation();
-  const { workspace, basePath } = useWorkspace();
+  const { basePath } = useWorkspace();
   const { pathname } = useLocation();
   const { setOpenMobile } = useSidebar();
   const base = basePath;
   const destination = (path: string) =>
     path.startsWith("/") ? path : `${base}/${path}`;
   const close = () => setOpenMobile(false);
-  const current = navigationGroups
-    .flatMap((group) => group.entries)
-    .find(
-      ([path]) =>
-        pathname === destination(path) ||
-        pathname.startsWith(`${destination(path)}/`),
-    );
-  const currentChild = current?.[3]?.find(
-    ([path]) => path !== current[0] && pathname === destination(path),
-  );
   return (
     <>
       <Sidebar
@@ -92,7 +82,7 @@ function WorkspaceNavigation() {
               aria-label={t("Close navigation")}
               onClick={close}
             >
-              <X />
+              <XIcon />
             </Button>
           </div>
           <WorkspaceMenu onNavigate={close} />
@@ -114,20 +104,13 @@ function WorkspaceNavigation() {
                         <SidebarMenuButton
                           isActive={active}
                           render={
-                            <NavLink
-                              to={
-                                path === "/providers"
-                                  ? `/providers?workspace=${encodeURIComponent(workspace.key)}`
-                                  : destination(path)
-                              }
-                              onClick={close}
-                            />
+                            <NavLink to={destination(path)} onClick={close} />
                           }
                         >
-                          <Icon />
+                          <Icon weight={active ? "duotone" : "regular"} />
                           <span>{t(label)}</span>
                           {children && (
-                            <ChevronDown className="ml-auto size-3" />
+                            <CaretDownIcon className="ml-auto size-3" />
                           )}
                         </SidebarMenuButton>
                         {children && active && (
@@ -163,7 +146,7 @@ function WorkspaceNavigation() {
         </SidebarFooter>
       </Sidebar>
       <SidebarInset className="min-w-0">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4 text-sm sm:px-7">
+        <div className="flex shrink-0 px-4 pt-4 sm:px-7 md:hidden">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -171,18 +154,9 @@ function WorkspaceNavigation() {
             aria-label={t("Open navigation")}
             onClick={() => setOpenMobile(true)}
           >
-            <Menu />
+            <ListIcon />
           </Button>
-          <strong className="font-medium">
-            {t(current?.[1] ?? "Settings")}
-          </strong>
-          {currentChild && (
-            <>
-              <span className="text-muted-foreground">/</span>
-              <strong className="font-medium">{t(currentChild[1])}</strong>
-            </>
-          )}
-        </header>
+        </div>
         <PageOutlet />
       </SidebarInset>
     </>
