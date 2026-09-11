@@ -1,13 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "a13n-ui";
 import { MCPCredentialFields } from "./credentials";
-import { saveMCPAuthorization } from "./authorization-context";
+import { MCPOAuthSetup } from "./oauth-setup";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { commandHeaders, data, type Schema } from "../../shared/api";
-import { AuthorizationLink } from "../../shared/authorization-link";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
@@ -16,41 +15,20 @@ import styles from "../../shared/shared.module.css";
 export function MCPAuthorization({
   initial,
   reload,
+  onConnectionChange,
 }: {
   initial: Schema["MCPConnection"];
   reload: () => Promise<void>;
+  onConnectionChange: (connection: Schema["MCPConnection"]) => void;
 }) {
   const client = useClient(),
     cache = useQueryClient(),
-    { workspace, basePath } = useWorkspace(),
+    { workspace } = useWorkspace(),
     { t } = useTranslation(),
     key = useIdempotency(),
     basis = initial,
     [bearer, setBearer] = useState(""),
     [headers, setHeaders] = useState<Record<string, string>>({});
-  const authorize = useMutation({
-    gcTime: 0,
-    mutationFn: () => {
-      const body = { expected_version: basis.version };
-      return client.http
-        .POST("/api/v1/mcp-connections/{connection_id}/authorize", {
-          params: {
-            path: { connection_id: basis.id },
-            header: commandHeaders(
-              workspace.id,
-              key.forBody({ authorize: basis.id, ...body }),
-            ),
-          },
-          body,
-        })
-        .then(data);
-    },
-    onSuccess: (launch) => {
-      const href = saveMCPAuthorization(launch, basis, basePath);
-      void cache.invalidateQueries({ queryKey: ["mcp-connections"] });
-      window.location.assign(href);
-    },
-  });
   const credentials = useMutation({
     gcTime: 0,
     mutationFn: () => {
@@ -112,22 +90,10 @@ export function MCPAuthorization({
       </div>
       {basis.auth_mode === "oauth" ? (
         <>
-          {authorize.data ? (
-            <AuthorizationLink
-              sameTab
-              url={authorize.data.authorization_url}
-              expiresAt={authorize.data.expires_at}
-            />
-          ) : (
-            <Button
-              variant="default"
-              loading={authorize.isPending}
-              onClick={() => authorize.mutate()}
-              type="button"
-            >
-              {t("Authorize with OAuth")}
-            </Button>
-          )}
+          <MCPOAuthSetup
+            connection={basis}
+            onConnectionChange={onConnectionChange}
+          />
           <Button variant="outline" onClick={() => void reload()} type="button">
             {t("Refresh connection")}
           </Button>
@@ -171,7 +137,7 @@ export function MCPAuthorization({
         {t("Verify connection")}
       </Button>
       <ErrorNotice
-        error={authorize.error ?? credentials.error ?? reconnect.error}
+        error={credentials.error ?? reconnect.error}
         retry={() => void reload()}
       />
     </div>

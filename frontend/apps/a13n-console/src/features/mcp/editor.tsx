@@ -39,6 +39,7 @@ export function MCPEditor({
   onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
 }) {
   const client = useClient(),
+    cache = useQueryClient(),
     { workspace, can } = useWorkspace(),
     { t } = useTranslation(),
     [generation, setGeneration] = useState(0),
@@ -48,8 +49,9 @@ export function MCPEditor({
     onClose,
     finalFocus,
   });
+  const queryKey = ["mcp-connections", workspace.id, id];
   const query = useQuery({
-    queryKey: ["mcp-connections", workspace.id, id],
+    queryKey,
     enabled: open,
     queryFn: ({ signal }) =>
       client.http
@@ -135,7 +137,15 @@ export function MCPEditor({
                     }
                   </TabsPanel>
                   <TabsPanel value={"authorization"}>
-                    {<MCPAuthorization initial={query.data} reload={reload} />}
+                    {
+                      <MCPAuthorization
+                        initial={query.data}
+                        reload={reload}
+                        onConnectionChange={(connection) =>
+                          cache.setQueryData(queryKey, connection)
+                        }
+                      />
+                    }
                   </TabsPanel>
                   <TabsPanel value={"tools"}>
                     {<MCPTools connection={query.data} />}
