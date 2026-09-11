@@ -39,7 +39,6 @@ import {
   validateSettings,
 } from "../../shared/validation";
 import { connectorApi, type ConnectorScope } from "./api";
-import { ConnectorCatalog } from "./catalog";
 
 export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
   const client = useClient(),
@@ -217,7 +216,6 @@ function ProviderEditor({
               name={resource.data.name}
               description={resource.data.type}
             />
-            <ConnectorCatalog provider={resource.data} />
           </div>
         ) : (
           <ProviderForm
@@ -411,11 +409,6 @@ function ProviderForm({
             </SettingsRow>
             <ErrorNotice error={test.error} retry={() => void reload()} />
             {test.data && <JsonView value={test.data} />}
-            {scope.kind === "workspace" && basis.status === "active" && (
-              <SettingsRow label={t("Connectors")}>
-                <ConnectorCatalog provider={basis} />
-              </SettingsRow>
-            )}
           </SettingsSection>
         )}
         <ErrorNotice

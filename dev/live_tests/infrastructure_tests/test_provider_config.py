@@ -39,9 +39,6 @@ def test_override_and_independent_sections_keep_secrets_private(tmp_path, monkey
         '[environment]\napi_key="sample-secret"',
         '[environment]\ntype="unsupported"\napi_key="sample-secret"',
         '[connector]\nprovider="composio"',
-        '[connector]\nprovider="openconnector"\ncatalog_api_key="sample-secret"',
-        '[connector]\nprovider="openconnector"\nproject_api_key="sample-secret"',
-        '[connector]\nprovider="openconnector"\nproject_api_key="sample-secret"\ncatalog_api_key="key"\nservices=[]',
         '[connector]\nprovider="composio"\napi_key="key"\nproject_api_key="sample-secret"',
         '[connector]\nprovider="unknown"\napi_key="sample-secret"',
         '[model]\nprovider="openrouter"\napi_key="sample-secret"',
@@ -83,22 +80,9 @@ def test_enabled_model_and_connector_sections(tmp_path, provider):
         f'[model]\nprovider="{provider}"\napi_key="model-key"\nmodel="upstream/model"\n{endpoint}\n'
     )
     config = load_provider_settings(path)
-    assert config.connector.toolkits == ["github"]
+    assert config.connector.provider == "composio"
     assert config.model.model == "upstream/model" and config.model.provider == provider
     assert config.environment is None
-
-
-def test_openconnector_configuration_uses_two_private_keys(tmp_path):
-    path = tmp_path / "settings.toml"
-    path.write_text(
-        '[connector]\nprovider="openconnector"\nproject_api_key="project-secret"\ncatalog_api_key="catalog-secret"\n'
-    )
-    config = load_provider_settings(path)
-    assert config.connector.services == ["slack"]
-    assert config.connector.project_api_key.get_secret_value() == "project-secret"
-    assert config.connector.catalog_api_key.get_secret_value() == "catalog-secret"
-    for secret in ("project-secret", "catalog-secret"):
-        assert secret not in repr(config) + config.model_dump_json()
 
 
 @pytest.mark.parametrize("section,provider", [("search", "exa"), ("brave_search", "brave")])
@@ -121,8 +105,6 @@ def test_search_configuration_is_independent_and_redacted(tmp_path, section, pro
         ("model", ""),
         ("search", ""),
         ("brave_search", ""),
-        ("slack", ""),
-        ("model", "--live-slack"),
         (("model", "openai/gpt-4.1-nano"), ""),
     ],
 )
@@ -191,21 +173,6 @@ async def test_search_fixture_routes_each_configured_account_to_its_own_provider
         assert await anext(fixture) == "search journey"
     finally:
         await fixture.aclose()
-
-
-@pytest.mark.anyio
-async def test_provider_opt_in_does_not_start_interactive_slack(monkeypatch):
-    from ..conftest import configured_provider
-
-    def unexpected_read():
-        raise AssertionError("Noninteractive run read Slack configuration")
-
-    monkeypatch.setattr(provider_config, "load_provider_settings", unexpected_read)
-    request = SimpleNamespace(
-        config=SimpleNamespace(getoption=lambda option: option == "--live-providers"), param="slack"
-    )
-    with pytest.raises(pytest.skip.Exception, match="interactive Slack OAuth"):
-        await anext(configured_provider.__wrapped__(request))
 
 
 @pytest.mark.anyio

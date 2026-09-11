@@ -129,7 +129,7 @@ async def test_composio_fixture_is_usable_by_production_adapter(tmp_path):
         policy = EndpointPolicy.from_operator_allowlist(private_cidrs=["127.0.0.1/32"])
         provider = ComposioProvider(
             ConnectorHttpClient(http, policy, response_max_bytes=1024 * 1024),
-            ComposioConfiguration(endpoint=origin, enabled_toolkits=("live",)),
+            ComposioConfiguration(endpoint=origin),
             ApiKeyCredentials(api_key="fixture-token"),
         )
         assert await provider.test() == ("account_read",)

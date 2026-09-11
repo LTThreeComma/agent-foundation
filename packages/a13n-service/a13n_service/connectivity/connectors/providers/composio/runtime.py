@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 
 from anyio import Semaphore, create_task_group
+from jsonschema import Draft202012Validator
 
 from a13n_service.connectivity.connectors.providers.configuration import ApiKeyCredentials
 from a13n_service.connectivity.domain import JsonObject
@@ -34,11 +34,9 @@ from ...validation import (
     required_string,
     same_origin_url,
 )
-from ..discovery import DirectoryBudget, directory_items, setup_schema, validate_discovered_setup
+from .catalog import TOOLKIT_VERSION, ComposioCatalog
 from .configuration import ComposioConfiguration, ComposioSetup
 from .output_schema import corrected_output_schema
-
-_TOOLKIT_VERSION = re.compile(r"^[0-9]{8}_[0-9]{2}$")
 
 
 class ComposioProvider:
@@ -51,14 +49,13 @@ class ComposioProvider:
         self._http = http
         self._configuration = configuration
         self._credentials = credentials
+        self._catalog = ComposioCatalog(http, configuration, credentials.api_key)
 
     async def aclose(self) -> None:
         # The process owns the shared HTTP client.
         pass
 
     def connect(self, binding: ConnectionBinding) -> ComposioConnection:
-        if binding.connector_key not in self._configuration.enabled_toolkits:
-            raise ConnectorProviderError("connector_not_enabled")
         return ComposioConnection(self._http, self._configuration, self._credentials, binding)
 
     def tool_catalog(self, connector_key: str) -> ComposioToolCatalog:
@@ -83,53 +80,10 @@ class ComposioProvider:
         return ("account_read",)
 
     async def discover_connectors(self) -> tuple[DiscoveredConnector, ...]:
-        budget = DirectoryBudget()
-        toolkits = await directory_items(
-            self._http,
-            endpoint=self._configuration.endpoint,
-            api_key=self._credentials.api_key,
-            path="/api/v3.1/toolkits",
-            budget=budget,
-        )
-        auth_configs = await directory_items(
-            self._http,
-            endpoint=self._configuration.endpoint,
-            api_key=self._credentials.api_key,
-            path="/api/v3.1/auth_configs",
-            budget=budget,
-            page_size=50,
-        )
-        configured: dict[str, list[str]] = {}
-        for item in auth_configs:
-            # v3.1 hosted OAuth is supported. Other schemes must never solicit credentials in Service.
-            if item.get("status") != "ENABLED" or item.get("auth_scheme") != "OAUTH2":
-                continue
-            key = required_string(required_object(item.get("toolkit")), "slug", max_length=128)
-            configured.setdefault(key, []).append(required_string(item, "id", max_length=256))
-        result: list[DiscoveredConnector] = []
-        seen: set[str] = set()
-        for item in toolkits:
-            key = required_string(item, "slug", max_length=128)
-            if key in seen:
-                raise ConnectorProviderError("invalid_provider_response")
-            seen.add(key)
-            if key not in self._configuration.enabled_toolkits:
-                continue
-            meta = required_object(item.get("meta"))
-            version = required_string(meta, "version", max_length=128)
-            if _TOOLKIT_VERSION.fullmatch(version) is None:
-                raise ConnectorProviderError("incompatible_toolkit_version")
-            ids = configured.get(key, [])
-            result.append(
-                DiscoveredConnector(
-                    key=key,
-                    name=required_string(item, "name", max_length=128),
-                    description=optional_string(meta.get("description"), max_length=16_384),
-                    setup_schema=setup_schema(ids, toolkit_version=version) if ids else {"not": {}},
-                    authentication_methods=("OAUTH2",) if ids else (),
-                )
-            )
-        return tuple(result)
+        return await self._catalog.directory()
+
+    async def discover_connector(self, connector_key: str) -> DiscoveredConnector:
+        return await self._catalog.connector(connector_key)
 
     async def start_setup(
         self,
@@ -137,20 +91,31 @@ class ComposioProvider:
         setup: JsonObject,
         context: SetupContext,
         resume_ref: str | None = None,
+        before_shared_setup: BeforeDispatch | None = None,
     ) -> SetupStarted:
         if resume_ref is not None:
             return SetupStarted(setup_ref=resume_ref, external_ref=resume_ref, supports_verified_callback=True)
         configured = ComposioSetup.model_validate(setup)
-        await validate_discovered_setup(self.discover_connectors, context.connector_key, setup)
+        connector = await self.discover_connector(context.connector_key)
+        if connector.unavailable_reason:
+            raise ConnectorProviderError("connector_setup_unavailable")
+        if not Draft202012Validator(connector.setup_schema).is_valid(setup):
+            raise ConnectorProviderError("invalid_setup_options")
         if context.callback_url is None:
             raise ConnectorProviderError("callback_unavailable")
+        auth_config_id = await self._catalog.resolve_auth_config(
+            context.connector_key,
+            configured.auth_config_id,
+            before_shared_setup,
+        )
         value = await self._http.request(
             "POST",
             endpoint=self._configuration.endpoint,
             path="/api/v3.1/connected_accounts/link",
             api_key=self._credentials.api_key,
             json_body={
-                "auth_config_id": configured.auth_config_id,
+                "auth_config_id": auth_config_id,
+                "connection_data": configured.connection_data,
                 "callback_url": context.callback_url,
                 "user_id": context.external_user_correlation,
             },
@@ -222,8 +187,6 @@ class ComposioToolCatalog:
         credentials: ApiKeyCredentials,
         connector_key: str,
     ) -> None:
-        if connector_key not in configuration.enabled_toolkits:
-            raise ConnectorProviderError("connector_not_enabled")
         self._http = http
         self._configuration = configuration
         self._credentials = credentials
@@ -243,7 +206,7 @@ class ComposioToolCatalog:
             if required_string(toolkit, "slug", max_length=128) != self._connector_key:
                 raise ConnectorProviderError("provider_mismatch")
             version = required_string(required_object(toolkit.get("meta")), "version", max_length=128)
-            if _TOOLKIT_VERSION.fullmatch(version) is None:
+            if TOOLKIT_VERSION.fullmatch(version) is None:
                 raise ConnectorProviderError("incompatible_toolkit_version")
             self._catalog_version = version
         version = self._catalog_version
@@ -379,7 +342,7 @@ class ComposioConnection:
         request_id: str,
         before_dispatch: BeforeDispatch,
     ) -> ConnectorToolOutcome:
-        if _TOOLKIT_VERSION.fullmatch(provider_version) is None:
+        if TOOLKIT_VERSION.fullmatch(provider_version) is None:
             raise ConnectorProviderError("incompatible_toolkit_version")
         await before_dispatch()
         try:

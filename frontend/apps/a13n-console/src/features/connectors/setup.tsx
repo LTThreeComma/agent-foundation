@@ -1,112 +1,158 @@
-import { Button } from "a13n-ui";
-
+import { Button, FormField, Input } from "a13n-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { commandHeaders, data, type Schema } from "../../shared/api";
-import { AuthorizationLink } from "../../shared/authorization-link";
-import { ErrorNotice, StateBadge } from "../../shared/feedback";
+import {
+  AuthorizationLink,
+  authorizationHref,
+} from "../../shared/authorization-link";
+import { ErrorNotice, Loading, StateBadge } from "../../shared/feedback";
 import { FormActions } from "../../shared/form";
-import { SchemaFields, withSchemaConstants } from "../../shared/schema-fields";
+import { SchemaFields, withSchemaValues } from "../../shared/schema-fields";
 import { useIdempotency } from "../../shared/idempotency";
 import { createBrowserNonce, saveAuthorization } from "./authorization-context";
 import styles from "../../shared/shared.module.css";
 import { jsonObject, validateSettings } from "../../shared/validation";
 
+type SetupTarget =
+  | {
+      connection: Schema["ConnectorConnection"];
+      connector?: Schema["Connector"];
+    }
+  | { connection?: undefined; connector: Schema["Connector"] };
 export function ConnectionSetup({
   connection,
   connector,
-}: {
-  connection: Schema["ConnectorConnection"];
-  connector?: Schema["Connector"];
-}) {
+  onStarted,
+}: SetupTarget & { onStarted?: () => void }) {
   const client = useClient(),
     { workspace, basePath } = useWorkspace(),
     cache = useQueryClient(),
     { t } = useTranslation(),
-    key = useIdempotency(),
-    [basis] = useState(connection),
+    key = useIdempotency();
+  const created = useRef(connection);
+  const restarted = useRef<{ version: number; nonce: string }>(undefined);
+  const [current, setCurrent] = useState(connection),
+    [name, setName] = useState(connection?.name ?? connector?.name ?? ""),
+    [started, setStarted] = useState(false),
     [nonce] = useState(createBrowserNonce),
     [setup, setSetup] = useState<Record<string, unknown>>({});
-  const catalog = useQuery({
-    queryKey: ["connector-setup-catalog", connection.connector_provider_id],
-    enabled: !connector,
-    queryFn: () =>
+  const providerId =
+    connection?.connector_provider_id ?? connector!.connector_provider_id;
+  const connectorKey = connection?.connector_key ?? connector!.key;
+  const definition = useQuery({
+    queryKey: [
+      "connector-setup-catalog",
+      workspace.id,
+      providerId,
+      connectorKey,
+    ],
+    queryFn: ({ signal }) =>
       client.http
-        .POST(
-          "/api/v1/connector-providers/{connector_provider_id}/discover-connectors",
+        .GET(
+          "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}",
           {
             params: {
-              path: { connector_provider_id: connection.connector_provider_id },
+              path: {
+                connector_provider_id: providerId,
+                connector_key: connectorKey,
+              },
             },
+            signal,
           },
         )
         .then(data),
   });
-  const definition =
-    connector ??
-    catalog.data?.items.find((item) => item.key === connection.connector_key);
   const launch = useMutation({
     gcTime: 0,
-    mutationFn: (options?: {
-      restart: Schema["ConnectorConnection"];
-      nonce: string;
-    }) => {
-      const selected = options?.restart ?? basis,
-        browserNonce = options?.nonce ?? nonce;
-      if (!definition)
-        throw new Error(t("This connector is unavailable from its provider."));
-      if (definition.authentication_methods.length === 0)
+    mutationFn: async (restart?: Schema["ConnectorConnection"]) => {
+      const selected = definition.data;
+      if (
+        !selected ||
+        selected.unavailable_reason ||
+        selected.authentication_methods.length === 0
+      )
         throw new Error(
-          t(
-            "Configure an OAuth2 auth config in the provider before connecting.",
+          selected?.unavailable_reason ??
+            t("This connector is unavailable from its provider."),
+        );
+      const configured = withSchemaValues(selected.setup_schema, setup);
+      validateSettings(selected.setup_schema, configured);
+      setStarted(true);
+      onStarted?.();
+      let target = restart ?? created.current;
+      if (!target) {
+        const body = {
+          connector_provider_id: providerId,
+          connector_key: connectorKey,
+          name,
+        };
+        target = data(
+          await client.http.POST(
+            "/api/v1/workspaces/{workspace}/connector-connections",
+            {
+              params: {
+                path: { workspace: workspace.id },
+                header: commandHeaders(workspace.id, key.forBody(body)),
+              },
+              body,
+            },
           ),
         );
-      const configured = withSchemaConstants(definition.setup_schema, setup);
-      validateSettings(definition.setup_schema, configured);
-      const body = {
-          expected_version: selected.version,
-          browser_nonce: browserNonce,
-          setup: jsonObject(JSON.stringify(configured)),
-          return_path: `${basePath}/connectors`,
-        },
-        params = {
-          path: { connection_id: selected.id },
-          header: commandHeaders(workspace.id, key.forBody(body)),
+        created.current = target;
+        setCurrent(target);
+        void cache.invalidateQueries({ queryKey: ["connector-connections"] });
+      }
+      if (restart && restarted.current?.version !== restart.version)
+        restarted.current = {
+          version: restart.version,
+          nonce: createBrowserNonce(),
         };
-      saveAuthorization({
+      const browserNonce = restart ? restarted.current!.nonce : nonce;
+      const returnPath = `${basePath}/connections`;
+      const context = {
         browser_nonce: browserNonce,
         workspace_id: workspace.id,
-        return_path: `${basePath}/connectors`,
-        connection_id: selected.id,
-      });
-      return !options?.restart && basis.status === "pending"
-        ? client.http
-            .POST("/api/v1/connector-connections/{connection_id}/setup", {
-              params,
-              body,
-            })
-            .then(data)
-        : client.http
-            .POST("/api/v1/connector-connections/{connection_id}/reconnect", {
-              params,
-              body,
-            })
-            .then(data);
-    },
-    onSuccess: (result, options) => {
+        return_path: returnPath,
+        connection_id: target.id,
+      };
+      saveAuthorization(context);
+      const body = {
+        expected_version: target.version,
+        browser_nonce: browserNonce,
+        setup: jsonObject(JSON.stringify(configured)),
+        return_path: returnPath,
+      };
+      const params = {
+        path: { connection_id: target.id },
+        header: commandHeaders(workspace.id, key.forBody(body)),
+      };
+      const result = data(
+        await (restart || target.status !== "pending"
+          ? client.http.POST(
+              "/api/v1/connector-connections/{connection_id}/reconnect",
+              { params, body },
+            )
+          : client.http.POST(
+              "/api/v1/connector-connections/{connection_id}/setup",
+              { params, body },
+            )),
+      );
       if (result.requires_browser_callback)
         saveAuthorization({
-          browser_nonce: options?.nonce ?? nonce,
-          workspace_id: workspace.id,
-          return_path: `${basePath}/connectors`,
-          connection_id: basis.id,
+          ...context,
           attempt_id: result.attempt_id,
           expires_at: result.expires_at,
         });
+      const href = authorizationHref(result.redirect_url);
+      if (href && result.requires_browser_callback)
+        window.location.assign(href);
+      return result;
+    },
+    onSettled: () => {
       void cache.invalidateQueries({ queryKey: ["connector-connections"] });
     },
   });
@@ -114,14 +160,14 @@ export function ConnectionSetup({
     queryKey: [
       "connector-connections",
       workspace.id,
-      connection.id,
+      current?.id,
       "setup-status",
     ],
-    enabled: !!launch.data,
+    enabled: !!current,
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/connector-connections/{connection_id}", {
-          params: { path: { connection_id: connection.id } },
+          params: { path: { connection_id: current!.id } },
           signal,
         })
         .then(data),
@@ -134,14 +180,40 @@ export function ConnectionSetup({
   });
   return (
     <div className={styles.stack}>
-      <h3>{connection.name}</h3>
       <p className={styles.muted}>
         {t(
-          "Authorize the external account in the provider-hosted flow. Credentials stay with the provider.",
+          "Authorize the external account with your provider. Credentials stay with the provider.",
         )}
       </p>
-      <ErrorNotice error={catalog.error ?? launch.error ?? status.error} />
-      {launch.data ? (
+      <ErrorNotice error={definition.error ?? launch.error ?? status.error} />
+      {launch.error && current ? (
+        <div className={styles.stack}>
+          <StateBadge state={status.data?.status ?? current.status} />
+          <p>
+            {t(
+              "Your connection is saved. Retry the authorization request or restart from its current status.",
+            )}
+          </p>
+          {status.data?.status !== "ready" && (
+            <>
+              <Button
+                loading={launch.isPending}
+                onClick={() => launch.mutate(launch.variables)}
+              >
+                {t("Retry authorization request")}
+              </Button>
+              {status.data && (
+                <Button
+                  variant="outline"
+                  onClick={() => launch.mutate(status.data)}
+                >
+                  {t("Restart authorization")}
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      ) : launch.data ? (
         <>
           <StateBadge
             state={status.data?.status ?? launch.data.connection.status}
@@ -160,10 +232,7 @@ export function ConnectionSetup({
               <Button
                 loading={launch.isPending}
                 onClick={() =>
-                  launch.mutate({
-                    restart: status.data ?? launch.data!.connection,
-                    nonce: createBrowserNonce(),
-                  })
+                  launch.mutate(status.data ?? launch.data!.connection)
                 }
               >
                 {t("Restart authorization")}
@@ -171,38 +240,51 @@ export function ConnectionSetup({
             )}
           <Button
             variant="outline"
-            type="button"
             onClick={() => void status.refetch()}
+            type="button"
           >
             {t("Refresh connection")}
           </Button>
         </>
+      ) : definition.isPending ? (
+        <Loading />
       ) : (
         <form
           className={styles.form}
           onSubmit={(event) => {
             event.preventDefault();
-            launch.mutate();
+            launch.mutate(undefined);
           }}
         >
-          {definition && (
-            <SchemaFields
-              schema={definition.setup_schema}
-              value={setup}
-              onChange={setSetup}
-            />
+          {!connection && (
+            <FormField label={t("Connection name")}>
+              <Input
+                required
+                value={name}
+                disabled={started}
+                maxLength={128}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </FormField>
           )}
-          {definition?.authentication_methods.length === 0 ? (
-            <p role="status">
-              {t(
-                "Configure an OAuth2 auth config in the provider before connecting.",
-              )}
-            </p>
+          {definition.data && !definition.data.unavailable_reason && (
+            <fieldset disabled={started}>
+              <SchemaFields
+                schema={definition.data.setup_schema}
+                value={setup}
+                onChange={setSetup}
+              />
+            </fieldset>
+          )}
+          {definition.data?.unavailable_reason ? (
+            <p role="status">{t(definition.data.unavailable_reason)}</p>
           ) : (
-            <FormActions
-              pending={launch.isPending}
-              label={t("Start authorization")}
-            />
+            definition.data && (
+              <FormActions
+                pending={launch.isPending}
+                label={t(current ? "Authorize connection" : "Connect")}
+              />
+            )
           )}
         </form>
       )}

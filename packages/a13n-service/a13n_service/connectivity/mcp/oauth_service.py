@@ -110,7 +110,7 @@ class MCPOAuthService:
     @property
     def redirect_uri(self) -> str:
         self._require_origin()
-        return f"{self._public_origin}/api/v1/oauth/mcp/callback"
+        return f"{self._public_origin}/mcp-setup/callback"
 
     def _require_origin(self) -> None:
         if self._public_origin is None:

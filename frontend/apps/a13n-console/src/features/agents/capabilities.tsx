@@ -119,7 +119,7 @@ export function AgentCapabilities({
         title={t("MCP connections")}
         description={t("Tools provided by your MCP connections.")}
         icon={<TreeStructureIcon size={15} />}
-        setup={`${base}/mcp`}
+        setup={`${base}/connections`}
         loading={choices.isPending}
         choices={availableChoices(
           (choices.data?.mcp ?? []).map((item) => ({
@@ -165,7 +165,7 @@ export function AgentCapabilities({
         title={t("Connectors")}
         description={t("Connected services this agent can use.")}
         icon={<PlugIcon size={15} />}
-        setup={`${base}/connectors`}
+        setup={`${base}/connections`}
         loading={choices.isPending}
         choices={availableChoices(
           (choices.data?.connectors ?? []).map((item) => ({

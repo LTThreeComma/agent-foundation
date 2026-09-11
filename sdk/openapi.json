@@ -2491,6 +2491,36 @@
         "title": "CompleteEmailChangeRequest",
         "type": "object"
       },
+      "CompleteMCPOAuthRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "issuer": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issuer",
+            "type": "string"
+          },
+          "state": {
+            "maxLength": 512,
+            "minLength": 32,
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "state",
+          "issuer"
+        ],
+        "title": "CompleteMCPOAuthRequest",
+        "type": "object"
+      },
       "CompletePasswordResetRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2606,9 +2636,21 @@
             "title": "Description"
           },
           "key": {
-            "pattern": "^[a-z][a-z0-9._-]{0,127}$",
+            "pattern": "^[a-z0-9_][a-z0-9._-]{0,127}$",
             "title": "Key",
             "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
           },
           "name": {
             "maxLength": 128,
@@ -2622,6 +2664,18 @@
             },
             "title": "Setup Schema",
             "type": "object"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
           }
         },
         "required": [
@@ -2646,8 +2700,27 @@
             "type": "array"
           },
           "next_cursor": {
-            "title": "Next Cursor",
-            "type": "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "refreshed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refreshed At"
           }
         },
         "required": [
@@ -2660,7 +2733,7 @@
         "additionalProperties": false,
         "properties": {
           "connector_key": {
-            "pattern": "^[a-z][a-z0-9._-]{0,127}$",
+            "pattern": "^[a-z0-9_][a-z0-9._-]{0,127}$",
             "title": "Connector Key",
             "type": "string"
           },
@@ -3545,7 +3618,7 @@
         "additionalProperties": false,
         "properties": {
           "connector_key": {
-            "pattern": "^[a-z][a-z0-9._-]{0,127}$",
+            "pattern": "^[a-z0-9_][a-z0-9._-]{0,127}$",
             "title": "Connector Key",
             "type": "string"
           },
@@ -18184,6 +18257,101 @@
         ]
       }
     },
+    "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}": {
+      "get": {
+        "operationId": "get_connector_providers_connector_provider_id_connectors_connector_key",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connector_provider_id",
+            "required": true,
+            "schema": {
+              "title": "Connector Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connector_key",
+            "required": true,
+            "schema": {
+              "title": "Connector Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connector"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service error.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionAuth": []
+          }
+        ],
+        "summary": "Get Connector",
+        "tags": [
+          "connectivity-management"
+        ]
+      }
+    },
     "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}/tools": {
       "get": {
         "operationId": "get_connector_providers_connector_provider_id_connectors_connector_key_tools",
@@ -18397,6 +18565,56 @@
             "schema": {
               "title": "Connector Provider Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Refresh",
+              "type": "boolean"
             }
           }
         ],
@@ -21707,44 +21925,69 @@
         ]
       }
     },
-    "/api/v1/oauth/mcp/callback": {
+    "/api/v1/oauth/mcp/client-metadata.json": {
       "get": {
-        "operationId": "get_oauth_mcp_callback",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "code",
-            "required": true,
-            "schema": {
-              "maxLength": 8192,
-              "minLength": 1,
-              "title": "Code",
-              "type": "string"
+        "operationId": "get_oauth_mcp_client_metadata_json",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MCPClientMetadata"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
-          {
-            "in": "query",
-            "name": "state",
-            "required": true,
-            "schema": {
-              "maxLength": 512,
-              "minLength": 32,
-              "title": "State",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "iss",
-            "required": true,
-            "schema": {
-              "maxLength": 2048,
-              "minLength": 1,
-              "title": "Iss",
-              "type": "string"
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service error.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           }
-        ],
+        },
+        "summary": "Mcp Client Metadata",
+        "tags": [
+          "connectivity-management"
+        ]
+      }
+    },
+    "/api/v1/oauth/mcp/complete": {
+      "post": {
+        "operationId": "post_oauth_mcp_complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteMCPOAuthRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -21811,57 +22054,7 @@
             "SessionAuth": []
           }
         ],
-        "summary": "Mcp Oauth Callback",
-        "tags": [
-          "connectivity-management"
-        ]
-      }
-    },
-    "/api/v1/oauth/mcp/client-metadata.json": {
-      "get": {
-        "operationId": "get_oauth_mcp_client_metadata_json",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MCPClientMetadata"
-                }
-              }
-            },
-            "description": "Successful Response",
-            "headers": {
-              "X-Request-ID": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service error.",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "string"
-                }
-              },
-              "X-Request-ID": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "summary": "Mcp Client Metadata",
+        "summary": "Complete Mcp Oauth",
         "tags": [
           "connectivity-management"
         ]

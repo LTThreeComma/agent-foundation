@@ -416,6 +416,23 @@ export interface paths {
     patch: operations["patch_connector_providers_connector_provider_id"];
     trace?: never;
   };
+  "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Connector */
+    get: operations["get_connector_providers_connector_provider_id_connectors_connector_key"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}/tools": {
     parameters: {
       query?: never;
@@ -949,23 +966,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/oauth/mcp/callback": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** Mcp Oauth Callback */
-    get: operations["get_oauth_mcp_callback"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/api/v1/oauth/mcp/client-metadata.json": {
     parameters: {
       query?: never;
@@ -977,6 +977,23 @@ export interface paths {
     get: operations["get_oauth_mcp_client_metadata_json"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/oauth/mcp/complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Complete Mcp Oauth */
+    post: operations["post_oauth_mcp_complete"];
     delete?: never;
     options?: never;
     head?: never;
@@ -3883,6 +3900,15 @@ export interface components {
        */
       token: string;
     };
+    /** CompleteMCPOAuthRequest */
+    CompleteMCPOAuthRequest: {
+      /** Code */
+      code: string;
+      /** Issuer */
+      issuer: string;
+      /** State */
+      state: string;
+    };
     /** CompletePasswordResetRequest */
     CompletePasswordResetRequest: {
       /**
@@ -3932,19 +3958,25 @@ export interface components {
       description?: string | null;
       /** Key */
       key: string;
+      /** Logo Url */
+      logo_url?: string | null;
       /** Name */
       name: string;
       /** Setup Schema */
       setup_schema: {
         [key: string]: components["schemas"]["JsonValue"];
       };
+      /** Unavailable Reason */
+      unavailable_reason?: string | null;
     };
     /** ConnectorCollection */
     ConnectorCollection: {
       /** Items */
       items: components["schemas"]["Connector"][];
       /** Next Cursor */
-      next_cursor?: null;
+      next_cursor?: string | null;
+      /** Refreshed At */
+      refreshed_at?: string | null;
     };
     /** ConnectorConnection */
     ConnectorConnection: {
@@ -9583,6 +9615,51 @@ export interface operations {
       };
     };
   };
+  get_connector_providers_connector_provider_id_connectors_connector_key: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        connector_provider_id: string;
+        connector_key: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Connector"];
+        };
+      };
+      /** @description Invalid request. */
+      400: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+      /** @description Service error. */
+      default: {
+        headers: {
+          "Retry-After"?: string;
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+    };
+  };
   get_connector_providers_connector_provider_id_connectors_connector_key_tools: {
     parameters: {
       query?: never;
@@ -9680,7 +9757,12 @@ export interface operations {
   };
   post_connector_providers_connector_provider_id_discover_connectors: {
     parameters: {
-      query?: never;
+      query?: {
+        query?: string;
+        cursor?: string | null;
+        limit?: number;
+        refresh?: boolean;
+      };
       header?: never;
       path: {
         connector_provider_id: string;
@@ -11298,18 +11380,50 @@ export interface operations {
       };
     };
   };
-  get_oauth_mcp_callback: {
+  get_oauth_mcp_client_metadata_json: {
     parameters: {
-      query: {
-        code: string;
-        state: string;
-        iss: string;
-      };
+      query?: never;
       header?: never;
       path?: never;
       cookie?: never;
     };
     requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MCPClientMetadata"];
+        };
+      };
+      /** @description Service error. */
+      default: {
+        headers: {
+          "Retry-After"?: string;
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+    };
+  };
+  post_oauth_mcp_complete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CompleteMCPOAuthRequest"];
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
@@ -11329,38 +11443,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ErrorResponse"];
-        };
-      };
-      /** @description Service error. */
-      default: {
-        headers: {
-          "Retry-After"?: string;
-          "X-Request-ID"?: string;
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorResponse"];
-        };
-      };
-    };
-  };
-  get_oauth_mcp_client_metadata_json: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          "X-Request-ID"?: string;
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPClientMetadata"];
         };
       };
       /** @description Service error. */

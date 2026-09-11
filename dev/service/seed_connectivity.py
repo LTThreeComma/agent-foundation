@@ -59,7 +59,7 @@ async def connectivity(client: Client, base: str, catalog: dict, identity: dict,
             json={
                 "name": f"Fictional Composio configuration · {state}",
                 "type": "composio",
-                "configuration": {"endpoint": "https://connector.invalid", "enabled_toolkits": ["github"]},
+                "configuration": {"endpoint": "https://connector.invalid"},
                 "credentials": {"api_key": "public-local-connector-token"},
             },
         )

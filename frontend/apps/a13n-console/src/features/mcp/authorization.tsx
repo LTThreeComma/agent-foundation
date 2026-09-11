@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button, FormField, Input } from "a13n-ui";
+import { Button } from "a13n-ui";
+import { MCPCredentialFields } from "./credentials";
+import { saveMCPAuthorization } from "./authorization-context";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
@@ -20,7 +22,7 @@ export function MCPAuthorization({
 }) {
   const client = useClient(),
     cache = useQueryClient(),
-    { workspace } = useWorkspace(),
+    { workspace, basePath } = useWorkspace(),
     { t } = useTranslation(),
     key = useIdempotency(),
     [basis] = useState(initial),
@@ -42,6 +44,11 @@ export function MCPAuthorization({
           body,
         })
         .then(data);
+    },
+    onSuccess: (launch) => {
+      const href = saveMCPAuthorization(launch, basis, basePath);
+      void cache.invalidateQueries({ queryKey: ["mcp-connections"] });
+      window.location.assign(href);
     },
   });
   const credentials = useMutation({
@@ -98,6 +105,7 @@ export function MCPAuthorization({
         <>
           {authorize.data ? (
             <AuthorizationLink
+              sameTab
               url={authorize.data.authorization_url}
               expiresAt={authorize.data.expires_at}
             />
@@ -130,35 +138,14 @@ export function MCPAuthorization({
                 "Existing credentials are never displayed. Supply a complete replacement.",
               )}
             </p>
-            {basis.auth_mode === "bearer" ? (
-              <FormField className="min-w-0 w-full" label={t("Bearer token")}>
-                <Input
-                  required={true}
-                  type="password"
-                  autoComplete="off"
-                  value={bearer}
-                  onChange={(event) => setBearer(event.target.value)}
-                />
-              </FormField>
-            ) : (
-              basis.static_header_names.map((name) => (
-                <FormField className="min-w-0 w-full" label={name} key={name}>
-                  <Input
-                    required={true}
-
-                    type="password"
-                    autoComplete="off"
-                    value={headers[name] ?? ""}
-                    onChange={(event) =>
-                      setHeaders((current) => ({
-                        ...current,
-                        [name]: event.target.value,
-                      }))
-                    }
-                  />
-                </FormField>
-              ))
-            )}
+            <MCPCredentialFields
+              mode={basis.auth_mode}
+              names={basis.static_header_names}
+              bearer={bearer}
+              onBearer={setBearer}
+              headers={headers}
+              onHeaders={setHeaders}
+            />
             <FormActions
               pending={credentials.isPending}
               label={t("Save credentials")}
