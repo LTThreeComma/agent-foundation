@@ -1305,5 +1305,11 @@
   "Use a branch, tag, or commit. Leave empty for the default branch.": "填写分支、标签或提交。留空则使用默认分支。",
   "Path to the skill inside the repository. Leave empty for the repository root.": "技能在仓库中的目录路径。留空则使用仓库根目录。",
   "Use the identifier from the external service, not its display name.": "填写外部服务中的目标标识，而非显示名称。",
-  "Provider type is fixed after creation.": "提供方类型在创建后不可修改。"
+  "Provider type is fixed after creation.": "提供方类型在创建后不可修改。",
+  "This provider cannot reauthorize an existing account. Create a new connection, authorize it, then select it in your agent settings.": "此提供商不支持对现有账户重新授权。请新建连接并授权，然后在智能体设置中选择新连接。",
+  "Back to connections": "返回连接列表",
+  "Load tools on demand": "按需加载工具",
+  "Select no tools": "不选择任何工具",
+  "No tools": "无工具",
+  "Authorization has already started. Restarting invalidates the previous authorization link.": "授权已经开始。重新开始会使之前的授权链接失效。"
 }

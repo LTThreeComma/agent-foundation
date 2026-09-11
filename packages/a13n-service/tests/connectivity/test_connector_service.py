@@ -385,7 +385,10 @@ async def test_connection_http_commands_preserve_lifecycle_and_dispatch(
     connection = await create_connection(
         connections, connector_provider_id=provider.id, idempotency_key="http-connection"
     )
+    from a13n_service.api import install_api_conventions
+
     app = FastAPI()
+    install_api_conventions(app)
     app.include_router(router.router)
     app.dependency_overrides[authenticate_request] = actor
     monkeypatch.setattr(router, "_connections", lambda request: connections)
@@ -399,6 +402,20 @@ async def test_connection_http_commands_preserve_lifecycle_and_dispatch(
         )
         assert response.status_code == 200
         launch = response.json()
+        duplicate = await client.post(
+            path + "/setup",
+            headers={"Idempotency-Key": "http-setup-another-key"},
+            json={"expected_version": connection.version, **setup},
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["error"]["code"] == "setup_already_started"
+        invalid_path = await client.post(
+            path + "/setup",
+            headers={"Idempotency-Key": "http-setup-invalid-path"},
+            json={"expected_version": connection.version, **setup, "return_path": "//outside.invalid/"},
+        )
+        assert invalid_path.status_code == 400
+        assert connector_backend.started == 1
         response = await client.post(
             "/api/v1/connector-setup/complete",
             json={
@@ -527,7 +544,20 @@ async def test_disabled_provider_stops_setup_and_releases_callback_reservation(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("outcome", ["typed_unknown", "error_unknown", "business_unknown"])
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        None,
+        "scope_missing",
+        "not_found",
+        "rate_limited",
+        "schema",
+        "depth",
+        "size",
+        "error_unknown",
+        "business_unknown",
+    ],
+)
 async def test_worker_connector_uses_verified_binding_and_preserves_unknown_write(
     connector_services,
     connector_registry,
@@ -535,7 +565,7 @@ async def test_worker_connector_uses_verified_binding_and_preserves_unknown_writ
     credential_protector,
     monkeypatch,
     external_runtime_factory,
-    outcome,
+    rejection,
 ):
     from a13n_harness import AgentSpec, HarnessBuilder, HarnessInstrumentation, HarnessTraceContent
     from a13n_service.connectivity.connectors.contracts import ConnectorProviderError, ConnectorToolOutcome
@@ -577,10 +607,22 @@ async def test_worker_connector_uses_verified_binding_and_preserves_unknown_writ
     async def execute(self, **kwargs):
         await kwargs["before_dispatch"]()
         calls.append((self.binding, kwargs))
-        if outcome == "error_unknown":
+        if rejection == "error_unknown":
             raise ConnectorProviderError("private_diagnostic", outcome_unknown=True)
-        if outcome == "business_unknown":
+        if rejection == "business_unknown":
             return ConnectorToolOutcome(kind="succeeded", result={"kind": "outcome_unknown", "ok": False})
+        if rejection in {"schema", "depth", "size"}:
+            payload = "invalid-object" if rejection == "schema" else {"value": "x" * (1024 * 1024)}
+            if rejection == "depth":
+                payload = {}
+                for _ in range(70):
+                    payload = {"nested": payload}
+            return ConnectorToolOutcome(kind="succeeded", result=payload, request_id=kwargs["request_id"])
+        if rejection is not None:
+            raise ConnectorProviderError(
+                "tool_rejected" if rejection == "not_found" else rejection,
+                http_status=404 if rejection == "not_found" else None,
+            )
         return ConnectorToolOutcome(kind="outcome_unknown", request_id=kwargs["request_id"])
 
     async def guard(session=None):
@@ -603,10 +645,13 @@ async def test_worker_connector_uses_verified_binding_and_preserves_unknown_writ
         instrumentation=HarnessInstrumentation(tracer_provider=tracer, trace_content=HarnessTraceContent.NONE)
     ).build(AgentSpec(), output_type=str, model=TestModel(), capabilities=[capability])
     result = await executable.run("create issue")
-    assert "outcome_unknown" in result.output_or_raise()
+    unknown = rejection in {None, "schema", "depth", "size", "error_unknown"}
+    expected_text = "outcome_unknown" if unknown or rejection == "business_unknown" else rejection
+    assert expected_text in result.output_or_raise()
+    if not unknown and rejection != "business_unknown":
+        assert '"failed"' in result.output_or_raise()
     tool = next(s for s in exporter.get_finished_spans() if s.attributes.get("gen_ai.operation.name") == "execute_tool")
-    expected = "returned" if outcome == "business_unknown" else "outcome_unknown"
-    assert tool.attributes["a13n.tool.result.status"] == expected
+    assert tool.attributes["a13n.tool.result.status"] == ("outcome_unknown" if unknown else "returned")
     assert tool.status.status_code is StatusCode.UNSET
     assert "private_diagnostic" not in repr(dict(tool.attributes))
     assert result.status == "completed"
