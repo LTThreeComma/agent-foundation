@@ -217,8 +217,10 @@ from a13n_harness.pricing import (
 from a13n_harness.recovery import (
     InterruptedResponseTracker,
     ModelRecoveryPolicy,
+    ToolRecoveryMode,
     is_recoverable_model_failure,
     normalize_interrupted_history,
+    prepare_tool_recovery,
 )
 from a13n_harness.result import HarnessRunResult, SafeFailure
 from a13n_harness.spec import AgentSpec as HarnessAgentSpec
@@ -1045,7 +1047,7 @@ class ExecutableAgent[OutputT]:
         default_environment: None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1062,7 +1064,7 @@ class ExecutableAgent[OutputT]:
         default_environment: str | None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1079,7 +1081,7 @@ class ExecutableAgent[OutputT]:
         default_environment: None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1095,7 +1097,7 @@ class ExecutableAgent[OutputT]:
         default_environment: str | None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1109,7 +1111,7 @@ class ExecutableAgent[OutputT]:
             default_environment=default_environment,
             bindings=bindings,
             previous_state=previous_state,
-            execute_pending_tools=execute_pending_tools,
+            tool_recovery=tool_recovery,
             deferred_resume=deferred_resume,
             usage=usage,
             usage_limits=usage_limits,
@@ -1130,7 +1132,7 @@ class ExecutableAgent[OutputT]:
         default_environment: None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1147,7 +1149,7 @@ class ExecutableAgent[OutputT]:
         default_environment: str | None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1164,7 +1166,7 @@ class ExecutableAgent[OutputT]:
         default_environment: None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1180,7 +1182,7 @@ class ExecutableAgent[OutputT]:
         default_environment: str | None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
@@ -1194,7 +1196,7 @@ class ExecutableAgent[OutputT]:
             default_environment=default_environment,
             bindings=bindings,
             previous_state=previous_state,
-            execute_pending_tools=execute_pending_tools,
+            tool_recovery=tool_recovery,
             deferred_resume=deferred_resume,
             usage=usage,
             usage_limits=usage_limits,
@@ -1210,11 +1212,13 @@ class ExecutableAgent[OutputT]:
         default_environment: str | None = None,
         bindings: RunBindings | None = None,
         previous_state: HarnessState | None = None,
-        execute_pending_tools: bool = False,
+        tool_recovery: ToolRecoveryMode = "declared",
         deferred_resume: DeferredToolResume | None = None,
         usage: RunUsage | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> HarnessRunStream[OutputT]:
+        if tool_recovery not in {"declared", "never", "always"}:
+            raise ValueError("tool_recovery must be 'declared', 'never', or 'always'")
         if input is not None and input_factory is not None:
             raise RunError(
                 "input and input_factory are mutually exclusive.",
@@ -1246,7 +1250,7 @@ class ExecutableAgent[OutputT]:
             bindings=resolved_bindings,
             environment_binding=environment_binding,
             previous_state=previous_state,
-            execute_pending_tools=execute_pending_tools,
+            tool_recovery=tool_recovery,
             deferred_resume=normalized_resume,
             run_reserved_capability_ids=run_reserved_ids,
             skill_selection_names=skill_selection_names,
@@ -1267,7 +1271,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         bindings: RunBindings,
         environment_binding: EnvironmentRuntime,
         previous_state: HarnessState | None,
-        execute_pending_tools: bool,
+        tool_recovery: ToolRecoveryMode,
         deferred_resume: DeferredToolResume | None,
         run_reserved_capability_ids: frozenset[str],
         skill_selection_names: frozenset[str] | None,
@@ -1284,7 +1288,11 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         )
         self.thread_id = self._previous_state.thread_id
         self.run_id = f"run-{uuid4().hex}"
-        self._execute_pending_tools = execute_pending_tools
+        self._tool_recovery = (
+            prepare_tool_recovery(self._previous_state.message_history, tool_recovery)
+            if deferred_resume is None
+            else None
+        )
         self._deferred_resume = deferred_resume
         self._run_reserved_capability_ids = run_reserved_capability_ids
         self._skill_selection_names = skill_selection_names
@@ -1457,6 +1465,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                     events=self._emitter,
                     usage_attribution=usage_attribution,
                     deferred_resume=self._deferred_resume,
+                    _tool_recovery=self._tool_recovery,
                     metadata=self._bindings.metadata,
                     _steering=SteeringBridge(
                         context_state,
@@ -2231,9 +2240,15 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         policy = self._executable.definition.model_recovery
         max_attempts = policy.max_attempts if policy.enabled else 1
         attempt_index = 0
-        current_history, _ = normalize_interrupted_history(
-            self._previous_state.message_history,
-            close_pending_tools=not self._execute_pending_tools and self._deferred_resume is None,
+        current_history = (
+            self._tool_recovery.messages if self._tool_recovery is not None else self._previous_state.message_history
+        )
+        deferred_results = (
+            self._deferred_resume.results
+            if self._deferred_resume is not None
+            else self._tool_recovery.results
+            if self._tool_recovery is not None
+            else None
         )
         current_history = _reconcile_system_prompt(
             current_history,
@@ -2250,9 +2265,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
             manager = self._executable._agent.run_stream_events(
                 current_input.value,
                 message_history=current_history,
-                deferred_tool_results=(
-                    self._deferred_resume.results if attempt_index == 0 and self._deferred_resume is not None else None
-                ),
+                deferred_tool_results=(deferred_results if attempt_index == 0 else None),
                 run_id=f"model-attempt-{uuid4().hex}",
                 conversation_id=self.thread_id,
                 deps=self.context,
