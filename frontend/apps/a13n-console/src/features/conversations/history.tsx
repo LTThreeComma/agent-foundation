@@ -1,4 +1,4 @@
-import { Button } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link } from "react-router";

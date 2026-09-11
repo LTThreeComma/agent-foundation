@@ -1,4 +1,7 @@
-import { Button, DisclosureSection, FormField, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";

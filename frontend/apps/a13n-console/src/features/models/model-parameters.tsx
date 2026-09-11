@@ -1,4 +1,6 @@
-import { Button, DisclosureSection, Tabs, TabsList, TabsTab } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { Tabs, TabsList, TabsTab } from "a13n-ui/components/tabs";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { TextAreaField } from "../../shared/form";

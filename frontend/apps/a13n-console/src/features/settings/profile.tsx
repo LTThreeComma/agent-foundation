@@ -1,6 +1,7 @@
-import { Button, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Input } from "a13n-ui/components/input";
 
-import { SettingsRow, SettingsSection } from "a13n-ui";
+import { SettingsRow, SettingsSection } from "a13n-ui/patterns/settings";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useState, type FormEvent } from "react";

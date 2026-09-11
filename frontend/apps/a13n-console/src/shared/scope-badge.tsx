@@ -1,4 +1,4 @@
-import { Badge } from "a13n-ui";
+import { Badge } from "a13n-ui/components/badge";
 import { useTranslation } from "react-i18next";
 
 export function ScopeBadge({ workspaceId }: { workspaceId?: string | null }) {

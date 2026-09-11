@@ -1,4 +1,5 @@
-import { Button, ChoiceField } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

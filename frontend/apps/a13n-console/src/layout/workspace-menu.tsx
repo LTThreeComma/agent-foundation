@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { Button } from "a13n-ui/components/button";
 import {
-  Button,
   Menu,
   MenuGroup,
   MenuItem,
@@ -10,7 +10,7 @@ import {
   MenuSubPopup,
   MenuSubTrigger,
   MenuTrigger,
-} from "a13n-ui";
+} from "a13n-ui/components/menu";
 import { CheckIcon, CaretDownIcon, GearSixIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";

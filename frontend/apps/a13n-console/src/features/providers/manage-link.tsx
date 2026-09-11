@@ -1,5 +1,5 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
-import { Button } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
 import { useTranslation } from "react-i18next";
 import { useAccess } from "../../layout/workspace";
 import { providersPath } from "./navigation";

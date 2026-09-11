@@ -1,4 +1,5 @@
-import { Button, Tabs, TabsList, TabsPanel, TabsTab } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "a13n-ui/components/tabs";
 import {
   CaretRightIcon,
   FileTextIcon,

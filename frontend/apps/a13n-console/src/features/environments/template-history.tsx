@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Button, DisclosureSection } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";

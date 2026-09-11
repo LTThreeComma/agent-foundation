@@ -1,4 +1,6 @@
-import { Button, DisclosureSection, ModalFrame } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router";

@@ -1,6 +1,8 @@
-import { Button, Checkbox, Label } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Checkbox } from "a13n-ui/components/checkbox";
+import { Label } from "a13n-ui/components/label";
 
-import { ModalFrame } from "a13n-ui";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
 import { useState } from "react";
 

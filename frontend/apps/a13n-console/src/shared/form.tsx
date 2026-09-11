@@ -1,4 +1,7 @@
-import { Button, FormField, ModalFrame, Textarea } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { Textarea } from "a13n-ui/components/textarea";
 
 import { useState, type ReactElement, type ReactNode } from "react";
 

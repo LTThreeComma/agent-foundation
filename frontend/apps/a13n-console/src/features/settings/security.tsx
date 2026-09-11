@@ -1,11 +1,8 @@
-import {
-  Button,
-  FormField,
-  Input,
-  ModalFrame,
-  SettingsSection,
-  SettingsRow,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { SettingsSection, SettingsRow } from "a13n-ui/patterns/settings";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";

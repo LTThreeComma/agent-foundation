@@ -1,4 +1,4 @@
-import { TooltipProvider } from "a13n-ui";
+import { TooltipProvider } from "a13n-ui/components/tooltip";
 import { lazy, Suspense, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {

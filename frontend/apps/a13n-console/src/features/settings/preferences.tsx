@@ -1,6 +1,6 @@
-import { ChoiceField } from "a13n-ui";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
 
-import { SettingsRow, SettingsSection } from "a13n-ui";
+import { SettingsRow, SettingsSection } from "a13n-ui/patterns/settings";
 
 import { useTranslation } from "react-i18next";
 import { useAppearance } from "../../layout/appearance";

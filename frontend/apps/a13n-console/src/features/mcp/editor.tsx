@@ -1,14 +1,9 @@
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  FormField,
-  Input,
-  ModalFrame,
-  Tabs,
-  TabsList,
-  TabsPanel,
-  TabsTab,
-} from "a13n-ui";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "a13n-ui/components/tabs";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";

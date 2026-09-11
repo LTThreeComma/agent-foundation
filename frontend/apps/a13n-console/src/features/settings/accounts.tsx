@@ -1,5 +1,9 @@
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
-import { Button, ChoiceField, FormField, Input, ModalFrame } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

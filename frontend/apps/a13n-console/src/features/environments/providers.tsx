@@ -10,15 +10,12 @@ import { ProviderKeyLink } from "../../shared/provider-key-link";
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { ResourceIdentity } from "../../shared/collection";
 import { ScopeBadge } from "../../shared/scope-badge";
-import {
-  Button,
-  DisclosureSection,
-  FormField,
-  Input,
-  SettingsSection,
-  SettingsRow,
-  ModalFrame,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { SettingsSection, SettingsRow } from "a13n-ui/patterns/settings";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

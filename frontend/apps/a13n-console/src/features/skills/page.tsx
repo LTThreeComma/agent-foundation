@@ -1,12 +1,7 @@
-import {
-  Badge,
-  FormField,
-  Input,
-  Tabs,
-  TabsList,
-  TabsPanel,
-  TabsTab,
-} from "a13n-ui";
+import { Badge } from "a13n-ui/components/badge";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "a13n-ui/components/tabs";
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";

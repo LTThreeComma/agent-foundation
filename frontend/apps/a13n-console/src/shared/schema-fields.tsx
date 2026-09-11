@@ -1,11 +1,9 @@
-import {
-  Checkbox,
-  ChoiceField,
-  FormField,
-  Input,
-  Label,
-  Textarea,
-} from "a13n-ui";
+import { Checkbox } from "a13n-ui/components/checkbox";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { Label } from "a13n-ui/components/label";
+import { Textarea } from "a13n-ui/components/textarea";
 
 import { useState } from "react";
 

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, ModalFrame } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import {
   ClockCounterClockwiseIcon,
   PencilSimpleIcon,

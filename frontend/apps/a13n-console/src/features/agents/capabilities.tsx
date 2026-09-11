@@ -1,15 +1,14 @@
+import { Button } from "a13n-ui/components/button";
 import {
-  Button,
   Collapsible,
   CollapsiblePanel,
   CollapsibleTrigger,
-  Checkbox,
-  Fieldset,
-  FieldsetLegend,
-  FormField,
-  Input,
-  Label,
-} from "a13n-ui";
+} from "a13n-ui/components/collapsible";
+import { Checkbox } from "a13n-ui/components/checkbox";
+import { Fieldset, FieldsetLegend } from "a13n-ui/components/fieldset";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { Label } from "a13n-ui/components/label";
 
 import {
   useState,

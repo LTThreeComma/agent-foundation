@@ -1,4 +1,5 @@
-import { Button, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Input } from "a13n-ui/components/input";
 import { FileArrowUpIcon, XIcon } from "@phosphor-icons/react";
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";

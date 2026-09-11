@@ -1,10 +1,8 @@
-import {
-  Button,
-  ChoiceField,
-  DisclosureSection,
-  FormField,
-  Input,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 import { formatLocalDateTime } from "../../shared/local-date-time";
 
 import { useQuery } from "@tanstack/react-query";

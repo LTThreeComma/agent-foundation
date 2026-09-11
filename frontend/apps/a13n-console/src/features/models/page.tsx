@@ -1,7 +1,8 @@
 import { useResourceRows } from "../../shared/resource-modal";
 import { ScopeBadge } from "../../shared/scope-badge";
 import { ManageProvidersLink } from "../providers/manage-link";
-import { FormField, Input } from "a13n-ui";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 
 import { useQuery } from "@tanstack/react-query";
 import { ProviderIcon } from "../../shared/provider-icon";

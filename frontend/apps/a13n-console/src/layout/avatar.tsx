@@ -1,4 +1,4 @@
-import { Avatar, AvatarFallback, AvatarImage } from "a13n-ui";
+import { Avatar, AvatarFallback, AvatarImage } from "a13n-ui/components/avatar";
 
 export function UserAvatar({
   name,

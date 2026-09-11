@@ -1,6 +1,9 @@
-import { Button, ChoiceField, FormField, ModalFrame } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
-import { SearchPicker } from "a13n-ui";
+import { SearchPicker } from "a13n-ui/patterns/search-picker";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

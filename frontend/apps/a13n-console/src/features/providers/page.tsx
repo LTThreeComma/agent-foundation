@@ -1,4 +1,4 @@
-import { Tabs, TabsList, TabsTab, TabsPanel } from "a13n-ui";
+import { Tabs, TabsList, TabsTab, TabsPanel } from "a13n-ui/components/tabs";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router";
 import { useAccess } from "../../layout/workspace";

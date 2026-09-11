@@ -1,4 +1,4 @@
-import { Button } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
 import { PlusIcon } from "@phosphor-icons/react";
 import type { ComponentProps } from "react";
 import { useTranslation } from "react-i18next";

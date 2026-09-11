@@ -6,7 +6,7 @@
 
 Coss UI registry components provide the visual and interaction foundation, using Base UI for focus, overlays, selection, and menu semantics and DayPicker for calendars. Tailwind CSS owns shared component styling and semantic theme utilities. CSS Modules remain available for application-specific layouts. The [repository model](../repository-model.md#frontend-workspace) owns workspace and packaging boundaries.
 
-Product layouts, navigation, conversation rendering, protocol state, data fetching, persistence, and translations belong to applications. Shared components do not import applications or interpret domain states. Badge variants describe visual meaning; applications map domain states to variants and translated labels.
+Product layouts, navigation, conversation rendering, protocol state, data fetching, persistence, and translations belong to applications. Shared components do not import applications or interpret domain states. Applications can import an explicit public module entry point to keep module evaluation scoped; the root entry point remains the aggregate interface. Badge variants describe visual meaning; applications map domain states to variants and translated labels.
 
 ## Sources of Truth
 
@@ -14,11 +14,12 @@ Product layouts, navigation, conversation rendering, protocol state, data fetchi
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | [Theme definitions](../../frontend/packages/a13n-ui/src/styles/theme.css)   | Semantic colors, light and dark themes, and Tailwind mappings            |
 | [Application tokens](../../frontend/packages/a13n-ui/src/styles/tokens.css) | Application aliases, brand typography, and shared scrollbar tokens       |
-| [Typed exports](../../frontend/packages/a13n-ui/src/index.ts)               | Public component signatures                                              |
+| [Package exports](../../frontend/packages/a13n-ui/package.json)             | Public module entry points                                               |
+| [Root exports](../../frontend/packages/a13n-ui/src/index.ts)                | Aggregate public component signatures                                    |
 | [Source provenance](../../frontend/packages/a13n-ui/coss-source.json)       | Imported registry revision, source paths, license, and local adaptations |
 | This document                                                               | Observable visual and interaction rules and their ownership              |
 
-`src/components`, `src/hooks`, and `src/lib` contain imported registry sources. Only the MIT-licensed UI registry is included. `src/patterns` contains reusable field, modal, search, disclosure, and settings compositions; `src/brand` contains project identity assets. Applications use public components directly and keep business-specific compositions in their owning feature or shared directory. Recurring control behavior and styling are corrected in their shared owner rather than overridden independently in each screen. Shared defaults remain lower in specificity than component styles so import order cannot override component appearance.
+`src/components`, `src/hooks`, and `src/lib` contain imported registry sources. Only the MIT-licensed UI registry is included. `src/patterns` contains reusable field, modal, search, disclosure, and settings compositions; `src/brand` contains project identity assets. TypeScript modules directly under `src/components`, `src/patterns`, and `src/brand` are public package subpaths; implementation-only modules belong under `src/lib`. Applications use public components directly and keep business-specific compositions in their owning feature or shared directory. Recurring control behavior and styling are corrected in their shared owner rather than overridden independently in each screen. Shared defaults remain lower in specificity than component styles so import order cannot override component appearance.
 
 ## Visual Hierarchy and Layout
 

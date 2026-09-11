@@ -1,4 +1,7 @@
-import { Button, ChoiceField, ModalFrame, Spinner } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { Spinner } from "a13n-ui/components/spinner";
 import { FileUpload } from "../../shared/file-upload";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

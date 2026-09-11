@@ -8,14 +8,11 @@ import { ProviderKeyLink } from "../../shared/provider-key-link";
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { ApiError } from "@converge.ai/a13n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  FormField,
-  Input,
-  SettingsSection,
-  SettingsRow,
-  ModalFrame,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { SettingsSection, SettingsRow } from "a13n-ui/patterns/settings";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";

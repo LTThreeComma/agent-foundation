@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
+import { Button } from "a13n-ui/components/button";
 import {
-  Button,
   Menu,
   MenuGroup,
   MenuGroupLabel,
@@ -8,7 +8,7 @@ import {
   MenuPopup,
   MenuSeparator,
   MenuTrigger,
-} from "a13n-ui";
+} from "a13n-ui/components/menu";
 import {
   CaretUpDownIcon,
   SignOutIcon,

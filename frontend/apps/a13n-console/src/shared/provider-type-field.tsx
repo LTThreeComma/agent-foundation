@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { FormField, SearchPicker } from "a13n-ui";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { SearchPicker } from "a13n-ui/patterns/search-picker";
 import { useTranslation } from "react-i18next";
 import { ProviderIcon } from "./provider-icon";
 

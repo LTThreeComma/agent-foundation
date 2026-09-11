@@ -1,6 +1,9 @@
-import { Button, FormField, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 
-import { Logo, Wordmark } from "a13n-ui";
+import { Logo } from "a13n-ui/brand/logo";
+import { Wordmark } from "a13n-ui/brand/wordmark";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";

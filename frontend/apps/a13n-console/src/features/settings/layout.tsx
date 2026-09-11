@@ -1,4 +1,6 @@
-import { Button, FormField, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 
 import { ArrowLeftIcon, CaretDownIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";

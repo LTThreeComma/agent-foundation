@@ -1,5 +1,6 @@
 import { resourceKeyPattern } from "./paths";
-import { FormField, Input } from "a13n-ui";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 import { useTranslation } from "react-i18next";
 
 export function ResourceKeyField({

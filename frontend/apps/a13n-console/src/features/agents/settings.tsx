@@ -1,13 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
 import {
-  Button,
-  FormField,
-  Input,
   Menu,
   MenuItem,
   MenuPopup,
   MenuTrigger,
-} from "a13n-ui";
+} from "a13n-ui/components/menu";
 import {
   ArchiveIcon,
   CopyIcon,

@@ -6,7 +6,7 @@ import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { ResourceIdentity } from "../../shared/collection";
 import { ScopeBadge } from "../../shared/scope-badge";
 import { useQuery } from "@tanstack/react-query";
-import { ModalFrame } from "a13n-ui";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";

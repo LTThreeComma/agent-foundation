@@ -1,4 +1,5 @@
-import { Button, SettingsRow } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { SettingsRow } from "a13n-ui/patterns/settings";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ErrorNotice, StateBadge } from "../../shared/feedback";

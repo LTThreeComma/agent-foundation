@@ -1,10 +1,8 @@
-import {
-  Button,
-  Checkbox,
-  ChoiceField,
-  DisclosureSection,
-  Label,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Checkbox } from "a13n-ui/components/checkbox";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { Label } from "a13n-ui/components/label";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

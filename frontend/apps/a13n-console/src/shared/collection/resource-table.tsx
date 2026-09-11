@@ -6,7 +6,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "a13n-ui";
+} from "a13n-ui/components/table";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 

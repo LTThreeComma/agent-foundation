@@ -1,13 +1,11 @@
-import {
-  Button,
-  Checkbox,
-  ChoiceField,
-  DisclosureSection,
-  FormField,
-  Input,
-  Label,
-  ModalFrame,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Checkbox } from "a13n-ui/components/checkbox";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { Label } from "a13n-ui/components/label";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 
 import { useQuery } from "@tanstack/react-query";
 import { SlidersHorizontalIcon } from "@phosphor-icons/react";

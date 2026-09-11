@@ -1,14 +1,9 @@
-import {
-  Button,
-  Tabs,
-  TabsList,
-  TabsTab,
-  TabsPanel,
-  DisclosureSection,
-  FormField,
-  Input,
-  ModalFrame,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Tabs, TabsList, TabsTab, TabsPanel } from "a13n-ui/components/tabs";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import { FileUpload } from "../../shared/file-upload";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";

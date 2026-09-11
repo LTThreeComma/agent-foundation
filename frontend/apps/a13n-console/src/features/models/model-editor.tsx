@@ -3,7 +3,7 @@ import {
   type ResourceEditorControl,
 } from "../../shared/resource-modal";
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
-import { ModalFrame } from "a13n-ui";
+import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";

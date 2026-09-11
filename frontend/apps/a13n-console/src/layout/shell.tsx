@@ -1,6 +1,6 @@
+import { Button } from "a13n-ui/components/button";
+import { Logo } from "a13n-ui/brand/logo";
 import {
-  Button,
-  Logo,
   Sidebar,
   SidebarContent,
   SidebarFooter,
@@ -16,8 +16,8 @@ import {
   SidebarMenuSubItem,
   SidebarProvider,
   useSidebar,
-  Wordmark,
-} from "a13n-ui";
+} from "a13n-ui/components/sidebar";
+import { Wordmark } from "a13n-ui/brand/wordmark";
 import { CaretDownIcon, ListIcon, XIcon } from "@phosphor-icons/react";
 import { Suspense, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";

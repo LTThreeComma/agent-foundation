@@ -1,4 +1,5 @@
-import { SettingsRow, Switch } from "a13n-ui";
+import { SettingsRow } from "a13n-ui/patterns/settings";
+import { Switch } from "a13n-ui/components/switch";
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
 

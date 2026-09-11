@@ -5,6 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./brand/*": "./src/brand/*.tsx",
+    "./components/*": "./src/components/*.tsx",
+    "./patterns/*": "./src/patterns/*.tsx",
     "./styles.css": "./src/styles/index.css"
   },
   "sideEffects": [

@@ -1,11 +1,9 @@
-import {
-  ChoiceField,
-  DisclosureSection,
-  FormField,
-  Input,
-  Label,
-  Switch,
-} from "a13n-ui";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { Label } from "a13n-ui/components/label";
+import { Switch } from "a13n-ui/components/switch";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";

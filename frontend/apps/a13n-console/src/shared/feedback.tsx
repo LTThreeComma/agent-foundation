@@ -1,11 +1,7 @@
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-  Badge,
-  Button,
-  Spinner,
-} from "a13n-ui";
+import { Alert, AlertDescription, AlertTitle } from "a13n-ui/components/alert";
+import { Badge } from "a13n-ui/components/badge";
+import { Button } from "a13n-ui/components/button";
+import { Spinner } from "a13n-ui/components/spinner";
 
 import {
   EmptyContent,
@@ -14,7 +10,7 @@ import {
   EmptyMedia,
   Empty as EmptyRoot,
   EmptyTitle,
-} from "a13n-ui";
+} from "a13n-ui/components/empty";
 
 import { ApiError } from "@converge.ai/a13n";
 import {

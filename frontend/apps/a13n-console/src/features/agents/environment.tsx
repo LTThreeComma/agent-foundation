@@ -4,7 +4,7 @@ import {
   CheckIcon,
   CircleNotchIcon,
 } from "@phosphor-icons/react";
-import { ChoiceField } from "a13n-ui";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";

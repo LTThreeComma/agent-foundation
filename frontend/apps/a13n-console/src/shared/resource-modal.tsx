@@ -1,4 +1,4 @@
-import type { ModalFrame } from "a13n-ui";
+import type { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import type { ComponentProps } from "react";
 import { useRef, useState } from "react";
 

@@ -2,20 +2,15 @@ import { ConnectionTest } from "./connection-test";
 import { ProviderIcon } from "../../shared/provider-icon";
 import { apiLabel, suggestedKey } from "./model-options";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  ChoiceField,
-  DisclosureSection,
-  FormField,
-  Input,
-  SearchPicker,
-  SettingsRow,
-  SettingsSection,
-  Switch,
-  Tabs,
-  TabsList,
-  TabsTab,
-} from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { ChoiceField } from "a13n-ui/patterns/choice-field";
+import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
+import { FormField } from "a13n-ui/patterns/form-field";
+import { Input } from "a13n-ui/components/input";
+import { SearchPicker } from "a13n-ui/patterns/search-picker";
+import { SettingsRow, SettingsSection } from "a13n-ui/patterns/settings";
+import { Switch } from "a13n-ui/components/switch";
+import { Tabs, TabsList, TabsTab } from "a13n-ui/components/tabs";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";

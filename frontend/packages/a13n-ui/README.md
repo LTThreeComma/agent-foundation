@@ -2,10 +2,12 @@
 
 Private shared React components for the frontend workspace, built from the MIT [Coss UI registry](https://github.com/cosscom/coss). The components use Base UI, DayPicker, and Tailwind CSS. See the [design system contract](../../../spec/frontend/design-system.md).
 
-Import components from `a13n-ui` and load `a13n-ui/styles.css` once at the application entry. Use `a13n-root` for application typography. Toggle the `dark` class on the document element so portaled overlays inherit the selected theme.
+Import components from their `a13n-ui/components/*`, `a13n-ui/patterns/*`, or `a13n-ui/brand/*` module and load `a13n-ui/styles.css` once at the application entry. The root `a13n-ui` entry remains available when an aggregate interface is useful. Use `a13n-root` for application typography. Toggle the `dark` class on the document element so portaled overlays inherit the selected theme.
 
 ```tsx
-import { Button, FormField, Input } from "a13n-ui";
+import { Button } from "a13n-ui/components/button";
+import { Input } from "a13n-ui/components/input";
+import { FormField } from "a13n-ui/patterns/form-field";
 import "a13n-ui/styles.css";
 
 <FormField label="Name" description="Use a recognizable name.">
@@ -16,10 +18,11 @@ import "a13n-ui/styles.css";
 
 ## Organization
 
-- `src/components`, `src/hooks`, and `src/lib`: Coss UI registry primitives and their dependencies. [coss-source.json](./coss-source.json) records the upstream revision, imported files, and local adaptations; [LICENSE.coss](./LICENSE.coss) preserves the license.
-- `src/patterns`: small compositions shared across application features, including FormField, ChoiceField, ModalFrame, SearchPicker, DisclosureSection, SettingsRow, and SettingsSection.
+- `src/components`: public Coss UI registry primitives. Each module is available through the matching `a13n-ui/components/*` package subpath.
+- `src/hooks` and `src/lib`: implementation dependencies without public package subpaths. [coss-source.json](./coss-source.json) records the upstream revision, imported files, and local adaptations; [LICENSE.coss](./LICENSE.coss) preserves the license.
+- `src/patterns`: public compositions shared across application features, available through matching `a13n-ui/patterns/*` subpaths, including FormField, ChoiceField, ModalFrame, SearchPicker, DisclosureSection, SettingsRow, and SettingsSection.
 - `src/styles`: the Tailwind entry, semantic Coss UI light and dark themes, application layout tokens, and bundled fonts.
-- `src/brand`: Logo, Wordmark, and licensed identity assets.
+- `src/brand`: public Logo and Wordmark modules, available through matching `a13n-ui/brand/*` subpaths, plus licensed identity assets.
 - `dev`: a standalone interactive showcase with foundations, component states, settings, and collection examples.
 - `tests`: interaction checks for shared compositions.
 
