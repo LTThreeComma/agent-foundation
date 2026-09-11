@@ -1,4 +1,8 @@
 import { ResourceModalTitle } from "../../shared/resource-modal-title";
+import {
+  useResourceEditorState,
+  type ResourceEditorControl,
+} from "../../shared/resource-modal";
 import { ResourceEditorButton } from "../../shared/resource-editor-button";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -22,33 +26,43 @@ import { Confirm } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
 import styles from "../../shared/shared.module.css";
 import { MCPAuthorization } from "./authorization";
-import { CreateMCP } from "./create";
 import { MCPTools } from "./tools";
 
 export function MCPEditor({
   connectionId,
   onCleanup,
-}: {
-  connectionId?: string;
+  controlledOpen,
+  onClose,
+  finalFocus,
+}: ResourceEditorControl & {
+  connectionId: string;
   onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
 }) {
   const client = useClient(),
     { workspace, can } = useWorkspace(),
     { t } = useTranslation(),
-    [open, setOpen] = useState(false),
-    [created, setCreated] = useState<string>(),
     [generation, setGeneration] = useState(0),
-    id = connectionId ?? created;
+    id = connectionId;
+  const { open, setOpen, modalProps } = useResourceEditorState({
+    controlledOpen,
+    onClose,
+    finalFocus,
+  });
   const query = useQuery({
     queryKey: ["mcp-connections", workspace.id, id],
-    enabled: open && !!id,
+    enabled: open,
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/mcp-connections/{connection_id}", {
-          params: { path: { connection_id: id! } },
+          params: { path: { connection_id: id } },
           signal,
         })
-        .then(data),
+        .then(data)
+        .then((connection) => {
+          if (connection.workspace_id !== workspace.id)
+            throw new Error(t("Connection belongs to another workspace."));
+          return connection;
+        }),
   });
   async function reload() {
     await query.refetch();
@@ -56,23 +70,18 @@ export function MCPEditor({
   }
   return (
     <ModalFrame
-      onOpenChange={(value) => {
-        setOpen(value);
-        if (!value) setCreated(undefined);
-      }}
+      {...modalProps}
       trigger={
-        <ResourceEditorButton
-          editing={!!connectionId}
-          createLabel="Connect MCP server"
-          editLabel="Details"
-        />
+        controlledOpen === undefined ? (
+          <ResourceEditorButton editing createLabel="" editLabel="Details" />
+        ) : undefined
       }
       size={"md"}
       title={
         query.data ? (
           <ResourceModalTitle name={query.data.name} id={query.data.id} />
         ) : (
-          t(id ? "MCP connection" : "Connect MCP server")
+          t("MCP connection")
         )
       }
       description={
@@ -84,12 +93,9 @@ export function MCPEditor({
         )
       }
       closeLabel={t("Close")}
-      open={open}
     >
       {open &&
-        (!id ? (
-          <CreateMCP onSuccess={(value) => setCreated(value.id)} />
-        ) : query.isPending ? (
+        (query.isPending ? (
           <Loading />
         ) : query.error ? (
           <ErrorNotice error={query.error} />
@@ -104,7 +110,11 @@ export function MCPEditor({
               {can("mcp_connection.manage") ? (
                 <Tabs
                   key={generation}
-                  defaultValue={created ? "authorization" : "details"}
+                  defaultValue={
+                    ["pending", "action_required"].includes(query.data.status)
+                      ? "authorization"
+                      : "details"
+                  }
                 >
                   <TabsList aria-label={t("MCP connection")}>
                     <TabsTab value={"details"}>{t("Details")}</TabsTab>

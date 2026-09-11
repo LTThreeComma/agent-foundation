@@ -113,25 +113,21 @@ The local file is gitignored. Every section is optional and independent. A missi
 
 If a trusted local proxy resolves a configured model hostname to a private or reserved address, explicitly set `LIVE_TEST_MODEL_PRIVATE_ENDPOINT_DOMAINS` to a JSON array of those operator-approved domains, such as `["openrouter.ai"]`. This uses the normal Service endpoint allowlist only in disposable lab processes; the default is empty and HTTPS validation remains enabled. Real Provider journeys allow 90 seconds per Control HTTP request for cloud catalog discovery; local deterministic journeys retain their shorter timeout.
 
-| Parameter                   | Meaning when enabled                                                     | Empty/default behavior                                                                                             |
-| --------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `environment.type`          | `a13n.e2b`, the native E2B Environment implementation                    | No additional cloud Environment test; existing direct-local and explicit Docker cases keep their current providers |
-| `environment.api_key`       | E2B account API key; required with `type`                                | No credentials required by the existing local cases                                                                |
-| `environment.template`      | Optional E2B template ID or alias                                        | `base` when E2B is enabled                                                                                         |
-| `connector.provider`        | `composio` or `openconnector`                                            | No additional external Connector test; case 27 keeps its local TLS Composio fixture and local MCP server           |
-| `connector.api_key`         | Composio project API key; required with `provider`                       | Existing connectivity fixtures use a generated lab-only credential                                                 |
-| `connector.toolkits`        | Optional nonempty list of Composio toolkit keys to discover              | `["github"]` when Composio is enabled; leave the example line commented when the section is disabled               |
-| `connector.project_api_key` | OOMOL Project API key; required for `openconnector`                      | No default; create under Console → Projects → your project → API Keys                                              |
-| `connector.catalog_api_key` | OOMOL personal API key for catalog reads; required for `openconnector`   | No default; create at <https://console.oomol.com/api-key>                                                          |
-| `connector.services`        | Optional nonempty list of OpenConnector service keys                     | `["slack"]` when OpenConnector is enabled                                                                          |
-| `model.provider`            | `openrouter` or `openai`                                                 | No additional external Model test; existing cases keep their scripted local model                                  |
-| `model.api_key`             | Model provider API key; required with `provider`                         | Existing scripted model uses a generated lab-only credential                                                       |
-| `model.model`               | Upstream model ID supporting Chat Completions; required for `configured` | Fixed OpenRouter matrix cases ignore this field and use their own model IDs                                        |
-| `model.base_url`            | Required HTTPS API base URL for `openai`                                 | Leave blank for `openrouter`, which uses the service's built-in endpoint                                           |
-| `search.provider`           | `exa`                                                                    | No external search journey; requires no Model or Connector API key                                                 |
-| `search.api_key`            | Exa API key with Search access                                           | No implicit key lookup; fill together with `search.provider`                                                       |
-| `brave_search.provider`     | `brave`                                                                  | No additional Brave search journey; independent of the Exa section                                                 |
-| `brave_search.api_key`      | Brave API key with Web Search access                                     | Fill together with `brave_search.provider`; never reuse the Exa key                                                |
+| Parameter               | Meaning when enabled                                                     | Empty/default behavior                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `environment.type`      | `a13n.e2b`, the native E2B Environment implementation                    | No additional cloud Environment test; existing direct-local and explicit Docker cases keep their current providers |
+| `environment.api_key`   | E2B account API key; required with `type`                                | No credentials required by the existing local cases                                                                |
+| `environment.template`  | Optional E2B template ID or alias                                        | `base` when E2B is enabled                                                                                         |
+| `connector.provider`    | `composio`                                                               | No additional external Connector test; case 27 keeps its local TLS Composio fixture and local MCP server           |
+| `connector.api_key`     | Composio project API key; required with `provider`                       | Existing connectivity fixtures use a generated lab-only credential                                                 |
+| `model.provider`        | `openrouter` or `openai`                                                 | No additional external Model test; existing cases keep their scripted local model                                  |
+| `model.api_key`         | Model provider API key; required with `provider`                         | Existing scripted model uses a generated lab-only credential                                                       |
+| `model.model`           | Upstream model ID supporting Chat Completions; required for `configured` | Fixed OpenRouter matrix cases ignore this field and use their own model IDs                                        |
+| `model.base_url`        | Required HTTPS API base URL for `openai`                                 | Leave blank for `openrouter`, which uses the service's built-in endpoint                                           |
+| `search.provider`       | `exa`                                                                    | No external search journey; requires no Model or Connector API key                                                 |
+| `search.api_key`        | Exa API key with Search access                                           | No implicit key lookup; fill together with `search.provider`                                                       |
+| `brave_search.provider` | `brave`                                                                  | No additional Brave search journey; independent of the Exa section                                                 |
+| `brave_search.api_key`  | Brave API key with Web Search access                                     | Fill together with `brave_search.provider`; never reuse the Exa key                                                |
 
 OpenRouter uses the native `openrouter` Provider and `openrouter.chat_completions` API. Its endpoint is `https://openrouter.ai/api/v1`, as described in the [OpenRouter quickstart](https://openrouter.ai/docs/quickstart). A custom compatible endpoint uses `openai` and `openai.chat_completions`; URLs must not contain credentials, query strings or fragments.
 
@@ -202,38 +198,6 @@ The Environment journey executes a real Shell write and file read in E2B, using 
 These cases reuse the configured OpenRouter credential, each in its own lab, without changing the local TOML. They ignore `model.model` and apply their fixed model IDs before configuration validation, so that field can be omitted or left blank when selecting only the matrix. Provider, credential and endpoint validation still applies. The `configured` case still requires `model.model`; select only the fixed cases with `LIVE_TEST_ARGS='-k "configured_model and openrouter"'` when it is absent. They skip for `openai`; the configured model case continues to cover that provider. Logs identify the upstream model, Run ID and output length without printing credentials or model output. External usage can consume credits.
 
 On success, failure, partial provisioning or normal cancellation, cleanup interrupts owned Runs and deletes owned remote Environments while the Worker is still running. Cleanup failures fail the test and identify the Environment ID. E2B sandboxes also have a five-minute timeout as a bound if the test process is forcibly killed. The lab then removes its containers and database, deleting all Provider rows, encrypted keys, templates, models and Agents created there. It never deletes or rotates existing account credentials or touches an existing installation's data. The local TOML remains available for later runs; ignored private process logs and test evidence remain under `.state/management/<random-id>/`.
-
-### OpenConnector and interactive Slack authorization
-
-The built-in `openconnector` adapter uses OOMOL's hosted Project API at `https://connector.oomol.com`; no OpenConnector deployment is needed. In [OOMOL Console](https://console.oomol.com), create a test Project and a Slack Provider config using OAuth2 and **System Client**. Create a Project API key in that Project and obtain a personal API key from the separate [API Keys page](https://console.oomol.com/api-key). `catalog_api_key` is our local field name for that personal key, not a separate OOMOL key type. See the [OOMOL SaaS setup guide](https://oomol.com/en/docs/connector-saas/).
-
-Use the following `[connector]` section in a private TOML file. Omit the Composio `api_key` and `toolkits` fields when selecting OpenConnector:
-
-```toml
-[connector]
-provider = "openconnector"
-project_api_key = "<OOMOL Project API key>"
-catalog_api_key = "<OOMOL personal API key>"
-services = ["slack"]
-```
-
-For example, save it as `dev/live_tests/.state/openconnector.toml` with mode `0600` to preserve an existing Composio configuration. Then run:
-
-```sh
-# Noninteractive: verify catalog credentials and discover configured services.
-LIVE_TEST_PROVIDERS_CONFIG=dev/live_tests/.state/openconnector.toml \
-  make live-test-providers LIVE_TEST_ARGS='-k configured_connector'
-
-# Interactive: authorize a new Slack account binding and execute a read-only tool.
-LIVE_TEST_PROVIDERS_CONFIG=dev/live_tests/.state/openconnector.toml \
-  make live-test-providers LIVE_TEST_ARGS='--live-slack -k openconnector_slack'
-```
-
-The interactive journey creates a fresh Workspace ConnectorConnection through Control. Its log identifies a mode-`0600` `slack-authorization.json` file inside the private lab directory. Open its `redirect_url` in a browser and authorize the test Slack workspace within ten minutes. Control polls OOMOL and verifies the exact account before publishing readiness; this flow needs no public Service callback origin. The temporary authorization file is removed when waiting ends. Review the actual Slack consent screen: OOMOL's System Client can request read and write permissions even though this test executes only a read-only action. Use a dedicated test workspace with permission to install the app.
-
-The scripted model then calls only `slack.list_channels` with `limit=1`, through a real Agent Run and Worker. Assertions check readiness, tool selection, a successful provider outcome, and the returned channel schema. Logs report connection/Run IDs and the channel count, without printing keys or channel contents. A completed Run with a failed or unknown tool outcome does not pass. The catalog-only check proves only `catalog_read`; the Project key is exercised by this OAuth/execution journey.
-
-Each interactive run uses a fresh isolated Workspace and therefore requires a new authorization. Ordinary live-test targets never start Slack OAuth without `--live-slack`. OOMOL's published Project API has no account-revoke operation: local lab teardown does not remove remote test accounts. Manage those in the test Project's **Connected accounts** page after testing.
 
 ## Disposable local setup
 

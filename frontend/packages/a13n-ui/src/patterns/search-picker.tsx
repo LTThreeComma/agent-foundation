@@ -38,6 +38,8 @@ export function SearchPicker({
   value,
   onValueChange,
   disabled,
+  onSearchChange,
+  footer,
   id,
   "aria-describedby": describedBy,
 }: {
@@ -48,6 +50,8 @@ export function SearchPicker({
   value?: string;
   onValueChange: (value: string) => void;
   disabled?: boolean;
+  onSearchChange?: (value: string) => void;
+  footer?: ReactNode;
   id?: string;
   "aria-describedby"?: string;
 }) {
@@ -70,9 +74,15 @@ export function SearchPicker({
       }}
       disabled={disabled}
       inputValue={query}
-      onInputValueChange={setQuery}
+      onInputValueChange={(next) => {
+        setQuery(next);
+        onSearchChange?.(next);
+      }}
       onOpenChange={(open) => {
-        if (!open) setQuery("");
+        if (!open) {
+          setQuery("");
+          onSearchChange?.("");
+        }
       }}
       itemToStringLabel={(item) => item.label}
       itemToStringValue={(item) => item.value}
@@ -96,7 +106,7 @@ export function SearchPicker({
           <ComboboxValue placeholder={placeholder} />
         </span>
       </ComboboxTrigger>
-      <ComboboxPopup aria-label={label}>
+      <ComboboxPopup aria-label={label} className="w-(--anchor-width)">
         <div className="border-b px-1 py-1 focus-within:border-ring">
           <ComboboxInput
             aria-label={label}
@@ -125,7 +135,7 @@ export function SearchPicker({
                       <span className="min-w-0">
                         <span className="block">{item.label}</span>
                         {item.description && (
-                          <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                          <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
                             {item.description}
                           </span>
                         )}
@@ -137,6 +147,7 @@ export function SearchPicker({
             </ComboboxGroup>
           )}
         </ComboboxList>
+        {footer && <div className="border-t p-2">{footer}</div>}
       </ComboboxPopup>
     </Combobox>
   );

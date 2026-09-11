@@ -26,11 +26,15 @@ Tool names in `tools` are exact source names. Omit `tools` or use `null` to allo
 
 A Run override inherits an omitted `connector_tools` or `mcp_tools` list. A supplied list replaces that entire category, and `[]` clears it. A null category is invalid. For example, `{"mcp_tools": []}` removes remote MCP selections while inheriting Connector selections.
 
-## Connector Providers: Composio and OpenConnector
+## Connector Providers: Composio
 
-Create a Provider under `/api/v1/workspaces/{workspace}/connector-providers` or the parent Organization, supply its service credentials, discover its Connectors, and create a Workspace ConnectorConnection. Complete external authorization before selecting that connection in `connector_tools`. Both Providers support the same tool selection and deferred-loading fields shown above.
+Create a Provider under `/api/v1/workspaces/{workspace}/connector-providers` or the parent Organization, supply its service credentials, discover its Connectors, and create a Workspace ConnectorConnection. Complete external authorization before selecting that connection in `connector_tools`. Connector connections support the same tool selection and deferred-loading fields shown above.
 
-For Composio, choose `type: "composio"`, configure `enabled_toolkits` (for example `["slack"]`), and supply the write-only project `api_key`. Create an enabled OAuth2 auth config for each toolkit in the [Composio dashboard](https://dashboard.composio.dev). Console fills fixed toolkit-version values from discovery; an unavailable auth configuration prevents setup.
+Add a Composio Provider with its write-only project `api_key`. All available applications appear in **Connections → New connection**; choose the Provider instance when several offer the same application. Service caches the directory for search and paging. Refresh replaces the complete directory only after a successful read; replacing the Provider key invalidates it.
+
+Managed OAuth is selected by default when the application supports it. Service creates its shared auth configuration only when you connect, and reuses an existing configuration for later accounts. You can instead select an enabled custom OAuth2 configuration created in [Composio Dashboard](https://dashboard.composio.dev). Configure client IDs, client secrets and application scopes there. Service asks only for ordinary connection parameters; unsupported authentication displays its reason before setup.
+
+If managed configuration creation has an uncertain result, Service does not send another creation request. Check Composio Dashboard and ensure an enabled OAuth2 configuration exists before retrying. This configuration is shared within the Provider; each Connection still authorizes its own Workspace-bound external account.
 
 Set a stable `A13N_SERVICE_CONNECTIVITY_SETUP_CORRELATION_SECRET` of at least 32 bytes, shared by replicas and preserved across restarts. Configure `A13N_SERVICE_CONNECTIVITY_PUBLIC_ORIGIN` and the IAM public origin to the same Console/API ingress origin. In Composio project **Settings → General → Configuration**, set the identity verifier URL to `https://<your-public-origin>/connector-setup/callback`. Local OAuth testing requires a public HTTPS tunnel; open Console through that tunnel before signing in and starting authorization. Start from Console, not the Composio dashboard. See [Composio callback identity verification](https://docs.composio.dev/reference/api-reference/connected-accounts).
 
@@ -40,11 +44,7 @@ An uncertain initial link request is not automatically repeated. A lost completi
 
 When upgrading from the old callback protocol, stop old Control/all setup senders, apply the additive migration, deploy Console and Service together, and set the new verifier URL before opening setup again. The reconciler invalidates old incomplete Composio attempts without browser proof; ready Connections remain intact. Do not roll old senders back into the new flow. The old digest column remains unused for schema compatibility. Remote orphaned accounts are not automatically deleted.
 
-For managed OpenConnector, choose `type: "openconnector"` and configure `enabled_services`, for example `["github", "gmail"]`. Supply `project_api_key` (OOMOL Project key) and `catalog_api_key` (OOMOL API key for catalog reads). Service uses the Project key for Workspace-isolated authorization and exact-account execution; third-party credentials stay with OOMOL. The returned authorization URL opens the external OAuth flow, and Control polls for completion. The Provider test response lists `verified_access`; OpenConnector's catalog test does not verify the Project key, which is checked during setup and account inspection.
-
 Preview tool definitions before linking an account with `GET /api/v1/connector-providers/{provider_id}/connectors/{connector_key}/tools`. Preview does not grant execution access. A verified Connection keeps its own account binding, so clearing completed setup history does not break tool calls or re-enabling a disabled connection.
-
-OOMOL's published Project API has no remote revoke operation. Service revoke/delete still disables the connection immediately and reports remote cleanup as failed; finish remote account removal in OOMOL. An initial setup interrupted by a lost response, cancellation, or process failure is not automatically retried because the Project API does not promise idempotent link creation. Concurrent retries return the same pending setup without a redirect until the active sender finishes; retry the same command afterward to resume its authorization URL.
 
 ## Remote MCP connections
 
@@ -83,6 +83,8 @@ To discover tools, POST `{"expected_version": VERSION_FROM_READ}` to `/api/v1/mc
 
 Resource states are `pending`, `ready`, `action_required`, and `disabled`; `action_required` includes its reason, such as reauthorization or incompatibility. PATCH updates the supported display name with an expected version, not arbitrary endpoint/auth fields. Reconnect, enable, disable, and delete are separate versioned commands. Delete returns cleanup evidence; it is not proof that remote revocation succeeded. Read the [Native operation reference](api-reference.md#connectivity-management) for each command's body and header requirements.
 
+Remote MCP presets prefill documented endpoints and authentication modes; they do not certify a completed authorization flow. Asana requires a pre-registered OAuth client and Vercel's resource address is incompatible with the current endpoint normalization, so their presets explain the limitation before creation. OAuth servers must support dynamic client registration or client metadata documents and return the authorization response issuer (`iss`) required by Service's issuer validation.
+
 ## Application Accounts and event reception
 
 An Application Account represents one provider account, Bot, or concrete application installation. Configure its credentials through `/api/v1/workspaces/{workspace}/application-accounts`. Credentials are write-only and encrypted on the Account.
@@ -115,7 +117,7 @@ Worker composition provides `WorkerRuntime.external_tools`. A host constructing 
 
 Replacement Attempts and inherited continuations retain these contexts and resolve fresh credentials. New child Runs receive no parent native contexts by default. The Harness sees ordinary MCP capabilities and needs no Account-specific configuration.
 
-Control owns Account and connection management, setup, and short-lived OAuth state expiration. OAuth refresh is demand-driven before authenticated use; interrupted exchanges require new authorization. Connection deletion first invalidates locally, then makes one bounded remote cleanup attempt. Failed or unknown cleanup is reported honestly and has no background retry. Connectivity owns inbound delivery and admission. Workers own tool discovery and outbound execution. No local MCP listener or separate MCP service is needed. `A13N_SERVICE_CONNECTIVITY_PUBLIC_ORIGIN` is required for interactive callback flows, not for noninteractive management or OpenConnector polling. Remote MCP must negotiate protocol `2025-11-25`; authenticated MCP endpoint redirects are rejected.
+Control owns Account and connection management, setup, and short-lived OAuth state expiration. OAuth refresh is demand-driven before authenticated use; interrupted exchanges require new authorization. Connection deletion first invalidates locally, then makes one bounded remote cleanup attempt. Failed or unknown cleanup is reported honestly and has no background retry. Connectivity owns inbound delivery and admission. Workers own tool discovery and outbound execution. No local MCP listener or separate MCP service is needed. `A13N_SERVICE_CONNECTIVITY_PUBLIC_ORIGIN` is required for interactive callback flows, not for noninteractive management. Remote MCP must negotiate protocol `2025-11-25`; authenticated MCP endpoint redirects are rejected.
 
 ## Development database setup
 

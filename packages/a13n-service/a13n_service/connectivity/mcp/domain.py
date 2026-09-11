@@ -86,6 +86,12 @@ class UpdateMCPConnectionRequest(StrictModel):
     name: DisplayName
 
 
+class CompleteMCPOAuthRequest(StrictModel):
+    code: str = Field(min_length=1, max_length=8192, repr=False)
+    state: str = Field(min_length=32, max_length=512, repr=False)
+    issuer: str = Field(min_length=1, max_length=2048)
+
+
 class MCPConnectionCommandRequest(StrictModel):
     expected_version: int = Field(ge=1)
 

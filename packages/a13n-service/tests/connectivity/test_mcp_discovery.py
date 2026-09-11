@@ -157,7 +157,7 @@ async def test_discovery_completion_rejects_concurrent_invalidation(
 async def test_remote_transport_rejects_other_negotiated_protocols(protocol_version):
     from a13n_service.connectivity.mcp.transport import RemoteTransport
 
-    from .test_openconnector_catalog import AllowEndpoint
+    from .connector_helpers import AllowEndpoint
 
     def respond(request):
         if request.method in {"GET", "DELETE"}:

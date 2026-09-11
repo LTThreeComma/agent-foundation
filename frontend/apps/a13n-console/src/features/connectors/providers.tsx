@@ -21,10 +21,6 @@ import {
   DisclosureSection,
   Input,
   ModalFrame,
-  Tabs,
-  TabsList,
-  TabsTab,
-  TabsPanel,
 } from "a13n-ui";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -47,7 +43,6 @@ import {
   validateSettings,
 } from "../../shared/validation";
 import { connectorApi, type ConnectorScope } from "./api";
-import { ConnectorCatalog } from "./catalog";
 
 export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
   const client = useClient(),
@@ -235,42 +230,9 @@ function ProviderEditor({
           <Loading />
         ) : definitions.error || resource.error ? (
           <ErrorNotice error={definitions.error ?? resource.error} />
-        ) : resource.data && providerId ? (
+        ) : readOnly && resource.data ? (
           <div className={styles.stack}>
-            <Tabs
-              defaultValue={
-                readOnly &&
-                scope.kind === "workspace" &&
-                resource.data.status === "active"
-                  ? "connectors"
-                  : "settings"
-              }
-            >
-              <TabsList aria-label={t("Provider")}>
-                <TabsTab value="settings">{t("Settings")}</TabsTab>
-                {scope.kind === "workspace" &&
-                  resource.data.status === "active" && (
-                    <TabsTab value="connectors">{t("Connectors")}</TabsTab>
-                  )}
-              </TabsList>
-              <TabsPanel value="settings">
-                {readOnly ? (
-                  <ConfigurationSummary value={resource.data.configuration} />
-                ) : (
-                  <ProviderForm
-                    key={generation}
-                    scope={scope}
-                    initial={providerId ? resource.data : undefined}
-                    definitions={definitions.data?.items ?? []}
-                    close={() => setOpen(false)}
-                    reload={reload}
-                  />
-                )}
-              </TabsPanel>
-              <TabsPanel value="connectors">
-                <ConnectorCatalog provider={resource.data} inline />
-              </TabsPanel>
-            </Tabs>
+            <ConfigurationSummary value={resource.data.configuration} />
           </div>
         ) : (
           <ProviderForm

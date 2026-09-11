@@ -16,6 +16,7 @@ from a13n_service.iam.http.resource_dependencies import WorkspaceId
 from a13n_service.request_runtime import get_connectivity_control_runtime, get_process_runtime
 
 from .domain import (
+    CompleteMCPOAuthRequest,
     CreateMCPConnectionRequest,
     MCPAuthorizationLaunch,
     MCPClientMetadata,
@@ -183,16 +184,14 @@ async def authorize_mcp_connection(
     )
 
 
-@router.get("/api/v1/oauth/mcp/callback", response_model=MCPConnection)
-async def mcp_oauth_callback(
+@router.post("/api/v1/oauth/mcp/complete", response_model=MCPConnection)
+async def complete_mcp_oauth(
     request: Request,
     response: Response,
     actor: Annotated[AuthenticatedActor, Depends(authenticate_mutation)],
-    code: Annotated[str, Query(min_length=1, max_length=8192)],
-    state_value: Annotated[str, Query(alias="state", min_length=32, max_length=512)],
-    issuer: Annotated[str, Query(alias="iss", min_length=1, max_length=2048)],
+    body: CompleteMCPOAuthRequest,
 ) -> MCPConnection:
-    resource = await _oauth(request).callback(actor=actor, state=state_value, code=code, issuer=issuer)
+    resource = await _oauth(request).callback(actor=actor, state=body.state, code=body.code, issuer=body.issuer)
     _etag(response, resource)
     return resource
 

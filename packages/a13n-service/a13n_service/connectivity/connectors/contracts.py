@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 
 from a13n_service.connectivity.domain import JsonObject
+
+ConnectorKey = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_][a-z0-9._-]{0,127}$")]
 
 
 class StrictModel(BaseModel):
@@ -159,8 +161,15 @@ class ConnectorProviderRuntime(Protocol):
 
     async def discover_connectors(self) -> tuple[DiscoveredConnector, ...]: ...
 
+    async def discover_connector(self, connector_key: str) -> DiscoveredConnector: ...
+
     async def start_setup(
-        self, *, setup: JsonObject, context: SetupContext, resume_ref: str | None = None
+        self,
+        *,
+        setup: JsonObject,
+        context: SetupContext,
+        resume_ref: str | None = None,
+        before_shared_setup: BeforeDispatch | None = None,
     ) -> SetupStarted: ...
 
     async def complete_setup(
@@ -177,8 +186,10 @@ class ConnectorProviderRuntime(Protocol):
 
 
 class DiscoveredConnector(StrictModel):
-    key: str = Field(pattern=r"^[a-z][a-z0-9._-]{0,127}$")
+    key: ConnectorKey
     name: str = Field(min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=16_384)
+    logo_url: str | None = Field(default=None, max_length=2048)
+    unavailable_reason: str | None = Field(default=None, max_length=512)
     setup_schema: JsonObject
     authentication_methods: tuple[str, ...] = Field(max_length=32)

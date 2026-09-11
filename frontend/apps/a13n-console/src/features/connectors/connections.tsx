@@ -1,7 +1,5 @@
 import { ResourceModalTitle } from "../../shared/resource-modal-title";
 import { ConfigurationSummary } from "../../shared/configuration-summary";
-import { PageActions } from "../../shared/page-actions";
-import { ManageProvidersLink } from "../providers/manage-link";
 import {
   Button,
   FormField,
@@ -14,7 +12,6 @@ import {
 } from "a13n-ui";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PlugIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
 import { useTranslation } from "react-i18next";
@@ -22,132 +19,49 @@ import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { commandHeaders, data, type Schema } from "../../shared/api";
 import {
-  Pagination,
-  ResourceIdentity,
-  ResourceTable,
-  useCursor,
-} from "../../shared/collection";
-import { Empty, ErrorNotice, Loading, StateBadge } from "../../shared/feedback";
-import { Confirm, JsonView } from "../../shared/form";
+  useResourceEditorState,
+  type ResourceEditorControl,
+} from "../../shared/resource-modal";
+import { ErrorNotice, Loading, StateBadge } from "../../shared/feedback";
+import { Confirm } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
 import styles from "../../shared/shared.module.css";
 import { ConnectionSetup } from "./setup";
 
-export function ConnectorConnections() {
-  const client = useClient(),
-    { workspace } = useWorkspace(),
-    { t } = useTranslation(),
-    page = useCursor(),
-    [cleanup, setCleanup] = useState<Schema["ConnectionCleanupReceipt"]>();
-  const query = useQuery({
-    queryKey: ["connector-connections", workspace.id, page.cursor],
-    queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace}/connector-connections", {
-          params: {
-            path: { workspace: workspace.id },
-            query: { cursor: page.cursor },
-          },
-          signal,
-        })
-        .then(data),
-  });
-  return (
-    <div className={styles.stack}>
-      <PageActions>
-        <ManageProvidersLink category="connectors" scope="workspace" />
-      </PageActions>
-      {cleanup && (
-        <div role="status">
-          <h3>{t("Cleanup result")}</h3>
-          <JsonView value={cleanup} />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setCleanup(undefined)}
-            type="button"
-          >
-            {t("Dismiss")}
-          </Button>
-        </div>
-      )}
-      <ErrorNotice error={query.error} />
-      {query.isPending ? (
-        <Loading />
-      ) : query.data?.items.length ? (
-        <>
-          <ResourceTable
-            items={query.data.items}
-            columns={[
-              {
-                label: t("Connection"),
-                tone: "primary",
-                render: (item) => (
-                  <ResourceIdentity
-                    name={item.name}
-                    description={item.connector_key}
-                    resourceId={item.id}
-                    icon={<PlugIcon size={17} />}
-                  />
-                ),
-              },
-              {
-                label: t("Status"),
-                render: (item) => (
-                  <>
-                    <StateBadge state={item.status} />
-                    {item.status_reason && (
-                      <small>{t(`state.${item.status_reason}`)}</small>
-                    )}
-                  </>
-                ),
-              },
-              {
-                label: t("Actions"),
-                align: "right",
-                render: (item) => (
-                  <ConnectionDetails connection={item} onCleanup={setCleanup} />
-                ),
-              },
-            ]}
-          />
-          <Pagination page={page} next={query.data.next_cursor} />
-        </>
-      ) : (
-        !query.error && (
-          <Empty
-            title={t("No connector connections")}
-            description={t(
-              "Open Providers, discover a connector, and authorize an account to get started.",
-            )}
-          />
-        )
-      )}
-    </div>
-  );
-}
-function ConnectionDetails({
-  connection,
+export function ConnectionDetails({
+  connectionId,
   onCleanup,
-}: {
-  connection: Schema["ConnectorConnection"];
+  controlledOpen,
+  onClose,
+  finalFocus,
+}: ResourceEditorControl & {
+  connectionId: string;
   onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
 }) {
   const client = useClient(),
-    { can } = useWorkspace(),
+    { can, workspace } = useWorkspace(),
     { t } = useTranslation(),
-    [open, setOpen] = useState(false),
     [generation, setGeneration] = useState(0);
+  const { open, setOpen, modalProps } = useResourceEditorState({
+    controlledOpen,
+    onClose,
+    finalFocus,
+  });
   const query = useQuery({
-    queryKey: ["connector-connections", connection.workspace_id, connection.id],
+    queryKey: ["connector-connections", workspace.id, connectionId],
     enabled: open,
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/connector-connections/{connection_id}", {
-          params: { path: { connection_id: connection.id } },
+          params: { path: { connection_id: connectionId } },
           signal,
         })
-        .then(data),
+        .then(data)
+        .then((connection) => {
+          if (connection.workspace_id !== workspace.id)
+            throw new Error(t("Connection belongs to another workspace."));
+          return connection;
+        }),
   });
   async function reload() {
     await query.refetch();
@@ -155,27 +69,28 @@ function ConnectionDetails({
   }
   return (
     <ModalFrame
-      onOpenChange={setOpen}
+      {...modalProps}
       trigger={
-        <Button size="sm" variant="outline" type="button">
-          {t("Details")}
-        </Button>
+        controlledOpen === undefined ? (
+          <Button size="sm" variant="outline" type="button">
+            {t("Details")}
+          </Button>
+        ) : undefined
       }
       size={"md"}
       title={
         <ResourceModalTitle
-          name={query.data?.name ?? connection.name}
-          id={connection.id}
+          name={query.data?.name ?? t("Connection")}
+          id={connectionId}
         />
       }
       description={
         <span className="flex flex-wrap items-center gap-2">
-          <span>{query.data?.connector_key ?? connection.connector_key}</span>
-          <StateBadge state={query.data?.status ?? connection.status} />
+          <span>{query.data?.connector_key}</span>
+          <StateBadge state={query.data?.status ?? "pending"} />
         </span>
       }
       closeLabel={t("Close")}
-      open={open}
     >
       {open &&
         (query.isPending ? (
@@ -191,7 +106,14 @@ function ConnectionDetails({
                 </p>
               )}
               {can("connector_connection.manage") ? (
-                <Tabs key={generation} defaultValue="details">
+                <Tabs
+                  key={generation}
+                  defaultValue={
+                    ["pending", "action_required"].includes(query.data.status)
+                      ? "setup"
+                      : "details"
+                  }
+                >
                   <TabsList aria-label={t("Connection details")}>
                     <TabsTab value={"details"}>{t("Details")}</TabsTab>
                     <TabsTab value={"setup"}>{t("Authorization")}</TabsTab>

@@ -44,9 +44,8 @@ async def inspect_connection(connection: ConnectorConnectionRuntime, *, require_
 
 async def authorize_account(args: argparse.Namespace, provider: ConnectorProviderRuntime) -> bool:
     print("\n[4] Discover hosted authorization options", flush=True)
-    connectors = await provider.discover_connectors()
-    connector = next((item for item in connectors if item.key == args.connector), None)
-    if connector is None or not connector.authentication_methods:
+    connector = await provider.discover_connector(args.connector)
+    if not connector.authentication_methods:
         raise ValueError(
             "No supported hosted auth configuration. Create an OAuth auth configuration in the provider dashboard first."
         )
@@ -213,7 +212,7 @@ async def run(args: argparse.Namespace, key: str, client: httpx2.AsyncClient) ->
         if args.connector not in available:
             raise ValueError("Selected connector is absent from the directory")
     args.connector = required_input(args.connector, "Connector/toolkit slug (for example github)")
-    configuration: JsonObject = {"enabled_toolkits": [args.connector]}
+    configuration: JsonObject = {}
     if args.endpoint:
         configuration["endpoint"] = args.endpoint
     configuration = implementation.validate_configuration(configuration)
@@ -227,10 +226,8 @@ async def run(args: argparse.Namespace, key: str, client: httpx2.AsyncClient) ->
             return 0
         if args.command == "discover":
             print("\nDiscover selected connector and available authentication configurations", flush=True)
-            connectors = await provider.discover_connectors()
-            show([connector.model_dump(mode="json") for connector in connectors])
-            if not connectors:
-                raise ValueError("Selected connector was not found in the provider directory")
+            connector = await provider.discover_connector(args.connector)
+            show(connector.model_dump(mode="json"))
             return 0
         if args.command == "inspect":
             return await use_connection(args, provider, None)

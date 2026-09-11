@@ -17,8 +17,8 @@ from a13n_service.storage import short_session, transaction
 from sqlalchemy import select
 
 from .conftest import NOW, WORKSPACE_ID, actor
+from .connector_helpers import AllowEndpoint
 from .test_connector_service import create_connection
-from .test_openconnector_catalog import AllowEndpoint
 
 pytestmark = pytest.mark.anyio
 NONCE = "b" * 64
@@ -39,9 +39,31 @@ async def composio_setup(composio_sessions, credential_protector):
     async def respond(request):
         requests.append(request)
         path = request.url.path
-        if path.endswith("/toolkits"):
+        if path.endswith("/toolkits") or path.endswith("/toolkits/github"):
+            toolkit = {
+                "slug": "github",
+                "name": "GitHub",
+                "meta": {"version": "20260903_01"},
+                "auth_config_details": [
+                    {"mode": "OAUTH2", "fields": {"connected_account_initiation": {"required": [], "optional": []}}}
+                ],
+            }
+            return httpx2.Response(200, json={"items": [toolkit]} if path.endswith("/toolkits") else toolkit)
+        if path.endswith("/tools"):
             return httpx2.Response(
-                200, json={"items": [{"slug": "github", "name": "GitHub", "meta": {"version": "20260903_01"}}]}
+                200,
+                json={
+                    "items": [
+                        {
+                            "slug": "GITHUB_GET_USER",
+                            "toolkit": {"slug": "github"},
+                            "version": "20260903_01",
+                            "description": "Read current user",
+                            "input_parameters": {"type": "object", "properties": {}},
+                            "output_parameters": {"type": "object"},
+                        }
+                    ]
+                },
             )
         if path.endswith("/auth_configs"):
             return httpx2.Response(
@@ -59,7 +81,7 @@ async def composio_setup(composio_sessions, credential_protector):
                 attempt = await session.scalar(
                     select(ConnectorSetupAttemptRecord).order_by(ConnectorSetupAttemptRecord.generation.desc())
                 )
-                assert attempt.status == "starting" and attempt.claim_owner and attempt.claim_generation == 1
+                assert attempt.status == "starting" and attempt.claim_owner and attempt.claim_generation >= 1
                 assert attempt.browser_binding_digest and NONCE not in attempt.browser_binding_digest
             if state.get("lose_link"):
                 raise httpx2.ReadTimeout("response lost")
@@ -94,8 +116,14 @@ async def composio_setup(composio_sessions, credential_protector):
             },
         )
 
-    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as http:
+    async def response(request):
+        result = await respond(request)
+        hook = state.get("response_hook")
+        return await hook(request, result) if hook is not None else result
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(response)) as http:
         registry = built_in_connector_provider_registry(http, AllowEndpoint(), response_max_bytes=1024 * 1024)
+        state["registry"] = registry
         providers = ConnectorProviderService(sessions, registry, credential_protector, clock=lambda: now[0])
         service = ConnectorConnectionService(
             sessions,
@@ -113,7 +141,7 @@ async def composio_setup(composio_sessions, credential_protector):
             request=CreateConnectorProviderRequest(
                 name="Composio",
                 type="composio",
-                configuration={"enabled_toolkits": ["github"]},
+                configuration={},
                 credentials={"api_key": "secret"},
             ),
         )

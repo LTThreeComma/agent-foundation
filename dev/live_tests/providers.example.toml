@@ -6,14 +6,8 @@ api_key = ""
 template = "" # Optional; defaults to base when enabled.
 
 [connector]
-provider = "" # composio or openconnector
+provider = "" # composio
 api_key = ""
-# Optional when enabled; defaults to ["github"].
-# toolkits = ["github"]
-# For openconnector, leave api_key/toolkits unset and supply both OOMOL keys:
-# project_api_key = ""
-# catalog_api_key = ""
-# services = ["slack"]
 
 [model]
 provider = "" # openrouter or openai

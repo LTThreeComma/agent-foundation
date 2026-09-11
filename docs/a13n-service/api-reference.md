@@ -667,6 +667,21 @@ Responses:
 - **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 
+### `GET /api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}`
+
+Get Connector.
+
+| Parameter               | Location | Required | Type / schema | Constraints and default |
+| ----------------------- | -------- | -------- | ------------- | ----------------------- |
+| `connector_provider_id` | path     | true     | string        | —                       |
+| `connector_key`         | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: Connector`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
 ### `GET /api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}/tools`
 
 Preview Connector Tools.
@@ -705,9 +720,13 @@ Responses:
 
 Discover Connectors.
 
-| Parameter               | Location | Required | Type / schema | Constraints and default |
-| ----------------------- | -------- | -------- | ------------- | ----------------------- |
-| `connector_provider_id` | path     | true     | string        | —                       |
+| Parameter               | Location | Required | Type / schema  | Constraints and default             |
+| ----------------------- | -------- | -------- | -------------- | ----------------------------------- |
+| `connector_provider_id` | path     | true     | string         | —                                   |
+| `query`                 | query    | false    | string         | maxLength=256; default=""           |
+| `cursor`                | query    | false    | string or null | —                                   |
+| `limit`                 | query    | false    | integer        | minimum=1; maximum=200; default=100 |
+| `refresh`               | query    | false    | boolean        | default=false                       |
 
 Responses:
 
@@ -911,22 +930,6 @@ Responses:
 - **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 
-### `GET /api/v1/oauth/mcp/callback`
-
-Mcp Oauth Callback.
-
-| Parameter | Location | Required | Type / schema | Constraints and default     |
-| --------- | -------- | -------- | ------------- | --------------------------- |
-| `code`    | query    | true     | string        | minLength=1; maxLength=8192 |
-| `state`   | query    | true     | string        | minLength=32; maxLength=512 |
-| `iss`     | query    | true     | string        | minLength=1; maxLength=2048 |
-
-Responses:
-
-- **200** — Successful Response (`application/json: MCPConnection`).
-- **400** — Invalid request. (`application/json: ErrorResponse`).
-- **default** — Service error. (`application/json: ErrorResponse`).
-
 ### `GET /api/v1/oauth/mcp/client-metadata.json`
 
 Mcp Client Metadata.
@@ -934,6 +937,20 @@ Mcp Client Metadata.
 Responses:
 
 - **200** — Successful Response (`application/json: MCPClientMetadata`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
+### `POST /api/v1/oauth/mcp/complete`
+
+Complete Mcp Oauth.
+
+Request body: required.
+
+- `application/json`: `CompleteMCPOAuthRequest`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: MCPConnection`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 
 ### `GET /api/v1/organizations/{organization}/connector-providers`
