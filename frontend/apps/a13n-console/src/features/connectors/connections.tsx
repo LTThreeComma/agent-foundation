@@ -1,6 +1,7 @@
+import { ResourceModalTitle } from "../../shared/resource-modal-title";
+import { ConfigurationSummary } from "../../shared/configuration-summary";
 import {
   Button,
-  DisclosureSection,
   FormField,
   Input,
   ModalFrame,
@@ -22,7 +23,7 @@ import {
   type ResourceEditorControl,
 } from "../../shared/resource-modal";
 import { ErrorNotice, Loading, StateBadge } from "../../shared/feedback";
-import { Confirm, FormActions, JsonView } from "../../shared/form";
+import { Confirm } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
 import styles from "../../shared/shared.module.css";
 import { ConnectionSetup } from "./setup";
@@ -76,11 +77,19 @@ export function ConnectionDetails({
           </Button>
         ) : undefined
       }
-      size={"lg"}
-      title={query.data?.name ?? t("Connection")}
-      description={t(
-        "Manage this workspace connection and its external authorization.",
-      )}
+      size={"md"}
+      title={
+        <ResourceModalTitle
+          name={query.data?.name ?? t("Connection")}
+          id={connectionId}
+        />
+      }
+      description={
+        <span className="flex flex-wrap items-center gap-2">
+          <span>{query.data?.connector_key}</span>
+          <StateBadge state={query.data?.status ?? "pending"} />
+        </span>
+      }
       closeLabel={t("Close")}
     >
       {open &&
@@ -89,37 +98,47 @@ export function ConnectionDetails({
         ) : query.error ? (
           <ErrorNotice error={query.error} />
         ) : (
-          query.data &&
-          (can("connector_connection.manage") ? (
-            <Tabs
-              key={generation}
-              defaultValue={
-                ["pending", "action_required"].includes(query.data.status)
-                  ? "setup"
-                  : "details"
-              }
-            >
-              <TabsList aria-label={t("Connection details")}>
-                <TabsTab value={"details"}>{t("Details")}</TabsTab>
-                <TabsTab value={"setup"}>{t("Authorization")}</TabsTab>
-              </TabsList>
-              <TabsPanel value={"details"}>
-                {
-                  <ConnectionSettings
-                    onCleanup={onCleanup}
-                    initial={query.data}
-                    close={() => setOpen(false)}
-                    reload={reload}
-                  />
-                }
-              </TabsPanel>
-              <TabsPanel value={"setup"}>
-                {<ConnectionSetup connection={query.data} />}
-              </TabsPanel>
-            </Tabs>
-          ) : (
-            <JsonView value={query.data} />
-          ))
+          query.data && (
+            <div className={styles.stack}>
+              {query.data.status_reason && (
+                <p className={styles.muted}>
+                  {t(`state.${query.data.status_reason}`)}
+                </p>
+              )}
+              {can("connector_connection.manage") ? (
+                <Tabs
+                  key={generation}
+                  defaultValue={
+                    ["pending", "action_required"].includes(query.data.status)
+                      ? "setup"
+                      : "details"
+                  }
+                >
+                  <TabsList aria-label={t("Connection details")}>
+                    <TabsTab value={"details"}>{t("Details")}</TabsTab>
+                    <TabsTab value={"setup"}>{t("Authorization")}</TabsTab>
+                  </TabsList>
+                  <TabsPanel value={"details"}>
+                    {
+                      <ConnectionSettings
+                        onCleanup={onCleanup}
+                        initial={query.data}
+                        close={() => setOpen(false)}
+                        reload={reload}
+                      />
+                    }
+                  </TabsPanel>
+                  <TabsPanel value={"setup"}>
+                    {<ConnectionSetup connection={query.data} />}
+                  </TabsPanel>
+                </Tabs>
+              ) : (
+                <div className={styles.stack}>
+                  <ConfigurationSummary value={query.data.safe_metadata} />{" "}
+                </div>
+              )}
+            </div>
+          )
         ))}
     </ModalFrame>
   );
@@ -159,7 +178,6 @@ function ConnectionSettings({
   const body = { expected_version: basis.version };
   return (
     <div className={styles.stack}>
-      <StateBadge state={basis.status} />
       <form
         className={styles.form}
         onSubmit={(event) => {
@@ -167,96 +185,113 @@ function ConnectionSettings({
           save.mutate();
         }}
       >
-        <FormField className="min-w-0 w-full" label={t("Name")}>
-          <Input
-            required={true}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            maxLength={128}
-          />
-        </FormField>
+        <div className="flex items-end gap-3">
+          <FormField className="min-w-0 w-full" label={t("Name")}>
+            <Input
+              required={true}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={128}
+            />
+          </FormField>
+          <Button
+            type="submit"
+            variant="outline"
+            loading={save.isPending}
+            disabled={name === basis.name}
+          >
+            {t("Save")}
+          </Button>
+        </div>
         <ErrorNotice error={save.error} retry={() => void reload()} />
-        <FormActions pending={save.isPending} />
       </form>
-      <DisclosureSection title={<>{t("Account metadata")}</>}>
-        <JsonView value={basis.safe_metadata} />
-      </DisclosureSection>
-      <div className={styles.actions}>
-        <Confirm
-          title={t(
-            basis.status === "disabled"
-              ? "Enable connection"
-              : "Disable connection",
-          )}
-          description={t(
-            "This changes whether new agent calls can use the connection.",
-          )}
-          trigger={t(basis.status === "disabled" ? "Enable" : "Disable")}
-          action={async () => {
-            const action = basis.status === "disabled" ? "enable" : "disable";
-            await client.http.POST(
-              "/api/v1/connector-connections/{connection_id}/{action}",
-              {
-                params: {
-                  path: { connection_id: basis.id, action },
-                  header: commandHeaders(
-                    workspace.id,
-                    key.forBody({ action, ...body }),
-                  ),
-                },
-                body,
-              },
-            );
-            done();
-          }}
-        />
-        {(["revoke", "delete"] as const).map((action) => (
+      {Object.keys(basis.safe_metadata).length > 0 && (
+        <ConfigurationSummary value={basis.safe_metadata} />
+      )}
+
+      <section className="grid gap-3 border-t border-border pt-4">
+        <h3 className="text-sm font-medium">{t("Connection actions")}</h3>
+        <div className={styles.actions}>
           <Confirm
-            key={action}
             title={t(
-              action === "revoke"
-                ? "Revoke authorization"
-                : "Delete connection",
+              basis.status === "disabled"
+                ? "Enable connection"
+                : "Disable connection",
             )}
             description={t(
-              "Local access is disabled immediately. The result reports whether external cleanup succeeded.",
+              "This changes whether new agent calls can use the connection.",
             )}
-            trigger={t(action === "revoke" ? "Revoke" : "Delete")}
-            danger
+            trigger={t(basis.status === "disabled" ? "Enable" : "Disable")}
             action={async () => {
-              const header = commandHeaders(
-                workspace.id,
-                key.forBody({ action, ...body }),
+              const action = basis.status === "disabled" ? "enable" : "disable";
+              await client.http.POST(
+                "/api/v1/connector-connections/{connection_id}/{action}",
+                {
+                  params: {
+                    path: { connection_id: basis.id, action },
+                    header: commandHeaders(
+                      workspace.id,
+                      key.forBody({ action, ...body }),
+                    ),
+                  },
+                  body,
+                },
               );
-              const result =
-                action === "revoke"
-                  ? data(
-                      await client.http.POST(
-                        "/api/v1/connector-connections/{connection_id}/revoke",
-                        {
-                          params: { path: { connection_id: basis.id }, header },
-                          body,
-                        },
-                      ),
-                    )
-                  : data(
-                      await client.http.DELETE(
-                        "/api/v1/connector-connections/{connection_id}",
-                        {
-                          params: {
-                            path: { connection_id: basis.id },
-                            header,
-                            query: body,
-                          },
-                        },
-                      ),
-                    );
-              onCleanup(result);
               done();
             }}
           />
-        ))}
-      </div>
+          {(["revoke", "delete"] as const).map((action) => (
+            <Confirm
+              key={action}
+              title={t(
+                action === "revoke"
+                  ? "Revoke authorization"
+                  : "Delete connection",
+              )}
+              description={t(
+                "Local access is disabled immediately. The result reports whether external cleanup succeeded.",
+              )}
+              trigger={t(action === "revoke" ? "Revoke" : "Delete")}
+              danger
+              triggerVariant="outline"
+              action={async () => {
+                const header = commandHeaders(
+                  workspace.id,
+                  key.forBody({ action, ...body }),
+                );
+                const result =
+                  action === "revoke"
+                    ? data(
+                        await client.http.POST(
+                          "/api/v1/connector-connections/{connection_id}/revoke",
+                          {
+                            params: {
+                              path: { connection_id: basis.id },
+                              header,
+                            },
+                            body,
+                          },
+                        ),
+                      )
+                    : data(
+                        await client.http.DELETE(
+                          "/api/v1/connector-connections/{connection_id}",
+                          {
+                            params: {
+                              path: { connection_id: basis.id },
+                              header,
+                              query: body,
+                            },
+                          },
+                        ),
+                      );
+                onCleanup(result);
+                done();
+              }}
+            />
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

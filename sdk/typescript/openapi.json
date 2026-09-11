@@ -8464,7 +8464,7 @@
             "type": "integer"
           },
           "return_path": {
-            "pattern": "^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,2047}$",
+            "pattern": "^/([A-Za-z0-9._~!$&'()*+,;=:@%-][A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,2046})?$",
             "title": "Return Path",
             "type": "string"
           },
@@ -11316,7 +11316,7 @@
             "type": "integer"
           },
           "return_path": {
-            "pattern": "^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,2047}$",
+            "pattern": "^/([A-Za-z0-9._~!$&'()*+,;=:@%-][A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,2046})?$",
             "title": "Return Path",
             "type": "string"
           },
@@ -35877,6 +35877,23 @@
                 }
               ],
               "title": "Enabled"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": ["organization", "workspace"],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
             }
           }
         ],

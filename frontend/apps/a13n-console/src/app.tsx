@@ -54,11 +54,6 @@ const WorkspaceSettings = lazy(() =>
     default: module.WorkspaceSettings,
   })),
 );
-const AssetsPage = lazy(() =>
-  import("./features/assets/page").then((module) => ({
-    default: module.AssetsPage,
-  })),
-);
 const SkillsPage = lazy(() =>
   import("./features/skills/page").then((module) => ({
     default: module.SkillsPage,
@@ -248,7 +243,6 @@ function AppContent() {
                       path="environments/instances"
                       element={<EnvironmentsPage section="instances" />}
                     />
-                    <Route path="assets" element={<AssetsPage />} />
                     <Route path="skills" element={<SkillsPage />} />
                     <Route path="skills/:skillKey" element={<SkillDetail />} />
                     <Route path="models" element={<ModelsPage />} />

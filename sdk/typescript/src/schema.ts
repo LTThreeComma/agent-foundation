@@ -18297,6 +18297,7 @@ export interface operations {
         query?: string | null;
         provider_id?: string | null;
         enabled?: boolean | null;
+        scope?: ("organization" | "workspace") | null;
       };
       header?: never;
       path: {

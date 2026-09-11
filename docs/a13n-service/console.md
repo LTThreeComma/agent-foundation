@@ -31,8 +31,7 @@ The following routes are relative to `/workspace/:workspaceKey`:
 | A specific Run       | `sessions/:sessionId/threads/:threadId/runs/:runId`       | Output, waiting feedback, control actions, execution detail                 |
 | Models               | `models`                                                  | Models and configured Providers                                             |
 | Search               | `settings?section=providers&category=search`              | Provider accounts, tests, and references                                    |
-| Skills               | `skills`, `skills/:skillKey`                              | Uploads, resources, and immutable revisions                                 |
-| Assets               | `assets`                                                  | Published binary content and logical deletion                               |
+| Skills               | `skills`, `skills/:skillId`                               | Uploads, resources, and immutable revisions                                 |
 | Environments         | `environments`, `environments/instances`                  | Templates, Provider configuration, actual runtime targets                   |
 | Application Accounts | `application-accounts`, `application-accounts/:accountId` | Provider reception and object-specific routing                              |
 | Connections          | `connections`                                             | Connected accounts and remote MCP servers; unified search and authorization |
@@ -59,7 +58,7 @@ One-time API credentials are displayed only at creation. Save them in an appropr
 
 ## Current limits
 
-Usage and Schedules are marked coming soon. Console does not provide Plugin, Secret, or Hook editors. Editing supported fields preserves existing hidden configuration; the absence of an editor does not mean the corresponding Service field is absent.
+Usage and Schedules are marked coming soon. Console does not provide Asset management or Plugin, Secret, or Hook editors. Editing supported fields preserves existing hidden configuration; the absence of an editor does not mean the corresponding Service field is absent.
 
 Trace querying requires both backend configuration and a trusted Service access authorizer. A configured exporter or reachable Langfuse UI is insufficient. MCP OAuth also has [callback requirements](identity.md#browser-oauth-callbacks); a provider redirect alone cannot bypass session/CSRF validation.
 

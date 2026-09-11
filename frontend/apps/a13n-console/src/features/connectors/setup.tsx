@@ -1,3 +1,4 @@
+import { ApiError } from "@converge.ai/a13n";
 import { Button, FormField, Input } from "a13n-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
@@ -43,6 +44,17 @@ export function ConnectionSetup({
   const providerId =
     connection?.connector_provider_id ?? connector!.connector_provider_id;
   const connectorKey = connection?.connector_key ?? connector!.key;
+  const provider = useQuery({
+    queryKey: ["connector-provider", providerId],
+    enabled: connection?.status === "ready",
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/connector-providers/{connector_provider_id}", {
+          params: { path: { connector_provider_id: providerId } },
+          signal,
+        })
+        .then(data),
+  });
   const definition = useQuery({
     queryKey: [
       "connector-setup-catalog",
@@ -178,6 +190,13 @@ export function ConnectionSetup({
         ? 3000
         : false,
   });
+  const replacementRequired =
+    (connection?.status === "ready" && provider.data?.type === "composio") ||
+    (launch.error instanceof ApiError &&
+      launch.error.code === "reconnect_unsupported");
+  const setupAlreadyStarted =
+    launch.error instanceof ApiError &&
+    launch.error.code === "setup_already_started";
   return (
     <div className={styles.stack}>
       <p className={styles.muted}>
@@ -185,23 +204,43 @@ export function ConnectionSetup({
           "Authorize the external account with your provider. Credentials stay with the provider.",
         )}
       </p>
-      <ErrorNotice error={definition.error ?? launch.error ?? status.error} />
-      {launch.error && current ? (
+      <ErrorNotice
+        error={
+          provider.error ??
+          definition.error ??
+          (replacementRequired || setupAlreadyStarted ? null : launch.error) ??
+          status.error
+        }
+      />
+      {replacementRequired ? (
+        <p role="status">
+          {t(
+            "This provider cannot reauthorize an existing account. Create a new connection, authorize it, then select it in your agent settings.",
+          )}{" "}
+          <a href={`${basePath}/connections`}>{t("Back to connections")}</a>
+        </p>
+      ) : connection?.status === "ready" && provider.isPending ? (
+        <Loading />
+      ) : provider.error ? null : launch.error && current ? (
         <div className={styles.stack}>
           <StateBadge state={status.data?.status ?? current.status} />
           <p>
             {t(
-              "Your connection is saved. Retry the authorization request or restart from its current status.",
+              setupAlreadyStarted
+                ? "Authorization has already started. Restarting invalidates the previous authorization link."
+                : "Your connection is saved. Retry the authorization request or restart from its current status.",
             )}
           </p>
           {status.data?.status !== "ready" && (
             <>
-              <Button
-                loading={launch.isPending}
-                onClick={() => launch.mutate(launch.variables)}
-              >
-                {t("Retry authorization request")}
-              </Button>
+              {!setupAlreadyStarted && (
+                <Button
+                  loading={launch.isPending}
+                  onClick={() => launch.mutate(launch.variables)}
+                >
+                  {t("Retry authorization request")}
+                </Button>
+              )}
               {status.data && (
                 <Button
                   variant="outline"

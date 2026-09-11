@@ -13,7 +13,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 LAUNCHERS = [
-    ("cli", "harness-ui", ["a13n-harness-ui", "--no-update-check"]),
+    ("cli", "harness-ui", ["python", "-m", "dev.harness-ui.cli"]),
     ("harness-ui-smoke", "harness-ui", ["python", "-m", "dev.harness-ui.smoke"]),
     ("harness-dev", "harness", ["opentelemetry-instrument", "python", "dev/observation-demo/agent.py"]),
 ]
@@ -21,6 +21,8 @@ LAUNCHERS = [
 
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    tmp_path = (tmp_path / "workspace with spaces").resolve()
+    tmp_path.mkdir()
     shutil.copy2(REPOSITORY_ROOT / "Makefile", tmp_path / "Makefile")
     for profile in ("harness", "harness-ui"):
         directory = tmp_path / "dev" / profile
@@ -146,16 +148,42 @@ def test_help_and_dry_run_have_no_side_effects(workspace: Path, args) -> None:
 def test_ui_launchers_forward_arguments(workspace: Path, target) -> None:
     result = run_make(workspace, target, 'CLI_ARGS=--config "config with spaces.yaml" webui')
     assert result.returncode == 0, result.stdout + result.stderr
+    assert uv_calls(workspace)[-1][-3:] == ["--config", "config with spaces.yaml", "webui"]
+    if target == "a13n-harness-ui":
+        assert "--no-update-check" in uv_calls(workspace)[-1]
+        assert "--env-file" not in uv_calls(workspace)[-1]
+        assert "--data-root" not in uv_calls(workspace)[-1]
+        assert not (workspace / "dev/harness-ui/.env").exists()
+
+
+def test_cli_forwards_explicit_path_overrides_to_development_launcher(workspace: Path) -> None:
+    result = run_make(workspace, "cli", 'CLI_ARGS=--config "custom config.yaml" --data-root "custom data" webui')
+    assert result.returncode == 0, result.stdout + result.stderr
     assert uv_calls(workspace)[-1][-5:] == [
-        "a13n-harness-ui",
-        "--no-update-check",
         "--config",
-        "config with spaces.yaml",
+        "custom config.yaml",
+        "--data-root",
+        "custom data",
         "webui",
     ]
-    if target == "a13n-harness-ui":
-        assert "--env-file" not in uv_calls(workspace)[-1]
-        assert not (workspace / "dev/harness-ui/.env").exists()
+
+
+def test_cli_configuration_and_data_are_git_ignored() -> None:
+    paths = [
+        "var/harness-ui/a13n-harness-ui.yaml",
+        "var/harness-ui/models/local.yaml",
+        "var/harness-ui/data/objects/example.json.zst",
+    ]
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", *paths],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == paths
 
 
 def test_harness_launcher_forwards_scenario_and_propagates_failure(workspace: Path, monkeypatch) -> None:

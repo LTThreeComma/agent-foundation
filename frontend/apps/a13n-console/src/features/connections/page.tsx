@@ -147,6 +147,7 @@ export function ConnectionsPage() {
               render: (row) => (
                 <ResourceIdentity
                   name={row.connection.name}
+                  resourceId={row.connection.id}
                   description={
                     row.kind === "connector"
                       ? row.connection.connector_key
