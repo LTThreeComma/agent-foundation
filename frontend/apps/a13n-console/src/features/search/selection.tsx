@@ -16,7 +16,9 @@ import { providersPath } from "../providers/navigation";
 export function AgentSearchSelection({
   value,
   onChange,
+  readOnly = false,
 }: {
+  readOnly?: boolean;
   value: Schema["SearchSelection"] | null;
   onChange: (value: Schema["SearchSelection"] | null) => void;
 }) {
@@ -48,7 +50,7 @@ export function AgentSearchSelection({
   }
   return (
     <DisclosureSection
-      title={t("Configure web search")}
+      title={t(readOnly ? "Web search" : "Configure web search")}
       summary={
         selected?.name ?? t(value ? "Selected provider unavailable" : "Off")
       }
@@ -59,6 +61,7 @@ export function AgentSearchSelection({
         )}
       </p>
       <ChoiceField
+        readOnly={readOnly}
         label={t("Search provider")}
         value={value?.provider_id ?? "off"}
         onValueChange={choose}
@@ -107,7 +110,7 @@ export function AgentSearchSelection({
       )}
       {value && (
         <>
-          <FormField label={t("Maximum results")}>
+          <FormField readOnly={readOnly} label={t("Maximum results")}>
             <Input
               type="number"
               required
@@ -120,6 +123,7 @@ export function AgentSearchSelection({
             />
           </FormField>
           <FormField
+            readOnly={readOnly}
             label={t("Include domains")}
             description={t(
               "Optional comma-separated DNS names, up to 20. No URLs or wildcards.",

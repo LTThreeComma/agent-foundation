@@ -71,6 +71,7 @@ export function ServiceAccounts() {
             columns={[
               {
                 label: t("Name"),
+                tone: "primary",
                 render: (item) => (
                   <Button
                     variant="ghost"
@@ -97,6 +98,7 @@ export function ServiceAccounts() {
                   <div className={styles.actions}>
                     <AccountEditor account={item} />
                     <Confirm
+                      triggerVariant="ghost"
                       title={t("Delete service account")}
                       description={t(
                         "This revokes its keys and removes workspace access.",

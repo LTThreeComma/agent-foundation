@@ -1,5 +1,6 @@
 import { ArrowLeftIcon, PlusIcon } from "@phosphor-icons/react";
 import { Button } from "a13n-ui/components/button";
+import { FormField } from "a13n-ui/patterns/form-field";
 import { SearchPicker } from "a13n-ui/patterns/search-picker";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -58,38 +59,42 @@ export function ProviderSetup({
     );
   return (
     <div className={styles.stack}>
-      <div className={modelStyles.flowHeading}>
-        <h3>{t("Provider")}</h3>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => setConnecting(true)}
-        >
-          <PlusIcon size={14} />
-          {t("Connect provider")}
-        </Button>
-      </div>
-      <SearchPicker
+      <FormField
         label={t("Provider")}
-        placeholder={t("Choose a provider…")}
-        emptyMessage={t("No results")}
-        value={value}
-        onValueChange={onSelect}
-        groups={[
-          {
-            label: t("Providers"),
-            options: providers.map((item) => ({
-              value: item.id,
-              label: item.name,
-              description:
-                definitions.find((definition) => definition.type === item.type)
-                  ?.display_name ?? item.type,
-              disabled: !item.enabled,
-            })),
-          },
-        ]}
-      />
+        labelAction={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setConnecting(true)}
+          >
+            <PlusIcon size={14} />
+            {t("Connect provider")}
+          </Button>
+        }
+      >
+        <SearchPicker
+          label={t("Provider")}
+          placeholder={t("Choose a provider…")}
+          emptyMessage={t("No results")}
+          value={value}
+          onValueChange={onSelect}
+          groups={[
+            {
+              label: t("Providers"),
+              options: providers.map((item) => ({
+                value: item.id,
+                label: item.name,
+                description:
+                  definitions.find(
+                    (definition) => definition.type === item.type,
+                  )?.display_name ?? item.type,
+                disabled: !item.enabled,
+              })),
+            },
+          ]}
+        />
+      </FormField>
     </div>
   );
 }

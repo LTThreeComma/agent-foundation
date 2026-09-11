@@ -6,6 +6,7 @@ import { Input } from "a13n-ui/components/input";
 import { Label } from "a13n-ui/components/label";
 import { ModalFrame } from "a13n-ui/patterns/modal-frame";
 import { Switch } from "a13n-ui/components/switch";
+import { Identifier } from "../../shared/copy";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -69,9 +70,10 @@ export function AccountTargets({ account }: { account: Schema["Account"] }) {
             columns={[
               {
                 label: t("Target"),
+                tone: "primary",
                 render: (item) => (
                   <>
-                    <strong>{item.external_target_id}</strong>
+                    <Identifier value={item.external_target_id} primary />
                     <small>
                       {t(
                         item.target_kind === "repository"
@@ -102,6 +104,7 @@ export function AccountTargets({ account }: { account: Schema["Account"] }) {
                     <div className={styles.actions}>
                       <TargetEditor account={account} target={item} />
                       <Confirm
+                        triggerVariant="ghost"
                         title={t("Delete target override")}
                         description={t(
                           "The account's default routing will apply to future events for this target.",
@@ -166,7 +169,9 @@ function TargetEditor({
       }
       size={"md"}
       title={t(target ? "Edit target override" : "Add target override")}
-      description={t("Match one provider object by its exact identifier.")}
+      description={t(
+        "Override the account defaults for one external target, such as a conversation or repository.",
+      )}
       closeLabel={t("Close")}
       open={open}
     >
@@ -300,7 +305,7 @@ function TargetForm({
         placeholder={t("Select target kind")}
         value={kind}
         className="min-w-0"
-        disabled={!!basis}
+        readOnly={!!basis}
         onValueChange={(value) =>
           setKind(value === "repository" ? "repository" : "conversation")
         }
@@ -315,7 +320,10 @@ function TargetForm({
       <FormField
         className="min-w-0 w-full"
         label={t("External target ID")}
-        disabled={!!basis}
+        description={t(
+          "Use the identifier from the external service, not its display name.",
+        )}
+        readOnly={!!basis}
       >
         <Input
           required={true}

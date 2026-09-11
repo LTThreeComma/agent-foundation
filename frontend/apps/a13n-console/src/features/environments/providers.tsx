@@ -108,6 +108,7 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
             columns={[
               {
                 label: t("Provider"),
+                tone: "primary",
                 render: (item) => (
                   <div className="flex min-w-0 items-center gap-3">
                     <ProviderIcon key={item.type} type={item.type} />
@@ -124,6 +125,7 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
               },
               {
                 label: t("Scope"),
+                tone: "muted",
                 render: (item) => (
                   <ScopeBadge workspaceId={item.workspace_id} />
                 ),
@@ -212,7 +214,7 @@ function ProviderEditor({
       size={"md"}
       title={t(providerId ? "Edit provider" : "Add provider")}
       description={t(
-        "Credentials are stored securely and never returned by the service.",
+        "Connect the service that hosts your environments. Credentials are never returned by the service.",
       )}
       closeLabel={t("Close")}
     >
@@ -326,7 +328,7 @@ function ProviderForm({
         <ProviderTypeField
           definitions={definitions}
           value={type}
-          disabled={!!basis}
+          readOnly={!!basis}
           onValueChange={(value) => {
             setType(value);
             setConfiguration({});

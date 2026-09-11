@@ -45,7 +45,9 @@ export function AgentCapabilities({
   setMcp,
   connectors,
   setConnectors,
+  readOnly = false,
 }: {
+  readOnly?: boolean;
   choices: ReturnType<typeof useAgentChoices>;
   skills: Skills;
   setSkills: Dispatch<SetStateAction<Skills>>;
@@ -60,6 +62,7 @@ export function AgentCapabilities({
   return (
     <>
       <CapabilityGroup
+        readOnly={readOnly}
         title={t("Skills")}
         description={t("Reusable knowledge and procedures.")}
         icon={<PuzzlePieceIcon size={15} />}
@@ -81,13 +84,14 @@ export function AgentCapabilities({
               ),
             settings: selected && (
               <FormField
+                readOnly={readOnly}
                 className={styles.pinnedVersion}
                 label={t("Pinned version")}
               >
                 <Input
                   type="number"
                   min={1}
-                  value={selected.version ?? ""}
+                  value={selected.version ?? (readOnly ? t("Latest") : "")}
                   placeholder={t("Latest")}
                   onChange={(event) =>
                     setSkills((previous) =>
@@ -110,6 +114,7 @@ export function AgentCapabilities({
         })}
       />
       <CapabilityGroup
+        readOnly={readOnly}
         title={t("MCP connections")}
         description={t("Tools provided by your MCP connections.")}
         icon={<TreeStructureIcon size={15} />}
@@ -138,6 +143,7 @@ export function AgentCapabilities({
               ),
             settings: selected && (
               <ToolNames
+                readOnly={readOnly}
                 tools={selected.tools}
                 onChange={(tools) =>
                   setMcp((previous) =>
@@ -154,6 +160,7 @@ export function AgentCapabilities({
         })}
       />
       <CapabilityGroup
+        readOnly={readOnly}
         title={t("Connectors")}
         description={t("Connected services this agent can use.")}
         icon={<PlugIcon size={15} />}
@@ -217,6 +224,7 @@ function CapabilityGroup({
   choices,
   setup,
   loading,
+  readOnly,
 }: {
   title: string;
   description: string;
@@ -224,6 +232,7 @@ function CapabilityGroup({
   choices: CapabilityChoice[];
   setup: string;
   loading: boolean;
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
@@ -248,109 +257,122 @@ function CapabilityGroup({
                 {choice.unavailable && !loading && (
                   <small>{t("Unavailable")}</small>
                 )}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t("Remove {{name}}", { name: choice.name })}
-                  onClick={() => choice.onChange(false)}
-                >
-                  {t("Remove")}
-                </Button>
+                {!readOnly && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={t("Remove {{name}}", { name: choice.name })}
+                    onClick={() => choice.onChange(false)}
+                  >
+                    {t("Remove")}
+                  </Button>
+                )}
               </div>
               {choice.settings && (
                 <div className={styles.choiceSettings}>{choice.settings}</div>
               )}
             </div>
           ))}
-        <Collapsible
-          className={styles.capabilityPicker}
-          open={adding}
-          onOpenChange={setAdding}
-        >
-          <CollapsibleTrigger render={<Button variant="secondary" size="sm" />}>
-            {adding ? <XIcon size={14} /> : <PlusIcon size={14} />}
-            {adding ? t("Close selection") : t("Add {{kind}}", { kind: title })}
-          </CollapsibleTrigger>
-          <CollapsiblePanel>
-            <div className={styles.addCapabilityPanel}>
-              {choices.length > 6 && (
-                <FormField
-                  className="min-w-0 w-full"
-                  label={t("Search {{kind}}", { kind: title })}
-                  hideLabel={true}
-                >
-                  <Input
-                    placeholder={t("Search…")}
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    type="search"
-                  />
-                </FormField>
-              )}
-              <Fieldset className={`a13n-scrollbar ${styles.choiceList}`}>
-                <FieldsetLegend className="sr-only">{title}</FieldsetLegend>
-                {visible.map((choice) => (
-                  <div key={choice.key} className={styles.choice}>
-                    <div className={styles.choiceHeading}>
-                      <Label className="flex items-center gap-2">
-                        <Checkbox
-                          checked={choice.checked}
-                          onCheckedChange={(value) =>
-                            choice.onChange(value === true)
-                          }
-                        />
-                        {choice.name}
-                      </Label>
-                      {choice.unavailable && !loading && (
-                        <small>{t("Unavailable")}</small>
-                      )}
+        {readOnly && !choices.some((choice) => choice.checked) && (
+          <p className="text-sm text-muted-foreground">{t("None")}</p>
+        )}
+        {!readOnly && (
+          <Collapsible
+            className={styles.capabilityPicker}
+            open={adding}
+            onOpenChange={setAdding}
+          >
+            <CollapsibleTrigger
+              render={<Button variant="secondary" size="sm" />}
+            >
+              {adding ? <XIcon size={14} /> : <PlusIcon size={14} />}
+              {adding
+                ? t("Close selection")
+                : t("Add {{kind}}", { kind: title })}
+            </CollapsibleTrigger>
+            <CollapsiblePanel>
+              <div className={styles.addCapabilityPanel}>
+                {choices.length > 6 && (
+                  <FormField
+                    className="min-w-0 w-full"
+                    label={t("Search {{kind}}", { kind: title })}
+                    hideLabel={true}
+                  >
+                    <Input
+                      placeholder={t("Search…")}
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      type="search"
+                    />
+                  </FormField>
+                )}
+                <Fieldset className={`a13n-scrollbar ${styles.choiceList}`}>
+                  <FieldsetLegend className="sr-only">{title}</FieldsetLegend>
+                  {visible.map((choice) => (
+                    <div key={choice.key} className={styles.choice}>
+                      <div className={styles.choiceHeading}>
+                        <Label className="flex items-center gap-2">
+                          <Checkbox
+                            checked={choice.checked}
+                            onCheckedChange={(value) =>
+                              choice.onChange(value === true)
+                            }
+                          />
+                          {choice.name}
+                        </Label>
+                        {choice.unavailable && !loading && (
+                          <small>{t("Unavailable")}</small>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
-                {!choices.length && (
-                  <p className={styles.capabilityEmpty}>
-                    {t(
-                      loading
-                        ? "Loading…"
-                        : "None available in this workspace.",
-                    )}
-                  </p>
-                )}
-                {!!choices.length && !visible.length && (
-                  <p className={styles.capabilityEmpty}>
-                    {t(
-                      search
-                        ? "No matching capabilities"
-                        : "All available resources added",
-                    )}
-                  </p>
-                )}
-              </Fieldset>
-              <Link
-                className={styles.setupCapability}
-                to={setup}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t("Set up {{kind}}", { kind: title })}
-                <ArrowUpRightIcon size={12} aria-hidden="true" />
-                <span className="visually-hidden">
-                  {t("Opens in a new tab")}
-                </span>
-              </Link>
-            </div>
-          </CollapsiblePanel>
-        </Collapsible>
+                  ))}
+                  {!choices.length && (
+                    <p className={styles.capabilityEmpty}>
+                      {t(
+                        loading
+                          ? "Loading…"
+                          : "None available in this workspace.",
+                      )}
+                    </p>
+                  )}
+                  {!!choices.length && !visible.length && (
+                    <p className={styles.capabilityEmpty}>
+                      {t(
+                        search
+                          ? "No matching capabilities"
+                          : "All available resources added",
+                      )}
+                    </p>
+                  )}
+                </Fieldset>
+                <Link
+                  className={styles.setupCapability}
+                  to={setup}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t("Set up {{kind}}", { kind: title })}
+                  <ArrowUpRightIcon size={12} aria-hidden="true" />
+                  <span className="visually-hidden">
+                    {t("Opens in a new tab")}
+                  </span>
+                </Link>
+              </div>
+            </CollapsiblePanel>
+          </Collapsible>
+        )}
       </div>
     </EditorSection>
   );
 }
 
 function ToolNames({
+  readOnly,
   tools,
   onChange,
 }: {
+  readOnly?: boolean;
   tools: string[] | null | undefined;
   onChange: (tools: string[] | null) => void;
 }) {
@@ -359,11 +381,12 @@ function ToolNames({
   return (
     <FormField
       className="min-w-0 w-full"
+      readOnly={readOnly}
       label={t("Tool names")}
       description={t("Comma-separated; empty selects all.")}
     >
       <Input
-        value={text}
+        value={readOnly ? text || t("All tools") : text}
         placeholder={t("All tools")}
         onChange={(event) => {
           const value = event.target.value;

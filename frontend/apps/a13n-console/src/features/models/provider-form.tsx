@@ -146,7 +146,7 @@ export function ProviderForm({
       <ProviderTypeField
         definitions={definitions}
         value={type}
-        disabled={!!original}
+        readOnly={!!original}
         onValueChange={(value) => {
           setType(value);
           setConfiguration({});

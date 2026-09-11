@@ -1,6 +1,7 @@
-import { Button } from "a13n-ui/components/button";
+import { Button, type ButtonProps } from "a13n-ui/components/button";
 import { FormField } from "a13n-ui/patterns/form-field";
 import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { ReadOnlyField } from "a13n-ui/patterns/read-only-field";
 import { Textarea } from "a13n-ui/components/textarea";
 
 import { useState, type ReactElement, type ReactNode } from "react";
@@ -19,6 +20,7 @@ export function TextAreaField({
   required,
   code = false,
   hideLabel = false,
+  readOnly = false,
   error,
 }: {
   label: string;
@@ -29,8 +31,19 @@ export function TextAreaField({
   required?: boolean;
   code?: boolean;
   hideLabel?: boolean;
+  readOnly?: boolean;
   error?: string;
 }) {
+  if (readOnly)
+    return (
+      <ReadOnlyField label={label} description={hint} hideLabel={hideLabel}>
+        {code ? (
+          <pre className={styles.codeValue}>{value || "—"}</pre>
+        ) : (
+          value || "—"
+        )}
+      </ReadOnlyField>
+    );
   return (
     <FormField
       label={label}
@@ -56,6 +69,7 @@ export function Confirm({
   trigger,
   triggerElement,
   danger = false,
+  triggerVariant,
   children,
 }: {
   title: string;
@@ -65,6 +79,7 @@ export function Confirm({
   trigger?: ReactNode;
   triggerElement?: ReactElement;
   danger?: boolean;
+  triggerVariant?: ButtonProps["variant"];
   children?: ReactNode;
 }) {
   const { t } = useTranslation();
@@ -89,7 +104,14 @@ export function Confirm({
       trigger={
         triggerElement ?? (
           <Button
-            variant={danger ? "destructive" : "outline"}
+            variant={triggerVariant ?? (danger ? "destructive" : "outline")}
+            className={
+              triggerVariant === "ghost"
+                ? danger
+                  ? "font-normal text-destructive-foreground"
+                  : "font-normal text-muted-foreground"
+                : undefined
+            }
             size="sm"
             type="button"
           >

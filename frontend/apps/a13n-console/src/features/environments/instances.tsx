@@ -4,6 +4,7 @@ import { DisclosureSection } from "a13n-ui/patterns/disclosure-section";
 import { FormField } from "a13n-ui/patterns/form-field";
 import { Input } from "a13n-ui/components/input";
 import { ModalFrame } from "a13n-ui/patterns/modal-frame";
+import { CopyableId } from "../../shared/copy";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -67,9 +68,10 @@ export function EnvironmentInstances() {
             columns={[
               {
                 label: t("Environment"),
+                tone: "primary",
                 render: (item) => (
                   <>
-                    <code>{item.id}</code>
+                    <CopyableId value={item.id} primary />
                     <small>
                       {t(item.ownership === "managed" ? "Managed" : "External")}
                     </small>
@@ -80,7 +82,11 @@ export function EnvironmentInstances() {
                 label: t("Status"),
                 render: (item) => <StateBadge state={item.status} />,
               },
-              { label: t("Generation"), render: (item) => item.generation },
+              {
+                label: t("Generation"),
+                align: "right",
+                render: (item) => item.generation,
+              },
               {
                 label: t("Activity"),
                 render: (item) => (
@@ -89,6 +95,7 @@ export function EnvironmentInstances() {
               },
               {
                 label: t("Updated"),
+                tone: "muted",
                 render: (item) => <Timestamp value={item.updated_at} />,
               },
               {

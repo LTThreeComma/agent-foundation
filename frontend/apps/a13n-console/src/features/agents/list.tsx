@@ -74,7 +74,7 @@ export function Agents() {
       description={t("The agents your workspace runs on.")}
       actions={create}
     >
-      <div className={styles.listFilters}>
+      <div className={shared.filters}>
         <FormField
           className="min-w-0 w-full"
           label={t("Search this page")}
@@ -95,7 +95,7 @@ export function Agents() {
             page.reset();
           }}
           label={t("Archive filter")}
-          hideLabel
+          variant="filter"
           options={[
             { value: "active", label: t("Not archived") },
             { value: "all", label: t("Include archived") },
@@ -125,6 +125,7 @@ export function Agents() {
             columns={[
               {
                 label: t("Agent"),
+                tone: "primary",
                 render: (agent) => (
                   <ResourceIdentity
                     to={agent.key}
@@ -163,6 +164,7 @@ export function Agents() {
               },
               {
                 label: t("Updated"),
+                tone: "muted",
                 render: (agent) => (
                   <Timestamp value={agent.updated_at} relative />
                 ),
