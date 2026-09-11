@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 
 from a13n_harness_ui.errors import ConfigurationError
 
-from .models import LoadedHarnessUiConfiguration
+from .models import AgentResource, AgentToolProxy, LoadedHarnessUiConfiguration
 from .mutation import ConfigurationMutationResult, _select_target
 
 
@@ -27,6 +27,27 @@ class ConfigurationSourceCatalog(BaseModel):
 
     generation_digest: str | None
     sources: tuple[ConfigurationSourceInfo, ...]
+
+
+class ToolProxySourceView(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    resource_id: str
+    name: str
+    kind: Literal["mcp_server", "harness_plugin"]
+    enabled: bool
+    group: str | None
+    presentation: Literal["active", "dormant", "direct", "disabled"]
+
+
+class AgentToolProxyView(BaseModel):
+    """Static source membership; never connects to MCP or discovers tools."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    agent_id: str
+    tool_proxy: AgentToolProxy
+    sources: tuple[ToolProxySourceView, ...]
 
 
 class ConfigurationSourceView(ConfigurationSourceInfo):
@@ -94,3 +115,28 @@ def source_view(
                 content=source.source(relative_path).content if info.content_available else None,
             )
     raise ConfigurationError("The accepted configuration source does not exist.", code="configuration_source_not_found")
+
+
+def agent_tool_proxy_view(source: LoadedHarnessUiConfiguration, agent: AgentResource) -> AgentToolProxyView:
+    proxy = agent.tool_proxy or AgentToolProxy()
+    owners = {
+        resource_id: name
+        for name, group in proxy.groups.items()
+        for resource_id in (*group.mcp_servers, *group.harness_plugins)
+    }
+    selected = {*source.selected_mcp_servers(agent), *source.selected_plugins(agent)}
+    sources = []
+    for resource in (*source.mcp_servers.values(), *source.harness_plugins.values()):
+        group = owners.get(resource.id)
+        enabled = resource.id in selected
+        sources.append(
+            ToolProxySourceView(
+                resource_id=resource.id,
+                name=resource.name,
+                kind=resource.kind,
+                enabled=enabled,
+                group=group,
+                presentation=("active" if enabled else "dormant") if group else ("direct" if enabled else "disabled"),
+            )
+        )
+    return AgentToolProxyView(agent_id=agent.id, tool_proxy=proxy, sources=tuple(sources))

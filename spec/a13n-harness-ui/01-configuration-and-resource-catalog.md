@@ -157,6 +157,12 @@ Rules:
 
 A completed source write is not a promise that its bytes remain current after another writer saves. Source digests remain read/provenance facts for accepted generations and frozen Runs, not file-write preconditions. Internal SQLite head selection and immutable-object integrity follow [Local Storage](03-local-storage-and-recovery.md); last-write-wins file publication does not change Thread, continuation, or execution concurrency contracts.
 
+### Agent Tool-Proxy Configuration and Preview
+
+Agent YAML owns tool-proxy groups. `config show` exposes a static preview for Agents with grouping configured: the Agent ID, authored grouping configuration, and configured MCP/Harness Plugin source identities with enabled membership and `active`, `dormant`, `direct`, or `disabled` presentation. It uses Agent creation defaults, not a particular Thread's sticky selections or live tools. Neither preview nor validation constructs MCP clients or discovers tools.
+
+Grouping semantics and immutable Run capture belong to [Agent composition](02-agent-composition-and-snapshots.md#tool-proxy-groups). Browser group editing is not implemented; the existing configuration source HTTP contract is unchanged.
+
 ## First-use Initialization
 
 [Setup and Environment Readiness](06-setup-and-environment-readiness.md) owns the explicit guided initialization shared by surfaces. It uses this same source tree, complete candidate validation, and last-write-wins publication. It creates no alternate settings store and never rewrites an existing installation merely because a new template is available.
