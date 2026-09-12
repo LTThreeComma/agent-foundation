@@ -1,6 +1,6 @@
 # Local live tests
 
-These opt-in tests send real HTTP requests to separate local Control and Worker processes. Control accepts Native API requests; Worker readiness is checked over HTTP, and execution is dispatched through the real queue. The tests never call Worker execution internals or use an in-process ASGI transport for live journeys.
+The opt-in HTTP journeys send real requests to separate local Control and Worker processes. Control accepts Native API requests; Worker readiness is checked over HTTP, and execution is dispatched through the real queue. HTTP journeys never call Worker execution internals or use an in-process ASGI transport. The separately opted-in performance suite calls native Service operations against real disposable storage to measure precise operation boundaries.
 
 | File                                               | Journey                                                                                                        |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -22,18 +22,18 @@ Tests are grouped by their primary feature, independently of their execution opt
 | Directory               | Primary responsibility                                                           | Modules | Collected cases |
 | ----------------------- | -------------------------------------------------------------------------------- | ------: | --------------: |
 | `environment/`          | Environment selection, access, files, providers, lifecycle and shared Worker use |      22 |             366 |
-| `control/`              | Run commands, waiting, inbox, queue, branches and acceptance races               |      21 |             193 |
-| `run_recovery/`         | Worker ownership, persistence, budgets, dependency failures and drain            |       8 |             653 |
-| `harness_integration/`  | Service configuration and resources reaching real Harness execution              |      11 |              29 |
+| `control/`              | Run commands, waiting, inbox, queue, branches and acceptance races               |      25 |             217 |
+| `run_recovery/`         | Worker ownership, persistence, budgets, dependency failures and drain            |       9 |             657 |
+| `harness_integration/`  | Service configuration and resources reaching real Harness execution              |      12 |              30 |
 | `model/`                | Frozen Model settings and current Provider settings between requests             |       1 |               3 |
 | `protocol/`             | Native and Hosted streams, reconnect and recovery projection                     |       3 |              13 |
 | `iam/`                  | Workspace isolation, current authority and revocation                            |       3 |              10 |
-| `providers/`            | Optional real search, model, environment and Connector accounts                  |       1 |              15 |
+| `providers/`            | Optional real search, model, environment and Connector accounts                  |       1 |              14 |
 | `observability/`        | Cross-layer evidence and telemetry failure isolation                             |       1 |               2 |
-| `performance/`          | Long-session operation latency and retained-history correctness                  |       1 |               1 |
-| `infrastructure_tests/` | Offline tests of fixtures, configuration, parsers and cleanup                    |      12 |             220 |
+| `performance/`          | Concurrent PG/S3 calls and bounded Service operations                            |       2 |               2 |
+| `infrastructure_tests/` | Offline tests of fixtures, configuration, parsers and cleanup                    |      19 |             310 |
 
-Counts are a collection snapshot: 84 modules and 1,505 parameterized cases, including inherited lifecycle cases and cases skipped unless explicitly enabled. A category does not enable infrastructure: the existing `--live*` fixture gates still apply. Mixed modules remain intact: `test_26_output_and_client_tools.py` and `test_32_multiworker_resources.py` live under `harness_integration/`, while `providers/test_31_real_providers.py` retains its real-account matrix.
+Counts are a collection snapshot: 98 modules and 1,624 parameterized cases, including inherited lifecycle cases and cases skipped unless explicitly enabled. A category does not enable infrastructure: the existing `--live*` fixture gates still apply. Mixed modules remain intact: `test_26_output_and_client_tools.py` and `test_32_multiworker_resources.py` live under `harness_integration/`, while `providers/test_31_real_providers.py` retains its real-account matrix.
 
 Subpackages inherit the root `conftest.py`. Feature-owned helpers live beside their tests; shared lab infrastructure lives in `infrastructure/`. The isolated launcher recursively selects the same first-round filenames and keeps their filename order.
 
@@ -46,6 +46,54 @@ uv run --locked python -m pytest dev/live_tests/control --live-round-two
 uv run --locked python -m pytest dev/live_tests/model --live-management
 ```
 
+## Manual correctness suites
+
+Live tests are opt-in local checks. No GitHub Actions workflow runs these suites. The existing `make live-test-ci` command and `ci.py` module remain the manual entry points for the 398 reviewed cases across seven suites; the full parameter matrices remain available through the ordinary live-test opt-ins below. Each invocation runs serially with its own dependencies and processes. Optional sharding keeps every selected node from a module together, preserving module-scoped backend setup.
+
+| Suite                 | Selected cases | Coverage                                                                                                                                                                                   |
+| --------------------- | -------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `core`                |             21 | Cases 01–08, including Native/Hosted protocol contracts, in one owned lab                                                                                                                  |
+| `functional`          |             35 | Queue, Retry, Fork, async children, Workspace isolation, Agent/Plugin/Skill/Asset execution, structured output, client feedback, and direct-local Environment selection/access/inheritance |
+| `control`             |             63 | Cases 45–50: acceptance, waiting, concurrency, branches, queue and inbox boundaries                                                                                                        |
+| `fork-queue`          |             49 | Cases 51–56, including both case-54 files: child results, Steer/queue races and Fork independence                                                                                          |
+| `run-faults`          |             59 | Cases 37–42: persistence, control receipts, budgets/drain, acceptance/queue faults, current authority and dependency failures                                                              |
+| `environment-native`  |            112 | Local/Docker/envd files, lifecycle, transport failures, bootstrap boundaries and real ENOSPC                                                                                               |
+| `environment-service` |             59 | Docker case-21 variants, backend conformance and multi-Worker Environment lifecycle, sharing, policy, dependency and authority boundaries                                                  |
+
+The reviewed suites use scripted local model endpoints and local MCP/Connector fixtures. Each invocation creates its own PostgreSQL, Redis and RustFS, starts real Control/Worker processes, and uses real direct-local, Local Envd, Docker, HTTP Envd and reverse-WebSocket Envd targets. Model-update case 23, real Model/Connector/Search account tests, E2B, and performance benchmarks are excluded. E2B parameters in mixed Environment modules are deselected before fixture setup, so private Provider configuration is not read. Five selected unsupported Environment combinations remain explicitly skipped because external daemons have no managed creation, some providers admit only one concurrent Session, and Docker has no native TTL renewal; these skips are not passing lifecycle coverage.
+
+The reduced combinations preserve these representative boundaries:
+
+- Fork versus Control: Continue, Interrupt and Feedback, each with Fork paused and with the source command paused (6 cases).
+- Fork versus execution: model, tool and checkpoint phases in both pause orders (6); replacement ownership after claim in both orders (2); explicit and shared queue handoff in both orders (4). The duplicate planned-handoff cross product is omitted; the dedicated SIGTERM/checkpoint and drain/lease tests remain.
+- Terminal submission: absent, completed and waiting heads, each with and without an existing queue, distributing failed/cancelled outcomes across the six cases.
+- Lost successor replies: Continue before/after commit plus committed Fork, Retry, Feedback and waiting Continue (6). Async-child delivery retains running, approval-waiting, completed and cancelled parents (4).
+- Model streams: one truncated, malformed or timeout failure plus repeated truncation that exhausts recovery (4); explicit 429 recovery and exhausted 503 rejection (2). PostgreSQL, Redis and S3 outage/recovery tests remain.
+- Environment sharing: first preparation with both `on_run`/`on_use` for direct-local and Docker (4); Docker cancellation/crash, Worker crash with HTTP Envd and cancellation with WebSocket Envd (4). Tools/access, template and lifecycle conformance still exercise all four non-cloud Service backends. Both principal-disable and role-revocation tests check the request-11 IAM refresh boundary and the other Worker's independent authority.
+- Native file failures: every missing-file operation and wrong-type operation remains represented, distributed across backends instead of their full Cartesian products (10 and 8). Traversal, symlink escape, read-only denial, real OS permissions and aborted writes retain every backend. Docker bootstrap corruption covers all four operations and four corruption kinds in four representative pairs.
+
+Lab setup migrates the disposable database and initializes both isolated identities in one bootstrap process, replacing three interpreter startups (two in core). Function-scoped fault labs own fresh databases, buckets, fault relays and Service processes. `--basetemp` creates missing parent directories before pytest starts. The local Composio Host supplies its HTTPS peer through trusted composition while provider requests retain the production empty configuration schema; Docker file evidence is read as the container user through Docker, independently of Harness tools.
+
+Run the suites locally:
+
+```sh
+# Selection only: no containers, services, native daemons or private account reads.
+make live-test-ci suite=environment-service LIVE_TEST_ARGS='--collect-only'
+# The first round needs Docker but no native daemon build.
+make live-test-ci suite=core
+make live-test-ci suite=control LIVE_TEST_ARGS='-k waiting -x'
+# Run the second of two optional Control shards.
+make live-test-ci suite=control LIVE_TEST_ARGS='--shard=2/2'
+# Build the source daemon, sandbox and both limited-storage fixture images.
+make live-test-ci-environment-build
+make live-test-ci suite=environment-native
+make live-test-ci suite=environment-service
+```
+
+The manual entry point ignores ambient Service/AWS/live-account/telemetry settings and pytest selection overrides. It does not load `.env`. `A13N_ENVD_TEST_BINARY`, `LIVE_TEST_SANDBOX_IMAGE`, `LIVE_TEST_FILE_RESOURCE_IMAGE` and `LIVE_TEST_DOCKER_RESOURCE_IMAGE` can select explicit local build artifacts. An additional `-k` expression only narrows the reviewed selection; it cannot re-enable E2B. `--junitxml` and `--basetemp` accept explicit output paths. On Linux, install Bubblewrap and enable unprivileged user namespaces before running Local Envd cases; native isolation remains enabled.
+
+Use `--junitxml` for a local result report. Process and daemon logs remain in the fixture-owned lab directories for inspection. Collection/support results do not establish live success; inspect the journey results and durations separately.
+
 ## Helper ownership
 
 Use the primary responsibility of a helper to choose its location:
@@ -53,17 +101,17 @@ Use the primary responsibility of a helper to choose its location:
 - Put feature-specific scenarios, model scripts, plugins, native observers and host extensions beside that feature's tests. For example, Control owns its inbox and fork helpers, Environment owns lifecycle/file fixtures and its fixture Dockerfile, and Protocol owns SSE parsers and contract oracles even when other suites consume them.
 - Put shared clients, lab composition, storage setup, resource provisioning and fault barriers in `infrastructure/`. Its `host.py` composes feature extensions; this is deliberate test-host composition, not a requirement that feature code be independent.
 - Keep tests of all those helpers in `infrastructure_tests/`. This directory contains offline test cases, not the helper implementations themselves.
-- Keep `conftest.py`, `manage.py` and `isolated.py` at the root as the common pytest and command entry points. Private `.state/` and `providers.local.toml` remain at their existing ignored locations; the example configuration stays beside them.
+- Keep `conftest.py`, `manage.py`, `isolated.py` and `ci.py` at the root as the common pytest and command entry points. Private `.state/` and `providers.local.toml` remain at their existing ignored locations; the example configuration stays beside them.
 
 | Location               | Helpers                                                                                                                                                                                                                                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `control/`             | `approval_plugin.py`, `async_children_model.py`, `control_children.py`, `control_fault_host.py`, `control_support.py`, `fixture_inbox.py`, `fork_fault_host.py`, `fork_support.py`, `queue_fault_host.py`                                                                                                                       |
+| `control/`             | `approval_plugin.py`, `async_children_model.py`, `control_children.py`, `control_fault_host.py`, `control_support.py`, `contention_support.py`, `fixture_inbox.py`, `fork_fault_host.py`, `fork_support.py`, `queue_fault_host.py`                                                                                              |
 | `environment/`         | `docker_lifecycle_host.py`, `e2b_host.py`, `e2b_support.py`, `environment_backends.py`, `environment_host.py`, `environment_worker_host.py`, `environment_workers.py`, `file_backends.py`, `file_contract.py`, `file_resource_worker.py`, `lifecycle_cases.py`, `lifecycle_host.py`, `lifecycle_support.py`, `service_cases.py` |
-| `harness_integration/` | `fixture_connectivity.py`, `management_model.py`, `plugin_image.py`, `plugin_package/`, `plugin_worker.Dockerfile`                                                                                                                                                                                                              |
+| `harness_integration/` | `fixture_connectivity.py`, `long_session_host.py`, `long_session_model.py`, `management_model.py`, `plugin_image.py`, `plugin_package/`, `plugin_worker.Dockerfile`                                                                                                                                                             |
 | `iam/`                 | `native_iam.py`, `run_fault_identity.py`                                                                                                                                                                                                                                                                                        |
 | `infrastructure/`      | `client.py`, `config.py`, `fixture_model.py`, `fixture_peer.py`, `host.py`, `local_storage.py`, `management_packages.py`, `management_support.py`, `round_two_lab.py`, `round_two_model.py`, `round_two_resources.py`, `run_faults.py`, `tcp_proxy.py`                                                                          |
 | `observability/`       | `fixture_telemetry.py`                                                                                                                                                                                                                                                                                                          |
-| `performance/`         | `long_session_host.py`, `long_session_model.py`                                                                                                                                                                                                                                                                                 |
+| `performance/`         | `operations.py`, `operation_config.py`, `pg_operations.py`, `s3_operations.py`, `service_operations.py`, `service_fixtures.py`, `allocation_operations.py`, `scenario_report.py`, `scenario_report_rows.py`, `s3_config.py`                                                                                                     |
 | `protocol/`            | `hosted_client.py`, `stream.py`, `stream_contract.py`                                                                                                                                                                                                                                                                           |
 | `providers/`           | `provider_config.py`, `real_providers.py`                                                                                                                                                                                                                                                                                       |
 | `run_recovery/`        | `resilience_plugin.py`, `run_fault_evidence.py`, `run_fault_host.py`, `run_fault_mcp.py`, `run_fault_model.py`, `run_fault_plugin.py`, `run_fault_support.py`                                                                                                                                                                   |
@@ -152,7 +200,7 @@ make live-test-providers LIVE_TEST_ARGS='-k "configured_search_exa and single-re
 
 `providers/test_31_real_providers.py` is also collected by `make live-test` and `make live-test-round-two`. `make live-test-local` runs the first-round files only; run `make live-test-providers` alongside it for external integration coverage. Existing timing, fault injection and management assertions always retain their deterministic dependencies, even when all sections are configured. `make live-test-check` never reads this private file or contacts these providers.
 
-Each enabled section starts its own disposable PostgreSQL, Redis, object-storage bucket, Control and Worker lab. Initialization creates the Provider and associated resources through Control HTTP, persisting credentials encrypted in that lab's database. No external credentials are copied into retained lab configuration.
+The Environment, Connector, Model and search sections each start their own disposable PostgreSQL, Redis, object-storage bucket, Control and Worker lab. Initialization creates the Provider and associated resources through Control HTTP, persisting credentials encrypted in that lab's database. No external credentials are copied into retained lab configuration.
 
 ### Exa and Brave search
 
@@ -496,7 +544,7 @@ Cleanup tracks test-owned Environment identities and exact sandbox IDs, discover
 
 This covers the lifecycle SDK surface used by our adapter: `list`, `get_info`, `create`, `connect`, `is_running`, `pause`, `set_timeout` and `kill`. It does not claim coverage of every E2B SDK feature, template, region or account quota. Deterministic credential denial, malformed state and policy/error mapping remain covered in `packages/a13n-environment/tests/test_e2b_lifecycle.py`; cloud outages, rate limits and permission failures are not induced against the real account.
 
-## Worker races and long-session latency
+## Worker races and long-session correctness
 
 Run the process races independently:
 
@@ -508,42 +556,36 @@ Four ready Worker processes are paused before accepting one Run, then released t
 
 Every recovery variant, the four-Worker claim race, and the two-Worker capacity case run 100 times by default (600 cases total). Each numbered pytest case owns a fresh lab, Worker processes, and Runs, with independent cleanup and retained process logs. Test IDs use `round-001` through `round-100` to identify failures; no separate repetition flag or stress mode is required.
 
-`performance/test_36_long_session.py` measures one Thread accumulating real sequential Runs through separate Control/Worker processes, PostgreSQL, Redis and S3. It runs only with `--live-performance`. The lab uses the default 30-second Worker lease.
+`harness_integration/test_36_long_session.py` retains sequential continuation and real built-in compaction coverage. It checks inherited memory, ordering, lineage and shrinking persisted state when compaction occurs. It has no latency gates and is independently opted in:
 
 ```sh
-# Grow one Thread to 1, 1,000 and 10,000 real Runs, measuring at each checkpoint.
-# Each real input/output has 1 KiB padding; five samples follow one warmup.
-make live-test-performance
-
-# Short validation including several context compactions.
-make live-test-performance LIVE_TEST_ARGS='--session-runs=1,100 --session-samples=2'
-
-# More acceptance samples at the same depths.
-make live-test-performance LIVE_TEST_ARGS='--session-runs=1,1000,10000 --session-message-bytes=1024 --session-samples=20'
+make live-test-session LIVE_TEST_ARGS='--session-runs=100'
+# Extended correctness run; can take hours:
+make live-test-session LIVE_TEST_ARGS='--session-runs=1,1000,10000'
 ```
 
-No synthetic history or fabricated Run rows are inserted. Every continuation uses the preceding sealed Run, and every checkpoint is written by production code. At each requested depth the test forks independent branches for operation measurements, preserving the main Thread for further sequential growth. The complete paginated Run listing must match the actual chain depth; pages contain 200 entries. This replaces the earlier synthetic-message benchmark and its `--session-turns` option.
+## Concurrent operation performance
 
-The opt-in Worker selects the real `CompactionCapability` in the reconstructed Agent definition. The deterministic model estimates tokens as request JSON UTF-8 bytes divided by four, including tools, plus output bytes divided by four. It rejects requests exceeding the 32,768-token fixture context window and answers actual Harness compaction requests with a bounded summary. The built-in 90% threshold decides when to compact. This validates compaction persistence and storage scaling, not tokenizer accuracy or natural-language summarization quality. The model emits the padded answer immediately; paid-model inference and artificial per-chunk delays are excluded.
+`performance/` measures operations with explicit start/end boundaries. PostgreSQL, RustFS and a preparation-only Control run in an owned disposable lab; no Worker or model loop executes. The default matrix is concurrency **1/8/32/64/256**, **256 measured calls per cell**, one unmeasured warmup wave, and **1 KiB/1 MiB** storage payloads. Service message writes use 1 KiB input; Run completion varies the history padding. PG and S3 pools each allow 256 connections, with no PG overflow. The owned PostgreSQL allows the configured PG pool plus 16 connections for preparation and administration (at least 100 total).
 
-Every sequential Run must complete, preserve parent/Thread lineage, return the expected output and retain a memory introduced only in the first Run. A read-only probe validates its real persisted state and sequence. Compaction must reduce object size and preserve the memory in the saved summary. The test checks fork, continue, retry, queue and steer behavior, including durable consumption and source immutability. These probes are outside operation latency measurements. Successful Runs with multiple Attempts are recorded and logged as recoveries; a passing journey does not imply recovery-free execution.
+```sh
+make live-test-performance
+make live-test-performance LIVE_TEST_ARGS='--performance-profile=dev/live_tests/performance/operations.example.toml'
+make live-test-s3 # same S3 call matrix, using private providers.local.toml [s3]
+make live-test-contention # separate correctness/fault races; barrier times are not performance samples
+```
 
-Each lab retains process logs, `progress.json` (workload completion status), `trajectory.jsonl` (one persisted state size, message count, compaction count, Attempt count and completion latency per sequential Run), and `latency-<runs>.json` under `.state/round-two/<random-id>/`. Reports retain raw samples, median, nearest-rank p95, maximum, workload and environment settings. An unfinished report remains `incomplete`. Pytest also reports fixture teardown errors separately after the workload has completed. Small sample counts do not establish stable tail latency. State sizes describe each Run's latest checkpoint; summing sequential checkpoint sizes gives their retained state-body storage, excluding Item objects and other database/object-store overhead.
+The measured scenarios are:
 
-| Metric                                                   | Measured boundary                                                                             |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `pg_run_read`                                            | A short scoped SQL query, ORM-to-domain conversion and session close                          |
-| `s3_read_bytes`                                          | Open and fully consume the exact state object, including body assembly                        |
-| `state_decode`                                           | Decode canonical state and validate its schema in memory                                      |
-| `s3_read_validate`                                       | Production state read, integrity checks and relational seal validation; includes S3 I/O again |
-| `run_get`, `runs_first_page`, `runs_all_pages`           | Public HTTP reads including authentication and response decoding                              |
-| `fork_accept`, `continue_accept`, `retry_accept`         | POST through acceptance response; prerequisite Thread version reads excluded for all three    |
-| `fork_complete`, `continue_complete`, `retry_complete`   | Full client operation through observed terminal completion, including version reads           |
-| `queue_accept`, `steer_accept`                           | Public admission response while a model response is held at a barrier                         |
-| `steer_release_to_consumed`                              | Barrier release through observed durable steer consumption                                    |
-| `queue_release_to_consumed`, `queue_release_to_complete` | Barrier release through observed queue consumption or successor completion                    |
+- PG SELECT, INSERT, UPDATE, and COMMIT separately. Connections and transactions are prepared first. Each statement timer covers one SQLAlchemy execute call; COMMIT times one previously prepared write transaction. The declared payload lives in an owned benchmark table; production business tables are covered by the Service scenarios.
+- S3 PUT, full-body GET, HEAD, DELETE, conditional PUT, stale-ETag rejection, and concurrent conditional PUT on one shared key. Each sample makes one SDK/HTTP request with retries disabled. PUT never includes a follow-up HEAD; GET includes body consumption. Successful and rejected calls have separate samples.
+- Native Service Thread creation, independent/shared-Run Attempt claim, lease heartbeat, Run running-to-completed publication/commit, steer pending insertion, steer consumed confirmation, queue insertion and capacity rejection. Same-Thread steer/queue writers exercise real locks. Service operation timing includes its PG pool waits, relational transactions and required S3 operations, while HTTP middleware, model/tool work, fixture preparation and verification remain outside.
 
-Chain creation, evidence probes, failure injection/repair and deliberate barrier waits are outside acceptance samples. Completion uses 100 ms polling and includes scheduling, HTTP and fixture overhead. Storage samples reuse warmed live clients and caches. This measures local storage/execution scaling, not remote S3 latency, real-model inference, network faults under load, or a production capacity limit. Run the performance matrix alone when comparing numbers; concurrent suites distort them. Ten thousand sequential Runs can take hours.
+The [reporting guide](performance/REPORTING.md) defines each boundary and result. Every execution writes raw `operations.json` plus one six-column `performance.md`/CSV table. No Run submission-to-completion, model latency, queue residence/delivery delay, offered-rate capacity or deliberate barrier wait appears in performance reports. Historical artifacts remain on disk but are rejected by the new report converter.
+
+Thread creation explicitly compares cold and prewarmed PG connections, resetting the pool before every wave. Select `thread_connection_states = ["cold"]` or `["warm"]` in focused profiles to collect each independently if a cold run fails. Independent Run fixtures use a prewarmed HTTP pool sized by `http_pool_size` (256 by default), then prepare all callers concurrently. Connection warmup and Run preparation are excluded from operation timings; their outcomes and connection counts remain available in the raw evidence.
+
+Private S3 configuration remains in ignored `providers.local.toml` (mode 600), with explicit credentials and `dedicated_test_bucket = true`. Missing/blank settings skip; partial settings fail before I/O. `LIVE_TEST_PROVIDERS_CONFIG` selects an alternative shared configuration. The S3-only benchmark rejects bucket versioning, never discovers ambient credentials, and deletes only its own random keys. Payloads are generated in memory. Failed cleanup fails the test and records remaining exact keys. Ordinary offline checks never read these credentials or start infrastructure.
 
 ### E2B file boundaries and OS failures
 

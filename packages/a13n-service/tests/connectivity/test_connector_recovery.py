@@ -1,6 +1,7 @@
 """Exercise setup ownership and final dispatch authorization across external I/O."""
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx2
@@ -222,7 +223,7 @@ async def test_idempotent_provider_recovers_interrupted_start(
 
 @pytest.mark.parametrize("change", ["connection", "provider", "credential", "attempt"])
 async def test_authority_change_after_discovery_blocks_action(
-    composio_setup, connectivity_sessions, external_runtime_factory, change
+    composio_setup, connectivity_sessions, external_runtime_factory, change, execution_authorization
 ):
     connections, connection, _, _, requests, state, _ = composio_setup
     registry = state["registry"]
@@ -243,7 +244,14 @@ async def test_authority_change_after_discovery_blocks_action(
             tools=("GITHUB_GET_USER",),
         ),
         guard,
-        AttemptToolScope(actor(), ORG_ID, WORKSPACE_ID, FrozenRunConnectivity((), ()), ()),
+        AttemptToolScope(
+            replace(actor(), auth_method="internal"),
+            ORG_ID,
+            WORKSPACE_ID,
+            FrozenRunConnectivity((), ()),
+            (),
+            authorization=await execution_authorization(),
+        ),
     )
 
     async with transaction(connectivity_sessions) as session:

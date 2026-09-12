@@ -79,7 +79,11 @@ def authenticated_control(config: dict):
     authenticate = bearer_authenticator(config)
     app = create_app(settings, components=Components(request_authenticator=authenticate))
     app.include_router(
-        fixture_router(Path(config["workspace_root"]), authenticate, long_session=config.get("long_session"))
+        fixture_router(
+            Path(config["workspace_root"]),
+            authenticate,
+            long_session=config.get("long_session"),
+        )
     )
     app.include_router(inbox_router(config, authenticate))
     return settings, app
@@ -95,7 +99,7 @@ def local_app(config: dict, role: str):
 
         install(config, role)
     if "long_session" in config and role == "worker":
-        from ..performance.long_session_host import install_compaction
+        from ..harness_integration.long_session_host import install_compaction
 
         install_compaction()
     settings = settings_for(config, role)
@@ -144,14 +148,22 @@ def local_app(config: dict, role: str):
             factories.append(RunFaultFactory(config["run_faults"].get("plugin_state_version")))
         catalog = build_harness_plugin_factory_catalog(explicit_factories=tuple(factories))
         logger.info("Live-test Worker installed plugin factories: %s", ", ".join(catalog))
+    connector_host = None
+    if config.get("local_connectors"):
+        from ..harness_integration.connector_host import ConnectorHost
+
+        connector_host = ConnectorHost(config, settings)
     app = create_app(
         settings,
         components=Components(
             request_authenticator=authenticate,
             plugin_factory_catalog=catalog,
             environment_provider_catalog=environment_catalog,
+            connector_provider_registry=connector_host.registry if connector_host else None,
         ),
     )
+    if connector_host is not None:
+        connector_host.install(app)
     if reverse_envd is not None:
         reverse_envd.install(app)
     if role == "control":
@@ -162,7 +174,7 @@ def local_app(config: dict, role: str):
             app.include_router(evidence_router(config, authenticate))
             app.include_router(secret_router(config, authenticate))
         if "long_session" in config:
-            from ..performance.long_session_host import measurements_router
+            from ..harness_integration.long_session_host import measurements_router
 
             app.include_router(measurements_router(config, authenticate))
         if config.get("e2b_lifecycle") or config.get("docker_lifecycle") or config.get("environment_workers"):
@@ -170,7 +182,11 @@ def local_app(config: dict, role: str):
 
             app.include_router(lifecycle_router(config, authenticate))
         app.include_router(
-            fixture_router(Path(config["workspace_root"]), authenticate, long_session=config.get("long_session"))
+            fixture_router(
+                Path(config["workspace_root"]),
+                authenticate,
+                long_session=config.get("long_session"),
+            )
         )
         app.include_router(inbox_router(config, authenticate))
         from ..harness_integration.fixture_connectivity import connectivity_router

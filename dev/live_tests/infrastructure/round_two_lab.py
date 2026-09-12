@@ -188,6 +188,8 @@ async def open_lab(
     environment_workers=False,
     long_session=None,
     run_faults=None,
+    performance=None,
+    local_connectors=True,
 ):
     if suite not in {"core", "round-two", "management"}:
         raise ValueError(f"Unknown live-test suite: {suite}")
@@ -198,7 +200,7 @@ async def open_lab(
     async with AsyncExitStack() as stack:
         print(f"Preparing {suite} lab; private logs: {root}", flush=True)
         storage_options = {}
-        if suite != "core":
+        if suite != "core" and performance is None:
             settings = Settings()
             storage_options = {"endpoint_url": settings.objects.endpoint_url, "region": settings.objects.region}
         object_environment = await stack.enter_async_context(open_object_storage(**storage_options))
@@ -208,6 +210,9 @@ async def open_lab(
         from testcontainers.redis import RedisContainer
 
         postgres = PostgresContainer("postgres:17-alpine")
+        if performance is not None:
+            # Leave room for the preparation-only Control and administrative connections.
+            postgres.with_command(["postgres", "-c", f"max_connections={max(100, performance.pg_pool_size + 16)}"])
         redis = RedisContainer("redis:8-alpine")
         for container in (postgres, redis):
             stack.push_async_callback(anyio.to_thread.run_sync, container.stop)
@@ -247,7 +252,11 @@ async def open_lab(
         from .fixture_peer import certificate_context, create_certificate
 
         if management:
-            config.update(peer_url=free_origin().replace("http:", "https:"), **create_certificate(root))
+            config.update(
+                peer_url=free_origin().replace("http:", "https:"),
+                local_connectors=local_connectors,
+                **create_certificate(root),
+            )
         if suite != "core":
             # Same Organization, a different Workspace/User; do not mask Workspace isolation defects.
             config["other_identity"] = {
@@ -295,13 +304,21 @@ async def open_lab(
         )
         if management:
             environment["SSL_CERT_FILE"] = config["peer_ca_bundle"]
+        if performance is not None:
+            environment.update(
+                # Preparation HTTP must not consume a second full measured pool.
+                A13N_SERVICE_DATABASE_POOL_SIZE=str(min(8, performance.pg_pool_size)),
+                A13N_SERVICE_DATABASE_MAX_OVERFLOW="0",
+                A13N_SERVICE_OBJECT_MAX_POOL_CONNECTIONS=str(performance.s3_pool_size),
+                A13N_SERVICE_DATABASE_STATEMENT_TIMEOUT_SECONDS="30",
+            )
         lab = RoundTwoLab(root, config, environment)
         for name, url, key in (
             ("postgres", database_url, "DATABASE_URL"),
             ("redis", redis_url, "REDIS_URL"),
             ("objects", endpoint, "OBJECT_ENDPOINT_URL"),
         ):
-            if suite == "core":
+            if suite == "core" or performance is not None:
                 break
             parts = urlsplit(url)
             proxy = await stack.enter_async_context(TCPProxy(parts.hostname, parts.port or 80).listen())
@@ -313,17 +330,17 @@ async def open_lab(
         if management:
             peer = await lab.spawn("dev.live_tests.infrastructure.fixture_peer")
             await lab.ready(peer, config["peer_url"], verify=certificate_context(config))
-        await lab.command("a13n_service", "db", "upgrade")
-        await lab.command("dev.live_tests.manage", "init")
-        if suite != "core":
-            other_path = root / "other.json"
-            private_json(other_path, {**config, **config["other_identity"]})
-            await lab.command(
-                "dev.live_tests.manage", "init", environment={**environment, "LIVE_TEST_CONFIG": str(other_path)}
-            )
+        await lab.command("dev.live_tests.manage", "bootstrap")
         control = await lab.spawn("dev.live_tests.manage", "control")
         lab.control = control
         await lab.ready(control, config["control_url"])
+        http_options = {}
+        if performance is not None:
+            http_options["limits"] = httpx2.Limits(
+                max_connections=performance.http_pool_size,
+                max_keepalive_connections=performance.http_pool_size,
+                keepalive_expiry=60,
+            )
         http = await stack.enter_async_context(
             httpx2.AsyncClient(
                 base_url=config["control_url"],
@@ -331,6 +348,7 @@ async def open_lab(
                 timeout=15,
                 trust_env=False,
                 follow_redirects=False,
+                **http_options,
             )
         )
         lab.client = LiveClient(config, http)
@@ -340,10 +358,12 @@ async def open_lab(
         else:
             await provision(lab.client)
         private_json(config_path, config)
-        await lab.start_worker()
+        if performance is None:
+            await lab.start_worker()
         try:
             yield lab
         finally:
             for proxy in lab.proxies.values():
                 proxy.restore()
-            await lab.client.cleanup()
+            if performance is None:
+                await lab.client.cleanup()

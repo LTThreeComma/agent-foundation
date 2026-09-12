@@ -1,6 +1,7 @@
 """Native MCP exposes content arguments while retaining the admitted target."""
 
 import json
+from dataclasses import replace
 
 import httpx2
 import pytest
@@ -98,7 +99,7 @@ async def test_lark_inbound_replies_use_distinct_effect_ids_and_reuse_token():
 @pytest.mark.parametrize("entry", ["inbound", "account"])
 @pytest.mark.parametrize("lost_response", [False, True])
 async def test_native_runtime_observes_unknown_without_repeating_effect(
-    connectivity_sessions, credential_protector, entry, lost_response
+    connectivity_sessions, credential_protector, entry, lost_response, execution_authorization
 ):
     from a13n_harness import AgentSpec, HarnessBuilder, HarnessInstrumentation, HarnessTraceContent
     from a13n_service.connectivity.accounts.models import AccountRecord
@@ -142,7 +143,14 @@ async def test_native_runtime_observes_unknown_without_repeating_effect(
             allowed_actions=("slack.send_message",),
         )
         arguments = {"channel_id": "C1", "text": "hello"}
-    scope = AttemptToolScope(actor(), ORG_ID, WORKSPACE_ID, FrozenRunConnectivity((), ()), (context,))
+    scope = AttemptToolScope(
+        replace(actor(), auth_method="internal"),
+        ORG_ID,
+        WORKSPACE_ID,
+        FrozenRunConnectivity((), ()),
+        (context,),
+        authorization=await execution_authorization(),
+    )
     requests = []
 
     async def guard():
