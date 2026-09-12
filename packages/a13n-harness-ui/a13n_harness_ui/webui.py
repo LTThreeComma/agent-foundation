@@ -899,6 +899,10 @@ def create_webui(
     async def comment(thread_id: str, comment_id: str) -> OutputComment:
         return await app().get_output_comment(thread_id, comment_id)
 
+    @server.post("/api/threads/{thread_id}/comments/{comment_id}/capture", response_model=ThreadAttachment)
+    async def capture_comment(thread_id: str, comment_id: str) -> ThreadAttachment:
+        return await app().capture_output_comment(thread_id, comment_id)
+
     @server.post(
         "/api/threads/{thread_id}/saved-output", response_model=SavedOutputView, openapi_extra=_body(SavedOutputTarget)
     )
@@ -1113,6 +1117,14 @@ def create_webui(
         except ValueError as exc:
             raise HarnessUiError(str(exc), code="attachment_invalid") from exc
 
+    @server.get("/api/threads/{thread_id}/attachments/{attachment_id}/metadata", response_model=ThreadAttachment)
+    async def attachment_metadata(thread_id: str, attachment_id: str) -> ThreadAttachment:
+        try:
+            attachment, _ = await app().read_thread_attachment(thread_id=thread_id, attachment_id=attachment_id)
+        except ValueError as exc:
+            raise HarnessUiError(str(exc), code="attachment_invalid") from exc
+        return attachment
+
     @server.get("/api/threads/{thread_id}/attachments/{attachment_id}")
     async def download_attachment(thread_id: str, attachment_id: str) -> Response:
         try:
@@ -1259,9 +1271,16 @@ def create_webui(
                 return FileResponse(destination, headers={"Cache-Control": "public, max-age=31536000, immutable"})
             return _error("not_found", "Asset not found.", 404)
         segments = path.split("/")
-        recognized = path in {"", "setup", "settings"} or (
-            len(segments) == 2 and segments[0] == "threads" and bool(segments[1])
-        )
+        recognized = path in {
+            "",
+            "setup",
+            "settings",
+            "projects",
+            "settings/resources",
+            "settings/source",
+            "settings/accounts",
+            "settings/catalog",
+        } or (len(segments) == 2 and segments[0] in {"threads", "projects"} and bool(segments[1]))
         if not recognized:
             return _error("not_found", "Route not found.", 404)
         index = static_root / "index.html"

@@ -6,6 +6,8 @@ This document owns the browser's default interaction flow, action placement, and
 
 The primary experience is doing work in a conversation. Configuration is available when needed, and code or a terminal can be opened alongside that work. The interface does not require users to understand resource inheritance or runtime internals before sending a prompt.
 
+The workbench uses the shared frontend design system with English interface text only. It has no language selector or translation runtime. Light and dark themes remain available; English-only interface text does not restrict the language of prompts, configuration content, names or comments.
+
 ## Entry and Navigation
 
 1. Open the instance URL and complete the existing key-entry flow if necessary.
@@ -64,7 +66,7 @@ A Thread comment list shows published comments, author labels, creation times, a
 
 Publish acknowledges a committed comment, distinct from the shared composer's Synchronized state. Publication failure or a stale target preserves the local comment text. A lost acknowledgement offers reconciliation of the same publication identity, not a second post. Newly published comments update the discussion without replacing the transcript, stealing focus, or clearing another input. Reload and reconnect refetch saved comments independently of presence and draft rejoin.
 
-Comments are human discussion by default. An explicit Add feedback to prompt action copies selected feedback and its source attribution into the shared composer for review; it does not immediately call the model. Existing Send and explicit steering controls retain execution authority. No comment-read or navigation action changes the shared prompt implicitly.
+Comments are human discussion by default. An explicit Add feedback to prompt action captures the complete selected comment and its original assistant output into the shared composer's context selection for review; it does not immediately call the model. The composer presents an inspectable comment reference, while model input carries the actual captured text and presentation metadata. Existing Send and explicit steering controls retain execution authority. No comment-read or navigation action changes the shared prompt implicitly.
 
 ## Project and Resource Configuration
 
