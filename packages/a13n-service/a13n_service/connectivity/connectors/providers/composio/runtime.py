@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from anyio import Semaphore, create_task_group
-from jsonschema import Draft202012Validator
 
 from a13n_service.connectivity.connectors.providers.configuration import ApiKeyCredentials
 from a13n_service.connectivity.domain import JsonObject
@@ -14,6 +13,7 @@ from ...contracts import (
     AdapterConnectionStatus,
     AdapterStatusReason,
     BeforeDispatch,
+    BeforeSharedSetup,
     ConnectionBinding,
     ConnectionInspection,
     ConnectorProviderError,
@@ -22,6 +22,7 @@ from ...contracts import (
     ConnectorToolPage,
     DiscoveredConnector,
     ProviderAccess,
+    SetupCompletionMethod,
     SetupContext,
     SetupStarted,
 )
@@ -35,7 +36,7 @@ from ...validation import (
     same_origin_url,
 )
 from .catalog import TOOLKIT_VERSION, ComposioCatalog
-from .configuration import COMPOSIO_ENDPOINT, ComposioSetup
+from .configuration import COMPOSIO_ENDPOINT
 from .output_schema import corrected_output_schema
 
 
@@ -88,31 +89,26 @@ class ComposioProvider:
         setup: JsonObject,
         context: SetupContext,
         resume_ref: str | None = None,
-        before_shared_setup: BeforeDispatch | None = None,
+        before_shared_setup: BeforeSharedSetup | None = None,
+        credentials: JsonObject | None = None,
     ) -> SetupStarted:
         if resume_ref is not None:
-            return SetupStarted(setup_ref=resume_ref, external_ref=resume_ref, supports_verified_callback=True)
-        configured = ComposioSetup.model_validate(setup)
-        connector = await self.discover_connector(context.connector_key)
-        if connector.unavailable_reason:
-            raise ConnectorProviderError("connector_setup_unavailable")
-        if not Draft202012Validator(connector.setup_schema).is_valid(setup):
-            raise ConnectorProviderError("invalid_setup_options")
+            raise ConnectorProviderError("setup_replay_unavailable")
+        if credentials is not None:
+            return await self._create_with_credentials(
+                setup=setup, credentials=credentials, context=context, before_shared_setup=before_shared_setup
+            )
         if context.callback_url is None:
             raise ConnectorProviderError("callback_unavailable")
-        auth_config_id = await self._catalog.resolve_auth_config(
-            context.connector_key,
-            configured.auth_config_id,
-            before_shared_setup,
-        )
+        auth_config = await self._catalog.prepare_setup(context.connector_key, setup, before_shared_setup)
         value = await self._http.request(
             "POST",
             endpoint=COMPOSIO_ENDPOINT,
             path="/api/v3.1/connected_accounts/link",
             api_key=self._credentials.api_key,
             json_body={
-                "auth_config_id": auth_config_id,
-                "connection_data": configured.connection_data,
+                "auth_config_id": auth_config.id,
+                **({"connection_data": setup["connection_data"]} if setup.get("connection_data") else {}),
                 "callback_url": context.callback_url,
                 "user_id": context.external_user_correlation,
             },
@@ -125,10 +121,48 @@ class ComposioProvider:
                 external_ref=required_string(response, "connected_account_id"),
                 expires_at=_link_expiry(response),
                 redirect_url=_authorization_url(response.get("redirect_url")),
-                supports_verified_callback=True,
+                completion_method=SetupCompletionMethod.oauth_verifier
+                if auth_config.scheme == "OAUTH2"
+                else SetupCompletionMethod.browser_confirmation,
             )
         except ValueError as error:
             raise ConnectorProviderError("invalid_provider_response", outcome_unknown=True) from error
+
+    async def _create_with_credentials(
+        self,
+        *,
+        setup: JsonObject,
+        credentials: JsonObject,
+        context: SetupContext,
+        before_shared_setup: BeforeSharedSetup | None,
+    ) -> SetupStarted:
+        auth_config = await self._catalog.prepare_credentials(
+            context.connector_key, setup, credentials, before_shared_setup
+        )
+        data = setup.get("connection_data", {})
+        if not isinstance(data, dict):
+            raise ConnectorProviderError("invalid_setup_options")
+        value = await self._http.request(
+            "POST",
+            endpoint=COMPOSIO_ENDPOINT,
+            path="/api/v3.1/connected_accounts",
+            api_key=self._credentials.api_key,
+            json_body={
+                "auth_config": {"id": auth_config.id},
+                "connection": {
+                    "user_id": context.external_user_correlation,
+                    "state": {"authScheme": auth_config.scheme, "val": {**data, **credentials, "status": "ACTIVE"}},
+                },
+            },
+            write=True,
+        )
+        try:
+            identifier = required_string(required_object(value), "id")
+        except ValueError as error:
+            raise ConnectorProviderError("invalid_provider_response", outcome_unknown=True) from error
+        return SetupStarted(
+            setup_ref=identifier, external_ref=identifier, completion_method=SetupCompletionMethod.polling
+        )
 
     async def complete_setup(
         self,

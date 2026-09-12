@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BrandIcon,
+  DisclosureSection,
   Button,
   FormField,
   ModalFrame,
@@ -90,7 +91,7 @@ function ConnectionChoice({
       keywords: [connector.key],
       icon: <BrandIcon alias={connector.key} logo={connector.logo_url} />,
     })),
-    ...(can("mcp_connection.manage")
+    ...(can("connection.manage")
       ? mcpPresets.map((preset) => ({
           value: `mcp:${preset.id}`,
           label: preset.name,
@@ -159,13 +160,38 @@ function ConnectionChoice({
               onStarted={() => setStarted(true)}
             />
             {selected.provider.type === "composio" && (
-              <a
-                href="https://dashboard.composio.dev"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {t("Manage OAuth apps in Composio Dashboard")}
-              </a>
+              <div className="space-y-3 text-sm text-muted-foreground">
+                {selected.connector.authentication_methods.includes(
+                  "OAUTH2",
+                ) && (
+                  <DisclosureSection title={t("Use your own OAuth app")}>
+                    <ol className="list-decimal space-y-2 pl-5">
+                      <li>
+                        {t(
+                          "In Composio Dashboard, create an auth config for this application and select custom credentials.",
+                        )}
+                      </li>
+                      <li>
+                        {t(
+                          "Enter your client ID, client secret and scopes there. Register the redirect URI shown by Composio with your OAuth app.",
+                        )}
+                      </li>
+                      <li>
+                        {t(
+                          "Return here, refresh configurations, and select your new config.",
+                        )}
+                      </li>
+                    </ol>
+                  </DisclosureSection>
+                )}
+                <a
+                  href="https://dashboard.composio.dev"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {t("Manage auth configs in Composio Dashboard")}
+                </a>
+              </div>
             )}
             <ConnectorToolPreview connector={selected.connector} />
           </>
@@ -243,7 +269,7 @@ function ConnectionChoice({
             </Button>
           )}
         </div>
-        {can("mcp_connection.manage") && (
+        {can("connection.manage") && (
           <Button
             type="button"
             variant="outline"

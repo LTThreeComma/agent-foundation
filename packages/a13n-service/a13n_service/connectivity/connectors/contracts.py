@@ -38,12 +38,18 @@ class SetupContext(StrictModel):
     callback_url: str | None = Field(default=None, max_length=4096, repr=False)
 
 
+class SetupCompletionMethod(StrEnum):
+    polling = "polling"
+    oauth_verifier = "oauth_verifier"
+    browser_confirmation = "browser_confirmation"
+
+
 class SetupStarted(StrictModel):
     setup_ref: str = Field(min_length=1, max_length=2048, repr=False)
     external_ref: str | None = Field(default=None, min_length=1, max_length=2048, repr=False)
     redirect_url: str | None = Field(default=None, max_length=4096, repr=False)
     expires_at: datetime | None = None
-    supports_verified_callback: bool
+    completion_method: SetupCompletionMethod
 
 
 class ConnectionInspection(StrictModel):
@@ -122,6 +128,7 @@ class ConnectionBinding(StrictModel):
 
 
 BeforeDispatch = Callable[[], Awaitable[None]]
+BeforeSharedSetup = Callable[[str], Awaitable[None]]
 
 
 class ConnectorConnectionRuntime(Protocol):
@@ -169,7 +176,8 @@ class ConnectorProviderRuntime(Protocol):
         setup: JsonObject,
         context: SetupContext,
         resume_ref: str | None = None,
-        before_shared_setup: BeforeDispatch | None = None,
+        before_shared_setup: BeforeSharedSetup | None = None,
+        credentials: JsonObject | None = None,
     ) -> SetupStarted: ...
 
     async def complete_setup(
@@ -193,3 +201,4 @@ class DiscoveredConnector(StrictModel):
     unavailable_reason: str | None = Field(default=None, max_length=512)
     setup_schema: JsonObject
     authentication_methods: tuple[str, ...] = Field(max_length=32)
+    credential_schemas: dict[str, JsonObject] = Field(default_factory=dict)
