@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import styles from "./copy.module.css";
+import { ErrorToast } from "./feedback";
 
 export function CopyButton({
   value,
@@ -60,11 +61,9 @@ export function CopyButton({
       <span role="status" className="visually-hidden">
         {status === "copied" ? t("Copied") : ""}
       </span>
-      {status === "failed" && (
-        <span className={styles.error} role="alert">
-          {t("Copy failed. Try again.")}
-        </span>
-      )}
+      <ErrorToast
+        error={status === "failed" ? new Error(t("Copy failed.")) : undefined}
+      />
     </span>
   );
 }

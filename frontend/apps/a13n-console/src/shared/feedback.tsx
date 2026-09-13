@@ -1,5 +1,6 @@
 import {
   Alert,
+  AlertAction,
   AlertDescription,
   AlertTitle,
   Badge,
@@ -22,7 +23,6 @@ import {
   WarningCircleIcon,
   ArrowLeftIcon,
   TrayIcon,
-  ArrowsClockwiseIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { PageActionsTarget } from "./page-actions";
@@ -71,30 +71,18 @@ function errorDetails(error: unknown, t: (value: string) => string) {
   };
 }
 
-export function ErrorToast({
-  error,
-  retry,
-}: {
-  error: unknown;
-  retry?: () => void;
-}) {
-  return error ? <ErrorToastContent error={error} retry={retry} /> : null;
+export function ErrorToast({ error }: { error: unknown }) {
+  return error ? <ErrorToastContent error={error} /> : null;
 }
 
-function ErrorToastContent({
-  error,
-  retry,
-}: {
-  error: unknown;
-  retry?: () => void;
-}) {
+function ErrorToastContent({ error }: { error: unknown }) {
   const { t } = useTranslation();
   const toast = useToast();
   const toastId = useId();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const details = errorDetails(error, t);
   useEffect(() => {
-    const details = errorDetails(error, t);
     toastRef.current.add({
       id: toastId,
       type: "error",
@@ -111,11 +99,8 @@ function ErrorToastContent({
           )}
         </>
       ),
-      actionProps: retry
-        ? { children: t("Try again"), onClick: retry }
-        : undefined,
     });
-  }, [error, retry, t, toastId]);
+  }, [details.description, details.requestId, details.title, toastId]);
   useEffect(
     () => () => {
       toastRef.current.close(toastId);
@@ -174,13 +159,14 @@ export function ErrorNotice({
             {t("Request ID")}: {details.requestId}
           </small>
         )}
-        {retry && (
+      </AlertDescription>
+      {retry && (
+        <AlertAction>
           <Button size="sm" variant="outline" onClick={retry} type="button">
-            {<ArrowsClockwiseIcon size={14} />}
             {t("Reload")}
           </Button>
-        )}
-      </AlertDescription>
+        </AlertAction>
+      )}
     </Alert>
   );
 }
