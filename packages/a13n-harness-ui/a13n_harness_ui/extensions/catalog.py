@@ -13,7 +13,7 @@ from a13n_environment import (
     build_environment_provider_catalog,
     discover_environment_provider_references,
 )
-from a13n_harness.capabilities import DocumentsCapability, WebCapability
+from a13n_harness.capabilities import DocumentsCapability, ToolReviewCapability, ToolReviewConfig, WebCapability
 from a13n_harness.capabilities.codeact import CodeActCapability, CodeActConfig
 from a13n_harness.capabilities.context import (
     CompactionCapability,
@@ -28,7 +28,6 @@ from a13n_harness.capabilities.context import (
 from a13n_harness.capabilities.documents import DocumentsConfiguration
 from a13n_harness.capabilities.interaction import UserInteractionCapability
 from a13n_harness.capabilities.native_image_generation import NativeImageGenerationCapability
-from a13n_harness.capabilities.shell_review import ShellReviewAction, ShellReviewCapability, ShellRiskLevel
 from a13n_harness.capabilities.skills import FileSkillSource, SkillManager, SkillsCapability, SkillsPolicy
 from a13n_harness.capabilities.web import WebConfiguration
 from a13n_harness.capabilities.working_state import WorkingStateCapability, WorkingStateConfiguration
@@ -48,6 +47,7 @@ from a13n_harness.plugin_factories import (
     build_harness_plugin_factory_catalog,
     discover_harness_plugin_factory_references,
 )
+from a13n_harness.tools import ToolPermissions, ToolPermissionsCapability
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_ai.capabilities import CAPABILITY_TYPES, AbstractCapability, NativeTool
 from pydantic_ai.native_tools import ImageGenerationTool
@@ -66,6 +66,7 @@ _BUILTIN_PROVIDER_KEYS = frozenset(
     {"a13n.direct-local", "a13n.local-envd", "a13n.docker", "a13n.e2b", "a13n.http-envd", "a13n.websocket-envd"}
 )
 _BUILTIN_CAPABILITIES: dict[str, type[AbstractCapability[Any]]] = {
+    "ShellReviewCapability": ToolReviewCapability,  # Legacy UI preset name; no separate Harness capability.
     "dynamic_environment": DynamicEnvironmentCapability,
     "codeact": CodeActCapability,
     "compaction": CompactionCapability,
@@ -213,6 +214,8 @@ class HarnessUiExtensionCatalog:
         result: list[SelectedCapability] = []
         custom_types: list[type[AbstractCapability[Any]]] = []
         for key, configuration in selections:
+            if key == "ShellReviewCapability" and configuration.get("on_error") == "skip":
+                configuration = {**configuration, "on_error": "allow"}
             self._require_unambiguous("capability", key)
             capability_type = _BUILTIN_CAPABILITIES.get(key)
             source: Literal["installed", "host"] = "installed"
@@ -483,6 +486,12 @@ def _construct_capability(
         return DocumentsCapability(DocumentsConfiguration.model_validate(configuration))
     if capability_type is WebCapability:
         return WebCapability(WebConfiguration.model_validate(configuration))
+    if capability_type is ToolPermissionsCapability:
+        return ToolPermissionsCapability(ToolPermissions.model_validate(configuration))
+    if capability_type is ToolReviewCapability:
+        return ToolReviewCapability(
+            ToolReviewConfig.model_validate({"on_flagged": "approval_required", **configuration})
+        )
     if capability_type is SkillsCapability:
         return _construct_skills_capability(
             configuration,
@@ -505,13 +514,6 @@ def _construct_capability(
         return NativeTool.from_spec(**native_arguments)
 
     arguments = dict(configuration)
-    if capability_type is ShellReviewCapability:
-        # JSON source carries enum values; the native constructor owns the remaining arguments.
-        if "risk_threshold" in arguments:
-            arguments["risk_threshold"] = ShellRiskLevel(arguments["risk_threshold"])
-        for name in ("on_flagged", "on_error"):
-            if name in arguments:
-                arguments[name] = ShellReviewAction(arguments[name])
     return capability_type(**arguments)
 
 
