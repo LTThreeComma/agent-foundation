@@ -25,6 +25,7 @@ import { FormActions, TextAreaField } from "../../shared/form";
 import styles from "../../shared/shared.module.css";
 import { type EnvironmentScope } from "./api";
 import { TemplateRecipe } from "./template-recipe";
+import { ResourceLabelsPanel } from "../../shared/resource-labels";
 
 export function TemplateEditor({
   scope,
@@ -39,6 +40,7 @@ export function TemplateEditor({
   editable?: boolean;
 }) {
   const client = useClient(),
+    cache = useQueryClient(),
     { t } = useTranslation(),
     [generation, setGeneration] = useState(0),
     { open, setOpen, modalProps } = useResourceEditorState({
@@ -80,6 +82,37 @@ export function TemplateEditor({
           <ResourceModalTitle
             name={query.data.value.name}
             id={query.data.value.id}
+            referenceDetails={
+              <ResourceLabelsPanel
+                resourceId={query.data.value.id}
+                labels={query.data.value.labels}
+                editable={editable}
+                read={(signal) =>
+                  client.http
+                    .GET("/api/v1/environment-templates/{template_id}/labels", {
+                      params: { path: { template_id: query.data.value.id } },
+                      signal,
+                    })
+                    .then(representation)
+                }
+                write={(labels, etag) =>
+                  client.http
+                    .PUT("/api/v1/environment-templates/{template_id}/labels", {
+                      params: {
+                        path: { template_id: query.data.value.id },
+                        header: { "If-Match": etag },
+                      },
+                      body: { labels },
+                    })
+                    .then(data)
+                }
+                onSaved={() =>
+                  void cache.invalidateQueries({
+                    queryKey: ["environment-templates", scope.kind, scope.id],
+                  })
+                }
+              />
+            }
           />
         ) : (
           t(templateId ? "Environment template" : "Create environment template")
@@ -243,6 +276,7 @@ export function TemplateSettings({
         />
         {t("Archived")}
       </Label>
+
       <ErrorNotice error={save.error} retry={() => void reload()} />
       {editable && (
         <FormActions

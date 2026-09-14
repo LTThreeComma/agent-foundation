@@ -25,6 +25,7 @@ import {
 } from "../../shared/feedback";
 import { isResourceKey } from "../../shared/paths";
 import { useIdempotency } from "../../shared/idempotency";
+import { ResourceLabelsPanel } from "../../shared/resource-labels";
 import styles from "../../shared/shared.module.css";
 import agentStyles from "./agents.module.css";
 import { type AgentConfig } from "./configuration";
@@ -114,6 +115,48 @@ export function AgentDetail() {
       name={agent.name}
       agentId={agent.id}
       agentKey={agent.key}
+      referenceDetails={
+        <ResourceLabelsPanel
+          resourceId={agent.id}
+          labels={agent.labels}
+          editable={
+            can("agent.update") &&
+            agent.source === "custom" &&
+            !agent.archived_at
+          }
+          read={(signal) =>
+            client.http
+              .GET("/api/v1/workspaces/{workspace}/agents/{agent}/labels", {
+                params: {
+                  path: { workspace: workspace.id, agent: agentKey },
+                },
+                headers: workspaceHeaders(workspace.id),
+                signal,
+              })
+              .then(representation)
+          }
+          write={(next, etag) =>
+            client.http
+              .PUT("/api/v1/workspaces/{workspace}/agents/{agent}/labels", {
+                params: {
+                  path: { workspace: workspace.id, agent: agentKey },
+                  header: {
+                    ...workspaceHeaders(workspace.id),
+                    "If-Match": etag,
+                  },
+                },
+                body: { labels: next },
+              })
+              .then(data)
+          }
+          onSaved={() => {
+            void query.refetch();
+            void cache.invalidateQueries({
+              queryKey: ["agents", workspace.id],
+            });
+          }}
+        />
+      }
       imageUrl={agent.image_url}
       description={agent.description ?? ""}
       environment={

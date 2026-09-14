@@ -21,10 +21,16 @@ import {
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { allPages, commandHeaders, data } from "../../shared/api";
+import {
+  allPages,
+  commandHeaders,
+  data,
+  representation,
+  workspaceHeaders,
+} from "../../shared/api";
 import { Empty, ErrorNotice, Loading } from "../../shared/feedback";
 import { SessionList } from "./list";
-import { CopyableId } from "../../shared/copy";
+import { ResourceReference } from "../../shared/resource-reference";
 import { useIdempotency } from "../../shared/idempotency";
 import { conversationQueries, invalidateConversation, runPath } from "./api";
 import { Composer } from "./composer";
@@ -34,6 +40,8 @@ import { SessionIdentity } from "./identity";
 import { useConversationNotifications } from "./notifications";
 import { OptionsComposer, RunOptions, useRunOptions } from "./options";
 import { ThreadQueue } from "./queue";
+import { ResourceLabelsPanel } from "../../shared/resource-labels";
+import { useLabelFilters } from "../../shared/label-filter";
 
 export function ConversationsPage() {
   const { sessionId } = useParams();
@@ -142,12 +150,15 @@ export function NewConversation() {
 }
 
 export function SessionLayout() {
+  const cache = useQueryClient();
   const { t } = useTranslation(),
     { sessionId = "", threadId } = useParams(),
     { workspace, can, basePath } = useWorkspace(),
     client = useClient(),
     queries = conversationQueries(client, workspace.id);
-  const threads = useQuery(queries.threads(sessionId));
+  const threadLabels = useLabelFilters("thread_label");
+  const runLabels = useLabelFilters("run_label");
+  const threads = useQuery(queries.threads(sessionId, threadLabels));
   const [mapOpen, setMapOpen] = useState(false);
   const mapTrigger = useRef<HTMLButtonElement>(null);
   const first = threads.data?.[0];
@@ -159,7 +170,40 @@ export function SessionLayout() {
             {t("Sessions")}
           </Link>
           <CaretRightIcon size={12} aria-hidden="true" />
-          <CopyableId value={sessionId} />
+          <ResourceReference id={sessionId}>
+            <ResourceLabelsPanel
+              resourceId={sessionId}
+              onSaved={() =>
+                void cache.invalidateQueries({
+                  queryKey: ["conversations", workspace.id, "sessions"],
+                })
+              }
+              editable={can("session.labels.update")}
+              read={(signal) =>
+                client.http
+                  .GET("/api/v1/sessions/{session_id}/labels", {
+                    params: { path: { session_id: sessionId } },
+                    headers: workspaceHeaders(workspace.id),
+                    signal,
+                  })
+                  .then(representation)
+              }
+              write={(labels, etag) =>
+                client.http
+                  .PUT("/api/v1/sessions/{session_id}/labels", {
+                    params: {
+                      path: { session_id: sessionId },
+                      header: {
+                        ...workspaceHeaders(workspace.id),
+                        "If-Match": etag,
+                      },
+                    },
+                    body: { labels },
+                  })
+                  .then(data)
+              }
+            />
+          </ResourceReference>
         </div>
         <SessionIdentity />
         <div className={styles.sessionControls}>
@@ -209,6 +253,7 @@ export function SessionLayout() {
         {mapOpen && (
           <SessionMap
             threads={threads.data ?? []}
+            runLabels={runLabels}
             onClose={() => {
               setMapOpen(false);
               mapTrigger.current?.focus();
@@ -256,6 +301,10 @@ export function ThreadLayout() {
       ) : (
         thread.data && (
           <>
+            <ResourceReference
+              id={thread.data.id}
+              labels={thread.data.labels}
+            />
             <Empty
               title={t("No runs yet")}
               description={t("This thread has not started a run.")}

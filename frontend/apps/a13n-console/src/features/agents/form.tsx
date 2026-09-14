@@ -48,6 +48,7 @@ export function AgentForm({
   imageUrl,
   agentId,
   agentKey,
+  referenceDetails,
   imagePicker,
   environment,
   metadata,
@@ -74,6 +75,7 @@ export function AgentForm({
   imageUrl?: string | null;
   agentId?: string;
   agentKey?: string;
+  referenceDetails?: ReactNode;
   imagePicker?: (name: string) => ReactNode;
   environment?: ReactNode;
   metadata?: ReactNode;
@@ -161,7 +163,9 @@ export function AgentForm({
             />
             <h1>{creating ? t("Create agent") : initialName}</h1>
             {agentId && (
-              <ResourceReference id={agentId} resourceKey={agentKey} />
+              <ResourceReference id={agentId} resourceKey={agentKey}>
+                {referenceDetails}
+              </ResourceReference>
             )}
             {identityAction && (
               <fieldset

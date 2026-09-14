@@ -9,6 +9,8 @@ export function ResourceIdentity({
   to,
   resourceId,
   resourceKey,
+  labels,
+  referenceDetails,
 }: {
   name: string;
   description?: ReactNode;
@@ -16,6 +18,8 @@ export function ResourceIdentity({
   to?: string;
   resourceId?: string;
   resourceKey?: string;
+  labels?: Record<string, string>;
+  referenceDetails?: ReactNode;
 }) {
   const content = (
     <>
@@ -36,7 +40,13 @@ export function ResourceIdentity({
         <div className={styles.resourceIdentityLink}>{content}</div>
       )}
       {resourceId && (
-        <ResourceReference id={resourceId} resourceKey={resourceKey} />
+        <ResourceReference
+          id={resourceId}
+          resourceKey={resourceKey}
+          labels={labels}
+        >
+          {referenceDetails}
+        </ResourceReference>
       )}
     </div>
   );

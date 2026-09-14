@@ -1,3 +1,4 @@
+import { ResourceReference } from "../../shared/resource-reference";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
@@ -125,6 +126,7 @@ export function MapRun({
             </div>
           </TooltipPopup>
         </Tooltip>
+        <ResourceReference id={run.id} labels={run.labels} />
       </div>
       {expanded && (
         <div className={styles.items}>

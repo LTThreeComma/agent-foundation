@@ -1,3 +1,4 @@
+import { CopyableId } from "../../shared/copy";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -12,7 +13,7 @@ import {
   Timestamp,
   StateBadge,
 } from "../../shared/feedback";
-import { CopyableId } from "../../shared/copy";
+import { ResourceReference } from "../../shared/resource-reference";
 import { conversationQueries, type SessionFilters } from "./api";
 import { SessionFilterBar, readSessionFilters } from "./filters";
 import styles from "./conversations.module.css";
@@ -71,7 +72,13 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
               tone: "muted",
               render: (session) => (
                 <div className={styles.sessionId} title={session.id}>
-                  <CopyableId value={session.id} />
+                  <span className="flex items-center gap-1">
+                    <CopyableId value={session.id} />
+                    <ResourceReference
+                      id={session.id}
+                      labels={session.labels}
+                    />
+                  </span>
                 </div>
               ),
             },

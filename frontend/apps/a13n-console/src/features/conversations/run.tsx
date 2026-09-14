@@ -1,3 +1,4 @@
+import { ResourceReference } from "../../shared/resource-reference";
 import { Button, ChoiceField, DisclosureSection, ModalFrame } from "a13n-ui";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -198,6 +199,14 @@ function RunContent({
           </span>
         </div>
         <div className={styles.inline}>
+          <span className="flex items-center gap-1">
+            {t("Thread")}
+            <ResourceReference id={thread.id} labels={thread.labels} />
+          </span>
+          <span className="flex items-center gap-1">
+            {t("Run")}
+            <ResourceReference id={run.id} labels={run.labels} />
+          </span>
           <RunInspector run={run} />
           {!current &&
             run.status === "completed" &&

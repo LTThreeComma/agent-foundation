@@ -1,3 +1,4 @@
+import { ResourceReference } from "../../shared/resource-reference";
 import { Button, DisclosureSection, ModalFrame } from "a13n-ui";
 
 import { useQuery } from "@tanstack/react-query";
@@ -63,7 +64,10 @@ export function RunInspector({ run }: { run: Schema["RunResource"] }) {
           <dl className={styles.metadata}>
             <dt>{t("Run")}</dt>
             <dd>
-              <CopyableId value={run.id} />
+              <span className="flex items-center gap-1">
+                <span>{run.id}</span>
+                <ResourceReference id={run.id} labels={run.labels} />
+              </span>
             </dd>
             <dt>{t("Agent revision")}</dt>
             <dd>

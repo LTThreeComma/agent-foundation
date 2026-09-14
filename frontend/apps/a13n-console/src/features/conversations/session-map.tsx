@@ -1,3 +1,4 @@
+import { ResourceReference } from "../../shared/resource-reference";
 import { useQueries } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,6 +19,7 @@ import { conversationQueries } from "./api";
 import { RunGroup, groupRuns } from "./session-map-groups";
 import { MapRun } from "./session-map-run";
 import styles from "./session-map.module.css";
+import { LabelFilterField } from "../../shared/label-filter";
 
 type Thread = Schema["ThreadResource"];
 const chronological = <T extends { created_at: string; id: string }>(
@@ -30,9 +32,11 @@ const chronological = <T extends { created_at: string; id: string }>(
 
 export function SessionMap({
   threads: unsorted,
+  runLabels = [],
   onClose,
 }: {
   threads: readonly Thread[];
+  runLabels?: string[];
   onClose: () => void;
 }) {
   const threads = chronological(unsorted);
@@ -42,7 +46,7 @@ export function SessionMap({
     { workspace, basePath } = useWorkspace();
   const queries = conversationQueries(client, workspace.id);
   const runs = useQueries({
-    queries: threads.map((thread) => queries.runs(thread.id)),
+    queries: threads.map((thread) => queries.runs(thread.id, runLabels)),
   });
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const scroll = useRef<HTMLDivElement>(null);
@@ -120,6 +124,7 @@ export function SessionMap({
               />
             )}
           </Link>
+          <ResourceReference id={thread.id} labels={thread.labels} />
         </div>
         {expanded && (
           <div className={styles.threadBody}>
@@ -216,6 +221,11 @@ export function SessionMap({
             {total === null ? "—" : t("{{count}} runs", { count: total })}
           </strong>
         </div>
+        <LabelFilterField
+          parameter="thread_label"
+          label={t("Thread label filter")}
+        />
+        <LabelFilterField parameter="run_label" label={t("Run label filter")} />
       </div>
       <TooltipProvider delay={250} closeDelay={100}>
         <div ref={scroll} className={`${styles.scroll} a13n-scrollbar`}>

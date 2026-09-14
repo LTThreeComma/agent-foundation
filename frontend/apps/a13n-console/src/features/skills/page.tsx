@@ -10,7 +10,7 @@ import {
 } from "a13n-ui";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { useTranslation } from "react-i18next";
@@ -38,18 +38,29 @@ import { Revisions } from "./revisions";
 import { SkillFiles } from "./files";
 import { RenameSkill, SkillActions } from "./identity";
 import { ResourceReference } from "../../shared/resource-reference";
+import { ResourceLabelsPanel } from "../../shared/resource-labels";
+import { LabelFilterField, useLabelFilters } from "../../shared/label-filter";
 
 export function SkillsPage() {
   const { workspace, can } = useWorkspace(),
     client = useClient(),
     { t } = useTranslation(),
     page = useCursor(),
+    labels = useLabelFilters(),
     navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [source, setSource] = useState<"all" | "zip" | "github">("all");
   const term = search.trim().toLocaleLowerCase();
   const query = useQuery({
-    queryKey: ["skills", workspace.id, "list", term, source, page.cursor],
+    queryKey: [
+      "skills",
+      workspace.id,
+      "list",
+      term,
+      source,
+      labels,
+      page.cursor,
+    ],
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/workspaces/{workspace}/skills", {
@@ -59,6 +70,7 @@ export function SkillsPage() {
               cursor: page.cursor,
               ...(term && { q: term }),
               ...(source !== "all" && { source_kind: source }),
+              label: labels,
             },
           },
           signal,
@@ -106,6 +118,7 @@ export function SkillsPage() {
             <TabsTab value="zip">{t("ZIP upload")}</TabsTab>
           </TabsList>
         </Tabs>
+        <LabelFilterField />
       </div>
       <ErrorNotice error={query.error} retry={() => void query.refetch()} />
       {query.isPending ? (
@@ -127,7 +140,11 @@ export function SkillsPage() {
                       {item.name}
                     </Link>
                   </h2>
-                  <ResourceReference id={item.id} resourceKey={item.key} />
+                  <ResourceReference
+                    id={item.id}
+                    resourceKey={item.key}
+                    labels={item.labels}
+                  />
                   <Badge variant="secondary">v{item.version}</Badge>
                 </header>
                 <CopyableResourceKey value={item.key} />
@@ -163,6 +180,7 @@ export function SkillsPage() {
   );
 }
 export function SkillDetail() {
+  const cache = useQueryClient();
   const { skillKey = "" } = useParams(),
     client = useClient(),
     { workspace, can } = useWorkspace(),
@@ -193,7 +211,41 @@ export function SkillDetail() {
       title={skill.name}
       titleAction={
         <>
-          <ResourceReference id={skill.id} resourceKey={skill.key} />
+          <ResourceReference id={skill.id} resourceKey={skill.key}>
+            <ResourceLabelsPanel
+              resourceId={skill.id}
+              labels={skill.labels}
+              editable={can("skill.update")}
+              read={(signal) =>
+                client.http
+                  .GET("/api/v1/skills/{skill_id}/labels", {
+                    params: { path: { skill_id: skill.id } },
+                    headers: workspaceHeaders(workspace.id),
+                    signal,
+                  })
+                  .then(representation)
+              }
+              write={(labels, etag) =>
+                client.http
+                  .PUT("/api/v1/skills/{skill_id}/labels", {
+                    params: {
+                      path: { skill_id: skill.id },
+                      header: {
+                        ...workspaceHeaders(workspace.id),
+                        "If-Match": etag,
+                      },
+                    },
+                    body: { labels },
+                  })
+                  .then(data)
+              }
+              onSaved={() =>
+                void cache.invalidateQueries({
+                  queryKey: ["skills", workspace.id],
+                })
+              }
+            />
+          </ResourceReference>
           {can("skill.update") && <RenameSkill resource={query.data} />}
         </>
       }

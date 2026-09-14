@@ -28,20 +28,23 @@ export function environmentApi(client: Client, scope: EnvironmentScope) {
               signal,
             })
             .then(data),
-    templates: (signal: AbortSignal, cursor?: string) =>
+    templates: (signal: AbortSignal, cursor?: string, label: string[] = []) =>
       scope.kind === "organization"
         ? client.http
             .GET("/api/v1/organizations/{organization}/environment-templates", {
               params: {
                 path: { organization: organization_id },
-                query: { cursor },
+                query: { cursor, label },
               },
               signal,
             })
             .then(data)
         : client.http
             .GET("/api/v1/workspaces/{workspace}/environment-templates", {
-              params: { path: { workspace: workspace_id }, query: { cursor } },
+              params: {
+                path: { workspace: workspace_id },
+                query: { cursor, label },
+              },
               signal,
             })
             .then(data),
