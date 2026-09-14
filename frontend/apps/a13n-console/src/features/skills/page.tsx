@@ -38,18 +38,29 @@ import { Revisions } from "./revisions";
 import { SkillFiles } from "./files";
 import { RenameSkill, SkillActions } from "./identity";
 import { ResourceReference } from "../../shared/resource-reference";
+import { ResourceLabelsDialog } from "../../shared/resource-labels";
+import { LabelFilterField, useLabelFilters } from "../../shared/label-filter";
 
 export function SkillsPage() {
   const { workspace, can } = useWorkspace(),
     client = useClient(),
     { t } = useTranslation(),
     page = useCursor(),
+    labels = useLabelFilters(),
     navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [source, setSource] = useState<"all" | "zip" | "github">("all");
   const term = search.trim().toLocaleLowerCase();
   const query = useQuery({
-    queryKey: ["skills", workspace.id, "list", term, source, page.cursor],
+    queryKey: [
+      "skills",
+      workspace.id,
+      "list",
+      term,
+      source,
+      labels,
+      page.cursor,
+    ],
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/workspaces/{workspace}/skills", {
@@ -59,6 +70,7 @@ export function SkillsPage() {
               cursor: page.cursor,
               ...(term && { q: term }),
               ...(source !== "all" && { source_kind: source }),
+              label: labels,
             },
           },
           signal,
@@ -106,6 +118,7 @@ export function SkillsPage() {
             <TabsTab value="zip">{t("ZIP upload")}</TabsTab>
           </TabsList>
         </Tabs>
+        <LabelFilterField />
       </div>
       <ErrorNotice error={query.error} retry={() => void query.refetch()} />
       {query.isPending ? (
@@ -205,6 +218,37 @@ export function SkillDetail() {
         </>
       }
     >
+      <div className="mb-5 flex justify-end">
+        <ResourceLabelsDialog
+          resourceId={skill.id}
+          labels={skill.labels}
+          editable={can("skill.update")}
+          read={(signal) =>
+            client.http
+              .GET("/api/v1/skills/{skill_id}/labels", {
+                params: { path: { skill_id: skill.id } },
+                headers: workspaceHeaders(workspace.id),
+                signal,
+              })
+              .then(representation)
+          }
+          write={(labels, etag) =>
+            client.http
+              .PUT("/api/v1/skills/{skill_id}/labels", {
+                params: {
+                  path: { skill_id: skill.id },
+                  header: {
+                    ...workspaceHeaders(workspace.id),
+                    "If-Match": etag,
+                  },
+                },
+                body: { labels },
+              })
+              .then(data)
+          }
+          onSaved={() => void query.refetch()}
+        />
+      </div>
       <Tabs
         value={tab}
         onValueChange={(key) => {

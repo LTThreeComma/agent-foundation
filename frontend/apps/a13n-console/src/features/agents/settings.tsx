@@ -32,6 +32,7 @@ import { ResourceKeyField } from "../../shared/resource-key";
 import { ErrorNotice } from "../../shared/feedback";
 import { Confirm, FormActions } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
+import { LabelOverridesField } from "../../shared/resource-labels";
 import styles from "../../shared/shared.module.css";
 
 export function AgentDetails({
@@ -196,6 +197,10 @@ export function AgentActions({
     cache = useQueryClient(),
     navigate = useNavigate(),
     idempotency = useIdempotency();
+  const [duplicateLabels, setDuplicateLabels] = useState<
+    Record<string, string>
+  >({});
+  const [duplicateLabelsValid, setDuplicateLabelsValid] = useState(true);
   const action = async (
     action: "enable" | "disable" | "archive" | "unarchive",
   ) => {
@@ -275,6 +280,7 @@ export function AgentActions({
             subject={agent.name}
             title={t("Duplicate agent")}
             description={t("Create an independent agent from this version.")}
+            disabled={!duplicateLabelsValid}
             triggerElement={
               <MenuItem closeOnClick={false}>
                 <CopyIcon size={13} />
@@ -285,6 +291,7 @@ export function AgentActions({
               const body = {
                 expected_version: agent.version,
                 name: `${agent.name} (${t("copy")})`,
+                labels: duplicateLabels,
               };
               const result = data(
                 await client.http.POST(
@@ -305,7 +312,15 @@ export function AgentActions({
               void cache.invalidateQueries();
               navigate(`${basePath}/agents/${result.key}`);
             }}
-          />
+          >
+            <LabelOverridesField
+              title={t("Agent label overrides")}
+              value={duplicateLabels}
+              inherited={agent.labels}
+              onChange={setDuplicateLabels}
+              onValidityChange={setDuplicateLabelsValid}
+            />
+          </Confirm>
         )}
       </MenuPopup>
     </Menu>

@@ -24,6 +24,7 @@ import {
   commandHeaders,
   data,
   representation,
+  workspaceHeaders,
   type Schema,
 } from "../../shared/api";
 import { Pagination, ResourceTable, useCursor } from "../../shared/collection";
@@ -41,20 +42,26 @@ import styles from "../../shared/shared.module.css";
 import { jsonObject, jsonValue } from "../../shared/validation";
 import { environmentApi } from "./api";
 import { useEnvironmentTypes } from "./providers";
+import {
+  LabelOverridesField,
+  ResourceLabelsDialog,
+} from "../../shared/resource-labels";
+import { LabelFilterField, useLabelFilters } from "../../shared/label-filter";
 
 export function EnvironmentInstances() {
   const client = useClient(),
     { workspace, can } = useWorkspace(),
     { t } = useTranslation(),
+    labels = useLabelFilters(),
     page = useCursor();
   const query = useQuery({
-    queryKey: ["environments", workspace.id, page.cursor],
+    queryKey: ["environments", workspace.id, labels, page.cursor],
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/workspaces/{workspace}/environments", {
           params: {
             path: { workspace: workspace.id },
-            query: { cursor: page.cursor },
+            query: { cursor: page.cursor, label: labels },
           },
           signal,
         })
@@ -66,6 +73,7 @@ export function EnvironmentInstances() {
       <PageActions>
         {can("environment.manage") && <CreateEnvironment />}
       </PageActions>
+      <LabelFilterField />
       <ErrorNotice error={query.error} />
       {query.isPending ? (
         <Loading variant="table" columns={6} />
@@ -259,6 +267,37 @@ function EnvironmentDetails({
                   <Timestamp value={detail.data.value.updated_at} />
                 </ReadOnlyField>
               </div>
+              <ResourceLabelsDialog
+                resourceId={detail.data.value.id}
+                labels={detail.data.value.labels}
+                editable={can("environment.manage")}
+                read={(signal) =>
+                  client.http
+                    .GET("/api/v1/environments/{environment_id}/labels", {
+                      params: {
+                        path: { environment_id: detail.data!.value.id },
+                      },
+                      headers: workspaceHeaders(workspace.id),
+                      signal,
+                    })
+                    .then(representation)
+                }
+                write={(labels, etag) =>
+                  client.http
+                    .PUT("/api/v1/environments/{environment_id}/labels", {
+                      params: {
+                        path: { environment_id: detail.data!.value.id },
+                        header: {
+                          ...workspaceHeaders(workspace.id),
+                          "If-Match": etag,
+                        },
+                      },
+                      body: { labels },
+                    })
+                    .then(data)
+                }
+                onSaved={() => void detail.refetch()}
+              />
               <div className={`${styles.stack} border-t border-border pt-4`}>
                 <ReadOnlyField label={t("Ownership")}>
                   {t(
@@ -378,7 +417,8 @@ function EnvironmentForm({ close }: { close: () => void }) {
     [configuration, setConfiguration] = useState("{}"),
     [state, setState] = useState(""),
     [stateVersion, setStateVersion] = useState("1"),
-    [access, setAccess] = useState<Schema["EnvironmentAccess"]>("full");
+    [access, setAccess] = useState<Schema["EnvironmentAccess"]>("full"),
+    [labels, setLabels] = useState<Record<string, string>>({});
   const save = useMutation({
     mutationFn: () => {
       const provider = providers.data?.find((item) => item.id === providerId);
@@ -392,6 +432,7 @@ function EnvironmentForm({ close }: { close: () => void }) {
               template_id: templateId,
               ...(name.trim() && { name: name.trim() }),
               ...(version && { version: Number(version) }),
+              labels,
             }
           : {
               provider_id: providerId,
@@ -399,6 +440,7 @@ function EnvironmentForm({ close }: { close: () => void }) {
               configuration: jsonObject(configuration),
               configuration_schema_version: schemaVersion,
               access,
+              labels,
               ...(state.trim() &&
                 provider && {
                   state: {
@@ -550,6 +592,15 @@ function EnvironmentForm({ close }: { close: () => void }) {
           </DisclosureSection>
         </>
       )}
+      <LabelOverridesField
+        value={labels}
+        inherited={
+          kind === "managed"
+            ? templates.data?.find((item) => item.id === templateId)?.labels
+            : undefined
+        }
+        onChange={setLabels}
+      />
       <ErrorNotice error={save.error} />
       <FormActions
         pending={save.isPending}

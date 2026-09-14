@@ -76,6 +76,7 @@ export function Confirm({
   triggerVariant,
   retry,
   children,
+  disabled = false,
 }: {
   title: string;
   description: string;
@@ -88,6 +89,7 @@ export function Confirm({
   triggerVariant?: ButtonProps["variant"];
   retry?: () => void;
   children?: ReactNode;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
@@ -142,6 +144,7 @@ export function Confirm({
           </Button>
           <Button
             variant={danger ? "destructive" : "default"}
+            disabled={disabled}
             loading={mutation.isPending}
             onClick={() => mutation.mutate()}
             type="button"

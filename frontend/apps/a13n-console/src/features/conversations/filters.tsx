@@ -26,6 +26,7 @@ import {
   parseLocalDateTime,
 } from "../../shared/local-date-time";
 import type { SessionFilters } from "./api";
+import { LabelFilterField } from "../../shared/label-filter";
 
 const statuses: Schema["RunStatus"][] = [
   "accepted",
@@ -51,6 +52,7 @@ const keys = [
   "trigger_type",
   "updated_after",
   "updated_before",
+  "label",
 ];
 
 export function readSessionFilters(search: URLSearchParams): SessionFilters {
@@ -61,6 +63,7 @@ export function readSessionFilters(search: URLSearchParams): SessionFilters {
     trigger_type: search.getAll("trigger_type"),
     updated_after: search.get("updated_after") || undefined,
     updated_before: search.get("updated_before") || undefined,
+    label: search.getAll("label"),
   };
 }
 
@@ -161,6 +164,7 @@ export function SessionFilterBar({
           }))}
           onChange={(values) => update({ status: values })}
         />
+        <LabelFilterField />
         <MultiFilter
           label={t("Trigger source")}
           values={search.getAll("trigger_type")}

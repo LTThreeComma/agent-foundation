@@ -25,6 +25,7 @@ import {
 } from "../../shared/feedback";
 import { isResourceKey } from "../../shared/paths";
 import { useIdempotency } from "../../shared/idempotency";
+import { ResourceLabelsDialog } from "../../shared/resource-labels";
 import styles from "../../shared/shared.module.css";
 import agentStyles from "./agents.module.css";
 import { type AgentConfig } from "./configuration";
@@ -188,6 +189,40 @@ export function AgentDetail() {
           <dt>{t("Updated")}</dt>
           <dd>
             <Timestamp value={agent.updated_at} relative />
+          </dd>
+          <dt>{t("Labels")}</dt>
+          <dd>
+            <ResourceLabelsDialog
+              resourceId={agent.id}
+              labels={agent.labels}
+              editable={can("agent.update")}
+              read={(signal) =>
+                client.http
+                  .GET("/api/v1/workspaces/{workspace}/agents/{agent}/labels", {
+                    params: {
+                      path: { workspace: workspace.id, agent: agentKey },
+                    },
+                    headers: workspaceHeaders(workspace.id),
+                    signal,
+                  })
+                  .then(representation)
+              }
+              write={(next, etag) =>
+                client.http
+                  .PUT("/api/v1/workspaces/{workspace}/agents/{agent}/labels", {
+                    params: {
+                      path: { workspace: workspace.id, agent: agentKey },
+                      header: {
+                        ...workspaceHeaders(workspace.id),
+                        "If-Match": etag,
+                      },
+                    },
+                    body: { labels: next },
+                  })
+                  .then(data)
+              }
+              onSaved={() => void query.refetch()}
+            />
           </dd>
         </dl>
       }

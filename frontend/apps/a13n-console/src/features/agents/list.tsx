@@ -27,17 +27,19 @@ import {
 } from "../../shared/feedback";
 import shared from "../../shared/shared.module.css";
 import styles from "./agents.module.css";
+import { LabelFilterField, useLabelFilters } from "../../shared/label-filter";
 
 export function Agents() {
   const { t } = useTranslation(),
     client = useClient(),
     { workspace, can } = useWorkspace(),
     page = useCursor(),
+    labels = useLabelFilters(),
     navigate = useNavigate();
   const [filter, setFilter] = useState("active"),
     [search, setSearch] = useState("");
   const query = useQuery({
-    queryKey: ["agents", workspace.id, filter, page.cursor],
+    queryKey: ["agents", workspace.id, filter, labels, page.cursor],
     queryFn: ({ signal }) =>
       client.http
         .GET("/api/v1/workspaces/{workspace}/agents", {
@@ -47,6 +49,7 @@ export function Agents() {
               limit: 30,
               cursor: page.cursor,
               include_archived: filter === "all",
+              label: labels,
             },
           },
           signal,
@@ -99,6 +102,7 @@ export function Agents() {
             { value: "all", label: t("Include archived") },
           ]}
         />
+        <LabelFilterField />
       </div>
       {query.isPending ? (
         <Loading variant="table" columns={4} />

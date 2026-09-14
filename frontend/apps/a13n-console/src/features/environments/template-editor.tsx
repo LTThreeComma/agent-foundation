@@ -25,6 +25,7 @@ import { FormActions, TextAreaField } from "../../shared/form";
 import styles from "../../shared/shared.module.css";
 import { type EnvironmentScope } from "./api";
 import { TemplateRecipe } from "./template-recipe";
+import { ResourceLabelsDialog } from "../../shared/resource-labels";
 
 export function TemplateEditor({
   scope,
@@ -243,6 +244,31 @@ export function TemplateSettings({
         />
         {t("Archived")}
       </Label>
+      <ResourceLabelsDialog
+        resourceId={basis.value.id}
+        labels={basis.value.labels}
+        editable={editable}
+        read={(signal) =>
+          client.http
+            .GET("/api/v1/environment-templates/{template_id}/labels", {
+              params: { path: { template_id: basis.value.id } },
+              signal,
+            })
+            .then(representation)
+        }
+        write={(labels, etag) =>
+          client.http
+            .PUT("/api/v1/environment-templates/{template_id}/labels", {
+              params: {
+                path: { template_id: basis.value.id },
+                header: { "If-Match": etag },
+              },
+              body: { labels },
+            })
+            .then(data)
+        }
+        onSaved={() => void reload()}
+      />
       <ErrorNotice error={save.error} retry={() => void reload()} />
       {editable && (
         <FormActions

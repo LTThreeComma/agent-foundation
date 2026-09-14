@@ -11,10 +11,10 @@ from a13n_service.interactions.control_domain import (
     UpdateQueuedSubmissionRequest,
     WaitingResolutionDefaults,
 )
-from a13n_service.interactions.models import RunRecord
+from a13n_service.interactions.models import RunRecord, ThreadRecord
 from a13n_service.interactions.queue import QueuedSubmissionStore
 from a13n_service.interactions.submissions import DeleteQueuedSubmissionRequest, QueuedSubmissionService
-from a13n_service.storage import short_session
+from a13n_service.storage import short_session, transaction
 from a13n_service.storage.object_store import LocalObjectStore
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -132,7 +132,9 @@ async def test_thread_submission_immediately_continues_completed_head_and_replay
     await seed_hook_actor_access(lifecycle_interaction_sessions)
     service, _commands_value, objects, source = await _submission_setup(lifecycle_interaction_sessions, tmp_path)
     await _complete_run(lifecycle_interaction_sessions, objects, run_id=source.run_id)
-    request = ThreadRunSubmissionRequest(expected_thread_version=2, input=_request("next").input)
+    request = ThreadRunSubmissionRequest(
+        expected_thread_version=2, input=_request("next").input, labels={"batch": "next"}
+    )
 
     first = await service.submit(
         actor=_actor(),
@@ -156,6 +158,7 @@ async def test_thread_submission_immediately_continues_completed_head_and_replay
     assert successor is not None
     assert successor.parent_run_id == source.run_id
     assert successor.lineage_kind == "continue"
+    assert successor.labels == {"batch": "next"}
 
 
 async def test_thread_submission_defaults_waiting_head_and_preserves_new_input(
@@ -168,6 +171,7 @@ async def test_thread_submission_defaults_waiting_head_and_preserves_new_input(
     request = ThreadRunSubmissionRequest(
         expected_thread_version=2,
         input=_request("instead").input,
+        labels={"batch": "waiting"},
         waiting_resolution=WaitingResolutionDefaults(sealed_state_digest_sha256=digest),
     )
 
@@ -183,6 +187,7 @@ async def test_thread_submission_defaults_waiting_head_and_preserves_new_input(
         successor = await database.get(RunRecord, receipt.run.run_id)
     assert successor is not None
     assert successor.input_kind == "waiting_continue"
+    assert successor.labels == {"batch": "waiting"}
     assert successor.input_json["resolutions"][0]["outcome"] == "reject"
     assert successor.input_json["input"]["content"] == [{"type": "text", "text": "instead"}]
 
@@ -225,7 +230,9 @@ async def test_explicit_queue_consumption_accepts_under_retained_authority_and_r
     queued_receipt = await service.submit(
         actor=_actor(),
         thread_id=source.thread_id,
-        request=ThreadRunSubmissionRequest(expected_thread_version=1, input=_request("queued next").input),
+        request=ThreadRunSubmissionRequest(
+            expected_thread_version=1, input=_request("queued next").input, labels={"batch": "queued"}
+        ),
         idempotency_key="submit-before-consume",
     )
     assert queued_receipt.queued_submission is not None
@@ -235,6 +242,9 @@ async def test_explicit_queue_consumption_accepts_under_retained_authority_and_r
         idempotency_key="cancel-before-consume",
         request=InterruptRequest(expected_run_version=1, expected_thread_version=1),
     )
+    async with transaction(lifecycle_interaction_sessions) as database:
+        thread = await database.get(ThreadRecord, source.thread_id)
+        thread.labels = {"team": "latest-before-consume", "batch": "parent"}
     request = ConsumeQueuedSubmissionRequest(expected_thread_version=2, expected_queue_version=1)
 
     first = await service.consume(
@@ -243,6 +253,9 @@ async def test_explicit_queue_consumption_accepts_under_retained_authority_and_r
         request=request,
         idempotency_key="consume-first",
     )
+    async with transaction(lifecycle_interaction_sessions) as database:
+        thread = await database.get(ThreadRecord, source.thread_id)
+        thread.labels = {"team": "after-acceptance"}
     repeated = await service.consume(
         actor=_actor(),
         thread_id=source.thread_id,
@@ -263,6 +276,7 @@ async def test_explicit_queue_consumption_accepts_under_retained_authority_and_r
     assert successor.authority_principal_id == queued_receipt.queued_submission.authority_principal.principal_id
     assert successor.parent_run_id is None
     assert successor.lineage_kind == "root"
+    assert successor.labels == {"team": "latest-before-consume", "batch": "queued"}
 
 
 async def test_queue_mutations_are_replayable_with_original_response(

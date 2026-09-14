@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.environments.usage import lock_run_environments, refresh_run_retention
 from a13n_service.hooks import InlineHookValidator
+from a13n_service.interactions.acceptance_validation import validate_prepared_run, validate_queued_run_input
 from a13n_service.interactions.environment_acceptance import add_run_with_environment
 from a13n_service.interactions.environment_selection import (
     EnvironmentDefault,
@@ -31,10 +32,9 @@ from ._outcome_transitions import (
 from ._transitions import charge_attempt_usage, terminalize_attempt
 from .acceptance import (
     RunAcceptanceReceipt,
+    _accepted_labels,
     require_session,
     validate_advancement,
-    validate_prepared_run,
-    validate_queued_run_input,
 )
 from .attempts import AttemptContext, AttemptMutationError, lock_attempt_authority
 from .control_domain import QueuedSubmission, QueuedSubmissionFailure, QueuedSubmissionState
@@ -47,7 +47,12 @@ from .input import AcceptedAgentInput
 from .lifecycle import LifecycleWriter
 from .models import RunAttemptRecord, RunRecord, ThreadRecord
 from .objects import RunPayloadStore, RunStateStore, StaleStateWriter, StoredRunState
-from .queue_persistence import QueueConsumptionConflict, consume_first_submission, fail_first_submission
+from .queue_persistence import (
+    QueueConsumptionConflict,
+    consume_first_submission,
+    fail_first_submission,
+    load_live_queued_submission,
+)
 from .state import CompletedOutcomeCandidate, RunCheckpoint, RunPayloadEnvelope
 
 
@@ -155,9 +160,19 @@ class CompletionQueueHandoffService:
                         next_head_run_id=source.id,
                     )
                     session_record_value = await require_session(database, successor_run)
+                    try:
+                        queued = await load_live_queued_submission(
+                            database,
+                            organization_id=thread.organization_id,
+                            queued_submission_id=queued_submission_id,
+                            submission_digest_sha256=submission_digest_sha256,
+                        )
+                    except QueueConsumptionConflict as error:
+                        raise RunAcceptanceError("queue_consumption_conflict", str(error)) from error
+                    accepted_labels = _accepted_labels(thread.labels, queued.submission.labels)
                     successor_record = await add_run_with_environment(
                         database,
-                        run=successor_run,
+                        run=successor_run.model_copy(update={"labels": accepted_labels}),
                         state=successor_state,
                         workspace_id=session_record_value.workspace_id,
                         intent=requested_environment(

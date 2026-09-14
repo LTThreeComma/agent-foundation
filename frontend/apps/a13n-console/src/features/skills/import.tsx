@@ -23,6 +23,7 @@ import { ErrorNotice } from "../../shared/feedback";
 import { FormActions, JsonView } from "../../shared/form";
 import { useIdempotency } from "../../shared/idempotency";
 import styles from "../../shared/shared.module.css";
+import { LabelOverridesField } from "../../shared/resource-labels";
 
 export function ImportSkill({
   skill,
@@ -85,7 +86,8 @@ function ImportForm({
     [repository, setRepository] = useState(""),
     [ref, setRef] = useState(""),
     [subdirectory, setSubdirectory] = useState(""),
-    [commit, setCommit] = useState("");
+    [commit, setCommit] = useState(""),
+    [labels, setLabels] = useState<Record<string, string>>({});
   const [upload, setUpload] = useState<{ file: File; key: string }>(),
     [receipt, setReceipt] = useState<Schema["SkillUploadReceipt"]>();
   const stage = useMutation({
@@ -130,7 +132,7 @@ function ImportForm({
           })
           .then(data);
       }
-      const body = { source, ...(name && { name }) };
+      const body = { source, ...(name && { name }), labels };
       return client.http
         .POST("/api/v1/workspaces/{workspace}/skills", {
           params: {
@@ -176,6 +178,7 @@ function ImportForm({
           />
         </FormField>
       )}
+      {!basis && <LabelOverridesField value={labels} onChange={setLabels} />}
       <Tabs
         value={kind}
         onValueChange={(value) => {

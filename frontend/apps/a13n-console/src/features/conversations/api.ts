@@ -123,28 +123,28 @@ export function conversationQueries(client: Client, workspaceId: string) {
             })
             .then(data),
       }),
-    threads: (session_id: string) =>
+    threads: (session_id: string, label: string[] = []) =>
       queryOptions({
-        queryKey: keys.threads(session_id),
+        queryKey: [...keys.threads(session_id), label],
         queryFn: ({ signal }) =>
           allPages((cursor) =>
             client.http
               .GET("/api/v1/sessions/{session_id}/threads", {
-                params: { path: { session_id }, query: { cursor } },
+                params: { path: { session_id }, query: { cursor, label } },
                 headers,
                 signal,
               })
               .then(data),
           ),
       }),
-    runs: (thread_id: string) =>
+    runs: (thread_id: string, label: string[] = []) =>
       queryOptions({
-        queryKey: keys.runs(thread_id),
+        queryKey: [...keys.runs(thread_id), label],
         queryFn: ({ signal }) =>
           allPages((cursor) =>
             client.http
               .GET("/api/v1/threads/{thread_id}/runs", {
-                params: { path: { thread_id }, query: { cursor } },
+                params: { path: { thread_id }, query: { cursor, label } },
                 headers,
                 signal,
               })

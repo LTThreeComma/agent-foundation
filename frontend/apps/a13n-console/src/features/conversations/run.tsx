@@ -13,7 +13,13 @@ import {
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import {
+  commandHeaders,
+  data,
+  representation,
+  workspaceHeaders,
+  type Schema,
+} from "../../shared/api";
 import {
   ErrorNotice,
   ErrorToast,
@@ -43,6 +49,10 @@ import { useAgent } from "../agents/queries";
 import { useRun } from "./queries";
 import { ThreadQueue } from "./queue";
 import { SteeringStatus } from "./steer";
+import {
+  LabelOverridesField,
+  ResourceLabelsDialog,
+} from "../../shared/resource-labels";
 
 export function RunPage() {
   const { runId = "", threadId = "", sessionId = "" } = useParams();
@@ -73,7 +83,13 @@ function RunContent({
   const live = useLiveRun(runId),
     [mode, setMode] = useState("message"),
     [notice, setNotice] = useState(""),
-    [steerIds, setSteerIds] = useState<string[]>([]);
+    [steerIds, setSteerIds] = useState<string[]>([]),
+    [retryLabels, setRetryLabels] = useState<Record<string, string>>({}),
+    [retryLabelsValid, setRetryLabelsValid] = useState(true),
+    [forkThreadLabels, setForkThreadLabels] = useState<Record<string, string>>(
+      {},
+    ),
+    [forkThreadLabelsValid, setForkThreadLabelsValid] = useState(true);
   const runQuery = useRun(runId);
   const run = runQuery.data;
   const agent = useAgent(run?.agent_id);
@@ -110,19 +126,21 @@ function RunContent({
   const currentRun = useRun(thread?.current_run_id);
   const headRun = useRun(thread?.head_run_id);
   const retry = useMutation({
-    mutationFn: () =>
-      client.http
+    mutationFn: () => {
+      const body = {
+        expected_thread_version: thread!.version,
+        labels: retryLabels,
+      };
+      return client.http
         .POST("/api/v1/runs/{run_id}/retry", {
           params: {
             path: { run_id: runId },
-            header: commandHeaders(
-              workspace.id,
-              retryKey.forBody({ expected_thread_version: thread!.version }),
-            ),
+            header: commandHeaders(workspace.id, retryKey.forBody(body)),
           },
-          body: { expected_thread_version: thread!.version },
+          body,
         })
-        .then(data),
+        .then(data);
+    },
     onSuccess: accepted,
   });
   const interruptKey = useIdempotency();
@@ -198,6 +216,66 @@ function RunContent({
           </span>
         </div>
         <div className={styles.inline}>
+          <ResourceLabelsDialog
+            label={t("Thread labels")}
+            resourceId={thread.id}
+            labels={thread.labels}
+            editable={can("thread.labels.update")}
+            read={(signal) =>
+              client.http
+                .GET("/api/v1/threads/{thread_id}/labels", {
+                  params: { path: { thread_id: thread.id } },
+                  headers: workspaceHeaders(workspace.id),
+                  signal,
+                })
+                .then(representation)
+            }
+            write={(labels, etag) =>
+              client.http
+                .PUT("/api/v1/threads/{thread_id}/labels", {
+                  params: {
+                    path: { thread_id: thread.id },
+                    header: {
+                      ...workspaceHeaders(workspace.id),
+                      "If-Match": etag,
+                    },
+                  },
+                  body: { labels },
+                })
+                .then(data)
+            }
+            onSaved={() => void threadQuery.refetch()}
+          />
+          <ResourceLabelsDialog
+            label={t("Run labels")}
+            resourceId={run.id}
+            labels={run.labels}
+            editable={can("run.labels.update")}
+            read={(signal) =>
+              client.http
+                .GET("/api/v1/runs/{run_id}/labels", {
+                  params: { path: { run_id: run.id } },
+                  headers: workspaceHeaders(workspace.id),
+                  signal,
+                })
+                .then(representation)
+            }
+            write={(labels, etag) =>
+              client.http
+                .PUT("/api/v1/runs/{run_id}/labels", {
+                  params: {
+                    path: { run_id: run.id },
+                    header: {
+                      ...workspaceHeaders(workspace.id),
+                      "If-Match": etag,
+                    },
+                  },
+                  body: { labels },
+                })
+                .then(data)
+            }
+            onSaved={() => void runQuery.refetch()}
+          />
           <RunInspector run={run} />
           {!current &&
             run.status === "completed" &&
@@ -209,16 +287,35 @@ function RunContent({
           {current &&
             ["failed", "cancelled"].includes(run.status) &&
             can("run.retry") && (
-              <Button
-                size="sm"
-                variant="outline"
-                loading={retry.isPending}
-                onClick={() => retry.mutate()}
-                type="button"
+              <ModalFrame
+                trigger={
+                  <Button size="sm" variant="outline" type="button">
+                    <ArrowsClockwiseIcon size={13} />
+                    {t("Retry run")}
+                  </Button>
+                }
+                title={t("Retry run")}
+                description={t(
+                  "Retry copies this run's labels and applies your overrides.",
+                )}
+                closeLabel={t("Close")}
               >
-                <ArrowsClockwiseIcon size={13} />
-                {t("Retry run")}
-              </Button>
+                <LabelOverridesField
+                  title={t("Run label overrides")}
+                  value={retryLabels}
+                  inherited={run.labels}
+                  onChange={setRetryLabels}
+                  onValidityChange={setRetryLabelsValid}
+                />
+                <Button
+                  disabled={!retryLabelsValid}
+                  loading={retry.isPending}
+                  onClick={() => retry.mutate()}
+                  type="button"
+                >
+                  {t("Retry run")}
+                </Button>
+              </ModalFrame>
             )}
           {run.status === "completed" && can("run.fork") && (
             <ModalFrame
@@ -236,6 +333,18 @@ function RunContent({
               closeLabel={t("Close")}
             >
               <OptionsComposer
+                inheritedLabels={{ ...thread.labels, ...forkThreadLabels }}
+                commandBasis={{ runId, forkThreadLabels }}
+                additionalLabelsValid={forkThreadLabelsValid}
+                additionalLabelFields={
+                  <LabelOverridesField
+                    title={t("Thread label overrides")}
+                    value={forkThreadLabels}
+                    inherited={thread.labels}
+                    onChange={setForkThreadLabels}
+                    onValidityChange={setForkThreadLabelsValid}
+                  />
+                }
                 label={t("Fork and send")}
                 submit={async (intent, key) =>
                   accepted(
@@ -245,7 +354,7 @@ function RunContent({
                           path: { run_id: runId },
                           header: commandHeaders(workspace.id, key),
                         },
-                        body: intent,
+                        body: { ...intent, thread_labels: forkThreadLabels },
                       }),
                     ),
                   )
@@ -436,6 +545,8 @@ function RunContent({
               />
             ) : (
               <OptionsComposer
+                inheritedLabels={thread.labels}
+                provisionalLabels={active || waiting}
                 commandBasis={thread.version}
                 label={t(active || waiting ? "Add to queue" : "Send")}
                 submit={async (intent, key) => {

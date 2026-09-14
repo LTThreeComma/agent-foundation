@@ -8,7 +8,12 @@ import { ArrowDownIcon, ArrowUpIcon, PlayIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useAuth, useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import {
+  commandHeaders,
+  data,
+  workspaceHeaders,
+  type Schema,
+} from "../../shared/api";
 import {
   ErrorNotice,
   ErrorToast,
@@ -281,6 +286,18 @@ function QueueEditor({
     client = useClient(),
     { workspace, basePath } = useWorkspace(),
     [open, setOpen] = useState(false);
+  const parentLabels = useQuery({
+    queryKey: ["queue-parent-labels", item.thread_id],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/threads/{thread_id}/labels", {
+          params: { path: { thread_id: item.thread_id } },
+          headers: workspaceHeaders(workspace.id),
+          signal,
+        })
+        .then(data),
+  });
   return (
     <ModalFrame
       onOpenChange={setOpen}
@@ -301,6 +318,8 @@ function QueueEditor({
         key={`${item.queued_submission_id}:${item.version}`}
         initial={item.submission}
         label={t("Save queued message")}
+        inheritedLabels={parentLabels.data?.labels}
+        provisionalLabels
         submit={async (submission, key) => {
           data(
             await client.http.PATCH(

@@ -685,6 +685,7 @@ async def test_completion_time_handoff_seals_source_and_consumes_queue_atomicall
         submission=ThreadRunSubmissionIntent(
             input=AgentInput(schema_version="1", content=(TextContent(text="next"),)),
             hook_subscription=hook,
+            labels={"batch": "queued"},
         ),
         queued_submission_id="qsub_7171717171717171",
     )
@@ -731,6 +732,9 @@ async def test_completion_time_handoff_seals_source_and_consumes_queue_atomicall
         expected_head_run_id=None,
     )
 
+    async with transaction(interaction_sessions) as database:
+        current_thread = await database.get(ThreadRecord, source.thread_id)
+        current_thread.labels = {"team": "latest", "batch": "parent"}
     receipt = await commit_handoff()
 
     assert receipt.outcome == "run_accepted"
@@ -741,6 +745,7 @@ async def test_completion_time_handoff_seals_source_and_consumes_queue_atomicall
     async with short_session(interaction_sessions) as database:
         source_row = await database.get(RunRecord, source.id)
         successor_row = await database.get(RunRecord, successor.id)
+        assert successor_row.labels == {"team": "latest", "batch": "queued"}
         attempt = await database.get(RunAttemptRecord, claimed.attempt.id)
         thread = await database.get(ThreadRecord, source.thread_id)
         hook_head = await database.get(HookSubscriptionRecord, receipt.successor.hook_subscription_id)

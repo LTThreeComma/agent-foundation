@@ -14,6 +14,7 @@ import { initialConfig } from "./configuration";
 import { AgentForm } from "./form";
 import { changeAgentImage } from "./images";
 import styles from "./agents.module.css";
+import { LabelOverridesField } from "../../shared/resource-labels";
 
 export function CreateAgent() {
   const { t } = useTranslation(),
@@ -23,6 +24,7 @@ export function CreateAgent() {
     navigate = useNavigate(),
     idempotency = useIdempotency();
   const [file, setFile] = useState<File | null>(null);
+  const [labels, setLabels] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<string>();
   const [fileError, setFileError] = useState<Error>();
   const [created, setCreated] = useState<{
@@ -143,10 +145,18 @@ export function CreateAgent() {
       creating
       imageUrl={preview}
       imagePicker={picker}
+      creationDetails={
+        <LabelOverridesField value={labels} onChange={setLabels} />
+      }
       pending={create.isPending || upload.isPending || !!created}
       error={create.error ?? fileError}
       submit={(config, name, description) =>
-        create.mutate({ config, name, description: description || null })
+        create.mutate({
+          config,
+          name,
+          description: description || null,
+          labels,
+        })
       }
     />
   );

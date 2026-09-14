@@ -21,18 +21,26 @@ import styles from "../../shared/shared.module.css";
 import { environmentApi, type EnvironmentScope } from "./api";
 import { useEnvironmentTypes } from "./providers";
 import { TemplateEditor } from "./template-editor";
+import { LabelFilterField, useLabelFilters } from "../../shared/label-filter";
 
 export function EnvironmentTemplates({ scope }: { scope: EnvironmentScope }) {
   const client = useClient(),
     { can, organizationAdmin } = useAccess(),
     { t } = useTranslation(),
     page = useCursor(),
+    labels = useLabelFilters(),
     api = environmentApi(client, scope),
     rows = useResourceRows<Schema["EnvironmentTemplate"]>(),
     providerTypes = useEnvironmentTypes();
   const query = useQuery({
-    queryKey: ["environment-templates", scope.kind, scope.id, page.cursor],
-    queryFn: ({ signal }) => api.templates(signal, page.cursor),
+    queryKey: [
+      "environment-templates",
+      scope.kind,
+      scope.id,
+      labels,
+      page.cursor,
+    ],
+    queryFn: ({ signal }) => api.templates(signal, page.cursor, labels),
   });
   const providers = useQuery({
     queryKey: ["environment-provider-options", scope.kind, scope.id],
@@ -69,6 +77,7 @@ export function EnvironmentTemplates({ scope }: { scope: EnvironmentScope }) {
         <ManageProvidersLink category="environments" scope={scope.kind} />
         {manage && <TemplateEditor scope={scope} />}
       </PageActions>
+      <LabelFilterField />
       {rows.selected && (
         <TemplateEditor
           key={rows.selected.id}

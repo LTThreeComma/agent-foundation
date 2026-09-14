@@ -43,6 +43,7 @@ export function ContinueBranch({
         {t("Use this run as the new parent for the thread.")}
       </Label>
       <OptionsComposer
+        inheritedLabels={thread.labels}
         commandBasis={thread.version}
         disabled={!confirmed}
         label={t("Continue from here")}

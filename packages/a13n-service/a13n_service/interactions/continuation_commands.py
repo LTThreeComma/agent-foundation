@@ -209,6 +209,8 @@ class ContinuationCommands:
                 hook_actor=actor.principal,
                 final_validator=validate_final,
                 transaction_hook=partial(evidence.commit, now=self._clock()),
+                label_overrides=request.labels,
+                label_source_run_id=source.id,
             )
         except RunAcceptanceError as error:
             return await evidence.reconcile(error)
@@ -254,7 +256,7 @@ class ContinuationCommands:
                     if protocol_context is not None
                     else {}
                 ),
-                **request.model_dump(mode="json", include={"hook_subscription"}),
+                **request.model_dump(mode="json", include={"hook_subscription", "labels"}),
             }
         )
         evidence = RunCommandEvidence(
@@ -334,7 +336,7 @@ class ContinuationCommands:
             {
                 "expected_thread_version": request.expected_thread_version,
                 "waiting_continue": normalized.model_dump(mode="json", by_alias=True),
-                **request.model_dump(mode="json", include={"hook_subscription"}),
+                **request.model_dump(mode="json", include={"hook_subscription", "labels"}),
             }
         )
         evidence = RunCommandEvidence(
@@ -464,6 +466,7 @@ class ContinuationCommands:
                 hook_actor=actor.principal,
                 final_validator=validate_final,
                 transaction_hook=partial(evidence.commit, now=self._clock()),
+                label_overrides=request.labels,
             )
         except RunAcceptanceError as error:
             return await evidence.reconcile(error)

@@ -21,7 +21,13 @@ import {
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { allPages, commandHeaders, data } from "../../shared/api";
+import {
+  allPages,
+  commandHeaders,
+  data,
+  representation,
+  workspaceHeaders,
+} from "../../shared/api";
 import { Empty, ErrorNotice, Loading } from "../../shared/feedback";
 import { SessionList } from "./list";
 import { CopyableId } from "../../shared/copy";
@@ -34,6 +40,11 @@ import { SessionIdentity } from "./identity";
 import { useConversationNotifications } from "./notifications";
 import { OptionsComposer, RunOptions, useRunOptions } from "./options";
 import { ThreadQueue } from "./queue";
+import {
+  LabelOverridesField,
+  ResourceLabelsDialog,
+} from "../../shared/resource-labels";
+import { useLabelFilters } from "../../shared/label-filter";
 
 export function ConversationsPage() {
   const { sessionId } = useParams();
@@ -63,9 +74,28 @@ export function NewConversation() {
     navigate = useNavigate(),
     cache = useQueryClient(),
     [search] = useSearchParams();
+  const existingSessionId = search.get("session") ?? "";
   const [agentId, setAgentId] = useState(search.get("agent") ?? ""),
+    [sessionLabels, setSessionLabels] = useState<Record<string, string>>({}),
+    [threadLabels, setThreadLabels] = useState<Record<string, string>>({}),
+    [sessionLabelsValid, setSessionLabelsValid] = useState(true),
+    [threadLabelsValid, setThreadLabelsValid] = useState(true),
     options = useRunOptions(),
     idempotency = useIdempotency();
+  const existingSessionLabels = useQuery({
+    queryKey: ["creation-parent-labels", "session", existingSessionId],
+    enabled: !!existingSessionId,
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/sessions/{session_id}/labels", {
+          params: { path: { session_id: existingSessionId } },
+          headers: workspaceHeaders(workspace.id),
+          signal,
+        })
+        .then(data),
+  });
+  const sessionPreview = existingSessionLabels.data?.labels ?? sessionLabels;
+  const threadPreview = { ...sessionPreview, ...threadLabels };
   const agents = useQuery({
     queryKey: ["agent-picker", workspace.id],
     queryFn: ({ signal }) =>
@@ -106,13 +136,18 @@ export function NewConversation() {
           disabled={!can("agent.invoke") || !agentId}
           label={t("Start session")}
           submit={async (input) => {
+            if (!sessionLabelsValid || !threadLabelsValid)
+              throw new Error(
+                t("Enter valid label overrides before continuing."),
+              );
             const body = {
               ...options.build(),
               agent_id: agentId,
               input,
               ...(search.get("session")
                 ? { session_id: search.get("session")! }
-                : {}),
+                : { session_labels: sessionLabels }),
+              thread_labels: threadLabels,
             };
             const receipt = data(
               await client.http.POST("/api/v1/workspaces/{workspace}/runs", {
@@ -134,7 +169,30 @@ export function NewConversation() {
             navigate(runPath(basePath, receipt));
           }}
         >
-          <RunOptions options={options} showAgent={false} />
+          <RunOptions
+            options={options}
+            showAgent={false}
+            inheritedLabels={threadPreview}
+            additionalLabelFields={
+              <>
+                {!existingSessionId && (
+                  <LabelOverridesField
+                    title={t("Session label overrides")}
+                    value={sessionLabels}
+                    onChange={setSessionLabels}
+                    onValidityChange={setSessionLabelsValid}
+                  />
+                )}
+                <LabelOverridesField
+                  title={t("Thread label overrides")}
+                  value={threadLabels}
+                  inherited={sessionPreview}
+                  onChange={setThreadLabels}
+                  onValidityChange={setThreadLabelsValid}
+                />
+              </>
+            }
+          />
         </Composer>
       </div>
     </div>
@@ -147,7 +205,9 @@ export function SessionLayout() {
     { workspace, can, basePath } = useWorkspace(),
     client = useClient(),
     queries = conversationQueries(client, workspace.id);
-  const threads = useQuery(queries.threads(sessionId));
+  const threadLabels = useLabelFilters("thread_label");
+  const runLabels = useLabelFilters("run_label");
+  const threads = useQuery(queries.threads(sessionId, threadLabels));
   const [mapOpen, setMapOpen] = useState(false);
   const mapTrigger = useRef<HTMLButtonElement>(null);
   const first = threads.data?.[0];
@@ -163,6 +223,33 @@ export function SessionLayout() {
         </div>
         <SessionIdentity />
         <div className={styles.sessionControls}>
+          <ResourceLabelsDialog
+            resourceId={sessionId}
+            editable={can("session.labels.update")}
+            read={(signal) =>
+              client.http
+                .GET("/api/v1/sessions/{session_id}/labels", {
+                  params: { path: { session_id: sessionId } },
+                  headers: workspaceHeaders(workspace.id),
+                  signal,
+                })
+                .then(representation)
+            }
+            write={(labels, etag) =>
+              client.http
+                .PUT("/api/v1/sessions/{session_id}/labels", {
+                  params: {
+                    path: { session_id: sessionId },
+                    header: {
+                      ...workspaceHeaders(workspace.id),
+                      "If-Match": etag,
+                    },
+                  },
+                  body: { labels },
+                })
+                .then(data)
+            }
+          />
           <Button
             ref={mapTrigger}
             variant={mapOpen ? "secondary" : "outline"}
@@ -209,6 +296,7 @@ export function SessionLayout() {
         {mapOpen && (
           <SessionMap
             threads={threads.data ?? []}
+            runLabels={runLabels}
             onClose={() => {
               setMapOpen(false);
               mapTrigger.current?.focus();
@@ -256,12 +344,44 @@ export function ThreadLayout() {
       ) : (
         thread.data && (
           <>
+            <div className="mb-4 flex justify-end">
+              <ResourceLabelsDialog
+                resourceId={thread.data.id}
+                labels={thread.data.labels}
+                editable={can("thread.labels.update")}
+                read={(signal) =>
+                  client.http
+                    .GET("/api/v1/threads/{thread_id}/labels", {
+                      params: { path: { thread_id: thread.data!.id } },
+                      headers: workspaceHeaders(workspace.id),
+                      signal,
+                    })
+                    .then(representation)
+                }
+                write={(labels, etag) =>
+                  client.http
+                    .PUT("/api/v1/threads/{thread_id}/labels", {
+                      params: {
+                        path: { thread_id: thread.data!.id },
+                        header: {
+                          ...workspaceHeaders(workspace.id),
+                          "If-Match": etag,
+                        },
+                      },
+                      body: { labels },
+                    })
+                    .then(data)
+                }
+                onSaved={() => void thread.refetch()}
+              />
+            </div>
             <Empty
               title={t("No runs yet")}
               description={t("This thread has not started a run.")}
             />
             {can("run.continue") && (
               <OptionsComposer
+                inheritedLabels={thread.data.labels}
                 label={t("Start run")}
                 submit={async (intent, key) => {
                   if (!intent.agent_id)

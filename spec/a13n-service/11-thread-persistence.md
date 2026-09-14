@@ -37,6 +37,7 @@ type ThreadOriginKind = Literal["new", "fork", "child"]
 
 
 class Thread:
+    labels: dict[str, str]
     id: str
     version: int
     queue_version: int
@@ -218,3 +219,4 @@ The independent Thread row duplicates relationships that are also present on Run
 13. Internal inbox sequence and capacity counters live on the Thread row and are updated atomically with inbox transitions under its row lock. They are absent from public Thread reads; counter-only updates preserve Thread versions, timestamps, and Run selection. Inbox entries and Redis control-group cursors retain their separate stores.
 14. `queue_version` changes on every queued-submission mutation. Consuming an entry atomically advances the queue version and creates one accepted Run; terminally failing permanently invalid queued intent advances the queue version and creates no Run. Either transition can commit with source completion under the owning queue contract.
 15. A state-first combined handoff can atomically select a completed source as head and either select an accepted queued successor as current or terminally fail permanently invalid queued intent while retaining the source as current. If that path is unavailable, terminal Thread state and a non-empty queue can coexist until recovery drain or while consumption is recoverably blocked; an existing-Thread Run submission appends behind that queue.
+16. Thread labels are mutable classification metadata outside execution and queue versions. A new ordinary or child Thread copies its Session's current labels at acceptance; a forked Thread instead copies its source Thread's current labels. Explicit creation overrides apply after the copy and no later parent mutation propagates.

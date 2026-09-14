@@ -19,6 +19,7 @@ import { RecipeConfiguration } from "./recipe-configuration";
 import { environmentApi, type EnvironmentScope } from "./api";
 import { useEnvironmentTypes } from "./providers";
 import editorStyles from "./template-editor.module.css";
+import { LabelOverridesField } from "../../shared/resource-labels";
 
 export function TemplateRecipe({
   scope,
@@ -50,6 +51,7 @@ export function TemplateRecipe({
   });
   const [name, setName] = useState(""),
     [description, setDescription] = useState(""),
+    [labels, setLabels] = useState<Record<string, string>>({}),
     [providerId, setProviderId] = useState(revision?.provider_id ?? ""),
     [version, setVersion] = useState(
       revision?.configuration_schema_version ?? "1",
@@ -118,7 +120,12 @@ export function TemplateRecipe({
             body: { ...recipe, expected_version: basis.version },
           })
           .then(data);
-      const body = { ...recipe, name, description: description || null };
+      const body = {
+        ...recipe,
+        name,
+        description: description || null,
+        labels,
+      };
       return environmentApi(client, scope).createTemplate(
         body,
         key.forBody(body),
@@ -161,6 +168,7 @@ export function TemplateRecipe({
                 maxLength={4096}
               />
             </FormField>
+            <LabelOverridesField value={labels} onChange={setLabels} />
           </div>
         </FormSection>
       )}

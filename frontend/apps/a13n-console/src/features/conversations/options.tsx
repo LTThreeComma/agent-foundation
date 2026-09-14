@@ -11,7 +11,7 @@ import {
 
 import { useQuery } from "@tanstack/react-query";
 import { SlidersHorizontalIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
@@ -23,6 +23,7 @@ import { useIdempotency } from "../../shared/idempotency";
 import { jsonObject, runOverride } from "../../shared/validation";
 import { Composer } from "./composer";
 import styles from "./conversations.module.css";
+import { LabelOverridesField } from "../../shared/resource-labels";
 
 type Options = Omit<Schema["ThreadRunSubmissionIntent-Input"], "input">;
 export function OptionsComposer({
@@ -31,6 +32,10 @@ export function OptionsComposer({
   label,
   disabled,
   commandBasis,
+  inheritedLabels,
+  provisionalLabels,
+  additionalLabelFields,
+  additionalLabelsValid = true,
 }: {
   initial?: Schema["ThreadRunSubmissionIntent-Input"];
   submit: (
@@ -40,8 +45,13 @@ export function OptionsComposer({
   label?: string;
   disabled?: boolean;
   commandBasis?: unknown;
+  inheritedLabels?: Record<string, string>;
+  provisionalLabels?: boolean;
+  additionalLabelFields?: ReactNode;
+  additionalLabelsValid?: boolean;
 }) {
-  const options = useRunOptions(initial),
+  const { t } = useTranslation(),
+    options = useRunOptions(initial),
     idempotency = useIdempotency();
   return (
     <Composer
@@ -49,22 +59,34 @@ export function OptionsComposer({
       disabled={disabled}
       label={label}
       submit={async (input) => {
+        if (!additionalLabelsValid)
+          throw new Error(t("Enter valid label overrides before continuing."));
         const intent = { ...options.build(), input };
         await submit(intent, idempotency.forBody([commandBasis, intent]));
         idempotency.reset();
       }}
     >
-      <RunOptions options={options} />
+      <RunOptions
+        options={options}
+        inheritedLabels={inheritedLabels}
+        provisionalLabels={provisionalLabels}
+        additionalLabelFields={additionalLabelFields}
+      />
     </Composer>
   );
 }
 export function useRunOptions(initial: Options = {}) {
+  const { t } = useTranslation();
   const [original] = useState(initial),
     [agent, setAgent] = useState(initial.agent_id ?? ""),
     [revision, setRevision] = useState(initial.agent_revision_id ?? ""),
     [model, setModel] = useState(
       initial.config_override?.model?.model_key ?? "",
     );
+  const [labels, setLabels] = useState<Record<string, string>>(
+    initial.labels ?? {},
+  );
+  const [labelsValid, setLabelsValid] = useState(true);
   const [settings, setSettings] = useState(
       initial.config_override?.model?.settings
         ? JSON.stringify(initial.config_override.model.settings, null, 2)
@@ -85,6 +107,14 @@ export function useRunOptions(initial: Options = {}) {
           ? `instance:${initial.environment.environment_id}`
           : "inherit",
   );
+  const [environmentLabels, setEnvironmentLabels] = useState<
+    Record<string, string>
+  >(
+    initial.environment && "template_id" in initial.environment
+      ? (initial.environment.labels ?? {})
+      : {},
+  );
+  const [environmentLabelsValid, setEnvironmentLabelsValid] = useState(true);
   const [advanced, setAdvanced] = useState(
     JSON.stringify(
       Object.fromEntries(
@@ -111,9 +141,17 @@ export function useRunOptions(initial: Options = {}) {
     setInstructions,
     environment,
     setEnvironment,
+    environmentLabels,
+    setEnvironmentLabels,
+    setEnvironmentLabelsValid,
     advanced,
     setAdvanced,
+    labels,
+    setLabels,
+    setLabelsValid,
     build: (): Options => {
+      if (!labelsValid || !environmentLabelsValid)
+        throw new Error(t("Enter valid label overrides before continuing."));
       const extra = jsonObject(advanced);
       for (const key of ["model", "instructions", "plugins"])
         if (key in extra)
@@ -148,6 +186,7 @@ export function useRunOptions(initial: Options = {}) {
         agent_id: agent || undefined,
         agent_revision_id: revision || undefined,
         config_override: Object.keys(override).length ? override : undefined,
+        labels,
         ...(environment === "inherit"
           ? { environment: undefined }
           : {
@@ -155,7 +194,10 @@ export function useRunOptions(initial: Options = {}) {
                 environment === "none"
                   ? null
                   : environment.startsWith("template:")
-                    ? { template_id: environment.slice(9) }
+                    ? {
+                        template_id: environment.slice(9),
+                        labels: environmentLabels,
+                      }
                     : { environment_id: environment.slice(9) },
             }),
       };
@@ -165,9 +207,15 @@ export function useRunOptions(initial: Options = {}) {
 export function RunOptions({
   options,
   showAgent = true,
+  inheritedLabels,
+  provisionalLabels,
+  additionalLabelFields,
 }: {
   options: ReturnType<typeof useRunOptions>;
   showAgent?: boolean;
+  inheritedLabels?: Record<string, string>;
+  provisionalLabels?: boolean;
+  additionalLabelFields?: ReactNode;
 }) {
   const { t } = useTranslation(),
     client = useClient(),
@@ -274,6 +322,15 @@ export function RunOptions({
             })),
           ]}
         />
+        {additionalLabelFields}
+        <LabelOverridesField
+          title={t("Run label overrides")}
+          value={options.labels}
+          inherited={inheritedLabels}
+          onChange={options.setLabels}
+          onValidityChange={options.setLabelsValid}
+          provisional={provisionalLabels}
+        />
         <ChoiceField
           placeholder={t("Inherit")}
           value={options.environment}
@@ -292,6 +349,20 @@ export function RunOptions({
             })),
           ]}
         />
+        {options.environment.startsWith("template:") && (
+          <LabelOverridesField
+            title={t("Environment label overrides")}
+            value={options.environmentLabels}
+            inherited={
+              choices.data?.templates.find(
+                (template) =>
+                  template.id === options.environment.slice("template:".length),
+              )?.labels
+            }
+            onChange={options.setEnvironmentLabels}
+            onValidityChange={options.setEnvironmentLabelsValid}
+          />
+        )}
         <Label className="flex items-center gap-2">
           <Checkbox
             checked={options.overrideInstructions}

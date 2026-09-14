@@ -51,6 +51,7 @@ export function AgentForm({
   imagePicker,
   environment,
   metadata,
+  creationDetails,
   back,
 }: {
   initial: AgentConfig;
@@ -77,6 +78,7 @@ export function AgentForm({
   imagePicker?: (name: string) => ReactNode;
   environment?: ReactNode;
   metadata?: ReactNode;
+  creationDetails?: ReactNode;
   back: string;
 }) {
   const [initial] = useState(providedInitial),
@@ -247,6 +249,7 @@ export function AgentForm({
                       maxLength={4096}
                     />
                   </FormField>
+                  {creationDetails}
                 </section>
               )}
               <div className={styles.modelProperty}>
