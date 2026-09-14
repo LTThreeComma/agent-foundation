@@ -340,12 +340,16 @@ function Conversation({
               </Button>
             )}
             {entries.map((entry) => (
-              <SavedEntry
+              <div
                 key={`${continuation}:${entry.position}`}
-                entry={entry}
-                toolGroups={toolGroups}
-                threadId={threadId}
-              />
+                data-presence-anchor={`entry:${continuation}:${entry.position}`}
+              >
+                <SavedEntry
+                  entry={entry}
+                  toolGroups={toolGroups}
+                  threadId={threadId}
+                />
+              </div>
             ))}
             {showLive && (
               <LiveOutput
