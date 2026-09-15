@@ -143,7 +143,7 @@ class ProviderIntegration:
             validate_header_names((affinity_header,), reserved=reserved)
             reserved = (*reserved, affinity_header)
         validate_header_names(header_names, reserved=reserved)
-        normalized = parsed.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        normalized = parsed.model_dump(mode="json", by_alias=True, exclude_none=False, exclude_defaults=True)
         if self.credential_validator is not None:
             self.credential_validator(normalized, credential_configured)
         endpoint = parsed.base_url or (self.endpoint(normalized) if callable(self.endpoint) else self.endpoint)

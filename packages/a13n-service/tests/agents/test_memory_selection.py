@@ -1,5 +1,5 @@
 import pytest
-from a13n_service.agents.domain import AgentRunOverride, CreateAgentRequest
+from a13n_service.agents.domain import AgentConfig, AgentRunOverride, CreateAgentRequest
 from a13n_service.agents.invocation import merge_agent_run_override
 from a13n_service.memory.domain import MemorySelection
 from a13n_service.memory.runtime import graph_uses_memory
@@ -25,16 +25,23 @@ async def test_memory_selection_survives_authoring_and_freezing(
     agent_sessions, agent_management, agent_invocation_resolver
 ):
     selection = MemorySelection(scope="thread", recall_required=True)
+    config_payload = agent_config().model_dump(mode="python", by_alias=True)
+    config_payload["memory"] = selection
+    config_payload["toolsets"]["web"]["enabled"] = True
+    config_payload["toolsets"]["web"]["tools"]["fetch"]["enabled"] = True
+    config = AgentConfig.model_validate(config_payload)
     created = await agent_management.commands.create(
         actor=actor(),
         workspace_id=WORKSPACE_ID,
         idempotency_key="memory-agent",
-        request=CreateAgentRequest(name="Memory", config=agent_config().model_copy(update={"memory": selection})),
+        request=CreateAgentRequest(name="Memory", config=config),
     )
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=created.agent.id)
     async with transaction(agent_sessions) as session:
         frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
     assert created.revision.config.memory == frozen.effective_config.memory == selection
+    assert frozen.effective_config.toolsets["web"] == config.toolsets["web"]
+    _reconstruct(frozen.effective_config)
 
 
 def test_reconstruction_retains_separate_root_and_child_selections():
