@@ -1,17 +1,12 @@
 import { useEffect, useState } from "react";
-import { Link, NavLink, useMatch, useNavigate } from "react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMatch, useNavigate } from "react-router";
 import {
   Button,
   Checkbox,
-  Collapsible,
-  CollapsibleTrigger,
-  CollapsiblePanel,
   FormField,
   Input,
   SearchPicker,
   Skeleton,
-  ModalFrame,
   Menu,
   MenuTrigger,
   MenuPopup,
@@ -19,78 +14,94 @@ import {
 } from "a13n-ui";
 import {
   Plus,
+  Folder,
   CaretRight,
-  FolderSimple,
-  WarningCircle,
-  CircleNotch,
-  Question,
-  Archive,
-  ChatCircle,
-  Gear,
   DotsThree,
-  PencilSimple,
-  ShareNetwork,
-  SlidersHorizontal,
+  DotsSixVertical,
+  Gear,
+  ArrowUp,
+  ArrowDown,
 } from "@phosphor-icons/react";
-import { useProjects, useSelectors, useTransport } from "../transport/context";
-import { result, type Schema } from "../transport/client";
-import { ErrorNotice, TextField } from "../shell/ui";
-import { useThreads } from "./queries";
-import { ResourceChoice } from "../configuration/resource-choice";
-import {
-  ParticipantAvatars,
-  threadParticipants,
-} from "../shell/participant-avatars";
+import { useProjects } from "../transport/context";
+import type { Schema } from "../transport/client";
+import { ErrorNotice } from "../shell/ui";
+import { useThread, useThreads } from "./queries";
+import { useProjectExpansion, useProjectOrder } from "./project-order";
+import { NewProject } from "./new-project";
+import { NewConversation } from "./new-conversation";
+import { ThreadRow } from "./thread-row";
 import styles from "./conversation.module.css";
+
+export { NewConversation } from "./new-conversation";
+type Presence = Schema<"PresenceFrame"> | null;
+type Group = {
+  id: string;
+  name: string;
+  projectId?: string;
+  scope?: "projectless" | "unavailable";
+};
 
 export function ConversationNavigation({
   presence = null,
 }: {
-  presence?: Schema<"PresenceFrame"> | null;
+  presence?: Presence;
 }) {
   const projects = useProjects();
-  const navigate = useNavigate();
+  const match = useMatch("/threads/:threadId");
+  const selectedId = match?.params.threadId ?? "";
+  const selected = useThread(selectedId).data?.thread;
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(false);
   const [scope, setScope] = useState("");
-  const [collapsed, setCollapsed] = useState<Set<string | null>>(new Set());
-  const match = useMatch("/threads/:threadId");
+  const scopedProject = projects.data?.find(
+    (project) => project.project_id === scope,
+  );
+  const [adding, setAdding] = useState(false);
   const [creating, setCreating] = useState<string | null | undefined>(
     undefined,
   );
-  const list = useThreads(query, scope || undefined, archived);
-  const rows = list.data?.pages.flatMap((page) => page.rows) ?? [];
-  const groups = new Map<string | null, { name: string; rows: typeof rows }>();
-  for (const project of projects.data ?? [])
-    if (!scope || project.project_id === scope)
-      groups.set(project.project_id, { name: project.name, rows: [] });
-  if (!scope) groups.set(null, { name: "Without a project", rows: [] });
-  for (const row of rows) {
-    const id = row.thread.configuration.project_id ?? null;
-    if (!groups.has(id))
-      groups.set(id, {
-        name: row.project_name || "Unavailable project",
-        rows: [],
-      });
-    groups.get(id)!.rows.push(row);
-  }
-  const activeThread = rows.find(
-    (row) => row.thread.thread_id === match?.params.threadId,
+  const [expanded, setExpanded] = useProjectExpansion();
+  const order = useProjectOrder(
+    (projects.data ?? []).map((project) => project.project_id),
   );
-  const activeProject = activeThread?.thread.configuration.project_id ?? null;
+  const groups: Group[] = order.ids.map((id) => {
+    const project = projects.data!.find((item) => item.project_id === id)!;
+    return { id, projectId: id, name: project.name };
+  });
+  groups.push({
+    id: "@projectless",
+    scope: "projectless",
+    name: "Without a project",
+  });
+  groups.push({
+    id: "@unavailable",
+    scope: "unavailable",
+    name: "Unavailable projects",
+  });
+  const activeGroup =
+    selected && projects.data
+      ? selected.configuration.project_id == null
+        ? "@projectless"
+        : projects.data?.some(
+              (project) =>
+                project.project_id === selected.configuration.project_id,
+            )
+          ? selected.configuration.project_id
+          : "@unavailable"
+      : undefined;
   useEffect(() => {
-    if (match)
-      setCollapsed((current) => {
-        const next = new Set(current);
-        next.delete(activeProject);
-        return next;
-      });
-  }, [match?.params.threadId, activeProject]);
+    if (activeGroup) setExpanded(activeGroup, true);
+    // Opening a different Thread reveals its group, but refreshes do not undo a manual collapse.
+  }, [selectedId, activeGroup, setExpanded]);
+  const searching = !!query.trim();
+  useEffect(() => {
+    if (searching) order.cancel();
+  }, [searching, order.cancel]);
   return (
     <div className={styles.navigation}>
-      <Button variant="outline" onClick={() => setCreating(null)}>
+      <Button variant="outline" onClick={() => setAdding(true)}>
         <Plus />
-        New conversation
+        Add project
       </Button>
       <div className={styles.navigationFilters}>
         <FormField label="Find conversations" hideLabel>
@@ -105,185 +116,84 @@ export function ConversationNavigation({
           label="Project scope"
           placeholder="All Projects"
           emptyMessage="No matching projects."
-          value={scope}
+          value={scopedProject?.project_id ?? ""}
           onValueChange={setScope}
           groups={[
             {
               label: "Projects",
               options: [
-                { value: "", label: "All Projects", icon: <FolderSimple /> },
+                { value: "", label: "All Projects", icon: <Folder /> },
                 ...(projects.data ?? []).map((project) => ({
                   value: project.project_id,
                   label: project.name,
                   keywords: [project.project_id],
-                  icon: <FolderSimple />,
+                  icon: <Folder />,
                 })),
               ],
             },
           ]}
         />
       </div>
-      <div className={`${styles.threadGroups} a13n-scrollbar`}>
-        {Array.from(groups)
-          .filter(([, group]) => !query || group.rows.length)
-          .map(([id, group]) => (
-            <Collapsible
-              key={id ?? "projectless"}
-              open={!!query || !collapsed.has(id)}
-              onOpenChange={(open) =>
-                setCollapsed((current) => {
-                  const next = new Set(current);
-                  if (open) next.delete(id);
-                  else next.add(id);
-                  return next;
-                })
+      <ErrorNotice
+        error={projects.error}
+        retry={() => void projects.refetch()}
+      />
+      <div
+        className={`${styles.threadGroups} a13n-scrollbar`}
+        data-project-scroll
+        {...order.pointerEvents}
+      >
+        {projects.isPending && <p role="status">Loading projects…</p>}
+        <div hidden={searching}>
+          {groups.map((group) => (
+            <ProjectGroup
+              key={group.id}
+              group={group}
+              expanded={
+                expanded[group.id] ??
+                (activeGroup === group.id ||
+                  (projects.isSuccess &&
+                    !projects.data.length &&
+                    group.id === "@projectless"))
               }
-            >
-              <div className={styles.groupHeading}>
-                <CollapsibleTrigger
-                  className={styles.groupToggle}
-                  title={group.name}
-                  aria-label={`Conversations in ${group.name}`}
-                  disabled={!!query}
-                >
-                  <CaretRight />
-                  <span>{group.name}</span>
-                </CollapsibleTrigger>
-                <div className={styles.groupActions}>
-                  {id && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`Settings for ${group.name}`}
-                      render={
-                        <Link to={`/projects/${encodeURIComponent(id)}`} />
-                      }
-                    >
-                      <Gear />
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`New conversation in ${group.name}`}
-                    onClick={() => setCreating(id)}
-                  >
-                    <Plus />
-                  </Button>
-                </div>
-              </div>
-              <CollapsiblePanel>
-                {group.rows.map((row) => (
-                  <div key={row.thread.thread_id} className={styles.threadRow}>
-                    <NavLink
-                      to={`/threads/${encodeURIComponent(row.thread.thread_id)}`}
-                      className={({ isActive }) =>
-                        `${styles.threadLink} ${isActive ? styles.selected : ""}`
-                      }
-                    >
-                      <ThreadStateIcon row={row} />
-                      <span>
-                        <strong
-                          title={
-                            row.thread.title ||
-                            row.thread.excerpt?.first_input ||
-                            "Untitled conversation"
-                          }
-                        >
-                          {row.thread.title ||
-                            row.thread.excerpt?.first_input ||
-                            "Untitled conversation"}
-                        </strong>
-                        {threadState(row) && <small>{threadState(row)}</small>}
-                      </span>
-                    </NavLink>
-                    <ParticipantAvatars
-                      participants={threadParticipants(
-                        presence,
-                        row.thread.thread_id,
-                      )}
-                      ownId={presence?.participant_id}
-                      threadTitle={
-                        row.thread.title ||
-                        row.thread.excerpt?.first_input ||
-                        "Untitled conversation"
-                      }
-                    />
-                    <Menu>
-                      <MenuTrigger
-                        render={<Button variant="ghost" size="icon-sm" />}
-                        className={styles.threadActions}
-                        aria-label={`Actions for ${row.thread.title || "Untitled conversation"}`}
-                      >
-                        <DotsThree />
-                      </MenuTrigger>
-                      <MenuPopup align="start" side="right">
-                        {(
-                          [
-                            ["rename", "Rename conversation", PencilSimple],
-                            ["share", "Share conversation", ShareNetwork],
-                            ["comments", "Comments", ChatCircle],
-                            [
-                              "details",
-                              "Conversation details",
-                              SlidersHorizontal,
-                            ],
-                          ] as const
-                        ).map(([action, label, Icon]) => (
-                          <MenuItem
-                            key={action}
-                            onClick={() =>
-                              navigate(
-                                `/threads/${encodeURIComponent(row.thread.thread_id)}?dialog=${action}`,
-                              )
-                            }
-                          >
-                            <Icon />
-                            {label}
-                          </MenuItem>
-                        ))}
-                      </MenuPopup>
-                    </Menu>
-                  </div>
-                ))}
-                {!group.rows.length && !query && list.isSuccess && (
-                  <small className={styles.emptyGroup}>
-                    No conversations yet
-                  </small>
-                )}
-              </CollapsiblePanel>
-            </Collapsible>
+              toggle={(open) => setExpanded(group.id, open)}
+              hidden={
+                !!scopedProject && scopedProject.project_id !== group.projectId
+              }
+              enabled={
+                !searching &&
+                (!scopedProject || scopedProject.project_id === group.projectId)
+              }
+              archived={archived}
+              presence={presence}
+              selected={activeGroup === group.id ? selected : undefined}
+              create={() => setCreating(group.projectId ?? null)}
+              order={order}
+            />
           ))}
-        {list.hasNextPage && (
-          <Button
-            variant="ghost"
-            loading={list.isFetchingNextPage}
-            onClick={() => void list.fetchNextPage()}
-          >
-            Load more conversations
-          </Button>
+        </div>
+        {searching && (
+          <SearchResults
+            query={query.trim()}
+            project={scopedProject}
+            archived={archived}
+            presence={presence}
+          />
         )}
-        {list.isPending && (
-          <div
-            role="status"
-            aria-label="Loading conversations"
-            aria-busy="true"
-            className={styles.threadSkeletons}
-          >
-            {[0, 1, 2, 3].map((item) => (
-              <Skeleton key={item} className="h-8 w-full" />
-            ))}
-          </div>
-        )}
-        {list.isSuccess && !rows.length && query && (
-          <p>No matching conversations.</p>
-        )}
-        <ErrorNotice error={list.error} retry={() => void list.refetch()} />
       </div>
+      <span className={styles.srOnly} role="status">
+        {order.announcement}
+      </span>
       <label className={styles.archiveFilter}>
         <Checkbox checked={archived} onCheckedChange={setArchived} />
         Include archived
       </label>
+      {adding && (
+        <NewProject
+          close={() => setAdding(false)}
+          created={(id) => setExpanded(id, true)}
+        />
+      )}
       {creating !== undefined && (
         <NewConversation
           projectId={creating}
@@ -294,165 +204,220 @@ export function ConversationNavigation({
   );
 }
 
-function threadState(row: Schema<"ThreadActivityView">) {
-  if (row.pending_decision) return "Needs your answer";
-  if (row.thread.root_activity.state === "preparing") return "Preparing";
-  if (row.thread.root_activity.state === "running") return "Running";
-  if (row.latest_operation?.status === "failed") return "Failed";
-  if (row.thread.archived) return "Archived";
-  return "";
-}
-
-function ThreadStateIcon({ row }: { row: Schema<"ThreadActivityView"> }) {
-  if (row.pending_decision)
-    return <Question className={styles.threadWaiting} aria-hidden="true" />;
-  if (row.thread.root_activity.state !== "inactive")
-    return <CircleNotch className={styles.threadRunning} aria-hidden="true" />;
-  if (row.latest_operation?.status === "failed")
-    return <WarningCircle className={styles.threadFailed} aria-hidden="true" />;
-  return row.thread.archived ? (
-    <Archive aria-hidden="true" />
-  ) : (
-    <ChatCircle aria-hidden="true" />
+function ProjectGroup({
+  group,
+  expanded,
+  toggle,
+  enabled,
+  hidden,
+  archived,
+  presence,
+  selected,
+  create,
+  order,
+}: {
+  group: Group;
+  expanded: boolean;
+  toggle: (open: boolean) => void;
+  enabled: boolean;
+  hidden: boolean;
+  archived: boolean;
+  presence: Presence;
+  selected?: Schema<"ThreadSummary">;
+  create: () => void;
+  order: ReturnType<typeof useProjectOrder>;
+}) {
+  const navigate = useNavigate();
+  const list = useThreads("", group.projectId, archived, {
+    scope: group.scope,
+    enabled: enabled && expanded,
+    limit: 5,
+  });
+  const rows = [
+    ...new Map(
+      (list.data?.pages.flatMap((page) => page.rows) ?? []).map((row) => [
+        row.thread.thread_id,
+        row,
+      ]),
+    ).values(),
+  ];
+  const pinned =
+    selected && !rows.some((row) => row.thread.thread_id === selected.thread_id)
+      ? selected
+      : undefined;
+  return (
+    <section
+      hidden={hidden}
+      data-project-key={group.projectId}
+      aria-label={group.name}
+      className={order.moving === group.id ? styles.movingProject : undefined}
+    >
+      <div className={styles.groupHeading}>
+        {group.projectId && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className={styles.projectDrag}
+            aria-label={`Reorder ${group.name}`}
+            aria-pressed={order.moving === group.id}
+            title="Drag to reorder, or press Space and use arrow keys"
+            {...order.handle(group.id)}
+          >
+            <DotsSixVertical />
+          </Button>
+        )}
+        <button
+          className={styles.groupToggle}
+          aria-expanded={expanded}
+          onClick={() => toggle(!expanded)}
+        >
+          <CaretRight
+            className={expanded ? styles.expandedChevron : undefined}
+          />
+          <Folder />
+          <span>{group.name}</span>
+        </button>
+        <div className={styles.groupActions}>
+          {group.scope !== "unavailable" && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`New conversation in ${group.name}`}
+              onClick={create}
+            >
+              <Plus />
+            </Button>
+          )}
+          {group.projectId && (
+            <Menu>
+              <MenuTrigger
+                render={<Button variant="ghost" size="icon-sm" />}
+                aria-label={`Actions for ${group.name}`}
+              >
+                <DotsThree />
+              </MenuTrigger>
+              <MenuPopup align="start" side="right">
+                <MenuItem
+                  onClick={() =>
+                    navigate(
+                      `/projects/${encodeURIComponent(group.projectId!)}`,
+                    )
+                  }
+                >
+                  <Gear />
+                  Project settings
+                </MenuItem>
+                <MenuItem
+                  disabled={order.ids.indexOf(group.id) === 0}
+                  onClick={() => order.moveBy(group.id, -1)}
+                >
+                  <ArrowUp />
+                  Move project up
+                </MenuItem>
+                <MenuItem
+                  disabled={
+                    order.ids.indexOf(group.id) === order.ids.length - 1
+                  }
+                  onClick={() => order.moveBy(group.id, 1)}
+                >
+                  <ArrowDown />
+                  Move project down
+                </MenuItem>
+                <MenuItem onClick={order.reset}>
+                  Reset project order in this browser
+                </MenuItem>
+              </MenuPopup>
+            </Menu>
+          )}
+        </div>
+      </div>
+      <div hidden={!expanded} className={styles.groupThreads}>
+        {pinned && (
+          <div className={styles.pinnedThread}>
+            <small className={styles.emptyGroup}>
+              Selected conversation · outside this page
+            </small>
+            <ThreadRow row={{ thread: pinned }} presence={presence} />
+          </div>
+        )}
+        {rows.map((row) => (
+          <ThreadRow key={row.thread.thread_id} row={row} presence={presence} />
+        ))}
+        {expanded && list.isPending && (
+          <div
+            role="status"
+            aria-label="Loading conversations"
+            aria-busy="true"
+            className={styles.threadSkeletons}
+          >
+            {[0, 1, 2].map((item) => (
+              <Skeleton key={item} className="h-8 w-full" />
+            ))}
+          </div>
+        )}
+        {list.isSuccess && !rows.length && (
+          <small className={styles.emptyGroup}>No conversations yet</small>
+        )}
+        <ErrorNotice error={list.error} retry={() => void list.refetch()} />
+        {list.hasNextPage && (
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={list.isFetchingNextPage}
+            onClick={() => void list.fetchNextPage()}
+            aria-label={`Show more conversations in ${group.name}`}
+          >
+            Show more
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
 
-export function NewConversation({
-  projectId,
-  close,
+function SearchResults({
+  query,
+  project,
+  archived,
+  presence,
 }: {
-  projectId: string | null;
-  close: () => void;
+  query: string;
+  project?: { project_id: string; name: string };
+  archived: boolean;
+  presence: Presence;
 }) {
-  const transport = useTransport();
-  const selectors = useSelectors();
-  const projects = useProjects();
-  const navigate = useNavigate();
-  const [project, setProject] = useState(projectId ?? "");
-  const [title, setTitle] = useState("");
-  const [agent, setAgent] = useState("");
-  const [environment, setEnvironment] = useState("");
-  const defaults: Schema<"NewThreadDefaults"> = {
-    project_id: project || null,
-    ...(agent ? { agent_id: agent } : {}),
-    ...(environment ? { environment_profile_id: environment } : {}),
-  };
-  const preview = useQuery({
-    queryKey: ["new-thread-preview", defaults],
-    queryFn: ({ signal }) =>
-      result(
-        transport.client.POST("/api/threads/configuration-preview", {
-          body: defaults,
-          signal,
-        }),
-      ),
-  });
-  const create = useMutation({
-    mutationFn: () =>
-      result(
-        transport.client.POST("/api/threads", {
-          body: { title: title || null, defaults },
-        }),
-      ),
-    onSuccess: (thread) => {
-      close();
-      navigate(`/threads/${encodeURIComponent(thread.thread_id)}`);
-    },
-  });
+  const list = useThreads(query, project?.project_id, archived);
+  const rows = [
+    ...new Map(
+      (list.data?.pages.flatMap((page) => page.rows) ?? []).map((row) => [
+        row.thread.thread_id,
+        row,
+      ]),
+    ).values(),
+  ];
   return (
-    <ModalFrame
-      open
-      onOpenChange={(open) => {
-        if (!open && !create.isPending) close();
-      }}
-      title="New conversation"
-      description="Choose where to work. These selections are captured for the new conversation; creating it does not start a model."
-      closeLabel="Close"
-    >
-      <form
-        className={styles.form}
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (
-            preview.data &&
-            !preview.isFetching &&
-            !preview.error &&
-            !create.isPending
-          )
-            create.mutate();
-        }}
-      >
-        <TextField
-          label="Title (optional)"
-          value={title}
-          onChange={(value) => setTitle(value.slice(0, 200))}
-        />
-        <ResourceChoice
-          label="Project"
-          value={project}
-          onValueChange={setProject}
-          options={[
-            { value: "", label: "Without a project" },
-            ...(projects.data ?? []).map((item) => ({
-              value: item.project_id,
-              label: item.name,
-            })),
-          ]}
-        />
-        <ResourceChoice
-          label="Agent"
-          value={agent}
-          onValueChange={setAgent}
-          options={[
-            { value: "", label: "Use creation default" },
-            ...(selectors.data?.agents ?? []).map((item) => ({
-              value: item.agent_id,
-              label: item.name,
-            })),
-          ]}
-        />
-        <ResourceChoice
-          label="Environment"
-          value={environment}
-          onValueChange={setEnvironment}
-          options={[
-            { value: "", label: "Use creation default" },
-            ...(selectors.data?.environments ?? []).map((item) => ({
-              value: item.profile_id,
-              label: item.name,
-            })),
-          ]}
-        />
-        {preview.data && (
-          <div className={styles.summary}>
-            <p>
-              Agent:{" "}
-              {selectors.data?.agents.find(
-                (item) =>
-                  item.agent_id === preview.data.configuration.agent_source.id,
-              )?.name || preview.data.configuration.agent_source.id}{" "}
-              · {preview.data.provenance.agent_source}
-            </p>
-            <p>
-              Environment: {preview.data.configuration.environment_profile_id} ·{" "}
-              {preview.data.provenance.environment_profile_id}
-            </p>
-          </div>
-        )}
-        <ErrorNotice error={preview.error || create.error || selectors.error} />
-        {preview.error && (
-          <Link to="/setup" onClick={close}>
-            Open setup and readiness
-          </Link>
-        )}
+    <section aria-label="Conversation search results">
+      <small className={styles.emptyGroup}>
+        {project ? `Results from ${project.name}` : "Results from all projects"}
+      </small>
+      {rows.map((row) => (
+        <div key={row.thread.thread_id}>
+          <small className={styles.emptyGroup}>{row.project_name}</small>
+          <ThreadRow row={row} presence={presence} />
+        </div>
+      ))}
+      {list.isPending && <p role="status">Searching conversations…</p>}
+      {list.isSuccess && !rows.length && <p>No matching conversations.</p>}
+      <ErrorNotice error={list.error} retry={() => void list.refetch()} />
+      {list.hasNextPage && (
         <Button
-          type="submit"
-          loading={create.isPending}
-          disabled={!preview.data || preview.isFetching || !!preview.error}
+          variant="ghost"
+          loading={list.isFetchingNextPage}
+          onClick={() => void list.fetchNextPage()}
         >
-          Create conversation
+          Show more results
         </Button>
-      </form>
-    </ModalFrame>
+      )}
+    </section>
   );
 }

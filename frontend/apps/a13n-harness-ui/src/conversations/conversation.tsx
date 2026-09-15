@@ -20,7 +20,7 @@ import { Decisions } from "./decisions";
 import { ConversationDetails } from "./details";
 import { WorkInspector } from "./work-inspector";
 import { Discussion } from "./comments";
-import { useHistory, useThread } from "./queries";
+import { refreshThreadLists, useHistory, useThread } from "./queries";
 import { FocusDisplay, showFocusedOutput, watchThread } from "./stream";
 import { LiveOutput, SavedEntry } from "./transcript";
 import { savedToolGroups } from "./tool-presentation";
@@ -84,7 +84,7 @@ function Conversation({
   const [newOutput, setNewOutput] = useState(false);
   const reconcile = useCallback(() => {
     void queries.invalidateQueries({ queryKey: ["thread", threadId] });
-    void queries.invalidateQueries({ queryKey: ["threads"] });
+    void refreshThreadLists(queries);
     void queries.invalidateQueries({ queryKey: ["child-saved-output"] });
   }, [queries, threadId]);
   useEffect(() => {

@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "react-router";
 import { useSources, useTransport } from "../transport/context";
 import { watchSummary } from "../transport/events";
+import { refreshThreadLists } from "../conversations/queries";
 import type { Schema } from "../transport/client";
 
 export type Profile = { display_name: string; color: string };
@@ -101,12 +102,16 @@ export function useLiveWorkbench(
                 ? ["comments", event.root_thread_id]
                 : ["comments"],
             });
-          else
+          else {
+            void refreshThreadLists(queries);
             void queries.invalidateQueries({
               // Native observations refresh on return/actions/reconnect, not each
               // unrelated conversation event. They are not a filesystem watcher.
-              predicate: (query) => !event || query.queryKey[0] !== "native",
+              predicate: (query) =>
+                query.queryKey[0] !== "threads" &&
+                (!event || query.queryKey[0] !== "native"),
             });
+          }
         },
         setSummary,
       ),
