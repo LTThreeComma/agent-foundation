@@ -12,7 +12,7 @@ The command assigns this checkout a stable local identity and loopback ports, pr
 
 Use `make dev-stop` to drain the background applications. Use `make dev-foreground` when attached logs and Ctrl+C ownership are preferable; press Ctrl+C once to drain all application process groups and again to force-stop them if shutdown stalls. Infrastructure and data remain available for the next start.
 
-Use `make service-dev` to run Service without Console in the foreground. Use `make setup` to prepare dependencies, infrastructure, and schema without starting an application listener. Successful preparation is fingerprinted in `var/dev/preparation.json`; unchanged Python, frontend, and TypeScript SDK inputs with their required outputs skip the corresponding work. Phase timings are printed on every setup.
+Use `make service-dev` to run Service without Console in the foreground. Use `make setup` to prepare dependencies, infrastructure, and schema without starting an application listener. Successful preparation is fingerprinted in `var/dev/preparation.json`; unchanged Python and frontend dependency inputs with their required outputs skip the corresponding work. Console compiles its own internal Service client; preparation neither installs nor builds an external SDK. Phase timings are printed on every setup.
 
 Do not assume ports. Discover the current checkout without changing it:
 
