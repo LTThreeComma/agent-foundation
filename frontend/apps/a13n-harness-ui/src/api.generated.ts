@@ -1019,6 +1019,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/threads/{thread_id}/touch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Touch Thread */
+        post: operations["touch_thread_api_threads__thread_id__touch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/threads/{thread_id}/metadata": {
         parameters: {
             query?: never;
@@ -3579,6 +3596,11 @@ export interface components {
             project_id?: string | null;
             /** Rows */
             rows: components["schemas"]["ThreadActivityView"][];
+            /**
+             * Active Rows
+             * @default []
+             */
+            active_rows?: components["schemas"]["ThreadActivityView"][];
             /** Total */
             total: number;
             /** Next Cursor */
@@ -3785,6 +3807,8 @@ export interface components {
             excerpt?: components["schemas"]["ConversationExcerpt"];
             /** Activity At */
             activity_at?: string | null;
+            /** Touched At */
+            touched_at?: string | null;
             /** Archived */
             archived: boolean;
             configuration: components["schemas"]["ThreadConfigurationView"];
@@ -6452,6 +6476,7 @@ export interface operations {
                 query?: string | null;
                 include_archived?: boolean;
                 archived_only?: boolean;
+                include_active?: boolean;
                 cursor?: string | null;
                 limit?: number;
             };
@@ -6692,7 +6717,7 @@ export interface operations {
                 query?: string | null;
                 project_id?: string | null;
                 include_archived?: boolean;
-                sort?: "updated" | "activity";
+                sort?: "updated" | "activity" | "touched";
                 cursor?: string | null;
                 limit?: number;
             };
@@ -6799,6 +6824,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TranscriptPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    touch_thread_api_threads__thread_id__touch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                thread_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadSummary"];
                 };
             };
             /** @description Validation Error */
