@@ -1,5 +1,6 @@
 import {
   Button,
+  ChoiceField,
   DisclosureSection,
   FormField,
   ReadOnlyField,
@@ -9,7 +10,13 @@ import {
 import { SearchPicker } from "a13n-ui";
 
 import { ApiError } from "@converge.ai/a13n";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router";
 import { EditorSection } from "./section";
 
@@ -23,7 +30,13 @@ import { useTranslation } from "react-i18next";
 import { ErrorNotice, ErrorToast } from "../../shared/feedback";
 import { TextAreaField } from "../../shared/form";
 import { ResourceReference } from "../../shared/resource-reference";
+import {
+  encodeThinking,
+  effortLabel,
+  withThinking,
+} from "../../shared/thinking";
 import { jsonObject } from "../../shared/validation";
+import sharedStyles from "../../shared/shared.module.css";
 import styles from "./agents.module.css";
 import { AgentSearchSelection } from "../web/selection";
 import { AgentMemorySelection } from "../memory/selection";
@@ -34,6 +47,7 @@ import { useAgentChoices } from "./choices";
 import {
   advancedConfig,
   buildConfig,
+  modelCharacteristics,
   searchSelection,
   type AgentConfig,
   withSearchSelection,
@@ -97,6 +111,9 @@ export function AgentForm({
     [settings, setSettings] = useState(
       JSON.stringify(initial.model.settings ?? {}, null, 2),
     ),
+    [contextWindow, setContextWindow] = useState(
+      initial.model.characteristics?.context_window_tokens?.toString() ?? "",
+    ),
     [advanced, setAdvanced] = useState(advancedConfig(initial)),
     [expanded, setExpanded] = useState(false),
     [modelExpanded, setModelExpanded] = useState(false),
@@ -107,6 +124,35 @@ export function AgentForm({
   const [skills, setSkills] = useState(initial.skills ?? []),
     [connections, setConnections] = useState(initial.connection_tools ?? []);
   const choices = useAgentChoices();
+  const selectedModel = choices.data?.models.find((item) => item.key === model);
+  const parsedSettings = useMemo(() => {
+    try {
+      return jsonObject(settings);
+    } catch {
+      return undefined;
+    }
+  }, [settings]);
+  const reasoning = encodeThinking(parsedSettings?.thinking);
+  const declaredEfforts = selectedModel?.declarations?.thinking_efforts ?? [];
+  const inheritedThinking = selectedModel?.settings?.thinking;
+  const reasoningOptions = [
+    { value: "unset", label: t("Inherit model default") },
+    { value: "off", label: t("Off") },
+    ...declaredEfforts.map((effort) => ({
+      value: effort as string,
+      label: effortLabel(t, effort),
+    })),
+    ...(reasoning === "on" ? [{ value: "on", label: t("On") }] : []),
+    ...(!["unset", "off", "on", ...declaredEfforts].includes(reasoning)
+      ? [
+          {
+            value: reasoning,
+            label: `${effortLabel(t, reasoning)} (${t("not offered by the model")})`,
+          },
+        ]
+      : []),
+  ];
+  const modelWindow = selectedModel?.declarations?.context_window_tokens;
   useEffect(() => {
     if (error instanceof ApiError && [400, 422].includes(error.status)) {
       setExpanded(true);
@@ -127,6 +173,10 @@ export function AgentForm({
             ...initial.model,
             model_key: model,
             settings: jsonObject(settings),
+            characteristics: modelCharacteristics(
+              initial.model.characteristics,
+              contextWindow,
+            ),
           },
           skills,
           connection_tools: connections,
@@ -152,6 +202,9 @@ export function AgentForm({
     instructions !== (initial.instructions ?? "") ||
     model !== initial.model.model_key ||
     settings !== JSON.stringify(initial.model.settings ?? {}, null, 2) ||
+    contextWindow !==
+      (initial.model.characteristics?.context_window_tokens?.toString() ??
+        "") ||
     advanced !== advancedConfig(initial) ||
     JSON.stringify(skills) !== JSON.stringify(initial.skills ?? []) ||
     JSON.stringify(connections) !==
@@ -304,6 +357,63 @@ export function AgentForm({
                 open={modelExpanded}
                 onOpenChange={setModelExpanded}
               >
+                <div className={sharedStyles.twoColumns}>
+                  <ChoiceField
+                    readOnly={readonly}
+                    disabled={!readonly && !parsedSettings}
+                    label={t("Reasoning")}
+                    description={
+                      readonly
+                        ? undefined
+                        : inheritedThinking === undefined
+                          ? t("The model does not set a default.")
+                          : t("Model default: {{effort}}", {
+                              effort:
+                                inheritedThinking === false
+                                  ? t("Off")
+                                  : inheritedThinking === true
+                                    ? t("On")
+                                    : effortLabel(t, String(inheritedThinking)),
+                            })
+                    }
+                    value={reasoning}
+                    onValueChange={(value) =>
+                      setSettings(
+                        JSON.stringify(
+                          withThinking(parsedSettings ?? {}, value),
+                          null,
+                          2,
+                        ),
+                      )
+                    }
+                    options={reasoningOptions}
+                  />
+                  <FormField
+                    readOnly={readonly}
+                    label={t("Context window")}
+                    description={
+                      readonly
+                        ? undefined
+                        : modelWindow
+                          ? t(
+                              "Blank inherits {{count}} tokens from the model.",
+                              {
+                                count: modelWindow.toLocaleString(),
+                              },
+                            )
+                          : t("Blank inherits the model's context window.")
+                    }
+                  >
+                    <Input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={contextWindow}
+                      placeholder={t("Inherit")}
+                      onChange={(event) => setContextWindow(event.target.value)}
+                    />
+                  </FormField>
+                </div>
                 <TextAreaField
                   readOnly={readonly}
                   label={t("Model settings")}

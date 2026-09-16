@@ -56,7 +56,7 @@ export function ModelEditor({
           />
         ) : undefined
       }
-      size={"lg"}
+      size={"xl"}
       title={t(modelId ? "Edit model" : "Add model")}
       description={
         modelId

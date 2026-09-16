@@ -7,7 +7,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
   ChoiceField,
-  DisclosureSection,
   FormField,
   Input,
   ReadOnlyField,
@@ -17,7 +16,7 @@ import {
   TabsList,
   TabsTab,
 } from "a13n-ui";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { allPages, data, type Schema } from "../../shared/api";
@@ -26,10 +25,39 @@ import { FormActions } from "../../shared/form";
 import styles from "../../shared/shared.module.css";
 import { jsonObject, validateSettings } from "../../shared/validation";
 import { modelApi, type ModelScope } from "./api";
+import { DeclarationsFields, emptyDeclarations } from "./declarations";
+import {
+  encodeThinking,
+  effortLabel,
+  THINKING_EFFORTS,
+  withThinking,
+} from "../../shared/thinking";
 import { ModelIcon } from "./model-icon";
 import { ModelParameters } from "./model-parameters";
 import { ProviderSetup } from "./provider-setup";
 import modelStyles from "./models.module.css";
+
+const CUSTOM_BASE_MODEL = "__custom__";
+
+function FormSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={modelStyles.formSection}>
+      <header className={modelStyles.formSectionHeader}>
+        <strong>{title}</strong>
+        {description && <span>{description}</span>}
+      </header>
+      <div className={modelStyles.formSectionBody}>{children}</div>
+    </section>
+  );
+}
 
 export function ModelForm({
   scope,
@@ -89,6 +117,14 @@ export function ModelForm({
     [parameterError, setParameterError] = useState<string>(),
     [manual, setManual] = useState(!!original || !!candidate),
     [settledUpstream, setSettledUpstream] = useState(upstream);
+  const [baseModel, setBaseModel] = useState<string | null | undefined>(
+      original ? (original.value.base_model ?? null) : undefined,
+    ),
+    [baseModelManual, setBaseModelManual] = useState(!!original),
+    [declarations, setDeclarations] = useState<Schema["ModelDeclarations"]>(
+      () => original?.value.declarations ?? emptyDeclarations(),
+    ),
+    [declarationsTouched, setDeclarationsTouched] = useState(!!original);
   const providers = useQuery({
     queryKey: ["model-provider-choices", scope.kind, scope.id],
     queryFn: ({ signal }) =>
@@ -118,6 +154,15 @@ export function ModelForm({
     const timer = setTimeout(() => setSettledUpstream(upstream.trim()), 400);
     return () => clearTimeout(timer);
   }, [upstream]);
+  const baseModels = useQuery({
+    queryKey: ["base-models"],
+    queryFn: ({ signal }) =>
+      client.http.GET("/api/v1/base-models", { signal }).then(data),
+  });
+  const identityChanged =
+    !!original &&
+    (settledUpstream !== original.value.upstream_model ||
+      callingApi !== original.value.model_api);
   const suggestions = useQuery({
     queryKey: [
       "model-catalog-suggestions",
@@ -126,27 +171,49 @@ export function ModelForm({
       provider,
       settledUpstream,
       callingApi,
+      !original && baseModelManual ? (baseModel ?? "none") : "auto",
     ],
     queryFn: () =>
       api.suggestions({
         provider_id: provider,
         upstream_model: settledUpstream,
         model_api: callingApi || undefined,
+        ...(!original && baseModelManual
+          ? { base_model: baseModel ?? null }
+          : {}),
       }),
     enabled:
-      !original &&
       !!provider &&
       !!settledUpstream &&
       !!callingApi &&
-      settledUpstream === upstream.trim(),
+      settledUpstream === upstream.trim() &&
+      (!original || identityChanged),
     retry: false,
   });
   const currentSuggestions =
     settledUpstream === upstream.trim() ? suggestions.data?.items : undefined;
-  const suggestion =
-    currentSuggestions?.length === 1 ? currentSuggestions[0] : undefined;
-  const callingApiLabel =
-    definition?.model_api_labels[callingApi] ?? callingApi;
+  // A resolved match proposes the base reference and declaration defaults;
+  // anything the user already chose or edited is never overwritten.
+  useEffect(() => {
+    if (original || !suggestions.data?.items?.length) return;
+    const items = suggestions.data.items;
+    const pick =
+      items.length === 1
+        ? items[0]
+        : items.find((item) => item.base_model === baseModel);
+    if (!pick) return;
+    if (!baseModelManual) setBaseModel(pick.base_model);
+    if (!declarationsTouched)
+      setDeclarations({ ...emptyDeclarations(), ...pick.declarations });
+    if (!apiEdited && pick.model_api) setModelApiKey(pick.model_api);
+  }, [
+    suggestions.data,
+    original,
+    baseModel,
+    baseModelManual,
+    declarationsTouched,
+    apiEdited,
+  ]);
   function chooseUpstream(
     value: string,
     suggestion?: Schema["ModelCandidate"],
@@ -168,11 +235,25 @@ export function ModelForm({
       setUpstream("");
       setSettledUpstream("");
       setSettingsText("{}");
+      setBaseModel(undefined);
+      setBaseModelManual(false);
+      setDeclarations(emptyDeclarations());
+      setDeclarationsTouched(false);
       if (!nameEdited) setName("");
       if (!keyEdited) setKey("");
       setManual(false);
     }
     setChoosingProvider(false);
+  }
+  function chooseBaseModel(value: string) {
+    setBaseModelManual(true);
+    setBaseModel(value === CUSTOM_BASE_MODEL ? null : value);
+    const match = currentSuggestions?.find((item) => item.base_model === value);
+    if (match) {
+      if (!apiEdited && match.model_api) setModelApiKey(match.model_api);
+      if (!declarationsTouched)
+        setDeclarations({ ...emptyDeclarations(), ...match.declarations });
+    }
   }
   const save = useMutation({
     mutationFn: async () => {
@@ -195,17 +276,10 @@ export function ModelForm({
         settings,
         description: description || null,
         enabled,
-        ...(original
-          ? {
-              base_model: original.value.base_model,
-              declarations: original.value.declarations,
-            }
-          : suggestion
-            ? {
-                base_model: suggestion.base_model,
-                declarations: suggestion.declarations,
-              }
-            : {}),
+        declarations,
+        ...(original || baseModel !== undefined
+          ? { base_model: baseModel ?? null }
+          : {}),
       };
       if (!original)
         return api.createModel({ ...body, key, provider_id: provider });
@@ -228,7 +302,89 @@ export function ModelForm({
       name !== original.value.name ||
       description !== (original.value.description ?? "") ||
       enabled !== original.value.enabled ||
-      settingsText !== JSON.stringify(original.value.settings, null, 2));
+      settingsText !== JSON.stringify(original.value.settings, null, 2) ||
+      (baseModel ?? null) !== (original.value.base_model ?? null) ||
+      JSON.stringify(declarations) !==
+        JSON.stringify({
+          ...emptyDeclarations(),
+          ...original.value.declarations,
+        }));
+  const parsedSettings = useMemo(() => {
+    try {
+      return jsonObject(settingsText);
+    } catch {
+      return undefined;
+    }
+  }, [settingsText]);
+  const reasoning = encodeThinking(parsedSettings?.thinking);
+  const reasoningOptions = [
+    { value: "unset", label: t("Provider default") },
+    { value: "off", label: t("Off") },
+    ...THINKING_EFFORTS.map((effort) => ({
+      value: effort as string,
+      label: effortLabel(t, effort),
+    })),
+    ...(reasoning === "on" ? [{ value: "on", label: t("On") }] : []),
+    ...(!["unset", "off", "on", ...THINKING_EFFORTS].includes(reasoning)
+      ? [{ value: reasoning, label: reasoning }]
+      : []),
+  ];
+  const suggestedBaseModels = (currentSuggestions ?? []).filter(
+    (item, index, items) =>
+      items.findIndex((other) => other.base_model === item.base_model) ===
+      index,
+  );
+  const knownBaseModels = baseModels.data?.items ?? [];
+  const baseModelGroups = [
+    ...(suggestedBaseModels.length
+      ? [
+          {
+            label: t("Suggested"),
+            options: suggestedBaseModels.map((item) => ({
+              value: item.base_model,
+              label: item.base_model,
+              description: item.model_api_label ?? undefined,
+            })),
+          },
+        ]
+      : []),
+    {
+      label: t("All base models"),
+      options: [
+        { value: CUSTOM_BASE_MODEL, label: t("Custom (no reference)") },
+        ...knownBaseModels.map((item) => ({
+          value: item.base_model,
+          label: item.base_model,
+          description: item.model_api_label ?? undefined,
+        })),
+        ...(baseModel &&
+        !knownBaseModels.some((item) => item.base_model === baseModel) &&
+        !suggestedBaseModels.some((item) => item.base_model === baseModel)
+          ? [{ value: baseModel, label: baseModel }]
+          : []),
+      ],
+    },
+  ];
+  const freshSuggestion =
+    original && identityChanged && currentSuggestions?.length === 1
+      ? currentSuggestions[0]
+      : undefined;
+  const applySuggestion =
+    freshSuggestion &&
+    (freshSuggestion.base_model !== (baseModel ?? null) ||
+      JSON.stringify({
+        ...emptyDeclarations(),
+        ...freshSuggestion.declarations,
+      }) !== JSON.stringify(declarations))
+      ? () => {
+          setBaseModel(freshSuggestion.base_model);
+          setDeclarations({
+            ...emptyDeclarations(),
+            ...freshSuggestion.declarations,
+          });
+          setDeclarationsTouched(true);
+        }
+      : undefined;
   if (choosingProvider)
     return (
       <ProviderSetup
@@ -496,29 +652,112 @@ export function ModelForm({
               </label>
             </div>
           </div>
-          {identityFields}
         </>
       )}
       {original ? (
-        <DisclosureSection title={t("Connection")} summary={callingApiLabel}>
-          {connectionFields}
-        </DisclosureSection>
+        <>
+          <FormSection
+            title={t("General")}
+            description={t("How this model appears to agents.")}
+          >
+            {identityFields}
+          </FormSection>
+          <FormSection
+            title={t("Connection")}
+            description={t("Provider, upstream model, and API.")}
+          >
+            {connectionFields}
+          </FormSection>
+        </>
       ) : (
-        connectionFields
+        <>
+          <FormSection
+            title={t("Connection")}
+            description={t("Provider, upstream model, and API.")}
+          >
+            {connectionFields}
+          </FormSection>
+          <FormSection
+            title={t("General")}
+            description={t("How this model appears to agents.")}
+          >
+            {identityFields}
+          </FormSection>
+        </>
       )}
-      {!original && identityFields}
 
-      <section className={modelStyles.defaultsFields}>
-        <ModelParameters
-          text={settingsText}
-          onChange={(next) => {
-            setSettingsText(next);
-            setParameterError(undefined);
-          }}
-          error={parameterError}
-          schema={definition?.settings_schemas[callingApi]}
+      <FormSection
+        title={t("Model defaults")}
+        description={t("Capabilities and reasoning agents inherit.")}
+      >
+        <FormField
+          label={t("Base model")}
+          description={t(
+            "Known model used for defaults and capabilities. The upstream name is still sent to the provider.",
+          )}
+        >
+          <SearchPicker
+            label={t("Base model")}
+            placeholder={t("Match automatically")}
+            emptyMessage={t("No matching base models")}
+            value={baseModel === null ? CUSTOM_BASE_MODEL : baseModel}
+            onValueChange={chooseBaseModel}
+            groups={baseModelGroups}
+          />
+        </FormField>
+        <ChoiceField
+          label={t("Default reasoning")}
+          description={t(
+            "Applied to runs unless an agent or run overrides it.",
+          )}
+          disabled={!parsedSettings}
+          value={reasoning}
+          onValueChange={(value) =>
+            setSettingsText(
+              JSON.stringify(
+                withThinking(parsedSettings ?? {}, value),
+                null,
+                2,
+              ),
+            )
+          }
+          options={reasoningOptions}
         />
-      </section>
+        <DeclarationsFields
+          value={declarations}
+          onChange={(next) => {
+            setDeclarations(next);
+            setDeclarationsTouched(true);
+          }}
+          action={
+            applySuggestion && (
+              <p className={modelStyles.suggestionNote}>
+                <span>
+                  {t("Catalog defaults are available for this identity.")}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={applySuggestion}
+                >
+                  {t("Apply")}
+                </Button>
+              </p>
+            )
+          }
+        />
+      </FormSection>
+
+      <ModelParameters
+        text={settingsText}
+        onChange={(next) => {
+          setSettingsText(next);
+          setParameterError(undefined);
+        }}
+        error={parameterError}
+        schema={definition?.settings_schemas[callingApi]}
+      />
       <ErrorNotice
         error={parameterError ? undefined : save.error}
         retry={original ? () => void reload() : undefined}

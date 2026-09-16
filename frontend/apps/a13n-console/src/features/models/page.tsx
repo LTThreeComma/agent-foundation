@@ -30,6 +30,7 @@ import {
 } from "../../shared/feedback";
 import styles from "../../shared/shared.module.css";
 import { modelApi, type ModelScope } from "./api";
+import { CapabilityIcons } from "./declarations";
 import { ModelEditor } from "./model-editor";
 import modelStyles from "./models.module.css";
 
@@ -295,6 +296,15 @@ export function Models({ scope }: { scope: ModelScope }) {
                       </span>
                     );
                   },
+                },
+                {
+                  label: t("Capabilities"),
+                  tone: "muted",
+                  render: (item) => (
+                    <CapabilityIcons
+                      capabilities={item.declarations?.capabilities}
+                    />
+                  ),
                 },
                 {
                   label: t("Scope"),

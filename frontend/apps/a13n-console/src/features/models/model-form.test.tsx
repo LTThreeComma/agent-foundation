@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { Schema } from "../../shared/api";
 import { ModelForm } from "./model-form";
 
 const state = vi.hoisted(() => ({
@@ -37,6 +38,12 @@ const settingsSchema = {
       description: "A very long parameter explanation.",
     },
     max_tokens: { type: "integer" },
+    thinking: {
+      anyOf: [
+        { type: "boolean" },
+        { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
+      ],
+    },
     openai_reasoning_effort: { type: "string", enum: ["low", "high"] },
   },
 };
@@ -88,7 +95,22 @@ function mount(
 beforeEach(() => {
   state.GET.mockImplementation(async (path: string) => ({
     data: {
-      items: path.endsWith("model-provider-types") ? [definition] : [provider],
+      items: path.endsWith("model-provider-types")
+        ? [definition]
+        : path.endsWith("base-models")
+          ? [
+              {
+                base_model: "openai:gpt-5",
+                model_api: "openai.responses",
+                model_api_label: "OpenAI Responses",
+              },
+              {
+                base_model: "anthropic:claude-sonnet-4",
+                model_api: "anthropic.messages",
+                model_api_label: "Anthropic Messages",
+              },
+            ]
+          : [provider],
       next_cursor: null,
     },
   }));
@@ -322,6 +344,117 @@ it("prefills a catalog model and preserves JSON overrides when switching APIs", 
     }),
   );
 });
+it("applies catalog defaults and edits declarations plus default reasoning", async () => {
+  const user = userEvent.setup();
+  mount("mp_test");
+  await user.click(await screen.findByRole("combobox", { name: "Model" }));
+  await user.click(await screen.findByRole("option", { name: /Model V1/ }));
+  await waitFor(() =>
+    expect(state.POST).toHaveBeenCalledWith(
+      "/api/v1/workspaces/{workspace}/model-catalog/suggestions",
+      expect.anything(),
+    ),
+  );
+  // The resolved suggestion fills the base-model picker.
+  await waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "Base model" }).textContent,
+    ).toContain("openai:gpt-5"),
+  );
+  // The suggested declarations are shown but stay editable.
+  const image = screen.getByRole("button", { name: "Image" });
+  expect(image.getAttribute("aria-pressed")).toBe("false");
+  await user.click(image);
+  await user.click(screen.getByRole("button", { name: "High" }));
+  await user.click(screen.getByRole("combobox", { name: "Default reasoning" }));
+  await user.click(await screen.findByRole("option", { name: "Medium" }));
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  await waitFor(() => expect(state.close).toHaveBeenCalled());
+  expect(state.POST).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace}/models",
+    expect.objectContaining({
+      body: expect.objectContaining({
+        base_model: "openai:gpt-5",
+        settings: { thinking: "medium" },
+        declarations: expect.objectContaining({
+          thinking_efforts: ["high"],
+          capabilities: ["image_understanding"],
+          structured_output: false,
+        }),
+      }),
+    }),
+  );
+});
+
+it("lets the base model be cleared to a custom reference on save", async () => {
+  const user = userEvent.setup();
+  const model: Schema["Model"] = {
+    id: "mdl_test",
+    key: "team-model",
+    name: "Team model",
+    provider_id: "mp_test",
+    upstream_model: "custom-model",
+    model_api: "openai.chat_completions",
+    base_model: "openai:gpt-5",
+    declarations: {
+      thinking_efforts: ["low", "high"],
+      capabilities: ["image_understanding"],
+      context_window_tokens: 128000,
+      max_output_tokens: 8192,
+      structured_output: true,
+      pricing: null,
+    },
+    settings: { thinking: "low" },
+    enabled: true,
+    description: null,
+    organization_id: "org_test",
+    workspace_id: "ws_test",
+    created_at: "2026-09-12T00:00:00Z",
+    updated_at: "2026-09-12T00:00:00Z",
+    created_by: { principal_id: "usr_test", principal_type: "user" as const },
+    updated_by: { principal_id: "usr_test", principal_type: "user" as const },
+  };
+  state.PATCH.mockResolvedValue({ data: model });
+  mount(undefined, { value: model, etag: '"v1"' });
+  // Saved values are visible without a save.
+  expect(
+    screen.getByRole("combobox", { name: "Default reasoning" }).textContent,
+  ).toContain("Low");
+  expect(
+    screen.getByRole("button", { name: "Image" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    (
+      screen.getByRole("spinbutton", {
+        name: "Context window (tokens)",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe("128000");
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Save changes",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  await user.click(await screen.findByRole("combobox", { name: "Base model" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Custom (no reference)" }),
+  );
+  await user.click(screen.getByRole("combobox", { name: "Default reasoning" }));
+  await user.click(await screen.findByRole("option", { name: "Off" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(state.close).toHaveBeenCalled());
+  expect(state.PATCH.mock.calls[0][1].body).toMatchObject({
+    base_model: null,
+    settings: { thinking: false },
+    declarations: expect.objectContaining({
+      thinking_efforts: ["low", "high"],
+      context_window_tokens: 128000,
+    }),
+  });
+});
+
 it("keeps manual entry available when the catalog fails", async () => {
   const previous = state.POST.getMockImplementation()!;
   state.POST.mockImplementation((path: string, args: unknown) =>
@@ -455,27 +588,13 @@ it("holds status edits until save and restores the unchanged state when reverted
   state.PATCH.mockResolvedValue({ data: { ...model, enabled: false } });
   mount(undefined, { value: model, etag: '"v1"' });
   const save = await screen.findByRole("button", { name: "Save changes" });
-  await user.click(screen.getByRole("button", { name: /^Connection/ }));
   const upstream = await screen.findByRole("textbox", {
     name: "Upstream model",
   });
   await user.clear(upstream);
   await user.type(upstream, "edited-model");
-  await user.click(screen.getByRole("button", { name: /^Connection/ }));
-  await user.click(screen.getByRole("button", { name: /^Connection/ }));
-  expect(
-    (
-      screen.getByRole("textbox", {
-        name: "Upstream model",
-      }) as HTMLInputElement
-    ).value,
-  ).toBe("edited-model");
-  await user.clear(screen.getByRole("textbox", { name: "Upstream model" }));
-  await user.type(
-    screen.getByRole("textbox", { name: "Upstream model" }),
-    "custom-model",
-  );
-  await user.click(screen.getByRole("button", { name: /^Connection/ }));
+  await user.clear(upstream);
+  await user.type(upstream, "custom-model");
   expect((save as HTMLButtonElement).disabled).toBe(true);
   await user.click(
     screen.getByRole("switch", { name: /^(Enabled|Disabled)$/ }),

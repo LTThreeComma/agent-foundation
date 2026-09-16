@@ -16,7 +16,16 @@ vi.mock("./choices", () => ({
     isPending: false,
     data: {
       models: [
-        { key: "research", name: "Research model", upstream_model: "upstream" },
+        {
+          key: "research",
+          name: "Research model",
+          upstream_model: "upstream",
+          settings: { thinking: "high" },
+          declarations: {
+            thinking_efforts: ["low", "high"],
+            context_window_tokens: 128000,
+          },
+        },
       ],
       skills: [{ key: "sources", name: "Source verification" }],
       connections: [
@@ -60,12 +69,15 @@ function editor(
     ReturnType<typeof initialConfig>["connection_tools"]
   > = [],
   memory?: ReturnType<typeof initialConfig>["memory"],
+  model: NonNullable<ReturnType<typeof initialConfig>["model"]> = {
+    model_key: "research",
+  },
 ) {
   const submit = vi.fn();
   const initial = {
     ...initialConfig("Research"),
     memory,
-    model: { model_key: "research" },
+    model,
     instructions: "Check the evidence.",
     connection_tools: connectorTools,
     skills: [{ skill_key: "sources", version: 3 }],
@@ -182,6 +194,69 @@ it("requires saving the instruction draft before trial or agent management", asy
     "",
     7,
   );
+});
+
+it("offers only declared reasoning efforts and writes settings.thinking", async () => {
+  const user = userEvent.setup(),
+    { submit } = editor();
+  await user.click(screen.getByRole("button", { name: /Model settings/ }));
+  const reasoning = await screen.findByRole("combobox", { name: "Reasoning" });
+  expect(reasoning.textContent).toContain("Inherit model default");
+  await user.click(reasoning);
+  const options = await screen.findAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual([
+    "Inherit model default",
+    "Off",
+    "Low",
+    "High",
+  ]);
+  await user.click(screen.getByRole("option", { name: "Low" }));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(submit.mock.calls[0][0].model.settings).toEqual({ thinking: "low" });
+});
+
+it("keeps a saved reasoning value outside the model's declared choices", async () => {
+  const user = userEvent.setup();
+  const { submit } = editor(false, [], undefined, {
+    model_key: "research",
+    settings: { thinking: "medium" },
+  });
+  await user.click(screen.getByRole("button", { name: /Model settings/ }));
+  const reasoning = await screen.findByRole("combobox", { name: "Reasoning" });
+  expect(reasoning.textContent).toContain("Medium (not offered by the model)");
+  await user.click(reasoning);
+  await user.click(
+    await screen.findByRole("option", { name: "Inherit model default" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(
+    screen.getByRole("combobox", { name: "Reasoning" }).textContent,
+  ).toContain("Inherit model default");
+  expect(submit.mock.calls[0][0].model.settings).toEqual({});
+});
+
+it("overrides and clears the context window characteristic", async () => {
+  const user = userEvent.setup(),
+    { submit } = editor(false, [], undefined, {
+      model_key: "research",
+      characteristics: { context_window_tokens: 64000 },
+    });
+  await user.click(screen.getByRole("button", { name: /Model settings/ }));
+  const field = (await screen.findByRole("spinbutton", {
+    name: "Context window",
+  })) as HTMLInputElement;
+  expect(field.value).toBe("64000");
+  await user.clear(field);
+  await user.type(field, "256000");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(submit.mock.calls[0][0].model.characteristics).toEqual({
+    context_window_tokens: 256000,
+  });
+  await user.clear(field);
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(submit.mock.calls[1][0].model.characteristics).toEqual({
+    context_window_tokens: null,
+  });
 });
 
 it("distinguishes an empty Connector allowlist from all tools", async () => {

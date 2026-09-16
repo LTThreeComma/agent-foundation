@@ -34,6 +34,18 @@ export function advancedConfig(config: AgentConfig) {
     2,
   );
 }
+export function modelCharacteristics(
+  original: AgentConfig["model"]["characteristics"],
+  text: string,
+): AgentConfig["model"]["characteristics"] {
+  const trimmed = text.trim();
+  if (!trimmed)
+    return original ? { ...original, context_window_tokens: null } : original;
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value <= 0)
+    throw new Error("Context window must be a positive integer.");
+  return { ...(original ?? {}), context_window_tokens: value };
+}
 export function buildConfig(
   original: AgentConfig,
   common: Pick<

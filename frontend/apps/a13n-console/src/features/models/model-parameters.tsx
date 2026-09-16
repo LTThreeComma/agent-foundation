@@ -13,6 +13,17 @@ const commonLabels: Record<string, string> = {
   openai_reasoning_effort: "Reasoning effort",
 };
 
+// Reasoning alternatives conflict with the dedicated Default reasoning
+// control (`thinking`) during settings validation; keep them JSON-only.
+const REASONING_KEYS = new Set([
+  "thinking",
+  "openai_reasoning_effort",
+  "anthropic_thinking",
+  "anthropic_effort",
+  "google_thinking_config",
+  "openrouter_reasoning",
+]);
+
 export function ModelParameters({
   text,
   onChange,
@@ -44,10 +55,12 @@ export function ModelParameters({
     Record<string, unknown>
   >;
   const fields = Object.fromEntries(
-    Object.entries(properties).map(([key, field]) => [
-      key,
-      { ...field, title: commonLabels[key] ?? field.title ?? key },
-    ]),
+    Object.entries(properties)
+      .filter(([key]) => !REASONING_KEYS.has(key))
+      .map(([key, field]) => [
+        key,
+        { ...field, title: commonLabels[key] ?? field.title ?? key },
+      ]),
   );
   const common = Object.fromEntries(
     Object.entries(fields).filter(([key]) => key in commonLabels),

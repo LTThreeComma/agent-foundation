@@ -1,5 +1,10 @@
 import { expect, test } from "vitest";
-import { advancedConfig, buildConfig, initialConfig } from "./configuration";
+import {
+  advancedConfig,
+  buildConfig,
+  initialConfig,
+  modelCharacteristics,
+} from "./configuration";
 
 test("ordinary editing preserves hidden configuration and leaves omission distinct from null", () => {
   const original = {
@@ -35,6 +40,31 @@ test("advanced fields cannot overwrite hidden or common fields", () => {
       '{"instructions": "hidden override"}',
     ),
   ).toThrow(/dedicated field/);
+});
+
+test("context window override parses, clears, and preserves other characteristics", () => {
+  const original = {
+    compact_threshold: 0.8,
+    context_window_tokens: 64000,
+  };
+  expect(modelCharacteristics(original, "128000")).toEqual({
+    compact_threshold: 0.8,
+    context_window_tokens: 128000,
+  });
+  expect(modelCharacteristics(original, "  ")).toEqual({
+    compact_threshold: 0.8,
+    context_window_tokens: null,
+  });
+  expect(modelCharacteristics(undefined, "")).toBeUndefined();
+  expect(modelCharacteristics(undefined, "4096")).toEqual({
+    context_window_tokens: 4096,
+  });
+  expect(() => modelCharacteristics(original, "abc")).toThrow(
+    /positive integer/,
+  );
+  expect(() => modelCharacteristics(original, "-1")).toThrow(
+    /positive integer/,
+  );
 });
 
 test("schema validation reports the invalid advanced field", () => {
