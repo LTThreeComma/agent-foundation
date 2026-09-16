@@ -13,6 +13,7 @@ import {
 } from "react-router";
 
 import {
+  ArrowSquareOutIcon,
   CaretRightIcon,
   ChatIcon,
   InfoIcon,
@@ -35,6 +36,8 @@ import { SessionIdentity } from "./identity";
 import { useConversationNotifications } from "./notifications";
 import { RunOptions, useRunOptions } from "./options";
 import { ThreadQueue } from "./queue";
+import { memoriesPath } from "../memory/api";
+import { useMemoryProviders } from "../memory/availability";
 
 export function ConversationsPage() {
   const { sessionId } = useParams();
@@ -153,6 +156,7 @@ export function SessionLayout() {
     client = useClient(),
     queries = conversationQueries(client, workspace.id);
   const threads = useQuery(queries.threads(sessionId));
+  const { visible: memoryVisible } = useMemoryProviders();
   const [mapOpen, setMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const mapTrigger = useRef<HTMLButtonElement>(null);
@@ -238,6 +242,30 @@ export function SessionLayout() {
           </div>
           <SessionIdentity />
           <div className={styles.sessionControls}>
+            {memoryVisible &&
+              threadId &&
+              threads.data?.some(
+                (thread) =>
+                  thread.id === threadId && thread.session_id === sessionId,
+              ) && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  render={
+                    <a
+                      href={memoriesPath(basePath, {
+                        scope: "thread",
+                        subject_id: threadId,
+                      })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                >
+                  <ArrowSquareOutIcon size={16} aria-hidden="true" />
+                  {t("Thread memories")}
+                </Button>
+              )}
             <Button
               ref={mapTrigger}
               variant={mapOpen ? "secondary" : "outline"}
