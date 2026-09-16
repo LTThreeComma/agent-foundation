@@ -1432,6 +1432,7 @@ def create_webui(
         segments = path.split("/")
         recognized = path in {
             "",
+            "new",
             "setup",
             "settings",
             "projects",
@@ -1439,7 +1440,7 @@ def create_webui(
             "settings/source",
             "settings/accounts",
             "settings/catalog",
-        } or (len(segments) == 2 and segments[0] in {"threads", "projects"} and bool(segments[1]))
+        } or (len(segments) == 2 and segments[0] in {"threads", "projects", "new"} and bool(segments[1]))
         if not recognized:
             return _error("not_found", "Route not found.", 404)
         index = static_root / "index.html"
