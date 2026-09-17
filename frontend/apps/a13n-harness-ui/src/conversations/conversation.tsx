@@ -22,14 +22,10 @@ import { Decisions } from "./decisions";
 import { ConversationDetails } from "./details";
 import { WorkInspector } from "./work-inspector";
 import { RootFailureNotice } from "./failure-notice";
-import { refreshThread } from "./refresh";
-import {
-  refreshThreadLists,
-  seedThreadSnapshot,
-  useHistory,
-  useThread,
-} from "./queries";
-import { FocusDisplay, showFocusedOutput, watchThread } from "./stream";
+import { refreshThreadLists, useHistory, useThread } from "./queries";
+import { showFocusedOutput } from "./stream";
+import { useLiveThread } from "./live-threads";
+import { LiveConnectionNotice } from "./live-connection";
 import { ConversationTranscript, RecoveryNotice } from "./transcript";
 import { inputSource } from "./local-input";
 import styles from "./conversation.module.css";
@@ -114,18 +110,8 @@ function Conversation({
     detail.data?.continuation_id,
     !!detail.data,
   );
-  const [display] = useState(() => new FocusDisplay());
-  const [connection, setConnection] = useState("Connecting");
-  const [reconnections, setReconnections] = useState(0);
-  const connected = connection === "Live";
-  const [connectionDelayed, setConnectionDelayed] = useState(false);
-  useEffect(() => {
-    setConnectionDelayed(false);
-    if (connected) return;
-    const timer = setTimeout(() => setConnectionDelayed(true), 700);
-    return () => clearTimeout(timer);
-  }, [connected]);
-  const [revision, setRevision] = useState(0);
+  const { display, connection, reconnections, revision } =
+    useLiveThread(threadId);
   const [showAvailable, setShowAvailable] = useState(false);
   const pageReady = useInitialReady(
     showAvailable ||
@@ -215,31 +201,6 @@ function Conversation({
     void refreshThreadLists(queries);
     void queries.invalidateQueries({ queryKey: ["child-saved-output"] });
   }, [queries, threadId]);
-  useEffect(() => {
-    let paint: ReturnType<typeof setTimeout> | undefined;
-    const close = watchThread(
-      transport,
-      threadId,
-      display,
-      () => {
-        if (!paint)
-          paint = setTimeout(() => {
-            paint = undefined;
-            setRevision((value) => value + 1);
-          }, 50);
-      },
-      (state) => {
-        setConnection(state);
-        if (state === "Reconnecting") setReconnections((count) => count + 1);
-      },
-      (reason) => refreshThread(queries, threadId, reason),
-      (snapshot) => seedThreadSnapshot(queries, threadId, snapshot),
-    );
-    return () => {
-      close();
-      clearTimeout(paint);
-    };
-  }, [transport, threadId, display, queries]);
   const entries = useMemo(
     () =>
       history.data?.pages
@@ -379,8 +340,11 @@ function Conversation({
         element.scrollHeight -
         olderAnchor.current.height;
       olderAnchor.current = null;
-    } else if (follow.current) scrollToLatest(!lastContent.current || restored);
-    else if (
+    } else if (follow.current) {
+      // Streaming commits and late layout use one bottom-follow policy. Only
+      // an explicit New output action animates; resize must not fight that RAF.
+      if (scrollFrame.current === null) scrollToLatest(true);
+    } else if (
       !restored &&
       !olderAnchor.current &&
       lastContent.current !== visibleContent
@@ -407,7 +371,12 @@ function Conversation({
       return;
     const observer = new ResizeObserver(() => {
       // Both late content and a growing composer can move the actual bottom.
-      if (follow.current && !olderAnchor.current) scrollToLatest(true);
+      if (
+        follow.current &&
+        !olderAnchor.current &&
+        scrollFrame.current === null
+      )
+        scrollToLatest(true);
     });
     observer.observe(element);
     observer.observe(content);
@@ -494,17 +463,10 @@ function Conversation({
       onContinue={() => setShowAvailable(true)}
     >
       <div className={styles.page}>
-        {!connected && connectionDelayed && (
-          <div className={styles.activityBar}>
-            <small role="status">
-              {reconnections > 0
-                ? `Reconnecting live updates… · ${reconnections} ${reconnections === 1 ? "retry" : "retries"}`
-                : connection === "Connecting"
-                  ? "Connecting live updates…"
-                  : connection}
-            </small>
-          </div>
-        )}
+        <LiveConnectionNotice
+          connection={connection}
+          reconnections={reconnections}
+        />
 
         {thread?.archived && (
           <div className={styles.warning}>
