@@ -142,6 +142,10 @@ The read returns safe identity, the immutable accepted-against Run, current targ
 
 After the relational commit, the control process best-effort appends one business-payload-free reconcile signal to the Thread control Stream. Failure or unknown outcome of that Redis write neither rolls back the accepted inbox entry nor creates an outbox record solely for retrying the signal. The process records bounded diagnostics and readiness follows the shared Redis dependency contract.
 
+## Environment Mount Reconciliation
+
+[Live mounts](29a-websocket-environments-and-live-mounts.md#worker-reconciliation-and-model-boundary) reuse the Thread reconcile signal. The watcher requests a relational reread; only the root model-request boundary applies mounts to Harness. Mount changes are not inbox entries and consume no input FIFO sequence. Operation payloads use separate relay Streams.
+
 ## Unified FIFO Delivery and State Commitment
 
 The current `RunAttemptExecutor` reconciles all eligible `pending` entries bound to its Run in ascending `delivery_sequence`. A later entry never bypasses an earlier eligible one because of kind, Redis arrival, payload location, or adapter readiness. Before moving to a later sequence, the executor must consume the earlier entry or commit its kind-owned `suppressed`, `expired`, `discarded`, or `superseded` disposition.

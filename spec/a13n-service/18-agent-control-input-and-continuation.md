@@ -6,6 +6,10 @@ Service accepts every new semantic unit of Agent work as a durable Run belonging
 
 This contract owns those caller- or responder-driven acceptance forms, their public command surfaces, and deferred-interaction feedback. Automatic Run acceptance for an inactive Thread receiving an asynchronous child result is owned by [Async Subagents](34-async-subagents.md#delivery-to-an-inactive-thread); it reuses the same Thread and Run advancement authority without becoming feedback or another public command. Adjacent input, Thread, Run, RunAttempt, and recovery concerns remain with the owners below. Worker takeover and automatic checkpoint recovery do not accept another semantic unit of work and remain outside this contract.
 
+## Additional Environment Associations
+
+Environment selection below fixes the primary Environment. Client WebSocket Environments must be online at Run acceptance. [Live Run mounts](29a-websocket-environments-and-live-mounts.md) owns separately authorized additions and their continuation/recovery rules; additions do not change the primary selection.
+
 ## Boundaries
 
 | Concern                                                                                       | Owner                                                                                                                      | Relationship                                                                                                               |
