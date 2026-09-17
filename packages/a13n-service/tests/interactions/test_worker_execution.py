@@ -18,6 +18,7 @@ from a13n_service.agents.reconstruction import AgentReconstructor
 from a13n_service.assets.models import AssetRecord
 from a13n_service.digests import digest_request
 from a13n_service.iam.models import RoleBindingRecord, UserRecord
+from a13n_service.interactions.attempt_executor import RunAttemptExecutor
 from a13n_service.interactions.attempts import AttemptExecutionService
 from a13n_service.interactions.control_models import ThreadInboxRecord
 from a13n_service.interactions.domain import RunAttemptYieldReason
@@ -62,6 +63,16 @@ async def test_worker_claims_and_executes_an_accepted_run_in_process(
     late_input,
     handoff=False,
 ):
+    # Worker recovery must not hide an unexpected executor failure in this success-path test.
+    execute = RunAttemptExecutor.run
+
+    async def checked_execute(*args, **kwargs):
+        try:
+            return await execute(*args, **kwargs)
+        except Exception as error:
+            pytest.fail(f"Unexpected attempt failure: {error!r}")
+
+    monkeypatch.setattr(RunAttemptExecutor, "run", checked_execute)
     config = acceptance.effective_agent_config()
     config = config.model_copy(
         update={
@@ -265,7 +276,7 @@ async def test_worker_claims_and_executes_an_accepted_run_in_process(
     model_factory.build.return_value = FunctionModel(stream_function=model)
     settings = Settings(
         service={"build_version": "test"},
-        worker={"concurrency": 1, "poll_interval_seconds": 0.02, "lease_seconds": 12 if handoff else 30},
+        worker={"concurrency": 1, "poll_interval_seconds": 0.02, "lease_seconds": 30},
     )
     exporter = InMemorySpanExporter()
     observation = observation_runtime(exporter)
@@ -283,22 +294,34 @@ async def test_worker_claims_and_executes_an_accepted_run_in_process(
     ):
         loop = runtime.execution_loop
         assert loop is not None
-        with fail_after(20 if handoff else 15):
-            async with create_task_group() as tasks:
-                tasks.start_soon(loop.run)
-                while True:
-                    async with short_session(interaction_sessions) as session:
-                        row = await session.get(RunRecord, run.id)
-                        assert row is not None
-                        if row.status in {"completed", "failed"}:
-                            assert row.status == "completed", row.failure_json
-                            assert row.output_json == (
-                                {"answer": 42} if recover_candidate and not late_input else "worker completed"
-                            )
-                            break
-                    await sleep(0.02)
-                await loop.drain()
-                await loop.wait_stopped()
+        # Keep the normal lease and its renewal/reconciliation timeouts under CI load.
+        # Same-build handoff deliberately waits one lease before reclaiming.
+        # Budget each execution phase separately from that mandatory delay.
+        completion_budget = 15 * (2 if handoff else 1) + (settings.worker.lease_seconds if handoff else 0)
+        last_progress = None
+        try:
+            with fail_after(completion_budget):
+                async with create_task_group() as tasks:
+                    tasks.start_soon(loop.run)
+                    while True:
+                        async with short_session(interaction_sessions) as session:
+                            row = await session.get(RunRecord, run.id)
+                            assert row is not None
+                            last_progress = (row.status, row.current_run_attempt_id)
+                            if row.status in {"completed", "failed"}:
+                                assert row.status == "completed", row.failure_json
+                                assert row.output_json == (
+                                    {"answer": 42} if recover_candidate and not late_input else "worker completed"
+                                )
+                                break
+                        await sleep(0.02)
+                    await loop.drain()
+                    await loop.wait_stopped()
+        except TimeoutError:
+            pytest.fail(
+                f"Run did not complete within {completion_budget}s: status/attempt={last_progress}, "
+                f"handoff_requested={handed_off}, late_input_injected={injected}, model_requests={len(requests)}"
+            )
         async with short_session(interaction_sessions) as session:
             attempt = await session.scalar(
                 select(RunAttemptRecord)
