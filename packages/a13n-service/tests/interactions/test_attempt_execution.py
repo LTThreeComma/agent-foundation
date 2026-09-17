@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from typing import Literal
 
 import pytest
 from a13n_harness import SafeFailure
 from a13n_service.agents.domain import EffectiveAgentConfig
 from a13n_service.endpoint_policy import EndpointPolicy
+from a13n_service.environments.domain import ExistingEnvironmentSelection
+from a13n_service.environments.websocket.coordination import ConnectionCoordination
 from a13n_service.hooks import InlineHookValidator
 from a13n_service.iam.domain import PrincipalRef, PrincipalType
 from a13n_service.interactions.acceptance import RunAcceptanceService
@@ -36,6 +39,7 @@ from a13n_service.interactions.domain import (
     ThreadOriginKind,
     ThreadRole,
 )
+from a13n_service.interactions.environment_selection import EnvironmentDefault, ExplicitEnvironment
 from a13n_service.interactions.harness_results import AttemptDisposition
 from a13n_service.interactions.initialization import RunStateSeed, initialize_start_state
 from a13n_service.interactions.models import RunAttemptRecord, RunRecord, ThreadRecord
@@ -704,6 +708,10 @@ async def _accept_root(
     max_attempts: int = 3,
     execution_policy_version: str = "1",
     execution_deadline_at: datetime | None = None,
+    environment_id: str | None = None,
+    environment_access: Literal["read_only", "read_write", "full"] = "full",
+    coordination: ConnectionCoordination | None = None,
+    idempotency_key: str | None = None,
 ) -> tuple[RunStateStore, Run, RunCheckpoint]:
     config = config or effective_agent_config()
     seed = RunStateSeed(
@@ -726,6 +734,8 @@ async def _accept_root(
         agent_revision_id=AGENT_REVISION_ID,
         effective_agent_config_digest=config.content_digest,
         model_execution_observation=config.resolved_model.execution.observation(),
+        environment_id=environment_id,
+        environment_access=environment_access if environment_id is not None else None,
         priority=0,
         queue_name="default",
         available_at=NOW,
@@ -740,6 +750,7 @@ async def _accept_root(
         handoffs_completed=0,
         usage_charged=RunUsage(),
         request_fingerprint="1" * 64,
+        idempotency_key=idempotency_key,
         status=RunStatus.accepted,
         input_kind=RunInputKind.agent_input,
         input={"schema_version": "1", "content": [{"type": "text", "text": "hello"}]},
@@ -755,6 +766,7 @@ async def _accept_root(
         clock=lambda: NOW,
         lifecycle=test_lifecycle_writer(),
         bindings=ordinary_memory(sessions),
+        coordination=coordination,
     ).accept_new_thread(
         session=Session(
             id=SESSION_ID,
@@ -777,6 +789,9 @@ async def _accept_root(
         ),
         run=run,
         state=state,
+        environment=ExplicitEnvironment(ExistingEnvironmentSelection(environment_id=environment_id))
+        if environment_id is not None
+        else EnvironmentDefault.agent,
     )
     return states, run, state
 

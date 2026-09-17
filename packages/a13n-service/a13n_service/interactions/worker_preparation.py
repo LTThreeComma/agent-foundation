@@ -36,7 +36,11 @@ from a13n_service.agents.toolsets import web_selection
 from a13n_service.assets.runtime import AssetRuntime
 from a13n_service.connectivity.execution import ExternalToolRuntime
 from a13n_service.environments.lifecycle import EnvironmentLifecycle
+from a13n_service.environments.mount_domain import AcceptedRunMount
+from a13n_service.environments.mount_observations import RunMountObservations
+from a13n_service.environments.mount_runtime import RunMountRuntime
 from a13n_service.environments.runtime import prepare_run_environment, validate_run_environment
+from a13n_service.environments.websocket.worker_connections import WorkerClientConnections
 from a13n_service.models.model_factory import NativeModelFactory
 from a13n_service.models.provider_runtime import LiveProviderResolver
 from a13n_service.models.runtime import SnapshotRunModelResolver
@@ -62,7 +66,6 @@ from .harness_runtime import (
     ImmediateHarnessInput,
     MaterializedHarnessInput,
     MountedHarnessEnvironments,
-    SingleHarnessEnvironment,
 )
 from .input import AcceptedAgentInput
 from .objects import RunPayloadStore
@@ -98,6 +101,7 @@ class WorkerAttemptPreparer:
         web: WebRuntime | None = None,
         memory: ExecutionMemoryRuntime | None = None,
         configuration_capability: Callable[[], ConfigurationCapability] | None = None,
+        client_connections: WorkerClientConnections | None = None,
     ) -> None:
         self._subagent_capability = subagent_capability
         self._secrets = secrets
@@ -107,6 +111,7 @@ class WorkerAttemptPreparer:
         self._configuration_capability = configuration_capability
         self._bound_secrets: BoundAgentSecrets | None = None
         self._environments = environments
+        self._client_connections = client_connections
         self._external_tools = external_tools
         self._sessions = sessions
         self._run = run
@@ -221,16 +226,40 @@ class WorkerAttemptPreparer:
                 )
                 yield invocation
                 return
-            environment = await prepare_run_environment(self._environments, context)
+            environment = await prepare_run_environment(
+                self._environments, context, client_connections=self._client_connections
+            )
             if environment is not None:
                 stack.push_async_callback(environment.close)
-                invocation = replace(
-                    invocation,
-                    environment=SingleHarnessEnvironment(
-                        EnvironmentMount(environment, access=EnvironmentAccess(environment.access))
-                    ),
+            mounted = MountedHarnessEnvironments(
+                entries=(
+                    {"workspace": EnvironmentMount(environment, access=EnvironmentAccess(environment.access))}
+                    if environment is not None
+                    else {}
                 )
-            yield invocation
+            )
+
+            async def prepare_mount(mount: AcceptedRunMount):
+                candidate = await prepare_run_environment(
+                    self._environments,
+                    self._control.current_context,
+                    client_connections=self._client_connections,
+                    mount=mount,
+                )
+                if candidate is None:
+                    raise RuntimeError("An accepted additional mount has no Environment")
+                return candidate
+
+            await self._control.bind_environment_mounts(
+                RunMountRuntime(
+                    runtime=mounted.runtime,
+                    has_primary=environment is not None,
+                    observations=RunMountObservations(self._sessions, clock=self._environments.clock),
+                    current_attempt=lambda: self._control.current_context,
+                    prepare=prepare_mount,
+                )
+            )
+            yield replace(invocation, environment=mounted)
 
     async def _prepare(self, context: AttemptContext, stack: AsyncExitStack) -> HarnessInvocation[Any]:
         run = self._run

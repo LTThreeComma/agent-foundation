@@ -2039,6 +2039,25 @@ Responses:
 - **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 
+### `POST /api/v1/environment-providers/{provider_id}/test-image/{request_id}/cancel`
+
+Cancel Image Test.
+
+| Parameter     | Location | Required | Type / schema | Constraints and default           |
+| ------------- | -------- | -------- | ------------- | --------------------------------- |
+| `provider_id` | path     | true     | string        | —                                 |
+| `request_id`  | path     | true     | string        | pattern="^envtest\_[0-9a-f]{32}$" |
+
+Request body: required.
+
+- `application/json`: `CancelDockerImageRequest`.
+
+Responses:
+
+- **204** — Successful Response.
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
 ### `GET /api/v1/environment-providers/{resource_id}`
 
 Get Provider.
@@ -2186,6 +2205,34 @@ Responses:
 - **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 
+### `GET /api/v1/environments/{environment_id}/connection`
+
+Connection Status.
+
+| Parameter        | Location | Required | Type / schema | Constraints and default |
+| ---------------- | -------- | -------- | ------------- | ----------------------- |
+| `environment_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ClientConnectionStatus`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
+### `POST /api/v1/environments/{environment_id}/connection-tickets`
+
+Issue Ticket.
+
+| Parameter        | Location | Required | Type / schema | Constraints and default |
+| ---------------- | -------- | -------- | ------------- | ----------------------- |
+| `environment_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **201** — Successful Response (`application/json: ClientConnectionTicket`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
 ### `POST /api/v1/environments/{environment_id}/delete`
 
 Delete Environment.
@@ -2330,6 +2377,41 @@ Request body: required.
 Responses:
 
 - **201** — Successful Response (`application/json: EnvironmentTemplate`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
+### `GET /api/v1/runs/{run_id}/environment-mounts`
+
+List Mounts.
+
+| Parameter | Location | Required | Type / schema  | Constraints and default            |
+| --------- | -------- | -------- | -------------- | ---------------------------------- |
+| `run_id`  | path     | true     | string         | —                                  |
+| `limit`   | query    | false    | integer        | minimum=1; maximum=100; default=50 |
+| `cursor`  | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: Collection_RunEnvironmentMount_`).
+- **400** — Invalid request. (`application/json: ErrorResponse`).
+- **default** — Service error. (`application/json: ErrorResponse`).
+
+### `POST /api/v1/runs/{run_id}/environment-mounts`
+
+Add Mount.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default    |
+| ----------------- | -------- | -------- | ------------- | -------------------------- |
+| `run_id`          | path     | true     | string        | —                          |
+| `Idempotency-Key` | header   | true     | string        | minLength=1; maxLength=512 |
+
+Request body: required.
+
+- `application/json`: `AddEnvironmentMountRequest`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: RunEnvironmentMount`).
 - **400** — Invalid request. (`application/json: ErrorResponse`).
 - **default** — Service error. (`application/json: ErrorResponse`).
 

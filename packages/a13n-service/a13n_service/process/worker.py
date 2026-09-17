@@ -50,6 +50,7 @@ from a13n_service.settings import Settings
 from a13n_service.skills.runtime import SkillRuntimePreparer
 from a13n_service.web.registry import WebProviderRegistry
 
+from .client_environments import build_worker_client_connections
 from .connectivity_clients import build_mcp_clients, connectivity_http_timeout
 
 
@@ -71,6 +72,8 @@ async def build_worker_runtime(
     """Construct the components owned by a Worker-capable role."""
 
     selected_provider_catalogs = provider_catalogs or load_provider_catalogs(())
+    worker_id = new_object_id("wrk")
+    client_connections = await build_worker_client_connections(settings, shared, environment_catalog, stack, worker_id)
 
     environments = EnvironmentLifecycle(
         shared.storage.sessions,
@@ -197,6 +200,7 @@ async def build_worker_runtime(
             shared,
             execution,
             environments=environments,
+            client_connections=client_connections,
             external_tools=external_tools,
             skills=skills,
             stream=run_stream,
@@ -211,6 +215,7 @@ async def build_worker_runtime(
             else ConfigurationDrafts(shared.storage.sessions, configuration_resolver),
         ),
         build_id=settings.service.build_version,
+        worker_id=worker_id,
         queue_name=settings.gateway.run_queue_name,
         concurrency=settings.worker.concurrency,
         poll_seconds=settings.worker.poll_interval_seconds,
@@ -227,6 +232,7 @@ async def build_worker_runtime(
         run_stream=run_stream,
         run_display=run_display,
         execution_loop=execution_loop,
+        client_connections=client_connections,
     )
 
     async def shutdown_execution() -> None:
@@ -253,7 +259,7 @@ async def build_worker_runtime(
                 shutdown=image_test_worker.shutdown,
             ),
         )
-    return runtime, (
+    background_tasks = [
         execution_task,
         *image_test_tasks,
         BackgroundTask(
@@ -268,7 +274,17 @@ async def build_worker_runtime(
         BackgroundTask(
             "Run display persistence", display_consumer.run, display_consumer.is_draining, display_consumer.shutdown
         ),
-    )
+    ]
+    if client_connections is not None:
+        background_tasks.append(
+            BackgroundTask(
+                "Client Environment responses and use leases",
+                client_connections.run,
+                client_connections.is_closed,
+                client_connections.close,
+            )
+        )
+    return runtime, tuple(background_tasks)
 
 
 __all__ = ["build_worker_runtime"]
