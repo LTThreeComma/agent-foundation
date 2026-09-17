@@ -7,7 +7,8 @@ import anyio
 import httpx2
 import pytest
 
-from dev.service.seed_verify import _parallel, verify
+from dev.service.seed_client import parallel_map
+from dev.service.seed_verify import verify
 
 
 def test_verify_batches_runs_and_reads_every_transcript_page():
@@ -125,7 +126,7 @@ def test_parallel_verification_is_bounded_and_cancels_siblings_on_failure():
                 active -= 1
 
         with anyio.fail_after(2), pytest.raises(ExceptionGroup, match="TaskGroup"):
-            await _parallel(list(range(30)), read)
+            await parallel_map(list(range(30)), read)
         assert active == 0 and peak == 8
 
     anyio.run(check)

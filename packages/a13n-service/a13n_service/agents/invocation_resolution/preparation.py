@@ -1,14 +1,17 @@
-"""Transaction-free preparation for Agent invocation resolution."""
+"""Select detached Agent invocation facts in a bounded database phase."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from a13n_harness.memory_plugins import MemoryBackendCatalog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.agent_configuration.context import ConfigurationRunContext
 from a13n_service.connectivity.selection_resolution import (
+    ConnectivitySelectionError,
     ConnectivitySelectionResolver,
+    PreparedConnectivity,
 )
 from a13n_service.iam import (
     AuthenticatedActor,
@@ -17,9 +20,11 @@ from a13n_service.iam import (
     authorize_agent,
     authorize_workspace,
 )
+from a13n_service.iam.authorization import ActorPermissions, read_actor_permissions
 from a13n_service.models.runtime import AcceptedModelSelector
 from a13n_service.models.service import ModelError
 from a13n_service.storage import short_session
+from a13n_service.web.registry import WebProviderRegistry
 
 from ..connectivity_resolution import prepare_invocation_connectivity
 from ..domain import (
@@ -44,6 +49,7 @@ from .contracts import (
     PreparedChildInvocation,
     RootAgentStatePolicy,
 )
+from .providers import validate_providers
 from .queries import (
     load_agent_record,
     load_revision_record,
@@ -68,11 +74,15 @@ class AgentInvocationPreparer:
         *,
         connectivity_resolver: ConnectivitySelectionResolver,
         protocol_policy: AgentProtocolPolicy,
+        web_provider_registry: WebProviderRegistry,
+        memory_backend_catalog: MemoryBackendCatalog,
     ) -> None:
         self._sessions = sessions
         self._model_selector = model_selector
         self._connectivity_resolver = connectivity_resolver
         self._protocol_policy = protocol_policy
+        self._web_provider_registry = web_provider_registry
+        self._memory_backend_catalog = memory_backend_catalog
 
     async def prepare(
         self,
@@ -86,6 +96,33 @@ class AgentInvocationPreparer:
         _active_agents: tuple[str, ...] = (),
         _budget: _GraphBudget | None = None,
     ) -> PreparedAgentInvocation:
+        async with short_session(self._sessions) as session:
+            prepared, _ = await self.prepare_in_session(
+                session,
+                actor=actor,
+                agent_id=agent_id,
+                agent_revision_id=agent_revision_id,
+                expected_current_revision_id=expected_current_revision_id,
+                config_override=config_override,
+                root_state_policy=root_state_policy,
+                _active_agents=_active_agents,
+                _budget=_budget,
+            )
+            return prepared
+
+    async def prepare_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        actor: AuthenticatedActor,
+        agent_id: str,
+        agent_revision_id: str | None = None,
+        expected_current_revision_id: str | None = None,
+        config_override: AgentRunOverride | None = None,
+        root_state_policy: RootAgentStatePolicy = RootAgentStatePolicy.invocable,
+        _active_agents: tuple[str, ...] = (),
+        _budget: _GraphBudget | None = None,
+    ) -> tuple[PreparedAgentInvocation, ActorPermissions]:
         budget = _budget or _GraphBudget()
         budget.remaining -= 1
         if budget.remaining < 0:
@@ -96,72 +133,85 @@ class AgentInvocationPreparer:
             raise agent_revision_not_executable("subagent_graph_too_deep")
         workspace_id = actor.workspace_id
         try:
-            async with short_session(self._sessions) as session:
-                authorized = await authorize_agent(
-                    session,
-                    actor=actor,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    action=WorkspaceAction.agent_invoke,
-                )
-                agent = await load_agent_record(
-                    session,
-                    organization_id=authorized.organization_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    for_update=False,
-                )
-                require_invocable_agent(agent, policy=root_state_policy)
-                if (
-                    expected_current_revision_id is not None
-                    and agent.current_revision_id != expected_current_revision_id
-                ):
-                    raise current_revision_conflict(agent.current_revision_id)
-                selector_kind = AgentSelectorKind.exact if agent_revision_id is not None else AgentSelectorKind.current
-                revision_id = agent_revision_id or agent.current_revision_id
-                if revision_id is None:
-                    raise agent_current_revision_missing()
-                revision_record = await load_revision_record(
-                    session,
-                    organization_id=authorized.organization_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    revision_id=revision_id,
-                    for_update=False,
-                )
-                revision = revision_record.to_resource()
-                merged = merge_agent_run_override(revision.config, config_override)
-                try:
-                    validate_agent_config(merged, protocol_policy=self._protocol_policy)
-                except AgentConfigValidationError as error:
-                    raise agent_revision_not_executable(error.reason) from error
-                await authorize_workspace(
-                    session,
-                    actor=actor,
-                    workspace_id=workspace_id,
-                    action=WorkspaceAction.models_read,
-                )
-                # Explicit Skill overrides resolve active keys even when their values match the Revision.
-                skills_overridden = config_override is not None and "skills" in config_override.model_fields_set
-                skills = await prepare_skills(
-                    session,
-                    actor=actor,
-                    organization_id=authorized.organization_id,
-                    workspace_id=workspace_id,
-                    selections=merged.skills,
-                    retained=None if skills_overridden else revision.resolved_skills,
-                )
-            async with short_session(self._sessions) as session:
-                subagents = await self._prepare_subagents(
-                    session,
-                    actor=actor,
-                    organization_id=authorized.organization_id,
-                    workspace_id=workspace_id,
-                    revision=revision,
-                    config=merged,
-                )
+            authority = await read_actor_permissions(
+                session, actor=actor, workspace_id=workspace_id, agent_ids=(agent_id,)
+            )
+            authorized = await authorize_agent(
+                session,
+                actor=actor,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                action=WorkspaceAction.agent_invoke,
+                authority=authority,
+            )
+            agent = await load_agent_record(
+                session,
+                organization_id=authorized.organization_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                for_update=False,
+            )
+            require_invocable_agent(agent, policy=root_state_policy)
+            if expected_current_revision_id is not None and agent.current_revision_id != expected_current_revision_id:
+                raise current_revision_conflict(agent.current_revision_id)
+            selector_kind = AgentSelectorKind.exact if agent_revision_id is not None else AgentSelectorKind.current
+            revision_id = agent_revision_id or agent.current_revision_id
+            if revision_id is None:
+                raise agent_current_revision_missing()
+            revision_record = await load_revision_record(
+                session,
+                organization_id=authorized.organization_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                revision_id=revision_id,
+                for_update=False,
+            )
+            revision = revision_record.to_resource()
+            merged = merge_agent_run_override(revision.config, config_override)
             try:
-                model = await self._model_selector.prepare(
+                validate_agent_config(merged, protocol_policy=self._protocol_policy)
+            except AgentConfigValidationError as error:
+                raise agent_revision_not_executable(error.reason) from error
+            await authorize_workspace(
+                session,
+                actor=actor,
+                workspace_id=workspace_id,
+                action=WorkspaceAction.models_read,
+                authority=authority,
+            )
+            await validate_providers(
+                session,
+                actor=actor,
+                organization_id=authorized.organization_id,
+                workspace_id=workspace_id,
+                authored=revision.config,
+                merged=merged,
+                authority=authority,
+                memory_backend_catalog=self._memory_backend_catalog,
+                web_provider_registry=self._web_provider_registry,
+            )
+            # Explicit Skill overrides resolve active keys even when their values match the Revision.
+            skills_overridden = config_override is not None and "skills" in config_override.model_fields_set
+            skills = await prepare_skills(
+                session,
+                actor=actor,
+                organization_id=authorized.organization_id,
+                workspace_id=workspace_id,
+                selections=merged.skills,
+                retained=None if skills_overridden else revision.resolved_skills,
+                authority=authority,
+            )
+            subagents = await self._prepare_subagents(
+                session,
+                actor=actor,
+                organization_id=authorized.organization_id,
+                workspace_id=workspace_id,
+                revision=revision,
+                config=merged,
+            )
+            try:
+                model = await self._model_selector.prepare_in_session(
+                    session,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
                     model_id=(
@@ -176,7 +226,8 @@ class AgentInvocationPreparer:
                     settings_override=merged.model_settings_override,
                 )
                 reviewer_model = (
-                    await self._model_selector.prepare(
+                    await self._model_selector.prepare_in_session(
+                        session,
                         organization_id=authorized.organization_id,
                         workspace_id=workspace_id,
                         model_id=merged.reviewer.model,
@@ -187,31 +238,39 @@ class AgentInvocationPreparer:
                 )
             except ModelError as error:
                 raise map_model_error(error) from error
-            connectivity = await prepare_invocation_connectivity(
-                self._connectivity_resolver,
-                actor=actor,
-                organization_id=authorized.organization_id,
-                workspace_id=workspace_id,
-                config=merged,
-            )
+            try:
+                selections = await self._connectivity_resolver.resolve_in_session(
+                    session,
+                    actor=actor,
+                    organization_id=authorized.organization_id,
+                    workspace_id=workspace_id,
+                    connection_tools=merged.connection_tools,
+                    authority=authority,
+                )
+            except ConnectivitySelectionError as error:
+                raise agent_revision_not_executable(error.code) from error
+            connectivity = PreparedConnectivity(actor, authorized.organization_id, workspace_id, selections)
         except AuthorizationError as error:
             raise map_authorization_error(error) from error
         children = tuple(
             [
                 PreparedChildInvocation(
                     edge=edge,
-                    invocation=await self.prepare(
-                        actor=actor,
-                        agent_id=edge.child_agent_id,
-                        agent_revision_id=edge.child_agent_revision_id,
-                        _active_agents=(*_active_agents, agent_id),
-                        _budget=budget,
-                    ),
+                    invocation=(
+                        await self.prepare_in_session(
+                            session,
+                            actor=actor,
+                            agent_id=edge.child_agent_id,
+                            agent_revision_id=edge.child_agent_revision_id,
+                            _active_agents=(*_active_agents, agent_id),
+                            _budget=budget,
+                        )
+                    )[0],
                 )
                 for edge in subagents
             ]
         )
-        return PreparedAgentInvocation(
+        prepared = PreparedAgentInvocation(
             root_state_policy=root_state_policy,
             actor=actor,
             organization_id=authorized.organization_id,
@@ -228,6 +287,7 @@ class AgentInvocationPreparer:
             connectivity=connectivity,
             reviewer_model=reviewer_model,
         )
+        return prepared, authority
 
     async def prepare_configuration(
         self, *, actor: AuthenticatedActor, agent_id: str, config: AgentConfig, context: ConfigurationRunContext

@@ -244,6 +244,45 @@ async def test_asset_http_lifecycle_idempotency_and_cleanup(api: Api) -> None:
 
 
 @pytest.mark.anyio
+async def test_upload_rechecks_revoked_grant_after_streamed_body(api: Api) -> None:
+    body_started = asyncio.Event()
+    release_body = asyncio.Event()
+
+    async def chunks():
+        yield PDF[:8]
+        body_started.set()
+        await release_body.wait()
+        yield PDF[8:]
+
+    request = asyncio.create_task(
+        api.client.post(
+            f"/api/v1/workspaces/{WORKSPACE_ID}/assets",
+            params={"filename": "revoked.pdf", "media_type": "application/pdf"},
+            content=chunks(),
+            headers={"Content-Type": "application/octet-stream", "Idempotency-Key": "revoked-mid-upload"},
+        )
+    )
+    try:
+        await asyncio.wait_for(body_started.wait(), timeout=5)
+        sessions = api.app.state.runtime.shared.storage.sessions
+        async with transaction(sessions) as session:
+            binding = await session.scalar(
+                select(RoleBindingRecord).where(
+                    RoleBindingRecord.principal_id == BUILDER_ID,
+                    RoleBindingRecord.resource_type == "workspace",
+                )
+            )
+            assert binding is not None
+            await session.delete(binding)
+    finally:
+        release_body.set()
+    response = await request
+    assert response.status_code in {403, 404}
+    async with transaction(sessions) as session:
+        assert not (await session.scalars(select(AssetRecord).where(AssetRecord.workspace_id == WORKSPACE_ID))).all()
+
+
+@pytest.mark.anyio
 async def test_run_asset_projection_accepts_organization_bound_session(api: Api) -> None:
     actor = AuthenticatedActor(
         principal=PrincipalRef(principal_type="user", principal_id=BUILDER_ID),

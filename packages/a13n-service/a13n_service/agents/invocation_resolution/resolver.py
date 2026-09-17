@@ -6,10 +6,15 @@ from a13n_harness.memory_plugins import MemoryBackendCatalog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.connectivity.selection_resolution import ConnectivitySelectionResolver
+from a13n_service.iam import AuthenticatedActor
+from a13n_service.iam.authorization import ActorPermissions
 from a13n_service.models.runtime import AcceptedModelSelector
 from a13n_service.web.registry import WebProviderRegistry, built_in_web_provider_registry
 
+from ..domain import AgentRunOverride
 from ..validation import AgentProtocolPolicy
+from .composition import compose_invocation
+from .contracts import FrozenAgentInvocation, PreparedAgentInvocation
 from .freezing import AgentInvocationFreezer
 from .preparation import AgentInvocationPreparer
 
@@ -31,17 +36,40 @@ class AgentInvocationResolver:
     ) -> None:
         policy = protocol_policy or AgentProtocolPolicy()
         connectivity = connectivity_resolver or ConnectivitySelectionResolver(sessions)
+        web = web_provider_registry or built_in_web_provider_registry()
+        memory = memory_backend_catalog if memory_backend_catalog is not None else MemoryBackendCatalog()
         self.preparation = AgentInvocationPreparer(
             sessions,
             model_selector,
             connectivity_resolver=connectivity,
             protocol_policy=policy,
+            web_provider_registry=web,
+            memory_backend_catalog=memory,
         )
         self.freezing = AgentInvocationFreezer(
             model_selector,
             connectivity_resolver=connectivity,
-            web_provider_registry=web_provider_registry or built_in_web_provider_registry(),
-            memory_backend_catalog=memory_backend_catalog
-            if memory_backend_catalog is not None
-            else MemoryBackendCatalog(),
+            web_provider_registry=web,
+            memory_backend_catalog=memory,
         )
+
+    async def select_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        actor: AuthenticatedActor,
+        agent_id: str,
+        agent_revision_id: str | None = None,
+        expected_current_revision_id: str | None = None,
+        config_override: AgentRunOverride | None = None,
+    ) -> tuple[PreparedAgentInvocation, FrozenAgentInvocation, ActorPermissions]:
+        """Select once and compose a candidate, retaining evidence for final validation."""
+        prepared, authority = await self.preparation.prepare_in_session(
+            session,
+            actor=actor,
+            agent_id=agent_id,
+            agent_revision_id=agent_revision_id,
+            expected_current_revision_id=expected_current_revision_id,
+            config_override=config_override,
+        )
+        return prepared, compose_invocation(prepared), authority

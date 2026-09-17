@@ -272,3 +272,53 @@ async def test_database_disconnect_after_productive_claim_still_backs_off(monkey
         await loop.run()
     assert len(calls) == 3 and calls[2] - calls[1] >= 0.02
     assert loop._capacity.value == 1
+
+
+@pytest.mark.parametrize("during_scan", [False, True])
+async def test_committed_work_wakes_idle_worker_without_losing_scan_race(monkeypatch, during_scan):
+    from a13n_service.interactions.queue_wakeups import QueueWakeups
+    from anyio import sleep
+
+    wakeups = QueueWakeups()
+    scanned, rescanned, finish_scan = Event(), Event(), Event()
+    scheduler = Mock(spec=AttemptScheduler)
+    runner = Mock()
+    scans = 0
+
+    async def scan(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            scanned.set()
+            await finish_scan.wait()
+        else:
+            rescanned.set()
+        return ()
+
+    scheduler.scan = AsyncMock(side_effect=scan)
+    loop = WorkerExecutionLoop(
+        Mock(),
+        scheduler,
+        HarnessPluginFactoryCatalog(()),
+        runner,
+        build_id="test",
+        queue_name="default",
+        poll_seconds=60,
+        wakeups=wakeups,
+    )
+    monkeypatch.setattr(loop, "_organizations", AsyncMock(return_value=(ORGANIZATION_ID,)))
+    with fail_after(2):
+        async with create_task_group() as tasks:
+            tasks.start_soon(loop.run)
+            await scanned.wait()
+            if during_scan:
+                wakeups.notify()
+                finish_scan.set()
+            else:
+                finish_scan.set()
+                await sleep(0.01)
+                wakeups.notify()
+            await rescanned.wait()
+            await loop.drain()
+            await loop.wait_stopped()
+    scheduler.claim.assert_not_called()

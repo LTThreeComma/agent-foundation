@@ -20,7 +20,7 @@ from a13n_service.iam import (
     AuthorizationError,
     authorize_workspace,
 )
-from a13n_service.iam.authorization import WorkspaceAction
+from a13n_service.iam.authorization import WorkspaceAction, read_actor_permissions
 from a13n_service.labels import LabelsBody, labels_etag
 from a13n_service.resource_keys import flush_key_change, insert_with_key
 from a13n_service.storage import transaction
@@ -88,43 +88,18 @@ class AgentCommands:
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
+                authority = await read_actor_permissions(
+                    session,
+                    actor=actor,
+                    workspace_id=workspace_id,
+                    agent_ids=tuple(selection.agent_id for selection in request.config.subagents.values()),
+                )
                 workspace = await authorize_workspace(
                     session,
                     actor=actor,
                     workspace_id=workspace_id,
                     action=WorkspaceAction.agent_create,
-                )
-                replay_ref = await load_replay(
-                    session,
-                    actor=actor,
-                    operation="agent.create",
-                    scope_id=workspace_id,
-                    identity=identity,
-                    now=now,
-                )
-                if replay_ref is not None:
-                    return replay_ref.restore(AgentRevisionCreateResult)
-                organization_id = workspace.organization_id
-        except AuthorizationError as error:
-            raise map_authorization_error(error) from error
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                config=request.config,
-                creation=True,
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-        try:
-            async with transaction(self._sessions) as session:
-                workspace = await authorize_workspace(
-                    session,
-                    actor=actor,
-                    workspace_id=workspace_id,
-                    action=WorkspaceAction.agent_create,
+                    authority=authority,
                 )
                 replay_ref = await load_replay(
                     session,
@@ -137,11 +112,23 @@ class AgentCommands:
                 if replay_ref is not None:
                     return replay_ref.restore(AgentRevisionCreateResult)
                 try:
-                    resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                    resolved = await self._resolver.resolve_in_transaction(
+                        session,
+                        actor=actor,
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                        config=request.config,
+                        authority=authority,
+                    )
                 except Exception as error:
                     raise resolution_error(error) from error
                 await authorize_template(
-                    session, actor=actor, workspace_id=workspace_id, template_id=request.default_environment_template_id
+                    session,
+                    actor=actor,
+                    workspace_id=workspace_id,
+                    template_id=request.default_environment_template_id,
+                    authority=authority,
                 )
                 record = AgentRecord(
                     id=agent_id,
@@ -208,6 +195,12 @@ class AgentCommands:
         except IntegrityError as error:
             if is_evidence_unique_race(error):
                 async with transaction(self._sessions) as session:
+                    await authorize_workspace(
+                        session,
+                        actor=actor,
+                        workspace_id=workspace_id,
+                        action=WorkspaceAction.agent_create,
+                    )
                     replay_ref = await load_replay(
                         session,
                         actor=actor,

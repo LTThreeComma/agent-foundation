@@ -196,6 +196,8 @@ The Run row lock or equivalent compare-and-swap plus attempt-number uniqueness a
 
 Operational admission control, queue names, priority, and fairness may order or delay scans. They never form another ownership authority. Redis may carry domain-owned Run-stream data and Thread-control wakeups, but no Redis value discovers, creates, transfers, or completes a RunAttempt or consumes a Thread inbox entry.
 
+A successful local Run acceptance may wake the same-process Worker after its transaction commits. This hint only advances the next PostgreSQL scan; it carries no execution authority. Workers capture the wakeup before scanning so commits during a scan are not lost. Bounded periodic scans remain required for cross-process submissions, recovery deadlines, and missed notifications. Executor completion and process drain also wake the local loop.
+
 ### Claim, Preparation, and Run Sequence
 
 This overview connects the admission and lifecycle stages. The following sections define each transaction; [lease-expiry recovery](#lease-expiry-recovery-sequence) adds the predecessor race, and [Recovery Preparation](#recovery-preparation) defines the admission and continuation decisions.

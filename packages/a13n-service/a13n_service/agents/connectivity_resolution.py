@@ -13,6 +13,7 @@ from a13n_service.connectivity.selection_resolution import (
     PreparedConnectivity,
 )
 from a13n_service.iam import AuthenticatedActor
+from a13n_service.iam.authorization import ActorPermissions
 
 from .domain import ConnectionToolSelection
 from .errors import agent_revision_create_failed, agent_revision_not_executable
@@ -76,9 +77,11 @@ async def freeze_invocation_connectivity(
     resolver: ConnectivitySelectionResolver,
     session: AsyncSession,
     prepared: PreparedConnectivity,
+    *,
+    authority: ActorPermissions | None = None,
 ) -> FrozenRunConnectivity:
     try:
-        return await resolver.freeze(session, prepared=prepared)
+        return await resolver.freeze(session, prepared=prepared, authority=authority)
     except ConnectivitySelectionError as error:
         raise agent_revision_not_executable(error.code) from error
 

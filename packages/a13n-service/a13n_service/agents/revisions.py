@@ -12,13 +12,13 @@ from a13n_service.durable_operations.idempotency import (
 from a13n_service.iam import (
     AuthenticatedActor,
     AuthorizationError,
+    authorize_agent,
 )
-from a13n_service.iam.authorization import WorkspaceAction
+from a13n_service.iam.authorization import WorkspaceAction, read_actor_permissions
 from a13n_service.storage import transaction
 from a13n_service.temporal import Clock, utc_now
 
 from .domain import (
-    Agent,
     AgentConfig,
     AgentRevisionCreateResult,
     CreateAgentRevisionRequest,
@@ -46,7 +46,7 @@ from .persistence import (
     touch_agent,
 )
 from .queries import AgentQueries
-from .resolution import AgentResolver, PreparedRevisionResolution, resolution_error
+from .resolution import AgentResolver, resolution_error
 
 
 class AgentRevisions:
@@ -82,25 +82,13 @@ class AgentRevisions:
         )
         if replay is not None:
             return replay
-        current = await self._queries.get(actor=actor, agent_id=agent_id)
-        require_custom(current)
-        if current.archived_at is not None:
-            raise agent_archived()
-        if current.version != request.expected_version:
-            raise agent_version_conflict(current.version)
-        prepared = await self._prepare_resolution(
-            actor=actor,
-            agent=current,
-            config=request.config,
-        )
         return await self._commit_revision_create(
             actor=actor,
             agent_id=agent_id,
             expected_version=request.expected_version,
             operation="agent.revision.create",
             identity=identity,
-            prepared=prepared,
-            source_revision_id=None,
+            config=request.config,
         )
 
     async def restore_revision(
@@ -206,20 +194,6 @@ class AgentRevisions:
                     return replay
             raise
 
-    async def _prepare_resolution(
-        self, *, actor: AuthenticatedActor, agent: Agent, config: AgentConfig
-    ) -> PreparedRevisionResolution:
-        try:
-            return await self._resolver.prepare(
-                actor=actor,
-                organization_id=agent.organization_id,
-                workspace_id=agent.workspace_id,
-                agent_id=agent.id,
-                config=config,
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-
     async def _commit_revision_create(
         self,
         *,
@@ -228,17 +202,24 @@ class AgentRevisions:
         expected_version: int,
         operation: str,
         identity: IdempotencyIdentity,
-        prepared: PreparedRevisionResolution,
-        source_revision_id: str | None,
+        config: AgentConfig,
     ) -> AgentRevisionCreateResult:
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
-                workspace = await authorize_agent_scope(
+                authority = await read_actor_permissions(
                     session,
                     actor=actor,
+                    workspace_id=actor.workspace_id,
+                    agent_ids=(agent_id, *(selection.agent_id for selection in config.subagents.values())),
+                )
+                workspace = await authorize_agent(
+                    session,
+                    actor=actor,
+                    workspace_id=actor.workspace_id,
                     agent_id=agent_id,
                     action=WorkspaceAction.agent_revision_create,
+                    authority=authority,
                 )
                 replay_ref = await load_replay(
                     session,
@@ -254,16 +235,25 @@ class AgentRevisions:
                 require_custom_mutable(record)
                 require_version(record, expected_version)
                 try:
-                    resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                    resolved = await self._resolver.resolve_in_transaction(
+                        session,
+                        actor=actor,
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace.workspace_id,
+                        agent_id=agent_id,
+                        config=config,
+                        authority=authority,
+                        creation=False,
+                    )
                 except Exception as error:
                     raise resolution_error(error) from error
                 revision = new_revision(
                     record,
                     revision_id=new_agent_revision_id(),
                     version=record.version + 1,
-                    config=prepared.config,
+                    config=config,
                     resolved=resolved,
-                    source_revision_id=source_revision_id,
+                    source_revision_id=None,
                     actor=actor,
                     now=now,
                 )

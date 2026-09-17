@@ -1,11 +1,12 @@
 """Authenticated API client shared by local seed journeys."""
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import contextmanager
 from typing import Any
 from uuid import uuid4
 
+import anyio
 import httpx2
 
 
@@ -63,3 +64,20 @@ class Client:
             self.http.headers.pop(name, None)
             if previous is not None:
                 self.http.headers[name] = previous
+
+
+async def parallel_map[T, R](
+    values: Iterable[T], operation: Callable[[T], Awaitable[R]], *, concurrency: int = 8
+) -> list[R]:
+    """Bound independent API operations and retain input order for fixture references."""
+    limiter = anyio.CapacityLimiter(concurrency)
+    results: dict[int, R] = {}
+
+    async def apply(index: int, value: T) -> None:
+        async with limiter:
+            results[index] = await operation(value)
+
+    async with anyio.create_task_group() as tasks:
+        for index, value in enumerate(values):
+            tasks.start_soon(apply, index, value)
+    return [results[index] for index in range(len(results))]

@@ -72,23 +72,30 @@ class CommandInput:
         Callers select the authority and inheritance source and revalidate the
         returned invocation and frozen configuration in the acceptance transaction.
         """
-        prepared = await invocations.preparation.prepare(
-            actor=actor,
-            agent_id=agent_id,
-            agent_revision_id=agent_revision_id,
-            expected_current_revision_id=expected_current_revision_id,
-            config_override=config_override,
-        )
         async with transaction(self._sessions) as database:
-            frozen = await invocations.freezing.freeze_in_transaction(database, prepared=prepared)
-        accepted = await self.accept(
+            prepared, frozen, authority = await invocations.select_in_session(
+                database,
+                actor=actor,
+                agent_id=agent_id,
+                agent_revision_id=agent_revision_id,
+                expected_current_revision_id=expected_current_revision_id,
+                config_override=config_override,
+            )
+            access = await input_environment_access(
+                database,
+                actor=actor,
+                agent_id=frozen.agent_id,
+                choice=environment,
+                inherited_id=inherited_environment_id,
+                access_ceiling=environment_access_ceiling,
+                authority=authority,
+            )
+        accepted = await self.accept_effective(
             actor=actor,
             workspace_id=actor.workspace_id,
             submitted=submitted,
-            frozen=frozen,
-            environment=environment,
-            inherited_environment_id=inherited_environment_id,
-            environment_access_ceiling=environment_access_ceiling,
+            effective=frozen.effective_config,
+            environment_access=access,
             prepared_assets=prepared_assets,
         )
         return PreparedCommandInput(prepared, frozen, accepted)
@@ -211,15 +218,17 @@ async def validate_invocation(
     prepared: PreparedAgentInvocation,
     frozen: FrozenAgentInvocation,
 ) -> None:
-    final = await invocations.freezing.freeze_in_transaction(database, prepared=prepared)
-    if final != frozen:
-        if _same_without_skills(final, frozen) and _skills_differ(final.effective_config, frozen.effective_config):
-            raise SkillPublicationChanged()
+    non_skill_matches, skills_match = await invocations.freezing.validate_in_transaction(
+        database, prepared=prepared, frozen=frozen
+    )
+    if not non_skill_matches:
         raise InteractionCommandError(
             "run_invocation_changed",
             "The selected Agent invocation changed before Run acceptance.",
             category=ErrorCategory.conflict,
         )
+    if not skills_match:
+        raise SkillPublicationChanged()
 
 
 class SkillPublicationChanged(InteractionCommandError):
@@ -253,11 +262,4 @@ def _same_without_skills(final: FrozenAgentInvocation, frozen: FrozenAgentInvoca
         and final.selector_kind == frozen.selector_kind
         and final.connection_selections == frozen.connection_selections
         and _without_skills(final.effective_config) == _without_skills(frozen.effective_config)
-    )
-
-
-def _skills_differ(first: EffectiveAgentConfig, second: EffectiveAgentConfig) -> bool:
-    return first.skills != second.skills or any(
-        _skills_differ(child.effective_config, second.child_configs[key].effective_config)
-        for key, child in first.child_configs.items()
     )

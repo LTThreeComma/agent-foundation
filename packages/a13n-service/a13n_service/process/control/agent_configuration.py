@@ -54,6 +54,7 @@ def build_configuration_service(
                 hooks,
                 lifecycle=shared.lifecycle,
                 bindings=shared.memory_behaviors,
+                wakeups=shared.queue_wakeups,
             ),
             states,
             CommandInput(sessions, assets, EndpointPolicy()),

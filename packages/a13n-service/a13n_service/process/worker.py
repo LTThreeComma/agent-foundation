@@ -191,6 +191,7 @@ async def build_worker_runtime(
         lease_seconds=settings.worker.lease_seconds,
         cleanup_seconds=settings.worker.cleanup_seconds,
         drain_seconds=settings.worker.drain_seconds,
+        wakeups=shared.queue_wakeups,
     )
     runtime = WorkerRuntime(
         external_tools=external_tools,

@@ -17,7 +17,7 @@ from uuid import uuid4
 import anyio
 import httpx2
 import uvicorn
-from a13n_service.connectivity.toolsets import portable_tool_name
+from a13n_service.connectivity.naming import portable_tool_name
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -236,6 +236,8 @@ def model_process(port: int = MODEL_PORT):
 @contextmanager
 def _model_process(port: int):
     with socket.socket() as listener:
+        # Seed and dev reuse this owned port; closed keepalive sockets may remain in TIME_WAIT.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", port))
         listener.listen()
         port = listener.getsockname()[1]

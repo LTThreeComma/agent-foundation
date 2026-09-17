@@ -502,7 +502,7 @@ class AuthorizationDecision:
     reason_code: str
 ```
 
-Every protected operation uses the canonical authorizer. A credential-authenticated request loads current Principal, credential, and applicable RoleBindings from the database once, then reuses that immutable request-local snapshot. A stream continuation or later request authorizes again. OSS performs no cross-request authorization caching. Agent execution instead uses the [Attempt IAM snapshot](#attempt-iam-snapshot); internal operations reuse the latest published snapshot between periodic refreshes.
+Every protected operation uses the canonical authorizer. A credential-authenticated command can load current Principal, credential, and bounded applicable RoleBindings once for a coherent database phase, then evaluate several actions from those detached facts. After external I/O, a final publication or acceptance transaction refreshes authority before committing; an early idempotent replay return also requires current authority. Repeated reads under READ COMMITTED are decision points, not a serialization guarantee against a revocation committed immediately afterward. A stream continuation or later request authorizes again. OSS performs no cross-request authorization caching. Agent execution instead uses the [Attempt IAM snapshot](#attempt-iam-snapshot); internal operations reuse the latest published snapshot between periodic refreshes. Credential-backed command facts cannot be substituted for an internal Attempt snapshot, or vice versa.
 
 The core evaluation is equivalent to:
 

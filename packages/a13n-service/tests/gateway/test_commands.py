@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -88,7 +89,10 @@ class _Preparation:
 
     async def prepare(self, **_kwargs):
         self.calls += 1
-        return SimpleNamespace(organization_id=ORGANIZATION_ID)
+        return SimpleNamespace(organization_id=ORGANIZATION_ID, subagents=())
+
+    async def prepare_in_session(self, _database, **kwargs):
+        return await self.prepare(**kwargs), None
 
 
 class _Freezing:
@@ -96,11 +100,18 @@ class _Freezing:
         self._values = values
         self.calls = 0
 
-    async def freeze_in_transaction(self, _database, *, prepared):
+    async def freeze_in_transaction(self, _database, *, prepared, authority=None):
+        del authority
         del prepared
         selected = self._values[min(self.calls, len(self._values) - 1)]
         self.calls += 1
         return selected
+
+    async def validate_in_transaction(self, database, *, prepared, frozen):
+        from a13n_service.interactions.command_preparation import _same_without_skills
+
+        current = await self.freeze_in_transaction(database, prepared=prepared)
+        return _same_without_skills(current, frozen), current == frozen
 
 
 def _request(text: str = "hello") -> StartRunCommand:
@@ -110,6 +121,15 @@ def _request(text: str = "hello") -> StartRunCommand:
             "input": {"schema_version": "2", "content": [{"type": "text", "text": text}]},
         }
     )
+
+
+def _invocations(preparation: _Preparation, freezing: _Freezing):
+    async def select_in_session(database, **kwargs):
+        prepared, authority = await preparation.prepare_in_session(database, **kwargs)
+        frozen = await freezing.freeze_in_transaction(database, prepared=prepared)
+        return prepared, frozen, authority
+
+    return SimpleNamespace(preparation=preparation, freezing=freezing, select_in_session=select_in_session)
 
 
 def _commands(
@@ -125,7 +145,7 @@ def _commands(
     execution_max_attempts=3,
     max_handoffs=2,
 ) -> InteractionCommands:
-    resolver = SimpleNamespace(preparation=preparation, freezing=freezing)
+    resolver = _invocations(preparation, freezing)
     payloads = RunPayloadStore(objects)
     acceptance = RunAcceptanceService(
         sessions,
@@ -389,7 +409,7 @@ async def test_start_rejects_final_invocation_drift_without_committing_run(
         interaction_sessions,
         interaction_object_store,
         _Preparation(),
-        _Freezing([_frozen(), _frozen(content_digest="b" * 64)]),
+        _Freezing([_frozen(), replace(_frozen(), selector_kind="exact")]),
     )
 
     with pytest.raises(InteractionCommandError) as captured:

@@ -539,6 +539,8 @@ Run acceptance creates or advances the Thread row together with the Run row and 
 2. publish object-backed input, and `state.json` create-only;
 3. in one short transaction, insert or advance the Thread, allocate or revalidate the selected Environment record, insert the `accepted` Run with its fixed Environment ID/access, update the Thread default without acquiring target use, and commit required lifecycle facts, idempotency evidence, and outbox intents.
 
+Preparation selects the Agent graph and eligible dependencies, previews Environment access, and composes the candidate effective configuration directly from those selected facts in one short database phase; it does not immediately reread the same dependencies. Parent-state and object I/O occur after that transaction and before final acceptance. The final transaction refreshes authority, locks and checks consumed mutable dependency facts, and validates the candidate without composing or digesting the full effective configuration again. A change limited to an unpinned current Skill uses the existing bounded refresh; other checked changes conflict. Thread advancement reads each distinct current, parent, selected-head, and label-source Run at most once in that transaction, even when historical continuation makes those IDs differ.
+
 ```mermaid
 sequenceDiagram
     participant Control as Control plane

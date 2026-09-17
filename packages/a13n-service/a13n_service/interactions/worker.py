@@ -18,6 +18,7 @@ from a13n_service.storage import is_database_contention, is_database_unavailable
 from .attempts import AttemptContext, AttemptLease
 from .domain import RunAttemptYieldReason, RunStatus
 from .models import RunRecord
+from .queue_wakeups import QueueWakeups
 from .run_control import RunAttemptControl
 from .scheduling import AttemptScheduler, ClaimedAttempt, WorkerClaim
 
@@ -64,9 +65,11 @@ class WorkerExecutionLoop:
         lease_seconds: float = 30,
         cleanup_seconds: float = 10,
         drain_seconds: float = 30,
+        wakeups: QueueWakeups | None = None,
     ) -> None:
         if concurrency < 1 or min(poll_seconds, lease_seconds, cleanup_seconds, drain_seconds) <= 0:
             raise ValueError("Worker execution bounds must be positive")
+        self._wakeups = wakeups or QueueWakeups()
         self._sessions = sessions
         self._scheduler = scheduler
         self._catalog = catalog
@@ -96,6 +99,7 @@ class WorkerExecutionLoop:
         if not self.is_draining():
             self._drain_deadline = current_time() + self._drain_seconds
             self._draining.set()
+            self._wakeups.notify()
         if self._admission_scope is not None:
             self._admission_scope.deadline = self._drain_deadline
         for scope in tuple(self._scopes.values()):
@@ -126,6 +130,7 @@ class WorkerExecutionLoop:
             async with create_task_group() as roots:
                 roots.start_soon(self._request_handoffs_on_drain)
                 while not self.is_draining():
+                    changed = self._wakeups.watch()
                     productive = False
                     try:
                         with CancelScope(deadline=self._drain_deadline) as admission:
@@ -162,6 +167,8 @@ class WorkerExecutionLoop:
                         if not contention and not is_database_unavailable(error):
                             raise
                         productive = False
+                        # Queue hints must not bypass database failure backoff.
+                        changed = self._draining
                         logger.warning(
                             "worker_database_contention" if contention else "worker_database_unavailable",
                             extra={"retry_seconds": self._poll_seconds},
@@ -172,7 +179,7 @@ class WorkerExecutionLoop:
                         await sleep(0)
                         continue
                     with move_on_after(self._poll_seconds):
-                        await self._draining.wait()
+                        await changed.wait()
         finally:
             self._stopped.set()
 
@@ -216,6 +223,7 @@ class WorkerExecutionLoop:
             self._controls.pop(context.run_attempt_id, None)
             self._scopes.pop(context.run_attempt_id, None)
             slot.release()
+            self._wakeups.notify()
 
     def _context(self, result: ClaimedAttempt, claim: WorkerClaim) -> AttemptContext:
         attempt = result.attempt

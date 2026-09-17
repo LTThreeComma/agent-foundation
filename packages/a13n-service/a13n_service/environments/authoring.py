@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.iam import AuthenticatedActor
-from a13n_service.iam.authorization import WorkspaceAction, authorize_workspace
+from a13n_service.iam.authorization import ActorPermissions, WorkspaceAction, authorize_workspace
 from a13n_service.iam.resource_scope import visible_workspace
 
 from .errors import environment_not_found, invalid_environment
@@ -18,11 +18,16 @@ async def authorize_template(
     workspace_id: str,
     template_id: str | None = None,
     revision_id: str | None = None,
+    authority: ActorPermissions | None = None,
 ) -> None:
     if template_id is None and revision_id is None:
         return
     workspace = await authorize_workspace(
-        session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.environment_template_use
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        action=WorkspaceAction.environment_template_use,
+        authority=authority,
     )
     query = (
         select(EnvironmentTemplateRevisionRecord)

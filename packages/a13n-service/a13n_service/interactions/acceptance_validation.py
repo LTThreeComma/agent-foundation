@@ -1,9 +1,15 @@
 """Pure validation of prepared Run, Thread, and checkpoint relationships."""
 
+from pydantic import ValidationError
+
 from a13n_service.digests import digest_request
 
+from .control_domain import WaitingRunContinueInput, WaitingRunFeedback
 from .domain import Run, RunInputKind, RunLineageKind, RunStatus, Session, Thread, ThreadOriginKind, ThreadRole
+from .errors import RunAcceptanceError
+from .inheritance import inherited_run_fields
 from .input import AcceptedAgentInput
+from .models import RunRecord, ThreadRecord
 from .state import RunCheckpoint, RunPayloadEnvelope
 
 
@@ -78,3 +84,108 @@ def validate_queued_run_input(
     actual = run.input if payload is None else payload.payload
     if actual != expected:
         raise ValueError("prepared queued Run input does not match its accepted submission")
+
+
+def validate_retry_advancement(current: RunRecord, run: Run) -> None:
+    if run.retry_of_run_id != current.id or current.status not in {
+        RunStatus.failed.value,
+        RunStatus.cancelled.value,
+    }:
+        raise RunAcceptanceError("run_retry_conflict", "Retry source is not the current failed or cancelled Run")
+    _validate_retry_copy(current.to_resource(), run)
+
+
+def validate_root_advancement(thread: ThreadRecord, current: RunRecord, run: Run) -> None:
+    if run.lineage_kind is not RunLineageKind.root or thread.head_run_id is not None:
+        raise RunAcceptanceError("run_lineage_invalid", "Root-like advancement requires a null Thread head")
+    if current.status not in {RunStatus.failed.value, RunStatus.cancelled.value}:
+        raise RunAcceptanceError("run_lineage_invalid", "Root-like advancement requires terminal current work")
+
+
+def validate_parent_advancement(
+    parent: RunRecord,
+    thread: ThreadRecord,
+    run: Run,
+    candidate_payload: RunPayloadEnvelope | None,
+) -> None:
+    assert run.parent_run_id is not None
+    if run.lineage_kind is RunLineageKind.fork:
+        raise RunAcceptanceError("run_lineage_invalid", "Fork lineage can only be the first Run of a new Thread")
+    expected_status = (
+        RunStatus.waiting.value
+        if run.input_kind in {RunInputKind.waiting_feedback, RunInputKind.waiting_continue}
+        else RunStatus.completed.value
+    )
+    if parent.thread_id != thread.id or parent.status != expected_status:
+        raise RunAcceptanceError("run_lineage_invalid", "Continuation parent is not an eligible same-Thread state")
+    if expected_status == RunStatus.waiting.value:
+        _validate_inherited_execution(parent.to_resource(), run)
+        _validate_waiting_input(parent, run, candidate_payload)
+
+
+def validate_selected_head(head: RunRecord, thread: ThreadRecord) -> None:
+    if head.thread_id != thread.id or head.status not in {RunStatus.waiting.value, RunStatus.completed.value}:
+        raise RunAcceptanceError("thread_head_invalid", "Selected Thread head is not a sealed continuation state")
+
+
+def _validate_retry_copy(source: Run, candidate: Run) -> None:
+    _validate_inherited_execution(source, candidate)
+    object_backed = source.input_object is not None
+    immutable_intent = (
+        source.parent_run_id,
+        source.lineage_kind,
+        source.input_kind,
+        object_backed,
+        source.input_text,
+        None if object_backed else source.input,
+    )
+    candidate_intent = (
+        candidate.parent_run_id,
+        candidate.lineage_kind,
+        candidate.input_kind,
+        candidate.input_object is not None,
+        candidate.input_text,
+        None if object_backed else candidate.input,
+    )
+    if candidate_intent != immutable_intent:
+        raise RunAcceptanceError("run_retry_invalid", "Retry must copy the terminal Run's exact accepted intent")
+
+
+def _validate_inherited_execution(source: Run, candidate: Run) -> None:
+    if inherited_run_fields(candidate) != inherited_run_fields(source):
+        raise RunAcceptanceError(
+            "run_inherited_authority_invalid",
+            "Run must preserve its source's accepted execution authority",
+        )
+
+
+def _validate_waiting_input(
+    parent: RunRecord,
+    candidate: Run,
+    payload: RunPayloadEnvelope | None,
+) -> None:
+    raw = candidate.input if payload is None else payload.payload
+    try:
+        if candidate.input_kind is RunInputKind.waiting_feedback:
+            accepted = WaitingRunFeedback.model_validate(raw)
+        elif candidate.input_kind is RunInputKind.waiting_continue:
+            accepted = WaitingRunContinueInput.model_validate(raw)
+        else:
+            raise RunAcceptanceError(
+                "run_input_invalid",
+                "Waiting continuation requires feedback or composite Continue input",
+            )
+    except ValidationError as error:
+        raise RunAcceptanceError("run_input_invalid", "Waiting continuation input is invalid") from error
+    if accepted.waiting_run_id != parent.id or accepted.sealed_state_digest_sha256 != parent.sealed_state_digest_sha256:
+        raise RunAcceptanceError("run_waiting_state_conflict", "Waiting continuation state changed")
+    pending = parent.to_resource().pending
+    if pending is None:
+        raise RunAcceptanceError("run_waiting_state_invalid", "Waiting Run has no pending summary")
+    expected = tuple((call.call_id, call.kind) for call in pending.calls)
+    actual = tuple((resolution.call_id, resolution.kind) for resolution in accepted.resolutions)
+    if actual != expected:
+        raise RunAcceptanceError(
+            "run_feedback_invalid",
+            "Waiting continuation does not exactly cover the frozen pending set",
+        )

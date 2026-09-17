@@ -38,3 +38,18 @@ async def test_stream_reports_usage_only_when_requested(include_usage, tool_call
         assert usage["prompt_tokens"] == 20
         assert usage["completion_tokens"] > 0
         assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_scripted_model_restarts_immediately_with_retained_keepalive_connection():
+    from urllib.parse import urlsplit
+
+    from dev.service.model import model_process
+
+    # A client can retain a keepalive socket when the server stops after seed.
+    with httpx2.Client(trust_env=False) as client:
+        with model_process(0) as endpoint:
+            port = urlsplit(endpoint).port
+            assert port is not None
+            assert client.get(endpoint.removesuffix("/v1") + "/healthz").status_code == 200
+    with model_process(port) as endpoint, httpx2.Client(trust_env=False) as client:
+        assert client.get(endpoint.removesuffix("/v1") + "/healthz").status_code == 200

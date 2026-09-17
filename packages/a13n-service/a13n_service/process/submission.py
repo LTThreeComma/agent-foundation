@@ -35,6 +35,7 @@ def build_input_commands(
             inline_hooks,
             lifecycle=shared.lifecycle,
             bindings=shared.memory_behaviors,
+            wakeups=shared.queue_wakeups,
         ),
         states,
         assets,

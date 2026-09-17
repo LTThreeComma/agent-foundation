@@ -44,24 +44,24 @@ async def prepare_skill_bindings(
     organization_id: str,
     workspace_id: str,
     selections: tuple[SkillSelection, ...],
+    lock: bool = False,
 ) -> tuple[PreparedSkillBinding, ...]:
     """Resolve public keys to stable active identities for an AgentRevision."""
 
     if not selections:
         return ()
     keys = tuple(item.skill_key for item in selections)
-    records = tuple(
-        (
-            await session.scalars(
-                select(SkillRecord).where(
-                    SkillRecord.organization_id == organization_id,
-                    SkillRecord.workspace_id == workspace_id,
-                    SkillRecord.key.in_(keys),
-                    SkillRecord.deleted_at.is_(None),
-                )
-            )
-        ).all()
+    query = (
+        select(SkillRecord)
+        .where(
+            SkillRecord.organization_id == organization_id,
+            SkillRecord.workspace_id == workspace_id,
+            SkillRecord.key.in_(keys),
+            SkillRecord.deleted_at.is_(None),
+        )
+        .order_by(SkillRecord.id)
     )
+    records = tuple((await session.scalars(query.with_for_update(read=True) if lock else query)).all())
     by_key = {record.key: record for record in records}
     if set(by_key) != set(keys):
         raise SkillSelectionInvalid
@@ -80,6 +80,7 @@ async def prepare_skill_bindings(
         organization_id=organization_id,
         workspace_id=workspace_id,
         bindings=bindings,
+        for_update=lock,
     )
     return tuple(
         PreparedSkillBinding(

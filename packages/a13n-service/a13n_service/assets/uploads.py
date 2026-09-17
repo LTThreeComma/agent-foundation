@@ -31,6 +31,7 @@ from .domain import (
     UploadedAssetSource,
 )
 from .errors import (
+    AssetError,
     asset_content_invalid,
     asset_idempotency_conflict,
 )
@@ -260,6 +261,20 @@ class AssetUploadService:
     ) -> Asset | None:
         try:
             async with transaction(self._sessions) as session:
+                replay_error = None
+                try:
+                    replay = await load_upload_replay(
+                        session,
+                        actor=actor,
+                        organization_id=organization_id,
+                        workspace_id=workspace_id,
+                        identity=identity,
+                        now=self._clock(),
+                    )
+                except AssetError as error:
+                    replay, replay_error = None, error
+                if replay is None and replay_error is None:
+                    return None
                 workspace = await authorize_workspace(
                     session,
                     actor=actor,
@@ -268,14 +283,9 @@ class AssetUploadService:
                 )
                 if workspace.organization_id != organization_id:
                     raise AuthorizationError("workspace_owner_changed", concealed=True)
-                return await load_upload_replay(
-                    session,
-                    actor=actor,
-                    organization_id=organization_id,
-                    workspace_id=workspace_id,
-                    identity=identity,
-                    now=self._clock(),
-                )
+                if replay_error is not None:
+                    raise replay_error
+                return replay
         except AuthorizationError as error:
             await record_denied(
                 self._sessions,

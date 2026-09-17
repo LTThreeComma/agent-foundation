@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth.credentials import require_current_credential
@@ -299,6 +299,51 @@ class PrincipalPermissions:
         )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class ActorPermissions:
+    """Credential-checked actions for one command phase and exact Agent set."""
+
+    actor: AuthenticatedActor
+    organization_id: str
+    workspace_id: str
+    workspace_actions: frozenset[WorkspaceAction]
+    agent_actions: tuple[tuple[str, frozenset[WorkspaceAction]], ...]
+
+    def for_agent(self, agent_id: str) -> frozenset[WorkspaceAction]:
+        return self.workspace_actions | next(
+            (actions for selected, actions in self.agent_actions if selected == agent_id), frozenset()
+        )
+
+
+async def read_actor_permissions(
+    session: AsyncSession,
+    *,
+    actor: AuthenticatedActor,
+    workspace_id: str,
+    agent_ids: tuple[str, ...] = (),
+) -> ActorPermissions:
+    """Read current credential, Principal, and grants once for selected actions."""
+    context = await _load_workspace_authorization(session, actor=actor, workspace_id=workspace_id, agent_ids=agent_ids)
+    bindings = context.bindings
+    return ActorPermissions(
+        actor=actor,
+        organization_id=context.authorized.organization_id,
+        workspace_id=workspace_id,
+        workspace_actions=_workspace_permissions(bindings),
+        agent_actions=tuple(
+            (agent_id, _agent_permissions(bindings, agent_id=agent_id)) for agent_id in sorted(set(agent_ids))
+        ),
+    )
+
+
+def _require_actor_permissions(
+    authority: ActorPermissions, *, actor: AuthenticatedActor, workspace_id: str
+) -> AuthorizedWorkspace:
+    if authority.actor != actor or authority.workspace_id != workspace_id:
+        raise AuthorizationError("permission_snapshot_scope_mismatch", concealed=True)
+    return AuthorizedWorkspace(organization_id=authority.organization_id, workspace_id=workspace_id, actor=actor)
+
+
 async def read_principal_permissions(
     session: AsyncSession,
     *,
@@ -372,9 +417,17 @@ async def authorize_workspace(
     workspace_id: str,
     action: WorkspaceAction,
     snapshot: PrincipalPermissions | None = None,
+    authority: ActorPermissions | None = None,
 ) -> AuthorizedWorkspace:
     """Authorize one operation from current Principal, credential boundary, and grants."""
 
+    if snapshot is not None and authority is not None:
+        raise ValueError("Only one authorization context may be supplied")
+    if authority is not None:
+        authorized = _require_actor_permissions(authority, actor=actor, workspace_id=workspace_id)
+        if action not in authority.workspace_actions:
+            raise AuthorizationError("permission_denied", concealed=True)
+        return authorized
     if snapshot is not None:
         authorized = await _authorize_actor_snapshot(session, actor=actor, workspace_id=workspace_id, snapshot=snapshot)
         if action not in snapshot.workspace_actions:
@@ -392,9 +445,18 @@ async def authorize_agent_skill_binding(
     actor: AuthenticatedActor,
     workspace_id: str,
     agent_id: str,
+    authority: ActorPermissions | None = None,
 ) -> AuthorizedWorkspace:
     """Authorize Skill binding through broad Workspace or direct Agent Builder authority."""
 
+    if authority is not None:
+        authorized = _require_actor_permissions(authority, actor=actor, workspace_id=workspace_id)
+        if (
+            WorkspaceAction.skill_read not in authority.workspace_actions
+            or WorkspaceAction.skill_bind not in authority.for_agent(agent_id)
+        ):
+            raise AuthorizationError("permission_denied", concealed=True)
+        return authorized
     context = await _load_workspace_authorization(
         session,
         actor=actor,
@@ -430,10 +492,18 @@ async def authorize_agent(
     agent_id: str,
     action: WorkspaceAction,
     snapshot: PrincipalPermissions | None = None,
+    authority: ActorPermissions | None = None,
 ) -> AuthorizedWorkspace:
     """Authorize one stable Agent through Workspace or direct Agent roles."""
 
+    if snapshot is not None and authority is not None:
+        raise ValueError("Only one authorization context may be supplied")
     await require_ordinary_agent(session, agent_id=agent_id)
+    if authority is not None:
+        authorized = _require_actor_permissions(authority, actor=actor, workspace_id=workspace_id)
+        if action not in authority.for_agent(agent_id):
+            raise AuthorizationError("permission_denied", concealed=True)
+        return authorized
     if snapshot is not None:
         authorized = await _authorize_actor_snapshot(session, actor=actor, workspace_id=workspace_id, snapshot=snapshot)
         if action not in snapshot.for_agent(agent_id):
@@ -559,6 +629,7 @@ async def _load_workspace_authorization(
     workspace_id: str,
     agent_id: str | None = None,
     include_agent_bindings: bool = False,
+    agent_ids: tuple[str, ...] = (),
 ) -> _WorkspaceAuthorizationContext:
     await require_current_credential(session, actor)
     if actor.boundary_workspace_id is not None and actor.boundary_workspace_id != workspace_id:
@@ -570,6 +641,7 @@ async def _load_workspace_authorization(
         workspace_id=workspace_id,
         agent_id=agent_id,
         include_agent_bindings=include_agent_bindings,
+        agent_ids=agent_ids,
     )
     if (
         actor.boundary_organization_id is not None
@@ -593,31 +665,49 @@ async def _load_principal_authorization(
     workspace_id: str,
     agent_id: str | None = None,
     include_agent_bindings: bool = False,
+    agent_ids: tuple[str, ...] = (),
 ) -> _PrincipalAuthorizationContext:
 
-    workspace = await session.scalar(
-        select(WorkspaceRecord).where(WorkspaceRecord.id == workspace_id, WorkspaceRecord.deleted_at.is_(None))
-    )
-    if workspace is None:
-        raise AuthorizationError("workspace_not_found", concealed=True)
-
+    # Workspace state, Principal eligibility and grants form one authority read.
+    # An outer join retains the distinction between a missing Workspace and no grants.
     if principal.principal_type is PrincipalType.user:
-        await _require_active_user(session, principal.principal_id)
+        active = (
+            select(UserRecord.id).where(UserRecord.id == principal.principal_id, UserRecord.status == "active").exists()
+        )
     else:
-        await _require_active_service_account(session, principal.principal_id, workspace)
-
-    bindings = tuple(
-        (
-            await session.scalars(
-                _binding_query(
-                    principal,
-                    workspace,
-                    agent_id=agent_id,
-                    include_agent_bindings=include_agent_bindings,
-                )
+        active = (
+            select(ServiceAccountRecord.id)
+            .where(
+                ServiceAccountRecord.id == principal.principal_id,
+                ServiceAccountRecord.organization_id == WorkspaceRecord.organization_id,
+                ServiceAccountRecord.workspace_id == WorkspaceRecord.id,
+                ServiceAccountRecord.status == "active",
+                ServiceAccountRecord.deleted_at.is_(None),
             )
-        ).all()
-    )
+            .correlate(WorkspaceRecord)
+            .exists()
+        )
+    rows = (
+        await session.execute(
+            select(WorkspaceRecord, active, RoleBindingRecord)
+            .outerjoin(
+                RoleBindingRecord,
+                _binding_scope(
+                    principal,
+                    agent_id=agent_id,
+                    agent_ids=agent_ids,
+                    include_agent_bindings=include_agent_bindings,
+                ),
+            )
+            .where(WorkspaceRecord.id == workspace_id, WorkspaceRecord.deleted_at.is_(None))
+        )
+    ).all()
+    if not rows:
+        raise AuthorizationError("workspace_not_found", concealed=True)
+    workspace, principal_active, _ = rows[0]
+    if not principal_active:
+        raise AuthorizationError("principal_inactive")
+    bindings = tuple(binding for _, _, binding in rows if binding is not None)
     for binding in bindings:
         validate_binding(binding)
     if principal.principal_type is PrincipalType.user and not any(
@@ -659,36 +749,22 @@ async def _require_active_user(session: AsyncSession, user_id: str) -> None:
         raise AuthorizationError("principal_inactive")
 
 
-async def _require_active_service_account(session: AsyncSession, principal_id: str, workspace: WorkspaceRecord) -> None:
-    account = await session.scalar(
-        select(ServiceAccountRecord).where(
-            ServiceAccountRecord.id == principal_id,
-            ServiceAccountRecord.organization_id == workspace.organization_id,
-            ServiceAccountRecord.workspace_id == workspace.id,
-            ServiceAccountRecord.status == "active",
-            ServiceAccountRecord.deleted_at.is_(None),
-        )
-    )
-    if account is None:
-        raise AuthorizationError("principal_inactive")
-
-
-def _binding_query(
+def _binding_scope(
     principal: PrincipalRef,
-    workspace: WorkspaceRecord,
     *,
     agent_id: str | None,
     include_agent_bindings: bool = False,
-) -> Select[tuple[RoleBindingRecord]]:
+    agent_ids: tuple[str, ...] = (),
+) -> ColumnElement[bool]:
     resource_scope = or_(
         and_(
             RoleBindingRecord.resource_type == "organization",
-            RoleBindingRecord.resource_id == workspace.organization_id,
+            RoleBindingRecord.resource_id == WorkspaceRecord.organization_id,
         ),
         and_(
             RoleBindingRecord.resource_type == "workspace",
-            RoleBindingRecord.resource_id == workspace.id,
-            RoleBindingRecord.workspace_id == workspace.id,
+            RoleBindingRecord.resource_id == WorkspaceRecord.id,
+            RoleBindingRecord.workspace_id == WorkspaceRecord.id,
         ),
     )
     if agent_id is not None:
@@ -697,7 +773,16 @@ def _binding_query(
             and_(
                 RoleBindingRecord.resource_type == "agent",
                 RoleBindingRecord.resource_id == agent_id,
-                RoleBindingRecord.workspace_id == workspace.id,
+                RoleBindingRecord.workspace_id == WorkspaceRecord.id,
+            ),
+        )
+    elif agent_ids:
+        resource_scope = or_(
+            resource_scope,
+            and_(
+                RoleBindingRecord.resource_type == "agent",
+                RoleBindingRecord.resource_id.in_(agent_ids),
+                RoleBindingRecord.workspace_id == WorkspaceRecord.id,
             ),
         )
     elif include_agent_bindings:
@@ -705,11 +790,11 @@ def _binding_query(
             resource_scope,
             and_(
                 RoleBindingRecord.resource_type == "agent",
-                RoleBindingRecord.workspace_id == workspace.id,
+                RoleBindingRecord.workspace_id == WorkspaceRecord.id,
             ),
         )
-    return select(RoleBindingRecord).where(
-        RoleBindingRecord.organization_id == workspace.organization_id,
+    return and_(
+        RoleBindingRecord.organization_id == WorkspaceRecord.organization_id,
         RoleBindingRecord.principal_type == principal.principal_type.value,
         RoleBindingRecord.principal_id == principal.principal_id,
         resource_scope,

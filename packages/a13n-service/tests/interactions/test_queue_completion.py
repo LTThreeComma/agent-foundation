@@ -1,5 +1,4 @@
 from datetime import timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -27,7 +26,7 @@ from anyio import Event, create_task_group, fail_after, sleep, sleep_forever
 from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import func, select
 
-from tests.gateway.test_commands import _commands, _Freezing, _frozen, _Preparation
+from tests.gateway.test_commands import _commands, _Freezing, _frozen, _invocations, _Preparation
 from tests.hooks.support import seed_hook_actor_access
 from tests.lifecycle_support import test_lifecycle_writer
 
@@ -334,7 +333,7 @@ async def test_worker_composition_consumes_queue_when_source_finishes(
 
     monkeypatch.setattr(QueueDrain, "consume_thread", observe_completed)
     settings = Settings(worker={"concurrency": 1, "poll_interval_seconds": 0.01})
-    invocations = SimpleNamespace(preparation=_Preparation(), freezing=_Freezing([_frozen()]))
+    invocations = _invocations(_Preparation(), _Freezing([_frozen()]))
     async with worker_runtime(
         sessions,
         interaction_object_store,

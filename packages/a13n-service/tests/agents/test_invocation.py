@@ -679,3 +679,87 @@ async def test_permissions_and_managed_reviewer_survive_acceptance_and_reconstru
     assert permissions.policy.risk_threshold == "extra_high"
     assert permissions.policy.on_flagged == "approval_required"
     assert permissions.policy.rules["environment.shell_exec"].risk_threshold == "high"
+
+
+@pytest.mark.anyio
+async def test_candidate_selection_reads_dependencies_once_and_matches_final_freeze(
+    agent_management, agent_invocation_resolver, agent_sessions
+):
+    """The real selector must not immediately re-read its Model and Revision."""
+    from sqlalchemy import event
+
+    created = await agent_management.commands.create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="single-selection",
+        request=CreateAgentRequest(name="Single selection", config=agent_config()),
+    )
+    statements = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement.lower())
+
+    async with transaction(agent_sessions) as session:
+        engine = session.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            prepared, candidate, _ = await agent_invocation_resolver.select_in_session(
+                session,
+                actor=actor(),
+                agent_id=created.agent.id,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+    assert sum("from models " in sql for sql in statements) == 1
+    assert sum("from agent_revisions " in sql for sql in statements) == 1
+    async with transaction(agent_sessions) as session:
+        final = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    assert candidate == final
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["disable_model", "revoke_user", "advance_revision"])
+async def test_selected_candidate_is_revalidated_after_external_work(
+    agent_management, agent_invocation_resolver, agent_sessions, change
+):
+    """Removing the redundant initial freeze must not weaken final acceptance."""
+    from a13n_service.iam.models import UserRecord
+
+    from .conftest import USER_ID
+
+    created = await agent_management.commands.create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="candidate-race",
+        request=CreateAgentRequest(name="Candidate race", config=agent_config()),
+    )
+    async with transaction(agent_sessions) as session:
+        prepared, candidate, _ = await agent_invocation_resolver.select_in_session(
+            session,
+            actor=actor(),
+            agent_id=created.agent.id,
+        )
+    if change == "advance_revision":
+        await agent_management.revisions.create_revision(
+            actor=actor(),
+            agent_id=created.agent.id,
+            idempotency_key="advance-candidate",
+            request=CreateAgentRevisionRequest(
+                expected_version=created.agent.version, config=agent_config(instructions="Changed")
+            ),
+        )
+    else:
+        async with transaction(agent_sessions) as session:
+            if change == "disable_model":
+                model = await session.get(ModelRecord, MODEL_ID)
+                model.enabled = False
+            else:
+                user = await session.get(UserRecord, USER_ID)
+                user.status = "disabled"
+    with pytest.raises(AgentError):
+        async with transaction(agent_sessions) as session:
+            await agent_invocation_resolver.freezing.validate_in_transaction(
+                session,
+                prepared=prepared,
+                frozen=candidate,
+            )

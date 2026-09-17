@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from a13n_service.interactions.queue_wakeups import QueueWakeups
 
 if TYPE_CHECKING:
     from a13n_service.agent_configuration.service import ConfigurationService
@@ -53,6 +55,7 @@ class SharedRuntime:
     storage: StorageResources
     lifecycle: LifecycleWriter
     secret_protector: SecretProtector
+    queue_wakeups: QueueWakeups = field(default_factory=QueueWakeups)
     memories: MemoryService | None = None
     memory_behaviors: MemoryBehaviors | None = None
 

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -107,6 +108,7 @@ def _serve(environment: Environment, langfuse: Langfuse) -> None:
     from a13n_service.log import configure_logging
     from a13n_service.process.server import serve_app
 
+    from .dev_resource_sync import apply_private_resources
     from .langfuse import local_traces
     from .model import model_process
 
@@ -115,11 +117,21 @@ def _serve(environment: Environment, langfuse: Langfuse) -> None:
             raise ValueError("The previous reset did not complete; run reset again before starting Service")
         configure_logging(environment.settings)
         with model_process(environment.ports.model):
-            serve_app(create_app(environment.settings))
+            app = create_app(environment.settings)
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan(application):
+                async with original_lifespan(application):
+                    await apply_private_resources(application, environment.settings, environment.state)
+                    yield
+
+            app.router.lifespan_context = lifespan
+            serve_app(app)
 
 
-def _console(environment: Environment) -> None:
-    ports = environment.ports
+def _console(instance: Instance) -> None:
+    ports = instance.ports
     os.execvpe(
         "pnpm",
         ["pnpm", "--dir", str(ROOT / "frontend"), "--filter", "a13n-console", "dev", "--port", str(ports.console)],
@@ -289,22 +301,6 @@ def _environment(config: Path, root: Path):
     return environment
 
 
-def _apply_private_resources(environment: Environment) -> None:
-    """Keep optional private resources outside baseline reset and startup success."""
-    import anyio
-
-    from .dev_resource_sync import sync_existing
-
-    try:
-        result = anyio.run(sync_existing, environment.settings, environment.state)
-    except Exception as error:
-        detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else type(error).__name__
-        print(f"Private development resources were not applied: {detail}", file=sys.stderr, flush=True)
-        return
-    if result is not None:
-        print(f"Private development resources: {result}", flush=True)
-
-
 def _run_prepared(args: argparse.Namespace, root: Path) -> None:
     from .docker import ensure_docker
     from .langfuse import USER_EMAIL, USER_PASSWORD, Langfuse, local_traces
@@ -318,7 +314,6 @@ def _run_prepared(args: argparse.Namespace, root: Path) -> None:
     if args.command in {"dev", "service-dev", "setup"}:
         setup(environment, langfuse, args.config, mem0_settings=mem0_settings)
     if args.command == "dev":
-        _apply_private_resources(environment)
         if args.foreground:
             _run_dev(environment, args.config, args.mem0_config)
         else:
@@ -331,8 +326,6 @@ def _run_prepared(args: argparse.Namespace, root: Path) -> None:
             langfuse.start()
         with local_traces(langfuse):
             reset(environment, args.state)
-            if args.state == "seeded":
-                _apply_private_resources(environment)
     elif args.command == "down":
         ensure_docker()
         environment.require_stopped()
@@ -378,11 +371,17 @@ def main(*, instance_root: Path = ROOT) -> None:
         if args.command in {"_serve", "_console"}:
             if os.environ.get(CHILD_OWNER) != str(os.getppid()):
                 raise ValueError("Internal development child commands require their lifecycle owner")
+            if args.command == "_console":
+                instance = load_instance(root)
+                if instance is None:
+                    raise ValueError("Console requires the parent development instance")
+                _console(instance)
+                return
             environment = _environment(args.config, root)
             from .langfuse import Langfuse
 
             langfuse = Langfuse(environment)
-            (_serve(environment, langfuse) if args.command == "_serve" else _console(environment))
+            _serve(environment, langfuse)
             return
         if not args.prepared:
             _bootstrap(args, root)

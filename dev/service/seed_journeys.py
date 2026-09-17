@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import anyio
 
-from .seed_client import Client
+from .seed_client import Client, parallel_map
 
 
 async def run(
@@ -57,78 +57,106 @@ def text_input(prompt: str) -> dict:
 
 
 async def journeys(client: Client, base: str, resources: dict, completed: dict) -> dict:
-    scenarios = {}
-    agent = resources["agents"][3]  # This Agent intentionally has no Environment-dependent Skills.
-    empty = await client.request("POST", base + "/threads", expected=201, json={"agent_id": agent})
-    scenarios["empty_thread"] = empty["id"]
-    failed = await run(client, base, agent, "[fail] This fictional provider request intentionally fails.")
-    scenarios["failed_run"] = failed["id"]
-    thread = await client.request("GET", f"/api/v1/threads/{failed['thread_id']}")
-    receipt = await client.request(
-        "POST", f"/api/v1/runs/{failed['id']}/retry", expected=202, json={"expected_thread_version": thread["version"]}
-    )
-    retried = await finish(client, receipt["run_id"], "failed")
-    scenarios["failed_retry"] = retried["id"]
-    receipt = await client.request(
-        "POST",
-        f"/api/v1/runs/{completed['id']}/fork",
-        expected=202,
-        json={"input": text_input("[long] Alternative proposal: keep this branch separate from the original review.")},
-    )
-    fork = await finish(client, receipt["run_id"])
-    scenarios["forked_run"] = fork["id"]
-    if fork["thread_id"] == completed["thread_id"]:
-        raise RuntimeError("Fork scenario did not create a separate Thread")
+    agent = resources["agents"][3]  # No Environment-dependent Skills.
 
-    for resolve in (False, True):
-        waiting = await run(
-            client,
-            base,
-            resources["scenarios"]["agent_client_tool"],
-            "[client] Please review the fictional rollout checklist.",
-            expected="waiting",
+    async def failure_and_retry():
+        scenarios = {}
+        empty = await client.request("POST", base + "/threads", expected=201, json={"agent_id": agent})
+        scenarios["empty_thread"] = empty["id"]
+        failed = await run(client, base, agent, "[fail] This fictional provider request intentionally fails.")
+        scenarios["failed_run"] = failed["id"]
+        thread = await client.request("GET", f"/api/v1/threads/{failed['thread_id']}")
+        receipt = await client.request(
+            "POST",
+            f"/api/v1/runs/{failed['id']}/retry",
+            expected=202,
+            json={"expected_thread_version": thread["version"]},
         )
-        pending = await client.request("GET", f"/api/v1/runs/{waiting['id']}/pending-actions")
-        if len(pending["items"]) != 1 or pending["items"][0]["kind"] != "client_tool":
-            raise RuntimeError("Waiting scenario did not retain its client-tool request")
-        scenarios["waiting_for_client" if not resolve else "feedback_source"] = waiting["id"]
-        if resolve:
-            thread = await client.request("GET", f"/api/v1/threads/{waiting['thread_id']}")
-            receipt = await client.request(
-                "POST",
-                f"/api/v1/runs/{waiting['id']}/feedback",
-                expected=202,
-                json={
-                    "expected_thread_version": thread["version"],
-                    "sealed_state_digest_sha256": waiting["sealed_state_digest_sha256"],
-                    "resolutions": [
-                        {
-                            "call_id": pending["items"][0]["call_id"],
-                            "action": "complete",
-                            "result": {"decision": "approved-for-local-demo", "reason": "Fictional client feedback"},
-                        }
-                    ],
-                },
-            )
-            resolved = await finish(client, receipt["run_id"])
-            if "approved-for-local-demo" not in resolved["output_text"]:
-                raise RuntimeError("Client feedback was not incorporated into the resumed output")
-            scenarios["feedback_completed"] = resolved["id"]
+        retried = await finish(client, receipt["run_id"], "failed")
+        scenarios["failed_retry"] = retried["id"]
+        return scenarios
 
-    for queue in (False, True):
-        interrupted = await interrupt_journey(client, base, agent, queue=queue)
-        scenarios["interrupted_with_queue" if queue else "interrupted_run"] = interrupted["id"]
-        if not queue:
-            thread = await client.request("GET", f"/api/v1/threads/{interrupted['thread_id']}")
-            receipt = await client.request(
-                "POST",
-                f"/api/v1/runs/{interrupted['id']}/retry",
-                expected=202,
-                json={"expected_thread_version": thread["version"]},
+    async def fork():
+        scenarios = {}
+        receipt = await client.request(
+            "POST",
+            f"/api/v1/runs/{completed['id']}/fork",
+            expected=202,
+            json={
+                "input": text_input("[long] Alternative proposal: keep this branch separate from the original review.")
+            },
+        )
+        fork = await finish(client, receipt["run_id"])
+        scenarios["forked_run"] = fork["id"]
+        if fork["thread_id"] == completed["thread_id"]:
+            raise RuntimeError("Fork scenario did not create a separate Thread")
+        return scenarios
+
+    async def feedback():
+        scenarios = {}
+        for resolve in (False, True):
+            waiting = await run(
+                client,
+                base,
+                resources["scenarios"]["agent_client_tool"],
+                "[client] Please review the fictional rollout checklist.",
+                expected="waiting",
             )
-            resumed = await finish(client, receipt["run_id"])
-            scenarios["interrupted_retry_completed"] = resumed["id"]
-    return scenarios
+            pending = await client.request("GET", f"/api/v1/runs/{waiting['id']}/pending-actions")
+            if len(pending["items"]) != 1 or pending["items"][0]["kind"] != "client_tool":
+                raise RuntimeError("Waiting scenario did not retain its client-tool request")
+            scenarios["waiting_for_client" if not resolve else "feedback_source"] = waiting["id"]
+            if resolve:
+                thread = await client.request("GET", f"/api/v1/threads/{waiting['thread_id']}")
+                receipt = await client.request(
+                    "POST",
+                    f"/api/v1/runs/{waiting['id']}/feedback",
+                    expected=202,
+                    json={
+                        "expected_thread_version": thread["version"],
+                        "sealed_state_digest_sha256": waiting["sealed_state_digest_sha256"],
+                        "resolutions": [
+                            {
+                                "call_id": pending["items"][0]["call_id"],
+                                "action": "complete",
+                                "result": {
+                                    "decision": "approved-for-local-demo",
+                                    "reason": "Fictional client feedback",
+                                },
+                            }
+                        ],
+                    },
+                )
+                resolved = await finish(client, receipt["run_id"])
+                if "approved-for-local-demo" not in resolved["output_text"]:
+                    raise RuntimeError("Client feedback was not incorporated into the resumed output")
+                scenarios["feedback_completed"] = resolved["id"]
+        return scenarios
+
+    async def interruptions():
+        scenarios = {}
+        for queue in (False, True):
+            interrupted = await interrupt_journey(client, base, agent, queue=queue)
+            scenarios["interrupted_with_queue" if queue else "interrupted_run"] = interrupted["id"]
+            if not queue:
+                thread = await client.request("GET", f"/api/v1/threads/{interrupted['thread_id']}")
+                receipt = await client.request(
+                    "POST",
+                    f"/api/v1/runs/{interrupted['id']}/retry",
+                    expected=202,
+                    json={"expected_thread_version": thread["version"]},
+                )
+                resumed = await finish(client, receipt["run_id"])
+                scenarios["interrupted_retry_completed"] = resumed["id"]
+        return scenarios
+
+    # Separate Threads share no mutable execution state. The fork starts only
+    # after the supplied source Run and its Environment are sealed.
+    async def execute(operation):
+        return await operation()
+
+    groups = await parallel_map((failure_and_retry, fork, feedback, interruptions), execute)
+    return {key: value for group in groups for key, value in group.items()}
 
 
 async def interrupt_journey(client: Client, base: str, agent: str, *, queue: bool) -> dict:

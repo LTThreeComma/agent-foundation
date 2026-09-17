@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from a13n_service.connectivity.connections.models import ConnectionRecord
 from a13n_service.connectivity.connectors.models import ConnectorConnectionRecord, ConnectorProviderRecord
 from a13n_service.iam import AuthenticatedActor, AuthorizationError, WorkspaceAction, authorize_workspace
-from a13n_service.iam.authorization import PrincipalPermissions
+from a13n_service.iam.authorization import ActorPermissions, PrincipalPermissions
 from a13n_service.iam.resource_scope import visible_workspace
 from a13n_service.storage import short_session
 
@@ -62,7 +62,13 @@ class ConnectivitySelectionResolver:
             )
         return PreparedConnectivity(actor, organization_id, workspace_id, selections)
 
-    async def freeze(self, session: AsyncSession, *, prepared: PreparedConnectivity) -> FrozenRunConnectivity:
+    async def freeze(
+        self,
+        session: AsyncSession,
+        *,
+        prepared: PreparedConnectivity,
+        authority: ActorPermissions | None = None,
+    ) -> FrozenRunConnectivity:
         current = await self.resolve_in_session(
             session,
             actor=prepared.actor,
@@ -70,6 +76,7 @@ class ConnectivitySelectionResolver:
             workspace_id=prepared.workspace_id,
             connection_tools=prepared.selections.connection_selections,
             lock=True,
+            authority=authority,
         )
         if current != prepared.selections:
             raise ConnectivitySelectionError("connection_changed", path="connection_tools")
@@ -106,6 +113,7 @@ class ConnectivitySelectionResolver:
         connection_tools: tuple[ConnectionToolSelection, ...],
         lock: bool = False,
         snapshot: PrincipalPermissions | None = None,
+        authority: ActorPermissions | None = None,
     ) -> FrozenRunConnectivity:
         identifiers = tuple(item.connection_id for item in connection_tools)
         if len(identifiers) != len(set(identifiers)):
@@ -119,6 +127,7 @@ class ConnectivitySelectionResolver:
                 workspace_id=workspace_id,
                 action=WorkspaceAction.connection_read,
                 snapshot=snapshot,
+                authority=authority,
             )
         except AuthorizationError as error:
             raise ConnectivitySelectionError("connection_not_eligible", path="connection_tools") from error

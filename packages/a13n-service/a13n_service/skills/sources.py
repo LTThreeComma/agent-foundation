@@ -28,7 +28,6 @@ from .github import AcquiredGitHubSkill, GitHubAcquisitionError
 from .objects import SkillPackageStore, SkillPackageStoreError
 from .package import NormalizedSkillPackage, SkillPackageError
 from .persistence import require_owned_upload, require_upload_manifest
-from .support import authorize_skill_workspace
 
 
 class GitHubCredentialResolver(Protocol):
@@ -89,7 +88,6 @@ class SkillSourcePreparer:
                 actor=actor,
                 organization_id=organization_id,
                 workspace_id=workspace_id,
-                action=action,
                 upload_id=source.upload_id,
             )
         return await self._prepare_github(
@@ -106,17 +104,9 @@ class SkillSourcePreparer:
         actor: AuthenticatedActor,
         organization_id: str,
         workspace_id: str,
-        action: WorkspaceAction,
         upload_id: str,
     ) -> PreparedSkillSource:
         async with transaction(self._sessions) as session:
-            await authorize_skill_workspace(
-                session,
-                actor=actor,
-                workspace_id=workspace_id,
-                action=action,
-                concealed_code="skill_upload_not_found",
-            )
             upload = await require_owned_upload(
                 session,
                 actor=actor,

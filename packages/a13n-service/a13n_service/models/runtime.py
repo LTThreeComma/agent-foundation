@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from a13n_harness import AgentContext
@@ -33,6 +34,7 @@ class PreparedModelExecution:
     organization_id: str
     workspace_id: str
     resource: ModelResource
+    provider_updated_at: datetime
     settings_layers: tuple[JsonObject, ...]
 
 
@@ -53,38 +55,61 @@ class AcceptedModelSelector:
         settings: JsonObject,
         settings_override: JsonObject | None = None,
     ) -> PreparedModelExecution:
-        if (model_key is None) == (model_id is None):
-            raise ValueError("exactly one Model selector is required")
         async with short_session(self._sessions) as session:
-            query = select(ModelRecord, ModelProviderRecord).join(
-                ModelProviderRecord,
-                ModelProviderRecord.id == ModelRecord.provider_id,
-            )
-            selector = (
-                ModelRecord.normalized_key == model_key.casefold()
-                if model_key is not None
-                else ModelRecord.id == model_id
-            )
-            query = query.where(
-                ModelRecord.organization_id == organization_id,
-                visible_workspace(ModelRecord.workspace_id, workspace_id),
-                selector,
-            )
-            row = (await session.execute(query)).one_or_none()
-            if row is None:
-                raise ModelError("model_not_found", "The Model was not found.", category=ErrorCategory.not_found)
-            model_record, provider_record = row
-            model = model_record.to_resource()
-            _require_enabled(model_record, provider_record)
-            self._registry.validate_model_api(provider_record.type, model.model_api)
-            settings_layers = (settings,) if settings_override is None else (settings, settings_override)
-            effective_settings(model.model_api, model.settings, *settings_layers)
-            return PreparedModelExecution(
+            return await self.prepare_in_session(
+                session,
                 organization_id=organization_id,
                 workspace_id=workspace_id,
-                resource=model,
-                settings_layers=settings_layers,
+                model_key=model_key,
+                model_id=model_id,
+                settings=settings,
+                settings_override=settings_override,
             )
+
+    async def prepare_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        organization_id: str,
+        workspace_id: str,
+        model_key: str | None = None,
+        model_id: str | None = None,
+        settings: JsonObject,
+        settings_override: JsonObject | None = None,
+        lock: bool = False,
+    ) -> PreparedModelExecution:
+        if (model_key is None) == (model_id is None):
+            raise ValueError("exactly one Model selector is required")
+        query = select(ModelRecord, ModelProviderRecord).join(
+            ModelProviderRecord,
+            ModelProviderRecord.id == ModelRecord.provider_id,
+        )
+        selector = (
+            ModelRecord.normalized_key == model_key.casefold() if model_key is not None else ModelRecord.id == model_id
+        )
+        query = query.where(
+            ModelRecord.organization_id == organization_id,
+            visible_workspace(ModelRecord.workspace_id, workspace_id),
+            selector,
+        )
+        if lock:
+            query = query.with_for_update(read=True)
+        row = (await session.execute(query)).one_or_none()
+        if row is None:
+            raise ModelError("model_not_found", "The Model was not found.", category=ErrorCategory.not_found)
+        model_record, provider_record = row
+        model = model_record.to_resource()
+        _require_enabled(model_record, provider_record)
+        self._registry.validate_model_api(provider_record.type, model.model_api)
+        settings_layers = (settings,) if settings_override is None else (settings, settings_override)
+        effective_settings(model.model_api, model.settings, *settings_layers)
+        return PreparedModelExecution(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            resource=model,
+            provider_updated_at=provider_record.to_resource().updated_at,
+            settings_layers=settings_layers,
+        )
 
     async def freeze_in_transaction(
         self,
@@ -109,7 +134,10 @@ class AcceptedModelSelector:
         model_record, provider_record = row
         _require_enabled(model_record, provider_record)
         model = model_record.to_resource()
-        if model.updated_at != prepared.resource.updated_at:
+        if (
+            model.updated_at != prepared.resource.updated_at
+            or provider_record.to_resource().updated_at != prepared.provider_updated_at
+        ):
             raise ModelError(
                 "model_configuration_changed",
                 "The Model changed during acceptance. Retry the request.",

@@ -1,26 +1,11 @@
 """Verify retained coverage before a reset can be reported as successful."""
 
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 import anyio
 
-from .seed_client import Client
-
-
-async def _parallel[Item, Result](items: Sequence[Item], action: Callable[[Item], Awaitable[Result]]) -> list[Result]:
-    limiter = anyio.CapacityLimiter(8)
-    results: dict[int, Result] = {}
-
-    async def collect(index: int, item: Item) -> None:
-        async with limiter:
-            results[index] = await action(item)
-
-    async with anyio.create_task_group() as tasks:
-        for index, item in enumerate(items):
-            tasks.start_soon(collect, index, item)
-    return [results[index] for index in range(len(items))]
+from .seed_client import Client, parallel_map
 
 
 async def verify(client: Client, manifest: dict) -> dict:
@@ -77,7 +62,7 @@ async def verify(client: Client, manifest: dict) -> dict:
             raise RuntimeError("Thread belongs to the wrong Session")
         return threads
 
-    all_threads = [thread for group in await _parallel(sessions, session_threads) for thread in group]
+    all_threads = [thread for group in await parallel_map(sessions, session_threads) for thread in group]
     all_runs = await client.collection(base + "/runs", params={"limit": 200})
     threads_by_id = {thread["id"]: thread for thread in all_threads}
     if len(threads_by_id) != len(all_threads) or len({run["id"] for run in all_runs}) != len(all_runs):
@@ -120,7 +105,7 @@ async def verify(client: Client, manifest: dict) -> dict:
 
     item_kinds = Counter()
     unavailable = []
-    for retained, items in zip(all_runs, await _parallel(all_runs, retained_items), strict=True):
+    for retained, items in zip(all_runs, await parallel_map(all_runs, retained_items), strict=True):
         if items is None:
             unavailable.append(retained["id"])
         else:

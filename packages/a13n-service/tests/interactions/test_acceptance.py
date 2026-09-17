@@ -30,6 +30,7 @@ from a13n_service.interactions.initialization import (
 )
 from a13n_service.interactions.models import RunRecord, ThreadRecord
 from a13n_service.interactions.objects import RunObjectIntegrityError, RunPayloadStore, RunStateStore
+from a13n_service.interactions.queue_wakeups import QueueWakeups
 from a13n_service.interactions.state import RunPayloadEnvelope
 from a13n_service.secrets.models import SecretRecord
 from a13n_service.storage import ObjectStore, short_session, transaction
@@ -120,6 +121,8 @@ async def test_accepts_prepared_root_state_and_round_trips_the_run(
     interaction_sessions: async_sessionmaker[AsyncSession],
     interaction_object_store: ObjectStore,
 ) -> None:
+    wakeups = QueueWakeups()
+    changed = wakeups.watch()
     states = RunStateStore(interaction_object_store)
     service = RunAcceptanceService(
         interaction_sessions,
@@ -129,6 +132,7 @@ async def test_accepts_prepared_root_state_and_round_trips_the_run(
         bindings=ordinary_memory(interaction_sessions),
         clock=lambda: NOW,
         lifecycle=test_lifecycle_writer(),
+        wakeups=wakeups,
     )
     seed = RunStateSeed(
         run_id="run_1111111111111111",
@@ -174,7 +178,20 @@ async def test_accepts_prepared_root_state_and_round_trips_the_run(
             state=invalid_state,
         )
 
+    async def reject_before_commit(database, receipt):
+        assert not changed.is_set()
+        raise RuntimeError("deliberate acceptance rollback")
+
+    with pytest.raises(RuntimeError, match="deliberate acceptance rollback"):
+        await service.accept_new_thread(
+            session=session, thread=thread, run=run, state=state, transaction_hook=reject_before_commit
+        )
+    assert not changed.is_set()
+    async with short_session(interaction_sessions) as database:
+        assert await database.get(RunRecord, run.id) is None
+
     receipt = await service.accept_new_thread(session=session, thread=thread, run=run, state=state)
+    assert changed.is_set()
 
     assert receipt.thread_version == 1
     assert await states.read(ORGANIZATION_ID, run.id, expected_thread_id=thread.id)

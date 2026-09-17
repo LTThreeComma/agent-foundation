@@ -5,10 +5,11 @@ import io
 import zipfile
 from pathlib import Path
 
+import anyio
 from a13n_service.settings import Settings
 
 from .seed_assets import asset_examples
-from .seed_client import Client
+from .seed_client import Client, parallel_map
 from .seed_environments import local_provider, local_workspace
 from .seed_model_providers import seed_model_providers, seed_provider_models
 
@@ -53,9 +54,20 @@ def agent_config(name: str, **values) -> dict:
 
 
 async def resources(client: Client, base: str, model_url: str, settings: Settings):
+    async def demo_models():
+        providers = await seed_model_providers(client, base)
+        await seed_provider_models(client, base, providers)
+
+    catalog = {}
+    # Catalog network refresh does not block local resource creation.
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(demo_models)
+        catalog = await local_resources(client, base, model_url, settings)
+    return catalog
+
+
+async def local_resources(client: Client, base: str, model_url: str, settings: Settings):
     scenarios = {}
-    demo_providers = await seed_model_providers(client, base)
-    await seed_provider_models(client, base, demo_providers)
     provider = await client.request(
         "POST",
         base + "/model-providers",
@@ -128,9 +140,9 @@ async def resources(client: Client, base: str, model_url: str, settings: Setting
     publication_path.write_bytes((FIXTURES / "brief.md").read_bytes())
     scenarios["environment_shared"] = workspace["environment_id"]
     scenarios["environment_template"] = workspace["template_id"]
-    assets, skills, agents, skill_keys, asset_checks = [], [], [], [], []
     examples = asset_examples()
-    for index in range(64):
+
+    async def resource_pair(index: int):
         filename, media_type, content = examples[index % len(examples)]
         asset = await client.request(
             "POST",
@@ -140,15 +152,12 @@ async def resources(client: Client, base: str, model_url: str, settings: Setting
             content=content,
             headers={"Content-Type": "application/octet-stream"},
         )
-        assets.append(asset["id"])
-        asset_checks.append(
-            {
-                "id": asset["id"],
-                "media_type": media_type,
-                "size": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-        )
+        check = {
+            "id": asset["id"],
+            "media_type": media_type,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
         response = await client.http.get(f"/api/v1/assets/{asset['id']}/content")
         if response.status_code != 200 or response.content != content:
             raise RuntimeError(
@@ -164,8 +173,13 @@ async def resources(client: Client, base: str, model_url: str, settings: Setting
                 "source": {"kind": "zip_upload", "upload_id": upload["upload_id"]},
             },
         )
-        skills.append(skill["skill"]["id"])
-        skill_keys.append(skill["skill"]["key"])
+        return asset["id"], check, skill["skill"]["id"], skill["skill"]["key"]
+
+    pairs = await parallel_map(range(64), resource_pair)
+    assets = [item[0] for item in pairs]
+    asset_checks = [item[1] for item in pairs]
+    skills = [item[2] for item in pairs]
+    skill_keys = [item[3] for item in pairs]
     upload = await upload_skill(client, base, 1, version=2)
     await client.request(
         "POST",
@@ -174,7 +188,8 @@ async def resources(client: Client, base: str, model_url: str, settings: Setting
         json={"expected_version": 1, "source": {"kind": "zip_upload", "upload_id": upload["upload_id"]}},
     )
     scenarios["skill_multiple_revisions"] = skills[0]
-    for index in range(56):
+
+    async def create_agent(index: int):
         name = AGENT_NAMES[index % len(AGENT_NAMES)] + (f" · {index + 1}" if index >= len(AGENT_NAMES) else "")
         config = agent_config(name, skills=[{"skill_key": skill_keys[index], "version": 1}] if index % 4 != 3 else [])
         created = await client.request(
@@ -189,7 +204,9 @@ async def resources(client: Client, base: str, model_url: str, settings: Setting
                 "config": config,
             },
         )
-        agents.append(created["agent"]["id"])
+        return created["agent"]["id"]
+
+    agents = await parallel_map(range(56), create_agent)
     config = {
         **agent_config("Client review · waiting and feedback"),
         "client_tools": [

@@ -9,14 +9,9 @@ from a13n_service.settings import Settings
 
 from .model import MODEL_PORT, model_process
 from .seed_client import Client
-from .seed_connectivity import connectivity
-from .seed_environments import environments
-from .seed_execution import execution
 from .seed_identity import PASSWORD, members, profiles
-from .seed_journeys import journeys, run
-from .seed_lifecycle import resource_history
 from .seed_resources import resources
-from .seed_sessions import bulk_sessions
+from .seed_scenarios import scenarios
 from .seed_verify import report, verify
 
 
@@ -69,28 +64,10 @@ async def seed(settings: Settings, *, session_count: int = 3, model_port: int = 
                     flush=True,
                 )
                 phase_started = perf_counter()
-                runs, bulk_environments = await bulk_sessions(client, base, catalog, settings, session_count)
-                print(f"Seed representative Sessions: {perf_counter() - phase_started:.2f}s", flush=True)
-                # One genuine continued conversation for scroll and history review.
-                phase_started = perf_counter()
-                previous = next(run for run in runs if run["status"] == "completed")
-                for index in range(12):
-                    previous = await run(
-                        client,
-                        base,
-                        previous["agent_id"],
-                        f"[long] Follow-up {index + 1}: expand the review.",
-                        previous=previous,
-                    )
-                print(f"Seed long conversation: {perf_counter() - phase_started:.2f}s", flush=True)
-                print("Creating branching, retry, waiting, feedback, interruption and queue scenarios...", flush=True)
-                phase_started = perf_counter()
-                conversation_scenarios = await journeys(client, base, catalog, previous)
-                conversation_scenarios.update(await execution(client, base, catalog))
-                connectivity_scenarios = await connectivity(client, base, catalog, identity_scenarios, model_url)
-                catalog["scenarios"].update(await environments(client, base, catalog, settings))
-                catalog["scenarios"].update(await resource_history(client, base, catalog))
-                print(f"Seed dedicated journeys: {perf_counter() - phase_started:.2f}s", flush=True)
+                scenario_results = await scenarios(
+                    client, base, catalog, settings, identity_scenarios, model_url, session_count
+                )
+                print(f"Seed execution scenarios: {perf_counter() - phase_started:.2f}s", flush=True)
                 sessions = await client.collection(base + "/sessions")
                 manifest = {
                     "workspace_id": workspace["id"],
@@ -100,15 +77,15 @@ async def seed(settings: Settings, *, session_count: int = 3, model_port: int = 
                     "skill_ids": skills,
                     "session_count": len(sessions),
                     "bulk_session_count": session_count,
-                    "bulk_environments": bulk_environments,
-                    "long_thread_id": previous["thread_id"],
+                    "bulk_environments": scenario_results["bulk_environments"],
+                    "long_thread_id": scenario_results["long_thread_id"],
                     "model_url": model_url,
                     "asset_checks": catalog["asset_checks"],
                     "scenarios": {
                         "identity": identity_scenarios,
                         "resources": catalog["scenarios"],
-                        "conversations": conversation_scenarios,
-                        "connectivity": connectivity_scenarios,
+                        "conversations": scenario_results["conversations"],
+                        "connectivity": scenario_results["connectivity"],
                     },
                 }
                 print("Verifying retained resources, pagination, relationships and outcomes...", flush=True)
@@ -116,7 +93,11 @@ async def seed(settings: Settings, *, session_count: int = 3, model_port: int = 
                 manifest["coverage"] = await verify(client, manifest)
                 await client.request("POST", "/api/v1/auth/logout", expected=204)
                 print(f"Seed semantic verification: {perf_counter() - phase_started:.2f}s", flush=True)
-    settings.filesystem.root.parent.joinpath("seed.json").write_text(json.dumps(manifest, indent=2) + "\n")
+                state = settings.filesystem.root.parent
+                state.joinpath("seed.json").write_text(json.dumps(manifest, indent=2) + "\n")
+                from .dev_resource_sync import apply_private_resources
+
+                await apply_private_resources(app, settings, state)
     settings.filesystem.root.parent.joinpath("seed-report.md").write_text(report(manifest))
     print(f"Public local account: {settings.iam.initial_admin_email} / {PASSWORD}", flush=True)
     print(f"Seed total: {perf_counter() - total_started:.2f}s", flush=True)

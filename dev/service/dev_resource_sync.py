@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from hashlib import sha256
 from pathlib import Path
 
 import httpx2
-from a13n_service.app import create_app
 from a13n_service.models.providers import built_in_provider_registry
 from a13n_service.settings import Settings
+from fastapi import FastAPI
 
 from .dev_resources import DevelopmentResources, _active, _filled, _model_credential, _revealed, load_resources
 from .seed_client import Client
@@ -313,37 +314,47 @@ async def sync_resources(
     }
 
 
-async def sync_existing(settings: Settings, state: Path) -> dict[str, int] | None:
+async def sync_existing(app: FastAPI, settings: Settings, state: Path) -> dict[str, int] | None:
     resources = load_resources()
     manifest_path = state / "seed.json"
     if resources is None or not manifest_path.exists() or not _active(resources):
         return None
-    # The seeded local account is the only authority used. The temporary app
-    # follows the same ordinary authenticated API path as the seed itself.
+    # Reuse the running application while retaining ordinary login, CSRF and
+    # management authorization. The ASGI transport does not own its lifespan.
     workspace_id = json.loads(manifest_path.read_text())["workspace_id"]
     origin = settings.iam.public_origin
-    app = create_app(settings)
-    async with app.router.lifespan_context(app):
-        async with httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app),
-            base_url=origin.replace("http://", "https://", 1),
-            headers={"Origin": origin},
-            timeout=60,
-            trust_env=False,
-        ) as http:
-            client = Client(http)
-            login = await client.request(
-                "POST",
-                "/api/v1/auth/login",
-                json={"email": settings.iam.initial_admin_email, "password": PASSWORD},
-            )
-            http.headers["X-A13N-CSRF-Token"] = login["csrf_token"]
-            http.headers["X-A13N-Workspace-ID"] = workspace_id
-            result = await sync_resources(
-                client,
-                f"/api/v1/workspaces/{workspace_id}",
-                resources,
-                AppliedResources(state / "dev-resources-applied.json"),
-            )
-            await client.request("POST", "/api/v1/auth/logout", expected=204)
-            return result
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app),
+        base_url=origin.replace("http://", "https://", 1),
+        headers={"Origin": origin},
+        timeout=60,
+        trust_env=False,
+    ) as http:
+        client = Client(http)
+        login = await client.request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"email": settings.iam.initial_admin_email, "password": PASSWORD},
+        )
+        http.headers["X-A13N-CSRF-Token"] = login["csrf_token"]
+        http.headers["X-A13N-Workspace-ID"] = workspace_id
+        result = await sync_resources(
+            client,
+            f"/api/v1/workspaces/{workspace_id}",
+            resources,
+            AppliedResources(state / "dev-resources-applied.json"),
+        )
+        await client.request("POST", "/api/v1/auth/logout", expected=204)
+        return result
+
+
+async def apply_private_resources(app: FastAPI, settings: Settings, state: Path) -> None:
+    """Keep optional private-resource failures outside startup and seed success."""
+    try:
+        result = await sync_existing(app, settings, state)
+    except Exception as error:
+        detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else type(error).__name__
+        print(f"Private development resources were not applied: {detail}", file=sys.stderr, flush=True)
+        return
+    if result is not None:
+        print(f"Private development resources: {result}", flush=True)

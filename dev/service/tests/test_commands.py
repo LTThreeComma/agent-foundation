@@ -61,14 +61,17 @@ def test_setup_refuses_incomplete_reset_before_touching_infrastructure(tmp_path,
     assert environment.incomplete.read_text() == "seeded\n"
 
 
-def test_private_resource_failure_does_not_block_local_startup(tmp_path, monkeypatch, capsys):
+@pytest.mark.anyio
+async def test_private_resource_failure_does_not_block_local_startup(tmp_path, monkeypatch, capsys):
     environment = local_environment(tmp_path)
 
-    async def failed_sync(settings, state):
+    async def failed_sync(app, settings, state):
         raise ValueError("invalid private resource")
 
     monkeypatch.setattr("dev.service.dev_resource_sync.sync_existing", failed_sync)
-    commands._apply_private_resources(environment)
+    from dev.service.dev_resource_sync import apply_private_resources
+
+    await apply_private_resources(None, environment.settings, environment.state)
     assert "Private development resources were not applied: invalid private resource" in capsys.readouterr().err
 
 

@@ -404,6 +404,8 @@ Plugin selection is retained only in `config.plugins`; Worker-owned normalizatio
 
 Create Agent accepts `name`, optional `description`, and one complete `config`. Service authorizes and resolves every referenced dependency, then atomically creates the Agent and Revision v1. It never exposes an Agent without a current Revision. ConfigurationDraft saving is a separate authoring boundary owned by [Agent Configuration Assistant](43-agent-configuration-assistant.md#draft-editing-and-validation); only its authenticated apply operation enters this Agent publication boundary.
 
+Creation checks an exact idempotent replay before applying current configuration validation. A new create validates local shape, then selects and protects current eligible managed dependencies in its one short publication transaction. A selection without an exact version uses the eligible dependency at that transaction; an explicit version condition remains exact. The same transaction writes Agent, Revision v1, idempotency evidence, and audit. No external I/O occurs while it is open.
+
 Create Revision accepts `expected_version` and one complete replacement `config`:
 
 1. authorize the operation and every referenced resource;
@@ -414,7 +416,7 @@ Create Revision accepts `expected_version` and one complete replacement `config`
 6. return the current Agent and Revision unchanged for a semantic no-op; or
 7. create immutable version `current + 1` and advance the Agent head in the same transaction.
 
-Resolution occurs outside the final commit transaction. The final short transaction rechecks the Agent, selected managed references, authorization, and concurrency evidence before committing. Failure creates no Revision and does not advance the head.
+Create Revision resolves dependencies in its publication transaction after checking the Agent version. Built-in registration uses the same transaction-time resolution. A selection without an exact dependency version uses the current eligible resource at that decision point; explicit version conditions remain exact. Failure creates no Revision and does not advance the head. ConfigurationDraft validation and apply retain separate preparation and final recheck because apply must verify the dependency digest reviewed earlier.
 
 Restore Revision revalidates retained dependencies and copies the selected historical content into a new later Revision. It never moves the head backward or repoints it to an older row. `source_revision_id` records the restored source.
 

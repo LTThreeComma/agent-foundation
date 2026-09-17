@@ -9,6 +9,7 @@ from a13n_service.iam import (
     WorkspaceAction,
     authorize_workspace,
 )
+from a13n_service.iam.authorization import ActorPermissions
 from a13n_service.skills.domain import SkillRevisionLock
 
 from ..domain import (
@@ -38,6 +39,7 @@ async def prepare_skills(
     workspace_id: str,
     selections: tuple[SkillSelection, ...],
     retained: tuple[ResolvedSkillBinding, ...] | None,
+    authority: ActorPermissions | None = None,
 ) -> tuple[PreparedSkillLock, ...]:
     if not selections:
         return ()
@@ -46,6 +48,7 @@ async def prepare_skills(
         actor=actor,
         workspace_id=workspace_id,
         action=WorkspaceAction.skill_read,
+        authority=authority,
     )
     try:
         if retained is not None:
@@ -102,6 +105,8 @@ async def validate_retained_skills(
 async def freeze_skills(
     session: AsyncSession,
     prepared: PreparedAgentInvocation,
+    *,
+    authority: ActorPermissions | None = None,
 ) -> tuple[SkillRevisionLock, ...]:
     if not prepared.skills:
         return ()
@@ -110,6 +115,7 @@ async def freeze_skills(
         actor=prepared.actor,
         workspace_id=prepared.workspace_id,
         action=WorkspaceAction.skill_read,
+        authority=authority,
     )
     try:
         return await freeze_skill_locks(
