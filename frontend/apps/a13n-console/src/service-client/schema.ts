@@ -1445,6 +1445,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/environment-templates/{template_id}/revisions/{revision_id}/default": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Set Default Revision */
+    post: operations["post_environment_templates_template_id_revisions_revision_id_default"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/environments/{environment_id}": {
     parameters: {
       query?: never;
@@ -2783,6 +2800,23 @@ export interface paths {
     put?: never;
     /** Create Skill Revision */
     post: operations["post_skills_skill_id_revisions"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/skills/{skill_id}/revisions/{skill_revision_id}/default": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Set Default Skill Revision */
+    post: operations["post_skills_skill_id_revisions_skill_revision_id_default"];
     delete?: never;
     options?: never;
     head?: never;
@@ -7388,8 +7422,8 @@ export interface components {
        * Format: date-time
        */
       created_at: string;
-      /** Current Revision Id */
-      current_revision_id: string;
+      /** Default Revision Id */
+      default_revision_id: string;
       /** Description */
       description: string | null;
       /** Id */
@@ -10302,8 +10336,8 @@ export interface components {
        */
       created_at: string;
       created_by: components["schemas"]["PrincipalRef"];
-      /** Current Revision Id */
-      current_revision_id: string;
+      /** Default Revision Id */
+      default_revision_id: string;
       /** Deleted At */
       deleted_at: string | null;
       /** Id */
@@ -10362,8 +10396,10 @@ export interface components {
        */
       created_at: string;
       created_by: components["schemas"]["PrincipalRef"];
-      /** Current Revision Id */
-      current_revision_id: string;
+      /** Default Revision Id */
+      default_revision_id: string;
+      /** Default Version */
+      default_version: number;
       /** Deleted At */
       deleted_at: string | null;
       /** Id */
@@ -10434,7 +10470,7 @@ export interface components {
        * Outcome
        * @enum {string}
        */
-      outcome: "published" | "already_current";
+      outcome: "published" | "already_default";
       revision: components["schemas"]["SkillRevision"];
       skill: components["schemas"]["Skill"];
     };
@@ -16659,6 +16695,53 @@ export interface operations {
       };
     };
   };
+  post_environment_templates_template_id_revisions_revision_id_default: {
+    parameters: {
+      query?: never;
+      header: {
+        "If-Match": string;
+      };
+      path: {
+        template_id: string;
+        revision_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EnvironmentTemplate"];
+        };
+      };
+      /** @description Invalid request. */
+      400: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+      /** @description Service error. */
+      default: {
+        headers: {
+          "Retry-After"?: string;
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+    };
+  };
   patch_environments_environment_id: {
     parameters: {
       query?: never;
@@ -21863,6 +21946,53 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SkillPublicationReceipt"];
+        };
+      };
+      /** @description Invalid request. */
+      400: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+      /** @description Service error. */
+      default: {
+        headers: {
+          "Retry-After"?: string;
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorResponse"];
+        };
+      };
+    };
+  };
+  post_skills_skill_id_revisions_skill_revision_id_default: {
+    parameters: {
+      query?: never;
+      header: {
+        "If-Match": string;
+      };
+      path: {
+        skill_id: string;
+        skill_revision_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          "X-Request-ID"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Skill"];
         };
       };
       /** @description Invalid request. */
