@@ -13,6 +13,7 @@ from pydantic_ai.tools import DeferredToolRequests
 from a13n_harness_ui.conversation import ConversationExcerpt
 from a13n_harness_ui.display_history import DisplayHistory, saved_display_history
 from a13n_harness_ui.environment_bindings import EnvironmentBindingSelection, validate_binding_aliases
+from a13n_harness_ui.goal import GoalView
 
 from .objects import ObjectKind, ObjectRef
 
@@ -128,6 +129,7 @@ class ThreadReadModel(StoredContract):
     version: Literal[1] = 1
     deferred_requests: DeferredToolRequests | None = None
     latest_activity: RetainedActivity | None = None
+    goal: GoalView | None = None
 
 
 class Thread(StoredContract):

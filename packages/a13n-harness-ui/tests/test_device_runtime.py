@@ -304,8 +304,9 @@ async def test_reverse_attachment_rejects_invalid_auth_before_upgrade(tmp_path, 
 
 @pytest.mark.parametrize("carrier", ["http", "websocket"])
 @pytest.mark.parametrize("default_environment", ["workspace", "build"])
+@pytest.mark.parametrize("mode", ["normal", "goal"])
 async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
-    tmp_path, monkeypatch, carrier, default_environment
+    tmp_path, monkeypatch, carrier, default_environment, mode
 ):
     """Only the model is scripted; App preparation and every file call use real providers."""
     monkeypatch.setenv("DEVICE_TOKEN", TOKEN)
@@ -402,7 +403,11 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
                         0: DeltaToolCall(name=name, json_args=json.dumps(arguments), tool_call_id=f"call-{model_calls}")
                     }
                 else:
-                    yield "Read local and remote files and wrote the remote result."
+                    output = "Read local and remote files and wrote the remote result."
+                    # One Goal follow-up repeats real file operations in the same Session.
+                    if mode == "goal" and model_calls % (2 * (len(calls) + 1)) == 0:
+                        output += "\n[GOAL_COMPLETE]"
+                    yield output
 
             async def resolve(self, context, model_id):
                 return FunctionModel(stream_function=model)
@@ -411,12 +416,17 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
             captures = []
             for index in range(2):
                 receipt = await app.submit_thread(
-                    thread_id=thread.thread_id, prompt="Use remote-build and inspect both environments."
+                    thread_id=thread.thread_id, prompt="Use remote-build and inspect both environments.", mode=mode
                 )
                 async with asyncio.timeout(30):
                     operation = await app.wait_root_operation(receipt.receipt_id)
                 assert operation.status is RootOperationStatus.completed, operation
                 assert operation.outcome.execution.output.startswith("Read local and remote")
+                if mode == "goal":
+                    assert operation.goal.status == "verified"
+                    assert operation.goal.iteration == 1
+                else:
+                    assert operation.goal is None
                 capture = await app.inspect_operation_configuration(receipt.receipt_id)
                 assert capture is not None
                 assert capture.environment_bindings == (selection,)
@@ -425,13 +435,14 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
                 assert len(set(opened)) == index + 1
                 assert (root / "output.txt").read_text() == "Written through a model tool"
                 assert not (workspace / "output.txt").exists()
-            assert observed == [name for name, _ in calls] * 2
+            assert observed == [name for name, _ in calls] * (4 if mode == "goal" else 2)
             assert (await app.get_thread(thread.thread_id)).continuation_id is not None
             assert (await app.device_info(recipe.id)).available
             assert captures[0].environment_bindings == captures[1].environment_bindings
 
 
-async def test_restart_reuses_captured_device_recipe_and_opens_a_fresh_session(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["normal", "goal"])
+async def test_restart_reuses_captured_device_recipe_and_opens_a_fresh_session(tmp_path, monkeypatch, mode):
     """A restart restores accepted bindings, not the edited configuration catalog."""
     from anyio import Event, create_task_group, fail_after, sleep
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -485,7 +496,7 @@ async def test_restart_reuses_captured_device_recipe_and_opens_a_fresh_session(t
             returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
             assert sum(part.tool_call_id == "once" for part in returns) == 1
             assert "Captured remote binding survived restart" in str(returns[-1].content)
-            return ModelResponse(parts=[TextPart("Restored")])
+            return ModelResponse(parts=[TextPart("Restored\n[GOAL_COMPLETE]" if mode == "goal" else "Restored")])
 
         install_model(monkeypatch, model)
         async with (
@@ -505,7 +516,7 @@ async def test_restart_reuses_captured_device_recipe_and_opens_a_fresh_session(t
                     default_environment="build",
                 )
             )
-            await app.submit_thread(thread_id=thread.thread_id, prompt="Read once, then continue")
+            await app.submit_thread(thread_id=thread.thread_id, prompt="Read once, then continue", mode=mode)
             with fail_after(10):
                 await started.wait()
             group.start_soon(release_during_shutdown, app, release)
@@ -517,3 +528,10 @@ async def test_restart_reuses_captured_device_recipe_and_opens_a_fresh_session(t
                     await sleep(0.02)
             assert len(requests) == 3
             assert len(set(opened)) == 2
+            goal = (await app.get_thread(thread.thread_id)).thread.goal
+            if mode == "goal":
+                assert goal.status == "verified"
+                assert goal.objective == "Read once, then continue"
+                assert goal.iteration == 0
+            else:
+                assert goal is None

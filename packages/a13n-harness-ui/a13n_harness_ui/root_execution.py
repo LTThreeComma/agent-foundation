@@ -29,7 +29,7 @@ from a13n_harness.observation import record_span_metadata
 from a13n_harness.pricing import get_current_pricing_catalog
 from a13n_logging import get_logger
 from a13n_stream_protocol import HarnessAguiObserver
-from anyio import CancelScope, to_thread
+from anyio import CancelScope, get_cancelled_exc_class, to_thread
 from opentelemetry.trace import StatusCode
 from pydantic_ai import ToolDenied, ToolFailed
 from pydantic_ai.capabilities import AbstractCapability
@@ -50,6 +50,7 @@ from a13n_harness_ui.diagnostics import exception_feedback
 from a13n_harness_ui.display_history import DisplayHistoryCollector, saved_display_history, with_display_history
 from a13n_harness_ui.environment_runtime import EnvironmentFinalization, EnvironmentRunService
 from a13n_harness_ui.errors import RunCoordinationError, ThreadError
+from a13n_harness_ui.goal import GoalCapability, GoalView, saved_goal, with_goal
 from a13n_harness_ui.live import HarnessUiLiveHub, HarnessUiSummaryHub
 from a13n_harness_ui.model_runtime import SubscriptionSource
 from a13n_harness_ui.observation import (
@@ -234,6 +235,8 @@ class RootRunExecutor:
         admission: RootRunAdmission,
         *,
         on_stream: Callable[[HarnessRunStream[Any], RootInputFiles | None], Awaitable[None]] | None = None,
+        goal: GoalView | None = None,
+        on_goal: Callable[[GoalView], Awaitable[None]] | None = None,
     ) -> RootRunOutcome:
         thread = admission.thread
         thread_id = thread.thread_id
@@ -245,6 +248,12 @@ class RootRunExecutor:
                 preparation_span,
                 {"prepare.input_kind": "deferred_response" if admission.response is not None else "prompt"},
             )
+            # Admission without a prompt is an explicit deferred/planned continuation;
+            # an ordinary prompt can never reactivate a checkpointed Goal.
+            if admission.prompt is None:
+                goal = saved_goal(previous_state)
+            previous_state = with_goal(previous_state, goal)
+            goal_capability = GoalCapability(goal, changed=on_goal)
             display = DisplayHistoryCollector(previous_state.message_history, saved_display_history(previous_state))
             base_continuation_id = thread.continuation.logical_digest if thread.continuation is not None else None
 
@@ -276,6 +285,7 @@ class RootRunExecutor:
                 pricing_catalog=pricing_catalog,
                 subagent_operator=self._subagent_operator,
                 root_capabilities=(
+                    goal_capability,
                     display,
                     RootCheckpointCapability(save_checkpoint),
                     *((RestartPauseCapability(self._restart, thread_id),) if self._restart is not None else ()),
@@ -449,6 +459,21 @@ class RootRunExecutor:
                             )
                         )
                 elif result is not None:
+                    if result.state is not None:
+                        goal_status = (
+                            "cancelled"
+                            if isinstance(run_error, get_cancelled_exc_class())
+                            else "failed"
+                            if run_error is not None
+                            else result.status
+                        )
+                        result = result.replace(
+                            state=await goal_capability.finish(
+                                result.state,
+                                status=goal_status,
+                                usage=result.usage,
+                            )
+                        )
                     continuation = await self._select_state(
                         thread=thread,
                         composition=published.reference,
@@ -469,6 +494,10 @@ class RootRunExecutor:
                     except Exception as exc:
                         continuation = RootContinuationSelection(status="failed", error=exc)
                     else:
+                        state = await goal_capability.finish(
+                            state,
+                            status="cancelled" if isinstance(run_error, get_cancelled_exc_class()) else "failed",
+                        )
                         continuation = await self._select_state(
                             thread=thread,
                             composition=published.reference,
