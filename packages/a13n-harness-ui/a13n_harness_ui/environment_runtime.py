@@ -523,9 +523,8 @@ class EnvironmentRunService:
                 "Device connections are unavailable.", code="device_connections_unavailable"
             )
         http = isinstance(binding.device.transport, HttpDeviceTransport)
-        # The Provider type names the state; the adapter key names the catalog entry.
         provider_key = "http_envd" if http else "websocket_envd"
-        adapter_key = "a13n.http-envd" if http else "a13n.websocket-envd"
+        adapter_key = provider_key
         selection = binding.selection
         key = EnvironmentBindingKey(
             thread_id=thread_id,

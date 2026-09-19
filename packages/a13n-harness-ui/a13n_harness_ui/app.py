@@ -21,6 +21,7 @@ from a13n_harness.environment import EnvironmentRunExtensionFactory
 from a13n_harness.input import RunInputValue
 from a13n_harness.plugin_factories import HarnessPluginFactory
 from a13n_harness.providers.environment.definition import EnvironmentProviderDefinition
+from a13n_harness.providers.environment.remote_envd.pairing import PairingChallenge, PairingRequest, PairingResponse
 from a13n_harness.providers.model.oauth import GrokCredentials
 from a13n_logging import get_logger
 from anyio import CancelScope, Event, Lock, create_task_group, move_on_after, sleep, to_thread
@@ -52,7 +53,7 @@ from a13n_harness_ui.configuration import (
     mutate_configuration_source,
     preview_external_subagent_import,
 )
-from a13n_harness_ui.configuration.models import DeviceResource
+from a13n_harness_ui.configuration.models import DeviceResource, PairedDeviceAuthentication
 from a13n_harness_ui.configuration.mutation import validate_configuration_source
 from a13n_harness_ui.configuration.setup import (
     SetupPreview,
@@ -76,7 +77,9 @@ from a13n_harness_ui.configuration_inspection import (
     captured_configuration,
 )
 from a13n_harness_ui.content_plugins import ContentPluginStore
+from a13n_harness_ui.device_pairing import DevicePairings
 from a13n_harness_ui.devices import DeviceAttachment, DeviceConnections, DeviceInfo, DeviceSummary
+from a13n_harness_ui.environment_bindings import EnvironmentSelectionPatch
 from a13n_harness_ui.environment_profiles import BUILT_IN_ENVIRONMENT_PROFILES, built_in_environment_profile
 from a13n_harness_ui.environment_runtime import (
     EnvironmentRunService,
@@ -386,6 +389,7 @@ class HarnessUiApp:
         self._rediscover_accounts = rediscover_accounts
         self._resolve_sandbox_executable = resolve_sandbox_executable
         self._devices = devices
+        self._device_pairings = DevicePairings()
         self._configuration_lock = Lock()
         self._sandbox_ready_paths: set[Path] = set()
         self._grok_account = grok_account
@@ -519,6 +523,7 @@ class HarnessUiApp:
                     expected_current_digest=current,
                 )
                 generation_changed = True
+            await self._devices.synchronize_registrations(candidate.devices.values())
             candidate_error: HarnessUiError | None = None
         except HarnessUiError as exc:
             candidate_error = exc
@@ -908,11 +913,13 @@ class HarnessUiApp:
         *,
         thread_id: str | None = None,
         defaults: NewThreadDefaults | None = None,
+        environment: EnvironmentSelectionPatch | None = None,
     ) -> SkillCatalogView:
         async with self._operation():
             return await self._terminal_projections.skill_catalog(
                 thread_id=thread_id,
                 defaults=defaults,
+                local_roots_override=None if environment is None else environment.local_roots,
             )
 
     async def validate_skill_references(
@@ -1076,6 +1083,7 @@ class HarnessUiApp:
                         project_id="thread",
                         agent_source="thread",
                         default_model_id="thread" if selected.default_model_id is not None else "agent",
+                        local_roots="thread",
                         environment_profile_id="thread",
                         environment_bindings="thread",
                         default_environment="thread",
@@ -1104,15 +1112,22 @@ class HarnessUiApp:
                 continuation_id=continuation_id,
             )
 
-    async def preview_project_defaults(self, *, thread_id: str) -> ProjectDefaultsPreview:
+    async def preview_project_defaults(
+        self, *, thread_id: str, environments_only: bool = False
+    ) -> ProjectDefaultsPreview:
         async with self._operation():
-            return await self._threads.preview_project_defaults(thread_id)
+            return await self._threads.preview_project_defaults(thread_id, environments_only=environments_only)
 
-    async def apply_project_defaults(self, *, thread_id: str, request: ProjectDefaultsApply) -> ThreadSummary:
+    async def apply_project_defaults(
+        self, *, thread_id: str, request: ProjectDefaultsApply, environments_only: bool = False
+    ) -> ThreadSummary:
         # Serialize with this App's generation acceptance, not with Agent execution.
         async with self._operation(), self._configuration_lock:
             await self._threads.apply_project_defaults(
-                thread_id=thread_id, expected_version=request.expected_version, defaults_digest=request.defaults_digest
+                thread_id=thread_id,
+                expected_version=request.expected_version,
+                defaults_digest=request.defaults_digest,
+                environments_only=environments_only,
             )
             await self._summary_hub.publish(kind="thread", thread_id=thread_id)
             return await self._projections.get_thread(thread_id)
@@ -1699,7 +1714,7 @@ class HarnessUiApp:
         model_overrides: RunModelOverrides | None = None,
         skill_references: tuple[SkillReference, ...] = (),
         input_surface: Literal["tui", "webui"] | None = None,
-        environment_profile_id: str | None = None,
+        environment: EnvironmentSelectionPatch | None = None,
         mode: GoalMode = "normal",
     ) -> RootRunReceipt:
         prompt = deepcopy(prompt)
@@ -1729,7 +1744,16 @@ class HarnessUiApp:
                 if configuration is None:
                     raise AppStateError("No accepted configuration is selected.", code="configuration_not_accepted")
                 goal = GoalView(objective=objective, max_iterations=configuration.document.max_goal_iterations)
-            catalog = await self._terminal_projections.skill_catalog(thread_id=thread_id)
+            catalog = await self._terminal_projections.skill_catalog(
+                thread_id=thread_id,
+                local_roots_override=(
+                    environment.local_roots
+                    if environment is not None and environment.local_roots is not None
+                    else mutation.patch.local_roots
+                    if mutation is not None
+                    else None
+                ),
+            )
             self._terminal_projections.validate_references_against(
                 catalog,
                 skill_references,
@@ -1743,7 +1767,7 @@ class HarnessUiApp:
                 prompt=prompt,
                 mutation=mutation,
                 model_overrides=model_overrides,
-                environment_profile_id=environment_profile_id,
+                environment=environment,
                 goal=goal,
                 touch=True,
             )
@@ -2065,15 +2089,71 @@ class HarnessUiApp:
             await self._reload_configuration_from_path()
             return result
 
+    async def pair_device(self, request: PairingRequest, credential: str, *, origin: str) -> PairingResponse:
+        async with self._operation(), self._configuration_lock:
+            source = await self._configurations.current()
+            return self._device_pairings.poll(
+                request, credential, {} if source is None else source.devices, origin=origin
+            )
+
+    async def pending_device_pairings(self) -> tuple[PairingChallenge, ...]:
+        async with self._operation(), self._configuration_lock:
+            return self._device_pairings.list_pending()
+
+    async def approve_device_pairing(self, pairing_id: str) -> DeviceSummary:
+        async with self._operation(), self._configuration_lock:
+            source = await self._configurations.current()
+            resource = self._device_pairings.approve(pairing_id, {} if source is None else source.devices)
+            if source is None or resource.id not in source.devices:
+                result = await mutate_configuration_source(
+                    self._require_configuration_path(),
+                    f"devices/{resource.id}.yaml",
+                    ResourceMutationRequest(content=resource.model_dump_json(indent=2)),
+                    validate_candidate=self._configurations.validate,
+                    content_plugin_root=self._content_plugin_root,
+                )
+                await self._accept_mutation(result)
+            self._device_pairings.approved(pairing_id)
+            return DeviceSummary.from_resource(resource)
+
+    async def reject_device_pairing(self, pairing_id: str) -> None:
+        async with self._operation(), self._configuration_lock:
+            self._device_pairings.reject(pairing_id)
+
+    async def revoke_device(self, device_id: str) -> DeviceSummary:
+        async with self._operation(), self._configuration_lock:
+            source = await self._configurations.current()
+            resource = await self._device_resource(device_id)
+            authentication = resource.authentication
+            if not isinstance(authentication, PairedDeviceAuthentication):
+                raise HarnessUiError("Only paired Device registrations can be revoked.", code="device_not_paired")
+            assert source is not None
+            relative_path = next(item.relative_path for item in source.sources if item.resource_id == device_id)
+            revoked = resource.model_copy(
+                update={"authentication": authentication.model_copy(update={"revoked": True})}
+            )
+            result = await mutate_configuration_source(
+                self._require_configuration_path(),
+                relative_path,
+                ResourceMutationRequest(content=revoked.model_dump_json(indent=2)),
+                validate_candidate=self._configurations.validate,
+                content_plugin_root=self._content_plugin_root,
+            )
+            # Persist first. Even if acceptance fails, close captured runtime scopes;
+            # future process startup reads the revoked source rather than restoring trust.
+            with CancelScope(shield=True):
+                try:
+                    await self._devices.revoke(resource)
+                finally:
+                    await self._accept_mutation(result)
+            return DeviceSummary.from_resource(revoked)
+
     async def list_devices(self) -> tuple[DeviceSummary, ...]:
         async with self._operation():
             source = await self._configurations.current()
             if source is None:
                 return ()
-            return tuple(
-                DeviceSummary(id=item.id, name=item.name, transport=item.transport.kind)
-                for item in source.devices.values()
-            )
+            return tuple(DeviceSummary.from_resource(item) for item in source.devices.values())
 
     async def _device_resource(self, device_id: str) -> DeviceResource:
         source = await self._configurations.current()
@@ -2240,6 +2320,7 @@ class HarnessUiApp:
             yield subscription
 
     async def _accept_mutation(self, result: ConfigurationMutationResult) -> None:
+        await self._devices.synchronize_registrations(result.configuration.devices.values())
         expected = await self._store.configurations.current_digest()
         try:
             await self._configurations.accept(
@@ -2490,6 +2571,9 @@ async def open_harness_ui_app(
             await thread_files.prune()
             devices = DeviceConnections(api_keys=ApiKeyStore(store.layout.root / "auth.json"))
             resources.push_async_callback(devices.close)
+            device_configuration = await configurations.current()
+            if device_configuration is not None:
+                await devices.synchronize_registrations(device_configuration.devices.values())
             environment_service = EnvironmentRunService(
                 store,
                 environment_reconstructor,

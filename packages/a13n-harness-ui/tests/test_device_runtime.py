@@ -18,7 +18,7 @@ from a13n_harness_ui.app import open_harness_ui_app
 from a13n_harness_ui.composition.models import ResolvedEnvironmentBinding
 from a13n_harness_ui.configuration.models import DeviceResource
 from a13n_harness_ui.configuration.mutation import ResourceMutationRequest
-from a13n_harness_ui.environment_bindings import EnvironmentBindingSelection
+from a13n_harness_ui.environment_bindings import EnvironmentBindingSelection, EnvironmentSelectionPatch
 from a13n_harness_ui.model_runtime import HarnessUiModelResolver
 from a13n_harness_ui.root_execution import _selection
 from a13n_harness_ui.surfaces import NewThreadDefaults, RootOperationStatus
@@ -58,10 +58,11 @@ def resource(carrier: str, endpoint: str) -> DeviceResource:
 
 
 @asynccontextmanager
-async def app_listener(tmp_path, recipe):
+async def app_listener(tmp_path, recipe=None):
     root = _write_configuration(tmp_path)
-    (tmp_path / "devices").mkdir()
-    (tmp_path / "devices/build.yaml").write_text(recipe.model_dump_json())
+    if recipe is not None:
+        (tmp_path / "devices").mkdir()
+        (tmp_path / "devices/build.yaml").write_text(recipe.model_dump_json())
     async with open_harness_ui_app(_settings(tmp_path / "data"), configuration_path=root, host_mode="webui") as app:
 
         @asynccontextmanager
@@ -177,7 +178,7 @@ async def test_device_browsing_and_independent_sessions_share_carrier(tmp_path, 
                         await asyncio.sleep(0.03)
                 assert (await api.get("/api/devices", headers={"Authorization": "Bearer wrong"})).status_code == 401
                 assert (await api.get("/api/devices")).json() == [
-                    {"id": recipe.id, "name": "Build", "transport": carrier}
+                    {"id": recipe.id, "name": "Build", "transport": carrier, "registration": "configured"}
                 ]
                 info = await api.get(f"/api/devices/{recipe.id}")
                 assert info.status_code == 200, info.text
@@ -186,6 +187,7 @@ async def test_device_browsing_and_independent_sessions_share_carrier(tmp_path, 
                     "name",
                     "transport",
                     "available",
+                    "registration",
                     "path_style",
                     "default_working_directory",
                     "directory_discovery",
@@ -265,7 +267,7 @@ async def test_device_browsing_and_independent_sessions_share_carrier(tmp_path, 
                 assert finalized.cleanup_errors == ()
                 publication = next(item for item in finalized.state_publications if item.key.alias == "build")
                 assert publication.status == "published"
-                assert publication.key.adapter_key == f"a13n.{carrier}-envd"
+                assert publication.key.adapter_key == f"{carrier}_envd"
                 assert publication.key.normalized_root == device_path(root)
                 # A second owner restores only Device identity, never a live Session.
                 restored = await service.prepare(captured.value)
@@ -349,13 +351,7 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
             selection = EnvironmentBindingSelection(
                 device_id=recipe.id, alias="build", working_directory=device_path(root)
             )
-            thread = await app.create_thread(
-                defaults=NewThreadDefaults(
-                    project_id="project-main",
-                    environment_bindings=(selection,),
-                    default_environment=default_environment,
-                )
-            )
+            thread = await app.create_thread(defaults=NewThreadDefaults(project_id="project-main"))
             # Explicit aggregate paths prove these calls use EIP even though the
             # fixture daemon and Host happen to share this machine's filesystem.
             remote_output = f"/environment/build{device_path(root / 'output.txt')}"
@@ -416,7 +412,14 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
             captures = []
             for index in range(2):
                 receipt = await app.submit_thread(
-                    thread_id=thread.thread_id, prompt="Use remote-build and inspect both environments.", mode=mode
+                    thread_id=thread.thread_id,
+                    prompt="Use remote-build and inspect both environments.",
+                    mode=mode,
+                    environment=EnvironmentSelectionPatch(
+                        local_roots=(str(workspace),),
+                        environment_bindings=(selection,),
+                        default_environment=default_environment,
+                    ),
                 )
                 async with asyncio.timeout(30):
                     operation = await app.wait_root_operation(receipt.receipt_id)
@@ -435,6 +438,7 @@ async def test_root_runs_use_remote_tools_skills_and_fresh_sessions(
                 assert len(set(opened)) == index + 1
                 assert (root / "output.txt").read_text() == "Written through a model tool"
                 assert not (workspace / "output.txt").exists()
+            assert (await app.get_thread(thread.thread_id)).thread.configuration == thread.configuration
             assert observed == [name for name, _ in calls] * (4 if mode == "goal" else 2)
             assert (await app.get_thread(thread.thread_id)).continuation_id is not None
             assert (await app.device_info(recipe.id)).available

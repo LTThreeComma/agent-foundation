@@ -18,6 +18,12 @@ from urllib.parse import quote, urlsplit
 import click
 import uvicorn
 from a13n_envd_client.eip.v1 import DirectoryListResult
+from a13n_harness.providers.environment.remote_envd.pairing import (
+    PairingChallenge,
+    PairingRequest,
+    PairingResponse,
+    credential_digest,
+)
 from anyio import CancelScope, Event, Lock, create_task_group, fail_after, move_on_after, sleep
 from anyio.abc import TaskStatus
 from fastapi import FastAPI, Query, Request, WebSocket
@@ -42,6 +48,7 @@ from a13n_harness_ui.configuration.views import (
 from a13n_harness_ui.configuration_inspection import CapturedConfiguration, ThreadConfigurationInspection
 from a13n_harness_ui.device_transport import DeviceWebSocket
 from a13n_harness_ui.devices import DeviceInfo, DeviceSummary
+from a13n_harness_ui.environment_bindings import EnvironmentSelectionPatch
 from a13n_harness_ui.errors import HarnessUiError
 from a13n_harness_ui.extensions import CatalogReference
 from a13n_harness_ui.host_files import (
@@ -223,7 +230,7 @@ class SteerRequest(SurfaceModel):
 
 class SubmitRequest(PromptRequest):
     mode: Literal["normal", "goal"] = "normal"
-    environment_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
+    environment: EnvironmentSelectionPatch | None = None
     model_id: str | None = Field(default=None, min_length=1, max_length=128)
     thinking: ThinkingSelection | None = None
     fast: bool | None = None
@@ -409,6 +416,7 @@ class AccessBoundary:
             authorization = request.headers.get("authorization", "")
             if (
                 not interactive
+                and not (scope["path"] == "/api/envd/pair" and scope["method"] == "POST")
                 and self.api_key is not None
                 and not hmac.compare_digest(authorization.encode(), f"Bearer {self.api_key}".encode())
             ):
@@ -508,6 +516,10 @@ def create_webui(
             status = 409
         elif code == "host_files_io_error":
             status = 500
+        elif code in {"device_authentication_failed", "device_revoked", "device_pairing_rejected"}:
+            status = 403
+        elif code == "device_pairing_capacity":
+            status = 429
         elif code in {"app_not_ready", "app_stopping", "host_git_unavailable", "host_terminal_unavailable"}:
             status = 503
         elif code == "host_git_timeout":
@@ -580,6 +592,36 @@ def create_webui(
     @server.get("/api/presence", response_model=PresenceFrame)
     async def presence(participant_id: Annotated[str | None, Query(max_length=80)] = None) -> PresenceFrame:
         return await app().page_presence_snapshot(participant_id)
+
+    @server.post("/api/envd/pair", response_model=PairingResponse, openapi_extra=_body(PairingRequest))
+    async def pair_device(request: Request) -> PairingResponse:
+        authorization = request.headers.get("authorization", "")
+        if request.query_params or not authorization.startswith("Bearer "):
+            raise HarnessUiError("An envd pairing credential is required.", code="device_authentication_failed")
+        try:
+            credential_digest(authorization[7:])
+        except ValueError:
+            raise HarnessUiError("Invalid envd pairing credential.", code="device_authentication_failed") from None
+        return await app().pair_device(
+            await _document(request, PairingRequest), authorization[7:], origin=str(request.base_url).rstrip("/")
+        )
+
+    @server.get("/api/device-pairings")
+    async def device_pairings() -> tuple[PairingChallenge, ...]:
+        return await app().pending_device_pairings()
+
+    @server.post("/api/device-pairings/{pairing_id}/approve")
+    async def approve_device_pairing(pairing_id: str) -> DeviceSummary:
+        return await app().approve_device_pairing(pairing_id)
+
+    @server.post("/api/device-pairings/{pairing_id}/reject", status_code=204)
+    async def reject_device_pairing(pairing_id: str) -> Response:
+        await app().reject_device_pairing(pairing_id)
+        return Response(status_code=204)
+
+    @server.post("/api/devices/{device_id}/revoke")
+    async def revoke_device(device_id: str) -> DeviceSummary:
+        return await app().revoke_device(device_id)
 
     @server.get("/api/devices")
     async def devices() -> tuple[DeviceSummary, ...]:
@@ -1096,6 +1138,16 @@ def create_webui(
     async def thread_skills(thread_id: str) -> SkillCatalogView:
         return await app().skill_catalog(thread_id=thread_id)
 
+    @server.post(
+        "/api/threads/{thread_id}/skills",
+        response_model=SkillCatalogView,
+        openapi_extra=_body(EnvironmentSelectionPatch),
+    )
+    async def preview_thread_skills(thread_id: str, request: Request) -> SkillCatalogView:
+        return await app().skill_catalog(
+            thread_id=thread_id, environment=await _document(request, EnvironmentSelectionPatch)
+        )
+
     @server.get("/api/threads/{thread_id}/configuration", response_model=ThreadConfigurationInspection)
     async def inspect_configuration(thread_id: str) -> ThreadConfigurationInspection:
         return await app().inspect_thread_configuration(thread_id)
@@ -1211,6 +1263,24 @@ def create_webui(
     async def apply_project_defaults(thread_id: str, request: Request) -> ThreadSummary:
         return await app().apply_project_defaults(
             thread_id=thread_id, request=await _document(request, ProjectDefaultsApply)
+        )
+
+    @server.get(
+        "/api/threads/{thread_id}/project-environments",
+        response_model=ProjectDefaultsPreview,
+        response_model_exclude_unset=True,
+    )
+    async def project_environments(thread_id: str) -> ProjectDefaultsPreview:
+        return await app().preview_project_defaults(thread_id=thread_id, environments_only=True)
+
+    @server.post(
+        "/api/threads/{thread_id}/project-environments",
+        response_model=ThreadSummary,
+        openapi_extra=_body(ProjectDefaultsApply),
+    )
+    async def apply_project_environments(thread_id: str, request: Request) -> ThreadSummary:
+        return await app().apply_project_defaults(
+            thread_id=thread_id, request=await _document(request, ProjectDefaultsApply), environments_only=True
         )
 
     @server.get("/api/projects", response_model=tuple[ProjectSummary, ...])
@@ -1450,7 +1520,7 @@ def create_webui(
                 prompt=document.input(),
                 mode=document.mode,
                 attachment_ids=document.attachment_ids,
-                environment_profile_id=document.environment_profile_id,
+                environment=document.environment,
                 model_overrides=RunModelOverrides(
                     model_id=document.model_id, thinking=document.thinking, fast=document.fast
                 ),

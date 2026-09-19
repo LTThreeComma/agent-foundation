@@ -136,6 +136,7 @@ class Environment(DomainModel):
     template_revision_id: ObjectId | None
     ownership: Literal["managed", "external"]
     device_id: str | None = None
+    device_registration: Literal["paired", "revoked"] | None = None
     generation: int
     status: EnvironmentStatus
     retention_condition: Literal["active", "idle"]

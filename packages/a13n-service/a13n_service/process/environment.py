@@ -5,10 +5,11 @@ from __future__ import annotations
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.environment import EnvironmentProviderDefinition
 from a13n_harness.providers.environment.builtins import BUILT_IN_ENVIRONMENT_PROVIDERS
+from a13n_harness.providers.environment.remote_envd.connections import WEBSOCKET_PROVIDER_KEY
 
 from a13n_service.process.components import Components
 from a13n_service.provider_plugins import ProviderCatalogs, load_provider_catalogs
-from a13n_service.settings import Settings
+from a13n_service.settings import RedisBackend, Settings
 
 
 def build_environment_catalog(
@@ -20,8 +21,16 @@ def build_environment_catalog(
 
     if settings.environments.local_providers and components.request_authenticator is not None:
         raise ValueError("Deployment local Providers require the OSS identity runtime")
+    builtin_keys = settings.environments.provider_builtins
+    if (
+        settings.redis.backend == RedisBackend.memory
+        and "provider_builtins" not in settings.environments.model_fields_set
+    ):
+        # The supported single-process memory profile has no distributed Stream
+        # relay. Explicitly enabling WebSocket still fails startup validation.
+        builtin_keys = tuple(key for key in builtin_keys if key != WEBSOCKET_PROVIDER_KEY)
     selected_providers = providers or load_provider_catalogs(())
-    selected_keys = {*settings.environments.provider_builtins, *settings.environments.local_providers}
+    selected_keys = {*builtin_keys, *settings.environments.local_providers}
     builtin_keys = {definition.type for definition in BUILT_IN_ENVIRONMENT_PROVIDERS}
     selected = components.environment_provider_catalog or ProviderCatalog(
         definition

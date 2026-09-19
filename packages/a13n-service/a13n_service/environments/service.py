@@ -580,7 +580,7 @@ class EnvironmentService:
                     if request.name is not None:
                         row.name = request.name
                 else:
-                    row = await self._register(session, actor, workspace_id, request, now)
+                    row = await self.register_external(session, actor, workspace_id, request, now)
                 session.add(
                     evidence_record(
                         actor=actor,
@@ -618,7 +618,7 @@ class EnvironmentService:
                         return replay.restore(Environment)
             raise
 
-    async def _register(
+    async def register_external(
         self,
         session: AsyncSession,
         actor: AuthenticatedActor,
