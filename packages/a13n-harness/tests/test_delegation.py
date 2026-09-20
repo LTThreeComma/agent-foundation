@@ -1385,12 +1385,20 @@ async def test_inline_child_binding_factory_preserves_owned_boundaries(change: s
     assert returns[0].content == "Inline delegation failed before a complete child result."
 
 
-@pytest.mark.parametrize("kind", ["none", "handoff", "compaction"])
-async def test_summary_delegation_reads_the_context_summary_not_replayed_input(kind: str) -> None:
+@pytest.mark.parametrize(
+    ("kind", "select_parent_model"),
+    [("none", False), ("handoff", False), ("compaction", False), ("compaction", True)],
+)
+async def test_summary_delegation_reads_the_context_summary_not_replayed_input(
+    kind: str, select_parent_model: bool
+) -> None:
+    from dataclasses import replace
+
     from a13n_harness import DelegationContextPolicy, HarnessState
     from a13n_harness.capabilities import CompactionCapability, CompactionPolicy
     from a13n_harness.capabilities.context import _COMPACTION_PROMPT
     from a13n_harness.model_context import user_prompt_content
+    from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
     from pydantic_ai.messages import TextPart
     from pydantic_ai.usage import RequestUsage
 
@@ -1431,14 +1439,34 @@ async def test_summary_delegation_reads_the_context_summary_not_replayed_input(k
         else:
             yield "done"
 
+    selected_model = FunctionModel(stream_function=parent_stream)
+
+    async def unselected_stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        pytest.fail("Both compaction and parent execution must use the effective Model")
+        yield "unreachable"
+
+    class SelectParentModel(AbstractCapability):
+        outer_run_id: str | None = None
+
+        def get_ordering(self) -> CapabilityOrdering:
+            return CapabilityOrdering(wraps=(CompactionCapability,))
+
+        async def before_model_request(self, ctx, request_context):
+            if self.outer_run_id is None:
+                self.outer_run_id = ctx.run_id
+            return (
+                replace(request_context, model=selected_model) if ctx.run_id == self.outer_run_id else request_context
+            )
+
     child = AgentDefinition(agent=AgentSpec(), output_type=str, model=FunctionModel(stream_function=child_stream))
     parent = AgentDefinition(
         agent=AgentSpec(),
         output_type=str,
-        model=FunctionModel(stream_function=parent_stream),
+        model=FunctionModel(stream_function=unselected_stream) if select_parent_model else selected_model,
         capabilities=(
             HandoffCapability(),
             SubagentCapability(),
+            *((SelectParentModel(),) if select_parent_model else ()),
             *((CompactionCapability(CompactionPolicy(trigger_tokens=100)),) if kind == "compaction" else ()),
         ),
         subagents=(
