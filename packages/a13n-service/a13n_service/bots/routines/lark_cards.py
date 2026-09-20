@@ -31,16 +31,17 @@ def render(row: RoutineRecord, *, language: str = "en_us") -> JsonObject:
     state = labels[f"confirm_{proposal.operation}" if proposal else row.state]
     title = definition.title if definition else labels["title"]
     details = [state]
-    if definition:
-        details += [definition.schedule.describe(), definition.prompt]
+    schedule = definition.schedule if definition else None
+    if definition and schedule:
+        details += [schedule.describe(), definition.prompt]
     details.append(labels["destination"].format(owner=row.owner_id))
-    next_at = definition.schedule.next_after(utc_now()) if proposal and definition else row.next_run_at
-    if next_at and definition:
-        zone = ZoneInfo(definition.schedule.timezone)
+    next_at = schedule.next_after(utc_now()) if proposal and schedule else row.next_run_at
+    if next_at and schedule:
+        zone = ZoneInfo(schedule.timezone)
         details.append(
             labels["next"].format(time=f"{assume_utc(next_at).astimezone(zone):%Y-%m-%d %H:%M} ({zone.key})")
         )
-    elif proposal and definition:
+    elif proposal and schedule:
         details.append(labels["expired"])
     if proposal:
         details.append(labels["confirmation"])
