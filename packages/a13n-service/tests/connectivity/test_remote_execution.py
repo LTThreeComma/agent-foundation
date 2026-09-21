@@ -13,7 +13,7 @@ from a13n_service.connectivity.execution import AttemptToolScope
 from a13n_service.connectivity.mcp.models import MCPConnectionRecord
 from a13n_service.connectivity.mcp.transport import RemoteTransport
 from a13n_service.connectivity.selection_domain import ConnectionRunSelection
-from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError, FrozenRunConnectivity
+from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError
 from a13n_service.storage import transaction
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -66,12 +66,12 @@ async def test_recovery_admission_checks_current_connections_without_opening_cli
         connection_id=MCP_CONNECTION_ID,
         tools=("search",),
     )
-    selected = FrozenRunConnectivity((selection,))
+    selected = (selection,)
     scope = AttemptToolScope(
         replace(actor(), auth_method="internal"),
         ORG_ID,
         WORKSPACE_ID,
-        FrozenRunConnectivity(()) if child else selected,
+        () if child else selected,
         (),
         authorization=await execution_authorization(),
     )
@@ -90,6 +90,8 @@ async def test_recovery_admission_checks_current_connections_without_opening_cli
         source.status = "disabled"
     with pytest.raises(ConnectivitySelectionError, match="connection_unavailable"):
         await runtime.validate(lambda: context, **arguments)
+    # Explicitly empty child selections never fall back to the revoked root connection.
+    await runtime.validate(lambda: context, child_agent_id="agt_child", selections=())
     open_clients.assert_not_called()
     assert server.calls == []
 
@@ -121,7 +123,7 @@ async def test_selected_remote_tool_uses_call_guard_and_revocation_stops_dispatc
             replace(actor(), auth_method="internal"),
             ORG_ID,
             WORKSPACE_ID,
-            FrozenRunConnectivity((selection,)),
+            (selection,),
             (),
             authorization=await execution_authorization(),
         ),
@@ -159,7 +161,7 @@ async def test_replacement_discovers_changed_tool_and_missing_explicit_name_fail
             replace(actor(), auth_method="internal"),
             ORG_ID,
             WORKSPACE_ID,
-            FrozenRunConnectivity((selection,)),
+            (selection,),
             (),
             authorization=await execution_authorization(),
         ),
@@ -174,7 +176,7 @@ async def test_replacement_discovers_changed_tool_and_missing_explicit_name_fail
                 replace(actor(), auth_method="internal"),
                 ORG_ID,
                 WORKSPACE_ID,
-                FrozenRunConnectivity((selection,)),
+                (selection,),
                 (),
                 authorization=await execution_authorization(),
             ),
@@ -187,7 +189,7 @@ async def test_replacement_discovers_changed_tool_and_missing_explicit_name_fail
             replace(actor(), auth_method="internal"),
             ORG_ID,
             WORKSPACE_ID,
-            FrozenRunConnectivity((selection,)),
+            (selection,),
             (),
             authorization=await execution_authorization(),
         ),
@@ -262,7 +264,7 @@ async def test_replacement_during_authorization_blocks_stale_headers(
                 replace(actor(), auth_method="internal"),
                 ORG_ID,
                 WORKSPACE_ID,
-                FrozenRunConnectivity((selection,)),
+                (selection,),
                 (),
                 authorization=await execution_authorization(),
             ),

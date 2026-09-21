@@ -1,7 +1,5 @@
 """Declared Agent Secret bindings and current owner eligibility."""
 
-from dataclasses import dataclass
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +10,7 @@ from a13n_service.iam.authorization import PrincipalPermissions
 
 from .domain import AgentSecretBinding, InvokingUserSecretCredential, WorkspaceSecretCredential
 from .models import SecretRecord
+from .snapshots import EncryptedSecret
 
 
 class AgentSecretError(ApplicationError):
@@ -118,32 +117,18 @@ async def require_secret(
     return row
 
 
-@dataclass(frozen=True, slots=True, repr=False)
-class AgentSecretSnapshot:
-    secret_id: str
-    organization_id: str
-    workspace_id: str
-    owner_type: str
-    owner_id: str
-    key: str
-    version: int
-    ciphertext: bytes
-    nonce: bytes
-    encryption_key_id: str
-
-    @classmethod
-    def from_record(cls, row: SecretRecord):
-        if row.ciphertext is None or row.nonce is None or row.encryption_key_id is None:
-            raise secret_unavailable()
-        return cls(
-            row.id,
-            row.organization_id,
-            row.workspace_id,
-            row.owner_type,
-            row.owner_id,
-            row.key,
-            row.version,
-            bytes(row.ciphertext),
-            bytes(row.nonce),
-            row.encryption_key_id,
-        )
+def snapshot_secret(row: SecretRecord) -> EncryptedSecret:
+    if row.ciphertext is None or row.nonce is None or row.encryption_key_id is None:
+        raise secret_unavailable()
+    return EncryptedSecret(
+        secret_id=row.id,
+        organization_id=row.organization_id,
+        workspace_id=row.workspace_id,
+        owner_type=row.owner_type,
+        owner_id=row.owner_id,
+        key=row.key,
+        version=row.version,
+        ciphertext=bytes(row.ciphertext),
+        nonce=bytes(row.nonce),
+        encryption_key_id=row.encryption_key_id,
+    )

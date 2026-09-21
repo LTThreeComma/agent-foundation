@@ -94,7 +94,7 @@ async def dependency_digest(
             if provider_id is not None:
                 await observe(EnvironmentProviderRecord, provider_id)
     connections = []
-    for selection in prepared.connectivity.selections.connection_selections:
+    for selection in prepared.connectivity.selections:
         row = (
             await session.execute(
                 select(

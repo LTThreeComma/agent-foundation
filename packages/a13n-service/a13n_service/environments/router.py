@@ -26,7 +26,6 @@ from .domain import (
     CreateTemplateRevisionRequest,
     Environment,
     EnvironmentCommand,
-    EnvironmentCommandRequest,
     EnvironmentDetail,
     EnvironmentProviderAccount,
     EnvironmentProviderMetadata,
@@ -361,7 +360,7 @@ async def stop_environment(
     return await _service(request).request_command(
         actor=actor,
         environment_id=environment_id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key=idempotency_key,
     )
 
@@ -373,7 +372,7 @@ async def delete_environment(
     return await _service(request).request_command(
         actor=actor,
         environment_id=environment_id,
-        request=EnvironmentCommandRequest(action="delete"),
+        action="delete",
         idempotency_key=idempotency_key,
     )
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import Literal
 
 from a13n_harness.capabilities import SkillManager, SkillsPolicy
@@ -49,15 +48,6 @@ class SkillRuntimeError(RuntimeError):
         self.code = code
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedSkillRuntime:
-    """Exact Harness inputs for one accepted Run's managed Skill selection."""
-
-    manager: SkillManager | None
-    catalog_digest: str | None
-    materialization_root: str | None
-
-
 class SkillRuntimePreparer:
     """Verify locked revisions and objects before constructing Harness inputs."""
 
@@ -77,14 +67,10 @@ class SkillRuntimePreparer:
         locks: tuple[SkillRevisionLock, ...],
         fence: SkillAttemptFence | None = None,
         working_directory: str = "/",
-    ) -> PreparedSkillRuntime:
+    ) -> SkillManager | None:
         selected_locks = _validate_locks(locks)
         if not selected_locks:
-            return PreparedSkillRuntime(
-                manager=None,
-                catalog_digest=None,
-                materialization_root=None,
-            )
+            return None
         await _require_current(fence)
         records = await self._load_records(
             organization_id=organization_id,
@@ -138,15 +124,10 @@ class SkillRuntimePreparer:
             self._packages,
             fence=fence,
         )
-        manager = SkillManager(
+        return SkillManager(
             (MaterializedSkillSource(source_id, plan, fence=fence),),
             materializers=(materializer,),
             policy=SkillsPolicy(conflict="error", max_skills=max(1, len(locked_revisions))),
-        )
-        return PreparedSkillRuntime(
-            manager=manager,
-            catalog_digest=catalog_digest,
-            materialization_root=root,
         )
 
     async def _load_records(

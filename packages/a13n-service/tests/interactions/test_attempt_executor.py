@@ -16,6 +16,7 @@ from a13n_harness import (
     HarnessEvent,
     HarnessRunResultEvent,
     HarnessState,
+    RunBindings,
     SafeFailure,
 )
 from a13n_harness.errors import DefinitionError, RunError
@@ -40,7 +41,6 @@ from a13n_service.interactions.harness_results import (
     HarnessOutcomeProjection,
 )
 from a13n_service.interactions.harness_runtime import (
-    HarnessCollaborators,
     HarnessDriver,
     HarnessInvocation,
     ImmediateHarnessInput,
@@ -399,7 +399,7 @@ async def test_executor_supervises_two_children_before_cleanup_and_capacity_rele
             model=FunctionModel(stream_function=_model),
         ),
         input=ImmediateHarnessInput("hello"),
-        collaborators=HarnessCollaborators(
+        bindings=RunBindings(
             instance=AgentInstanceContext(
                 identity=AgentIdentityRef(issuer="a13n.service", subject="test-user"),
                 agent_instance_id="instance-1",
@@ -627,7 +627,7 @@ async def test_handoff_closes_runtime_while_renewing_before_yield(
     invocation = HarnessInvocation(
         definition=AgentDefinition(agent=AgentSpec(), output_type=str, model=FunctionModel(stream_function=_model)),
         input=ImmediateHarnessInput("accepted input"),
-        collaborators=HarnessCollaborators(
+        bindings=RunBindings(
             instance=AgentInstanceContext(
                 identity=AgentIdentityRef(issuer="a13n.service", subject="test-user"),
                 agent_instance_id="instance-1",

@@ -16,7 +16,7 @@ from a13n_service.iam import AuthenticatedActor, AuthorizationError
 from a13n_service.iam.operation import authorization_operation
 from a13n_service.interactions.acceptance import RunAcceptanceError, RunAcceptanceReceipt, RunAcceptanceService
 from a13n_service.interactions.command_evidence import RunRequest
-from a13n_service.interactions.command_preparation import CommandInput, PreparedCommandInput
+from a13n_service.interactions.command_preparation import CommandInput
 from a13n_service.interactions.domain import ExecutionBudget, Run, RunLineageKind, RunUsageLimit, Thread, new_run_id
 from a13n_service.interactions.environment_selection import EnvironmentDefault, requested_environment
 from a13n_service.interactions.initialization import (
@@ -163,9 +163,8 @@ class ConfigurationInputs:
             frozen=frozen,
             environment=None,
         )
-        prepared = PreparedCommandInput(invocation=invocation, frozen=frozen, input=accepted)
         run_id = new_run_id()
-        seed = RunStateSeed.from_invocation(run_id=run_id, invocation=prepared.frozen, input=prepared.input).model_copy(
+        seed = RunStateSeed.from_invocation(run_id=run_id, invocation=frozen, input=accepted).model_copy(
             update={
                 "usage_limits": UsageLimits(
                     request_limit=self._definition.request_limit, total_tokens_limit=self._definition.total_tokens_limit
@@ -197,8 +196,8 @@ class ConfigurationInputs:
             lineage_kind=RunLineageKind.root
             if source is None
             else (RunLineageKind.fork if is_fork else RunLineageKind.continue_),
-            invocation=prepared.frozen,
-            input=prepared.input,
+            invocation=frozen,
+            input=accepted,
             request_key=evidence.key,
             origin=SubmissionOrigin(),
             configuration_context=context,

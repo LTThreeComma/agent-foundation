@@ -7,7 +7,6 @@ import pytest
 from a13n_service.http_errors import application_error_status
 from a13n_service.iam import AuthenticatedActor, PrincipalRef, PrincipalType
 from a13n_service.trace_query import (
-    AuthorizedRunAttempt,
     Content,
     Observation,
     ObservationCollection,
@@ -127,15 +126,9 @@ class Authorizer:
         actor: AuthenticatedActor,
         scope: TraceQueryScope,
         correlations: tuple[TraceCorrelation, ...],
-    ) -> dict[str, AuthorizedRunAttempt]:
+    ) -> frozenset[str]:
         del actor, scope
-        return {
-            item.run_attempt_id: AuthorizedRunAttempt(
-                run_attempt_id=item.run_attempt_id,
-            )
-            for item in correlations
-            if item.run_attempt_id in self.visible
-        }
+        return frozenset(item.run_attempt_id for item in correlations if item.run_attempt_id in self.visible)
 
 
 def service(

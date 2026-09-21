@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 
 from a13n_envd_client import EIPSession
 from a13n_harness.providers.environment.eip.binding import EIPEnvironmentSession
@@ -19,12 +18,6 @@ from .relay_commands import CommandRelayDispatch
 from .relay_files import FileRelayDispatch
 from .relay_protocol import DEFAULT_RELAY_LIMITS, ReadinessRequest, RelayEnvironmentSnapshot, RelayLimits, RelayRequest
 from .relay_transfers import FileTransferPlan
-
-
-@dataclass(frozen=True, slots=True)
-class _MountBinding:
-    name: str
-    session: EIPEnvironmentSession
 
 
 class EnvironmentRelayDispatch:
@@ -51,7 +44,7 @@ class EnvironmentRelayDispatch:
         self._mount_name = mount_name
         self._limits = limits
         self._max_mounts = max_mounts
-        self._mounts: dict[str, _MountBinding] = {}
+        self._mounts: dict[str, EIPEnvironmentSession] = {}
 
     def prepare(self, request: RelayRequest) -> Callable[[], Awaitable[JsonValue]] | FileTransferPlan:
         if request.operation == "scope.describe":
@@ -84,19 +77,14 @@ class EnvironmentRelayDispatch:
         if owned is None:
             if len(self._mounts) >= self._max_mounts:
                 raise EnvironmentError("Relay mount binding capacity is exhausted", code="environment_overloaded")
-            owned = _MountBinding(
-                request.mount_name,
-                EIPEnvironmentSession(
-                    session=self._session,
-                    provider_key=WEBSOCKET_PROVIDER_KEY,
-                    environment_id=self._environment_id,
-                    mount_id=request.mount_id,
-                ),
+            owned = EIPEnvironmentSession(
+                session=self._session,
+                provider_key=WEBSOCKET_PROVIDER_KEY,
+                environment_id=self._environment_id,
+                mount_id=request.mount_id,
             )
             self._mounts[request.mount_id] = owned
-        if owned.name != request.mount_name:
-            raise EnvironmentError("A mount binding cannot change its association", code="environment_forbidden")
-        return owned.session, owned.session.descriptor.permissions.operations
+        return owned, owned.descriptor.permissions.operations
 
     def _snapshot(self, binding: EIPEnvironmentSession) -> RelayEnvironmentSnapshot:
         descriptor = binding.descriptor

@@ -21,10 +21,9 @@ from .domain import (
 from .errors import TraceQueryError, TraceQueryProviderError
 from .langfuse import LangfuseTraceQueryProvider
 from .provider import TraceQueryProvider, TraceQueryProviderRegistry
-from .service import AuthorizedRunAttempt, TraceAccessAuthorizer, TraceQueryScope, TraceQueryService
+from .service import TraceAccessAuthorizer, TraceQueryScope, TraceQueryService
 
 __all__ = [
-    "AuthorizedRunAttempt",
     "Content",
     "InstrumentationScope",
     "LangfuseTraceQueryProvider",

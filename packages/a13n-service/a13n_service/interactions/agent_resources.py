@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 from a13n_harness import AgentContext
-from a13n_harness.capabilities import SkillsCapability
+from a13n_harness.capabilities import SkillManager, SkillsCapability
 from pydantic_ai.capabilities import AbstractCapability
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,11 +15,10 @@ from a13n_service.agents.reconstruction import AgentDefinitionReconstructionCont
 from a13n_service.agents.toolsets import enabled_tool
 from a13n_service.assets.runtime import AssetCapability, AssetRuntime, PublicationSelection
 from a13n_service.connectivity.execution import ExternalToolRuntime
-from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
 from a13n_service.iam.authorization import WorkspaceAction, authorize_persisted_agent_principal_actions
 from a13n_service.models.domain import ModelExecutionSnapshot
 from a13n_service.skills.attempts import CurrentSkillAttempt
-from a13n_service.skills.runtime import PreparedSkillRuntime, SkillRuntimePreparer
+from a13n_service.skills.runtime import SkillRuntimePreparer
 from a13n_service.storage import short_session
 
 from .attempts import AttemptContext
@@ -47,7 +46,7 @@ async def validate_agent_resources(
     skills: SkillRuntimePreparer,
     external_tools: ExternalToolRuntime,
     working_directory: str = "/",
-) -> dict[str | None, PreparedSkillRuntime]:
+) -> dict[str | None, SkillManager | None]:
     """Validate retained dependencies without opening execution resources."""
     children = inline_child_executions(config)
     async with short_session(sessions) as session:
@@ -81,10 +80,10 @@ async def validate_agent_resources(
         await external_tools.validate(
             current_context,
             child_agent_id=edge.child_agent_id,
-            selections=FrozenRunConnectivity(child.connection_selections),
+            selections=child.connection_selections,
         )
         configurations[revision_id] = child.effective_config
-    prepared: dict[str | None, PreparedSkillRuntime] = {}
+    prepared: dict[str | None, SkillManager | None] = {}
     for revision_id, selected in configurations.items():
         prepared[revision_id] = await skills.prepare(
             organization_id=run.organization_id,
@@ -103,7 +102,7 @@ async def prepare_agent_resources(
     asset_publication: AssetRuntime,
     config: EffectiveAgentConfig,
     current_context: Callable[[], AttemptContext],
-    skills: dict[str | None, PreparedSkillRuntime],
+    skills: dict[str | None, SkillManager | None],
     external_tools: ExternalToolRuntime,
     stack: AsyncExitStack,
 ) -> PreparedAgentResources:
@@ -121,7 +120,7 @@ async def prepare_agent_resources(
             external_tools.child_capabilities(
                 current_context,
                 agent_id=edge.child_agent_id,
-                selections=FrozenRunConnectivity(child.connection_selections),
+                selections=child.connection_selections,
             )
         )
         configurations[revision_id] = child.effective_config
@@ -138,8 +137,8 @@ async def prepare_agent_resources(
                 ),
             )
         runtime = skills[revision_id]
-        if runtime.manager is not None:
-            capabilities[revision_id] = (*capabilities[revision_id], SkillsCapability(runtime.manager))
+        if runtime is not None:
+            capabilities[revision_id] = (*capabilities[revision_id], SkillsCapability(runtime))
     return PreparedAgentResources(
         capabilities,
         tuple(

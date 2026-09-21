@@ -173,7 +173,7 @@ class AgentInvocationFreezer:
             execution=execution,
             reviewer_execution=reviewer_execution,
             skills=skills,
-            connection_selections=connectivity.connection_selections,
+            connection_selections=connectivity,
             child_configs=child_configs,
         )
 
@@ -207,7 +207,7 @@ class AgentInvocationFreezer:
                 )
                 for item in prepared.skills
             ),
-            connection_selections=prepared.connectivity.selections.connection_selections,
+            connection_selections=prepared.connectivity.selections,
             child_configs=child_configs,
         )
 
@@ -285,10 +285,7 @@ def _compose_invocation(
         by_alias=True,
         exclude={"content_digest"},
     )
-    effective = EffectiveAgentConfig(
-        **config_payload,
-        content_digest=digest_request(digest_payload),
-    )
+    effective = effective_without_digest.model_copy(update={"content_digest": digest_request(digest_payload)})
     return FrozenAgentInvocation(
         agent_id=prepared.agent_id,
         agent_revision_id=prepared.agent_revision_id,

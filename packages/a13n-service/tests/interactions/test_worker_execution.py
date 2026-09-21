@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from a13n_harness import EnvironmentMount
 from a13n_harness.environment import FILE_READ_ACTIONS, EnvironmentPermissionSet
+from a13n_harness.environment.advanced import create_environment_runtime
 from a13n_harness.providers.environment.direct_local.configuration import (
     DirectLocalEnvironmentConfiguration,
     DirectLocalRootConfiguration,
@@ -24,7 +25,6 @@ from a13n_service.interactions.attempt_executor import RunAttemptExecutor
 from a13n_service.interactions.attempts import AttemptExecutionService
 from a13n_service.interactions.control_models import ThreadInboxRecord
 from a13n_service.interactions.domain import RunAttemptYieldReason
-from a13n_service.interactions.harness_runtime import SingleHarnessEnvironment
 from a13n_service.interactions.inbox import ThreadInboxStore
 from a13n_service.interactions.input import AcceptedAgentInput, TextContent
 from a13n_service.interactions.models import RunAttemptRecord, RunRecord
@@ -242,11 +242,17 @@ async def test_worker_claims_and_executes_an_accepted_run_in_process(
                 )
                 yield replace(
                     invocation,
-                    environment=SingleHarnessEnvironment(
-                        EnvironmentMount(
-                            environment,
-                            permission_ceiling=EnvironmentPermissionSet(operations=FILE_READ_ACTIONS),
-                        )
+                    bindings=replace(
+                        invocation.bindings,
+                        environment=create_environment_runtime(
+                            mounts={
+                                "workspace": EnvironmentMount(
+                                    environment,
+                                    permission_ceiling=EnvironmentPermissionSet(operations=FILE_READ_ACTIONS),
+                                )
+                            },
+                            default_mount="workspace",
+                        ),
                     ),
                 )
 

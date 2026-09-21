@@ -19,8 +19,10 @@ from a13n_harness import (
     HarnessEvent,
     HarnessObservationContext,
     HarnessRunResultEvent,
+    RunBindings,
     RunPreparationContext,
 )
+from a13n_harness.environment.advanced import create_environment_runtime
 from a13n_harness.errors import RunError
 from a13n_harness.model_context import (
     ModelContextNext,
@@ -47,13 +49,10 @@ from a13n_service.interactions.environment_observation import (
 )
 from a13n_service.interactions.harness_control import HarnessContextBinding, HarnessHookBoundary, HarnessRunIdentity
 from a13n_service.interactions.harness_runtime import (
-    HarnessCollaborators,
     HarnessDriver,
     HarnessInvocation,
     ImmediateHarnessInput,
     MaterializedHarnessInput,
-    MountedHarnessEnvironments,
-    SingleHarnessEnvironment,
 )
 from a13n_service.interactions.objects import RunStateStore, StoredRunState
 from a13n_service.interactions.state import DeferredContinuationState, HostContinuationState, RunCheckpoint
@@ -285,7 +284,7 @@ async def test_runtime_wires_factory_environment_model_and_fresh_bindings(
                 output_type=str,
             ),
             input=MaterializedHarnessInput(materialize),
-            collaborators=HarnessCollaborators(
+            bindings=RunBindings(
                 instance=instance,
                 model_resolver=resolve_model,
                 metadata={"run_class": "interactive"},
@@ -294,19 +293,17 @@ async def test_runtime_wires_factory_environment_model_and_fresh_bindings(
                     name="runtime-test",
                     session_id="session-1",
                 ),
-            ),
-            # A mounted aggregate owns its runtime, so observation is declared on the
-            # entry before the aggregate is built, exactly as the Worker preparation does.
-            environment=MountedHarnessEnvironments(
-                entries={
-                    "source": observe_environment_entry(
-                        EnvironmentMount(
-                            environment, permission_ceiling=EnvironmentPermissionSet(operations=FILE_READ_ACTIONS)
-                        ),
-                        projector,
-                    )
-                },
-                default_environment="source",
+                environment=create_environment_runtime(
+                    mounts={
+                        "source": observe_environment_entry(
+                            EnvironmentMount(
+                                environment, permission_ceiling=EnvironmentPermissionSet(operations=FILE_READ_ACTIONS)
+                            ),
+                            projector,
+                        )
+                    },
+                    default_mount="source",
+                ),
             ),
             usage=usage,
             usage_limits=UsageLimits(request_limit=2),
@@ -388,7 +385,7 @@ async def test_recovery_omits_already_applied_input_factory(
                 model=FunctionModel(stream_function=model_stream),
             ),
             input=MaterializedHarnessInput(must_not_replay),
-            collaborators=HarnessCollaborators(instance=instance),
+            bindings=RunBindings(instance=instance),
         ),
         preparation=_preparation(),
     )
@@ -432,7 +429,7 @@ async def test_pending_deferred_state_requires_native_resume(
                     model=FunctionModel(lambda messages, info: "unused"),
                 ),
                 input=ImmediateHarnessInput(),
-                collaborators=HarnessCollaborators(instance=instance),
+                bindings=RunBindings(instance=instance),
             ),
             preparation=_preparation(),
         )
@@ -506,7 +503,7 @@ async def test_runtime_passes_exact_native_deferred_resume(
         HarnessInvocation(
             definition=definition(),
             input=ImmediateHarnessInput(),
-            collaborators=HarnessCollaborators(instance=instance),
+            bindings=RunBindings(instance=instance),
             deferred_resume=DeferredToolResume(
                 prior.deferred,
                 DeferredToolResults(
@@ -547,8 +544,12 @@ async def test_planned_handoff_yields_only_after_environment_close(
                 model=FunctionModel(lambda messages, info: "must not run"),
             ),
             input=ImmediateHarnessInput("accepted input"),
-            collaborators=HarnessCollaborators(instance=instance),
-            environment=SingleHarnessEnvironment(environment),
+            bindings=RunBindings(
+                instance=instance,
+                environment=create_environment_runtime(
+                    mounts={"workspace": observe_environment_entry(environment, projector)}, default_mount="workspace"
+                ),
+            ),
         ),
         preparation=_preparation(),
     )
@@ -590,8 +591,13 @@ async def test_environment_preparation_failure_emits_only_safe_live_projection(
                     model=FunctionModel(lambda messages, info: "must not run"),
                 ),
                 input=MaterializedHarnessInput(use_environment),
-                collaborators=HarnessCollaborators(instance=instance),
-                environment=SingleHarnessEnvironment(environment),
+                bindings=RunBindings(
+                    instance=instance,
+                    environment=create_environment_runtime(
+                        mounts={"workspace": observe_environment_entry(environment, projector)},
+                        default_mount="workspace",
+                    ),
+                ),
             ),
             preparation=_preparation(),
         )
@@ -646,8 +652,17 @@ async def test_environment_observations_preserve_ceiling_and_effective_permissio
                 model=FunctionModel(stream_function=complete),
             ),
             input=MaterializedHarnessInput(read_input),
-            collaborators=HarnessCollaborators(instance=instance),
-            environment=SingleHarnessEnvironment(EnvironmentMount(environment, permission_ceiling=ceiling)),
+            bindings=RunBindings(
+                instance=instance,
+                environment=create_environment_runtime(
+                    mounts={
+                        "workspace": observe_environment_entry(
+                            EnvironmentMount(environment, permission_ceiling=ceiling), projector
+                        )
+                    },
+                    default_mount="workspace",
+                ),
+            ),
         ),
         preparation=_preparation(),
     )
@@ -686,7 +701,8 @@ async def test_live_projection_failure_does_not_change_harness_outcome(
     state = await _stored_state(interaction_object_store, initial_state())
     coordinator = _RuntimeCoordinator(state, instance, trace)
 
-    result = await _driver(coordinator, _EventProjector(fail=True)).run(
+    projector = _EventProjector(fail=True)
+    result = await _driver(coordinator, projector).run(
         HarnessInvocation(
             definition=AgentDefinition(
                 agent=AgentSpec(),
@@ -694,8 +710,17 @@ async def test_live_projection_failure_does_not_change_harness_outcome(
                 model=FunctionModel(stream_function=complete),
             ),
             input=ImmediateHarnessInput("accepted input"),
-            collaborators=HarnessCollaborators(instance=instance),
-            environment=SingleHarnessEnvironment(_environment(tmp_path / "projection-failure", "workspace")),
+            bindings=RunBindings(
+                instance=instance,
+                environment=create_environment_runtime(
+                    mounts={
+                        "workspace": observe_environment_entry(
+                            _environment(tmp_path / "projection-failure", "workspace"), projector
+                        )
+                    },
+                    default_mount="workspace",
+                ),
+            ),
         ),
         preparation=_preparation(),
     )

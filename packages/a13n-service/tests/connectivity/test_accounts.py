@@ -17,7 +17,6 @@ from a13n_service.connectivity.execution import AttemptToolScope
 from a13n_service.connectivity.native import native_capability
 from a13n_service.connectivity.native_context import InboundRunContext, bind_account_tools
 from a13n_service.connectivity.providers.registry import require_native_provider
-from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
 from a13n_service.http_errors import application_error_status
 from a13n_service.iam import AuthenticatedActor, PrincipalRef
 from a13n_service.storage import transaction
@@ -198,7 +197,7 @@ async def test_paused_ingress_keeps_accepted_reply_but_disabled_account_blocks_i
         ),
         ORG_ID,
         WORKSPACE_ID,
-        FrozenRunConnectivity(()),
+        (),
         (context,),
         authorization=await execution_authorization(principal=principal),
     )

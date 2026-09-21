@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -45,11 +45,6 @@ class TraceQueryScope:
     workspace_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class AuthorizedRunAttempt:
-    run_attempt_id: str
-
-
 class TraceAccessAuthorizer(Protocol):
     """Run-domain authorization port; implementations own their short sessions."""
 
@@ -61,7 +56,7 @@ class TraceAccessAuthorizer(Protocol):
         actor: AuthenticatedActor,
         scope: TraceQueryScope,
         correlations: Sequence[TraceCorrelation],
-    ) -> Mapping[str, AuthorizedRunAttempt]: ...
+    ) -> frozenset[str]: ...
 
 
 class TraceQueryService:
@@ -353,9 +348,8 @@ async def _authorize_exact(
         raise _not_found()
 
 
-def _authorized(trace: Trace, authorized: Mapping[str, AuthorizedRunAttempt]) -> bool:
-    decision = authorized.get(trace.correlation.run_attempt_id)
-    return decision is not None and decision.run_attempt_id == trace.correlation.run_attempt_id
+def _authorized(trace: Trace, authorized: frozenset[str]) -> bool:
+    return trace.correlation.run_attempt_id in authorized
 
 
 def _matches(trace: Trace, scope: TraceQueryScope) -> bool:

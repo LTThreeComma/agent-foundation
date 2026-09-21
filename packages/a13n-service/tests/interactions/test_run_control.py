@@ -40,7 +40,6 @@ from a13n_service.interactions.harness_results import (
     StoredHarnessOutcomeAdapter,
 )
 from a13n_service.interactions.harness_runtime import (
-    HarnessCollaborators,
     HarnessDriver,
     HarnessInvocation,
     ImmediateHarnessInput,
@@ -364,7 +363,7 @@ async def _run(
                 model_recovery=model_recovery or ModelRecoveryPolicy(),
             ),
             input=ImmediateHarnessInput("accepted input"),
-            collaborators=HarnessCollaborators(instance=bindings.instance),
+            bindings=RunBindings(instance=bindings.instance),
             deferred_resume=deferred_resume,
         ),
         preparation=_preparation(control.current_context),

@@ -24,10 +24,10 @@ from a13n_service.storage import short_session
 from a13n_service.temporal import Clock, utc_now
 
 from .agent_inputs import (
-    AgentSecretSnapshot,
     graph_secret_requirements,
     require_secret,
     secret_unavailable,
+    snapshot_secret,
     validate_secret_bindings,
 )
 from .crypto import SecretProtectionError, SecretProtector
@@ -119,7 +119,7 @@ class BoundAgentSecrets:
             raise secret_unavailable()
         async with short_session(self._runtime._sessions) as database:
             actor = await self._authorize(database, agent_id)
-            snapshot = AgentSecretSnapshot.from_record(
+            snapshot = snapshot_secret(
                 await require_secret(
                     database,
                     actor=actor,

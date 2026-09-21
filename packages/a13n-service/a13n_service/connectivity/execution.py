@@ -54,7 +54,7 @@ from .native import native_capability
 from .native_actions import NativeObservationFactory
 from .native_context import NativeToolContext, parse_native_contexts
 from .selection_domain import ConnectionRunSelection
-from .selection_resolution import ConnectivitySelectionResolver, FrozenRunConnectivity
+from .selection_resolution import ConnectivitySelectionResolver
 from .tool_validation import validate_result
 from .toolsets import local_capability, namespaced, selected_tools
 
@@ -66,7 +66,7 @@ class AttemptToolScope:
     actor: AuthenticatedActor
     organization_id: str
     workspace_id: str
-    selections: FrozenRunConnectivity
+    selections: tuple[ConnectionRunSelection, ...]
     native_tool_contexts: tuple[NativeToolContext, ...] = field(repr=False)
     authorization: AttemptAuthorization = field(repr=False)
     protected_inputs: tuple[object, ...] = field(default=(), repr=False)
@@ -174,9 +174,7 @@ class ExternalToolRuntime:
             actor,
             run.organization_id,
             conversation.workspace_id,
-            FrozenRunConnectivity(
-                _CONNECTIONS.validate_python(run.connection_selections_json),
-            ),
+            _CONNECTIONS.validate_python(run.connection_selections_json),
             parse_native_contexts(run.native_tool_contexts_json),
             context.authorization,
             deepcopy(protected_inputs),
@@ -187,13 +185,13 @@ class ExternalToolRuntime:
         current_context: Callable[[], AttemptContext],
         *,
         child_agent_id: str | None = None,
-        selections: FrozenRunConnectivity | None = None,
+        selections: tuple[ConnectionRunSelection, ...] | None = None,
     ) -> None:
         """Check retained scope and connection eligibility without opening tool clients."""
         async with short_session(self._sessions) as session:
             scope = await self._scope_in_session(session, current_context(), child_agent_id=child_agent_id)
             selected = scope.selections if selections is None else selections
-            for selection in selected.connection_selections:
+            for selection in selected:
                 await self._selections.require_current_source(
                     session,
                     actor=scope.actor,
@@ -227,7 +225,7 @@ class ExternalToolRuntime:
         current_context: Callable[[], AttemptContext],
         *,
         agent_id: str,
-        selections: FrozenRunConnectivity,
+        selections: tuple[ConnectionRunSelection, ...],
     ) -> AsyncIterator[tuple[MCP[AgentContext], ...]]:
         """Bind an accepted inline child's tools to the owning Attempt, without native ingress context."""
         parent = await self._scope(current_context(), child_agent_id=agent_id)
@@ -254,7 +252,7 @@ class ExternalToolRuntime:
     ) -> AsyncIterator[tuple[MCP[AgentContext], ...]]:
         capabilities: list[MCP[AgentContext]] = []
         async with AsyncExitStack() as stack:
-            for selection in accepted.selections.connection_selections:
+            for selection in accepted.selections:
                 if selection.tools == ():
                     continue
                 if selection.kind == "connector":

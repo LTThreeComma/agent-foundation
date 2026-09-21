@@ -26,16 +26,11 @@ class ConnectivitySelectionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenRunConnectivity:
-    connection_selections: tuple[ConnectionRunSelection, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class PreparedConnectivity:
     actor: AuthenticatedActor
     organization_id: str
     workspace_id: str
-    selections: FrozenRunConnectivity
+    selections: tuple[ConnectionRunSelection, ...]
 
 
 class ConnectivitySelectionResolver:
@@ -62,13 +57,15 @@ class ConnectivitySelectionResolver:
             )
         return PreparedConnectivity(actor, organization_id, workspace_id, selections)
 
-    async def freeze(self, session: AsyncSession, *, prepared: PreparedConnectivity) -> FrozenRunConnectivity:
+    async def freeze(
+        self, session: AsyncSession, *, prepared: PreparedConnectivity
+    ) -> tuple[ConnectionRunSelection, ...]:
         current = await self.resolve_in_session(
             session,
             actor=prepared.actor,
             organization_id=prepared.organization_id,
             workspace_id=prepared.workspace_id,
-            connection_tools=prepared.selections.connection_selections,
+            connection_tools=prepared.selections,
             lock=True,
         )
         if current != prepared.selections:
@@ -93,7 +90,7 @@ class ConnectivitySelectionResolver:
             connection_tools=(selection,),
             snapshot=snapshot,
         )
-        if current != FrozenRunConnectivity((selection,)):
+        if current != (selection,):
             raise ConnectivitySelectionError("connection_changed", path="connection_tools")
 
     @staticmethod
@@ -106,12 +103,12 @@ class ConnectivitySelectionResolver:
         connection_tools: tuple[ConnectionToolSelection, ...],
         lock: bool = False,
         snapshot: PrincipalPermissions | None = None,
-    ) -> FrozenRunConnectivity:
+    ) -> tuple[ConnectionRunSelection, ...]:
         identifiers = tuple(item.connection_id for item in connection_tools)
         if len(identifiers) != len(set(identifiers)):
             raise ConnectivitySelectionError("connection_selected_more_than_once", path="connection_tools")
         if not identifiers:
-            return FrozenRunConnectivity(())
+            return ()
         try:
             await authorize_workspace(
                 session,
@@ -181,4 +178,4 @@ class ConnectivitySelectionResolver:
                     permissions=selection.permissions,
                 )
             )
-        return FrozenRunConnectivity(tuple(selections))
+        return tuple(selections)

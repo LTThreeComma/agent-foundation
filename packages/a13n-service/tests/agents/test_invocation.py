@@ -673,6 +673,7 @@ async def test_permissions_and_managed_reviewer_survive_acceptance_and_reconstru
     from a13n_harness.tools import ToolPermissionsCapability
     from a13n_service.agents.domain import AgentConfig, EffectiveAgentConfig, PreparedAgentPlugins
     from a13n_service.agents.reconstruction import AgentReconstructor
+    from a13n_service.digests import digest_request
 
     config = AgentConfig.model_validate(
         {
@@ -703,6 +704,10 @@ async def test_permissions_and_managed_reviewer_survive_acceptance_and_reconstru
     async with transaction(agent_sessions) as session:
         frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
     effective = EffectiveAgentConfig.model_validate_json(frozen.effective_config.model_dump_json())
+    assert effective == frozen.effective_config
+    assert effective.content_digest == digest_request(
+        effective.model_dump(mode="json", by_alias=True, exclude={"content_digest"})
+    )
     assert effective.toolsets == config.toolsets and effective.reviewer == config.reviewer
     assert effective.resolved_reviewer_model is not None
     assert effective.resolved_reviewer_model.execution.model_id == MODEL_ID

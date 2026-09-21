@@ -264,7 +264,3 @@ class EnvironmentCommand(DomainModel):
     status: Literal["pending", "completed", "failed"]
     created_at: datetime
     completed_at: datetime | None
-
-
-class EnvironmentCommandRequest(DomainModel):
-    action: Literal["stop", "delete"]

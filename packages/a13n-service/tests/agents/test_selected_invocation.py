@@ -8,7 +8,7 @@ from a13n_service.agents.models import AgentRecord
 from a13n_service.etags import resource_etag
 from a13n_service.iam.models import RoleBindingRecord
 from a13n_service.interactions.command_preparation import CommandInput
-from a13n_service.interactions.command_values import ContinueRunCommand
+from a13n_service.interactions.command_values import ContinueRunCommand, ForkRunCommand
 from a13n_service.interactions.errors import InteractionCommandError
 from a13n_service.interactions.models import RunRecord
 from a13n_service.interactions.objects import RunStateStore
@@ -44,7 +44,7 @@ async def _media_models(sessions, **models: tuple[str, ...]) -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["start", "continue"])
+@pytest.mark.parametrize("operation", ["start", "continue", "fork"])
 async def test_command_keeps_selected_config_and_authority_across_input_io(
     agent_management, agent_invocation_resolver, agent_sessions, tmp_path, monkeypatch, operation
 ):
@@ -69,7 +69,7 @@ async def test_command_keeps_selected_config_and_authority_across_input_io(
     commands = _commands(agent_sessions, objects, resolver.preparation, resolver.freezing)
     request = _request().model_copy(update={"agent_id": created.agent.id})
     source = None
-    if operation == "continue":
+    if operation != "start":
         source = await commands.runs.start(
             actor=actor(), workspace_id=WORKSPACE_ID, idempotency_key="source", request=request
         )
@@ -100,6 +100,13 @@ async def test_command_keeps_selected_config_and_authority_across_input_io(
         if source is None:
             accepted = await commands.runs.start(
                 actor=actor(), workspace_id=WORKSPACE_ID, idempotency_key="accept", request=request
+            )
+        elif operation == "fork":
+            accepted = await commands.runs.fork(
+                actor=actor(),
+                run_id=source.run_id,
+                idempotency_key="accept",
+                request=ForkRunCommand(agent_id=created.agent.id, input=request.input),
             )
         else:
             accepted = await commands.runs.continue_from(

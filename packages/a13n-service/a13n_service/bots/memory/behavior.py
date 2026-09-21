@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from a13n_harness.capabilities.memory import MemoryCapability
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +12,7 @@ from a13n_service.agents.reconstruction import AgentDefinitionReconstructionCont
 from a13n_service.interactions.attempts import AttemptContext
 from a13n_service.interactions.domain import Run
 from a13n_service.interactions.errors import RunAcceptanceError
-from a13n_service.interactions.ports.memory import ActiveMemory, DisabledMemory
+from a13n_service.interactions.ports.memory import DisabledMemory
 from a13n_service.memory.models import MemoryProviderRecord, RunMemoryStorageRecord
 from a13n_service.memory.resources import binds_host_files
 from a13n_service.memory.service import MemoryService
@@ -32,7 +33,7 @@ class PreparedConversationMemory:
     current_context: Callable[[], AttemptContext]
     filesystem: bool = False
 
-    def for_node(self, node: AgentDefinitionReconstructionContext) -> ActiveMemory | DisabledMemory:
+    def for_node(self, node: AgentDefinitionReconstructionContext) -> MemoryCapability | DisabledMemory:
         capability = bot_memory_capability(
             self.service,
             run=self.run,
@@ -42,7 +43,7 @@ class PreparedConversationMemory:
             current_context=self.current_context,
             filesystem=self.filesystem,
         )
-        return DisabledMemory() if capability is None else ActiveMemory(capability)
+        return DisabledMemory() if capability is None else capability
 
 
 class ConversationMemory:

@@ -6,10 +6,10 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from a13n_service.connectivity.selection_domain import ConnectionRunSelection
 from a13n_service.connectivity.selection_resolution import (
     ConnectivitySelectionError,
     ConnectivitySelectionResolver,
-    FrozenRunConnectivity,
     PreparedConnectivity,
 )
 from a13n_service.iam import AuthenticatedActor
@@ -76,7 +76,7 @@ async def freeze_invocation_connectivity(
     resolver: ConnectivitySelectionResolver,
     session: AsyncSession,
     prepared: PreparedConnectivity,
-) -> FrozenRunConnectivity:
+) -> tuple[ConnectionRunSelection, ...]:
     try:
         return await resolver.freeze(session, prepared=prepared)
     except ConnectivitySelectionError as error:

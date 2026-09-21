@@ -86,10 +86,6 @@ class ConnectorProviderCommandRequest(StrictModel):
     expected_version: int = Field(ge=1)
 
 
-class ConnectorSetupCompletion(StrictModel):
-    return_url: str
-
-
 class ConnectorSetupLaunch(StrictModel):
     completion_method: SetupCompletionMethod
     attempt_id: str

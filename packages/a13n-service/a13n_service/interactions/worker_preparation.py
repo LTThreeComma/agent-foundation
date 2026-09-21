@@ -17,8 +17,10 @@ from a13n_harness import (
     RunInputValue,
     RunPreparationContext,
 )
-from a13n_harness.capabilities import SubagentCapability, UserInteractionCapability, WebBinding
+from a13n_harness.capabilities import SkillManager, SubagentCapability, UserInteractionCapability, WebBinding
+from a13n_harness.capabilities.memory import MemoryCapability
 from a13n_harness.environment import FILE_READ_ACTIONS, EnvironmentPermissionSet
+from a13n_harness.environment.advanced import create_environment_runtime
 from a13n_harness.errors import RunError
 from a13n_harness.plugin_factories import HarnessPluginFactoryCatalog
 from a13n_harness.providers.environment.management import Environment
@@ -50,7 +52,7 @@ from a13n_service.models.runtime import SnapshotRunModelResolver
 from a13n_service.observability import observe_input
 from a13n_service.secrets.agent_inputs import graph_secret_requirements
 from a13n_service.secrets.agent_runtime import AgentSecretRuntime, BoundAgentSecrets
-from a13n_service.skills.runtime import PreparedSkillRuntime, SkillRuntimePreparer
+from a13n_service.skills.runtime import SkillRuntimePreparer
 from a13n_service.storage import short_session
 from a13n_service.subagents.result_delivery import AsyncSubagentResultMaterializer
 from a13n_service.web.runtime import WebRuntime, graph_uses_web
@@ -64,15 +66,13 @@ from .domain import Run, RunInputKind
 from .harness_control import InlineRunControlCapability
 from .harness_results import AttemptCommitter
 from .harness_runtime import (
-    HarnessCollaborators,
     HarnessInvocation,
     ImmediateHarnessInput,
     MaterializedHarnessInput,
-    MountedHarnessEnvironments,
 )
 from .input import AcceptedAgentInput
 from .objects import RunPayloadStore
-from .ports.memory import ActiveMemory, ExecutionMemoryRuntime, PreparedMemory
+from .ports.memory import ExecutionMemoryRuntime, PreparedMemory
 from .protocol_context import ProtocolContextCapability
 from .run_control import RunAttemptControl
 from .state import CompletedOutcomeCandidate
@@ -132,7 +132,7 @@ class WorkerAttemptPreparer:
         self._skills = skills
         self._asset_publication = asset_publication
         self._async_results = async_results
-        self._prepared_skills: dict[str | None, PreparedSkillRuntime] | None = None
+        self._prepared_skills: dict[str | None, SkillManager | None] | None = None
 
     def _observed(
         self, environment: Environment, permission_ceiling: EnvironmentPermissionSet | None = None
@@ -233,13 +233,16 @@ class WorkerAttemptPreparer:
                 environment = await to_thread.run_sync(KnowledgeFiles().environment)
                 invocation = replace(
                     invocation,
-                    environment=MountedHarnessEnvironments(
-                        entries={
-                            "builtin-skills": self._observed(
-                                environment, EnvironmentPermissionSet(operations=FILE_READ_ACTIONS)
-                            )
-                        },
-                        default_environment="builtin-skills",
+                    bindings=replace(
+                        invocation.bindings,
+                        environment=create_environment_runtime(
+                            mounts={
+                                "builtin-skills": self._observed(
+                                    environment, EnvironmentPermissionSet(operations=FILE_READ_ACTIONS)
+                                )
+                            },
+                            default_mount="builtin-skills",
+                        ),
                     ),
                 )
                 yield invocation
@@ -249,8 +252,9 @@ class WorkerAttemptPreparer:
             )
             if environment is not None:
                 stack.push_async_callback(environment.close)
-            mounted = MountedHarnessEnvironments(
-                entries=({"workspace": self._observed(environment)} if environment is not None else {})
+            mounted = create_environment_runtime(
+                mounts=({"workspace": self._observed(environment)} if environment is not None else {}),
+                default_mount="workspace" if environment is not None else None,
             )
 
             async def prepare_mount(mount: AcceptedRunMount):
@@ -266,7 +270,7 @@ class WorkerAttemptPreparer:
 
             await self._control.bind_environment_mounts(
                 RunMountRuntime(
-                    runtime=mounted.runtime,
+                    runtime=mounted,
                     has_primary=environment is not None,
                     observations=RunMountObservations(self._sessions, clock=self._environments.clock),
                     current_attempt=lambda: self._control.current_context,
@@ -274,7 +278,7 @@ class WorkerAttemptPreparer:
                     observe=self._observed,
                 )
             )
-            yield replace(invocation, environment=mounted)
+            yield replace(invocation, bindings=replace(invocation.bindings, environment=mounted))
 
     async def _prepare(self, context: AttemptContext, stack: AsyncExitStack) -> HarnessInvocation[Any]:
         run = self._run
@@ -320,8 +324,8 @@ class WorkerAttemptPreparer:
             if self._prepared_memory is None:
                 raise RunError("Memory preparation is incomplete.", code="memory_binding_unavailable")
             memory = self._prepared_memory.for_node(context)
-            if isinstance(memory, ActiveMemory):
-                selected = (*selected, memory.capability)
+            if isinstance(memory, MemoryCapability):
+                selected = (*selected, memory)
             protocol_context = self._control.current_state.envelope.protocol_context
             if context.is_root and protocol_context is not None:
                 selected = (*selected, ProtocolContextCapability(protocol_context))
@@ -455,7 +459,7 @@ class WorkerAttemptPreparer:
             usage_limits=self._control.current_state.envelope.usage_limits,
             input=input_source,
             deferred_resume=resume,
-            collaborators=HarnessCollaborators(
+            bindings=RunBindings(
                 instance=instance,
                 web=root_web,
                 capabilities=(self._bound_secrets.capability(),) if self._bound_secrets is not None else (),

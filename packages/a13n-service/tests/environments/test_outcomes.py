@@ -8,7 +8,7 @@ from a13n_harness.providers.environment.errors import EnvironmentProviderError
 from a13n_harness.providers.environment.errors import EnvironmentProviderErrorCategory as Category
 from a13n_harness.providers.environment.errors import EnvironmentProviderOutcomeCertainty as Certainty
 from a13n_harness.providers.environment.models import EnvironmentError, EnvironmentState
-from a13n_service.environments.domain import CreateManagedEnvironmentRequest, EnvironmentCommandRequest
+from a13n_service.environments.domain import CreateManagedEnvironmentRequest
 from a13n_service.environments.identity import target_identity
 from a13n_service.environments.lifecycle import EnvironmentLifecycle
 from a13n_service.environments.models import (
@@ -68,7 +68,7 @@ async def test_successful_effect_survives_interrupted_publication(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action=action),
+        action=action,
         idempotency_key=action,
     )
     attempts = interrupt_publication(monkeypatch, lifecycle, after_commit=after_commit)
@@ -135,7 +135,7 @@ async def test_undispatched_failure_preserves_only_an_earlier_unknown_operation(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop",
     )
     if previous_claim:
@@ -191,7 +191,7 @@ async def test_unpublished_success_retains_the_pending_operation(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop",
     )
     with pytest.raises(DBAPIError):
@@ -318,7 +318,7 @@ async def test_close_failure_does_not_rewrite_a_completed_stop(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop",
     )
     with pytest.raises(RuntimeError, match="Local cleanup failed"):
@@ -350,7 +350,7 @@ async def test_receipt_replay_cannot_overwrite_a_later_operation(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop",
     )
     publish = lifecycle.publish
@@ -409,7 +409,7 @@ async def test_publication_cancellation_is_not_replaced_by_the_provider_error(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop",
     )
     with pytest.raises(asyncio.CancelledError, match="Publication cancelled"):

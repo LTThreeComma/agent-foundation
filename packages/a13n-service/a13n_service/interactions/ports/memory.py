@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 
 from a13n_harness.capabilities.memory import MemoryCapability
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,39 +23,13 @@ class ExecutionBindings(Protocol):
         ...
 
 
-MemoryOperation = Literal["index", "list", "search", "read", "create", "delete"]
-
-
 @dataclass(frozen=True)
 class DisabledMemory:
     """Terminal behavior selection; never an invitation to try another provider."""
 
 
-@dataclass(frozen=True)
-class ActiveMemory:
-    capability: MemoryCapability
-
-    @property
-    def retrieval(self) -> Literal["automatic", "index_first", "on_request"]:
-        if self.capability.document_store is not None or self.capability.document_factory is not None:
-            return "index_first"
-        return "automatic" if self.capability.auto_recall else "on_request"
-
-    @property
-    def operations(self) -> frozenset[MemoryOperation]:
-        capability = self.capability
-        if capability.document_store is not None or capability.document_factory is not None:
-            operations: set[MemoryOperation] = set()
-            if capability.document_read:
-                operations.update(("index", "search", "read"))
-            if capability.document_write:
-                operations.update(("create", "delete"))
-            return frozenset(operations)
-        return frozenset(("search", "list", "create")) if capability.toolset else frozenset()
-
-
 class PreparedMemory(Protocol):
-    def for_node(self, node: AgentDefinitionReconstructionContext) -> DisabledMemory | ActiveMemory: ...
+    def for_node(self, node: AgentDefinitionReconstructionContext) -> DisabledMemory | MemoryCapability: ...
 
 
 class ExecutionMemoryRuntime(Protocol):

@@ -12,7 +12,7 @@ from a13n_service.agents.domain import EffectiveAgentConfig
 from a13n_service.agents.reconstruction import AgentDefinitionReconstructionContext
 from a13n_service.interactions.attempts import AttemptContext
 from a13n_service.interactions.domain import Run
-from a13n_service.interactions.ports.memory import ActiveMemory, DisabledMemory
+from a13n_service.interactions.ports.memory import DisabledMemory
 
 from .domain import ManagedMemoryBackend, MemoryEntries, MemorySelection
 from .file_runtime import filesystem_store
@@ -28,7 +28,7 @@ class OrdinaryPreparedMemory:
     workspace_id: str
     current_context: Callable[[], AttemptContext]
 
-    def for_node(self, node: AgentDefinitionReconstructionContext) -> ActiveMemory | DisabledMemory:
+    def for_node(self, node: AgentDefinitionReconstructionContext) -> MemoryCapability | DisabledMemory:
         if node.config.memory is None:
             return DisabledMemory()
         if isinstance(node.config.memory, MemoryEntries):
@@ -76,7 +76,7 @@ class OrdinaryPreparedMemory:
                 entries.append(
                     MemoryEntry(name=entry.name, mode=entry.mode, description=entry.description, capability=child)
                 )
-            return ActiveMemory(MemoryCapability(entries=entries))
+            return MemoryCapability(entries=entries)
         capability = memory_capability(
             self.service,
             run=self.run,
@@ -85,7 +85,7 @@ class OrdinaryPreparedMemory:
             selection=node.config.memory,
             current_context=self.current_context,
         )
-        return ActiveMemory(capability)
+        return capability
 
 
 class OrdinaryMemory:

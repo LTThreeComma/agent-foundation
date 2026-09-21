@@ -29,10 +29,10 @@ async def test_acceptance_retains_requested_scope_without_discovery(connectivity
     )
     async with transaction(connectivity_sessions) as session:
         retained = await resolver.freeze(session, prepared=prepared)
-    assert retained.connection_selections[0].tools == ("not-discovered",)
-    assert retained.connection_selections[0].defer_loading
-    assert retained.connection_selections[1].tools is None
-    assert [selection.model_alias for selection in retained.connection_selections] == [
+    assert retained[0].tools == ("not-discovered",)
+    assert retained[0].defer_loading
+    assert retained[1].tools is None
+    assert [selection.model_alias for selection in retained] == [
         "conn_orders_account",
         "conn_docs",
     ]
@@ -57,7 +57,7 @@ async def test_accepted_alias_survives_connection_rename(connectivity_sessions):
         workspace_id=WORKSPACE_ID,
         connection_tools=(ConnectionToolSelection(connection_id=CONNECTOR_CONNECTION_ID),),
     )
-    selection = prepared.selections.connection_selections[0]
+    selection = prepared.selections[0]
     async with transaction(connectivity_sessions) as session:
         connection = await session.get(ConnectorConnectionRecord, CONNECTOR_CONNECTION_ID)
         connection.name = "Renamed account"
@@ -129,7 +129,7 @@ async def test_dispatch_checks_only_current_source_without_freezing_other_connec
                 actor=actor(),
                 organization_id=ORG_ID,
                 workspace_id=WORKSPACE_ID,
-                selection=prepared.selections.connection_selections[0],
+                selection=prepared.selections[0],
             )
     finally:
         event.remove(engine, "before_execute", record)
@@ -143,7 +143,7 @@ async def test_dispatch_checks_only_current_source_without_freezing_other_connec
                 actor=actor(),
                 organization_id=ORG_ID,
                 workspace_id=WORKSPACE_ID,
-                selection=prepared.selections.connection_selections[1],
+                selection=prepared.selections[1],
             )
 
 
@@ -164,7 +164,7 @@ async def test_reauthorization_fences_accepted_runs_but_credential_refresh_does_
     )
     async with transaction(connectivity_sessions) as session:
         accepted = await resolver.freeze(session, prepared=prepared)
-    selection = accepted.connection_selections[0]
+    selection = accepted[0]
     async with transaction(connectivity_sessions) as session:
         connection = await session.get(ConnectionRecord, connection_id)
         connection.credential_generation += 1
@@ -188,8 +188,5 @@ async def test_reauthorization_fences_accepted_runs_but_credential_refresh_does_
         workspace_id=WORKSPACE_ID,
         connection_tools=(ConnectionToolSelection(connection_id=connection_id),),
     )
-    assert replacement.selections.connection_selections[0].connection_id == selection.connection_id
-    assert (
-        replacement.selections.connection_selections[0].authorization_generation
-        == selection.authorization_generation + 1
-    )
+    assert replacement.selections[0].connection_id == selection.connection_id
+    assert replacement.selections[0].authorization_generation == selection.authorization_generation + 1

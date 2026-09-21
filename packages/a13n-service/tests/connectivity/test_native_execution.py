@@ -12,7 +12,6 @@ from a13n_service.connectivity.accounts.models import AccountRecord
 from a13n_service.connectivity.execution import AttemptToolScope
 from a13n_service.connectivity.mcp.transport import RemoteTransport
 from a13n_service.connectivity.native_context import AccountRunContext, bind_account_tools, parse_native_contexts
-from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
 from a13n_service.iam.models import RoleBindingRecord
 from a13n_service.storage import transaction
 from pydantic import ValidationError
@@ -44,7 +43,7 @@ async def native_runtime(
         replace(actor(), auth_method="internal"),
         ORG_ID,
         WORKSPACE_ID,
-        FrozenRunConnectivity(()),
+        (),
         (context,),
         authorization=await execution_authorization(),
     )
@@ -220,7 +219,7 @@ async def test_lark_attempt_reuses_token_and_rotation_replaces_scope(
         replace(actor(), auth_method="internal"),
         ORG_ID,
         WORKSPACE_ID,
-        FrozenRunConnectivity(()),
+        (),
         (context,),
         authorization=await execution_authorization(),
     )

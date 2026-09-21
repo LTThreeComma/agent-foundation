@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from contextlib import asynccontextmanager
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from inspect import isawaitable
-from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from a13n_harness import (
@@ -16,13 +14,10 @@ from a13n_harness import (
     AgentDefinition,
     AgentInstanceContext,
     DeferredToolResume,
-    EnvironmentEntry,
-    EnvironmentMount,
     ExecutableAgent,
     HarnessBuilder,
     HarnessEvent,
     HarnessExtensionEvent,
-    HarnessObservationContext,
     HarnessRunResult,
     HarnessRunResultEvent,
     HarnessRunStream,
@@ -30,27 +25,21 @@ from a13n_harness import (
     RunBindings,
     RunInputFactory,
     RunInputValue,
-    RunModelResolver,
 )
-from a13n_harness.capabilities import WebBinding
 from a13n_harness.environment.advanced import EnvironmentRuntime, create_environment_runtime
 from a13n_harness.errors import RunError
 from a13n_harness.events import UsageReportPayload
-from a13n_harness.model_context import ModelContextMiddleware
 from a13n_harness.pricing import get_current_pricing_catalog
-from a13n_harness.providers.environment.management import Environment
-from a13n_harness.toolsets.file_media import MediaUnderstandingProvider
 from a13n_harness.usage import UsageRecord
 from anyio import to_thread
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from .attempts import AttemptAuthorityError, AttemptPreparationAccepted
-from .environment_observation import EnvironmentHookObservation, observe_environment_entry
+from .environment_observation import EnvironmentHookObservation
 from .harness_control import (
     HarnessContextBinding,
     HarnessHookBoundary,
@@ -88,93 +77,12 @@ type HarnessInput = ImmediateHarnessInput | MaterializedHarnessInput
 
 
 @dataclass(frozen=True, slots=True)
-class NoHarnessEnvironment:
-    """Select Harness's empty Environment runtime."""
-
-
-@dataclass(frozen=True, slots=True)
-class SingleHarnessEnvironment:
-    """Mount one fresh Environment as the default workspace."""
-
-    entry: EnvironmentEntry
-
-    def __post_init__(self) -> None:
-        _require_environment_entry(self.entry)
-
-
-@dataclass(frozen=True, slots=True)
-class MountedHarnessEnvironments:
-    """Own a stable, initially empty or populated, named Environment runtime."""
-
-    entries: Mapping[str, EnvironmentEntry]
-    default_environment: str | None = None
-    runtime: EnvironmentRuntime = field(init=False, compare=False, repr=False)
-
-    def __post_init__(self) -> None:
-        entries = dict(self.entries)
-        if any(not isinstance(name, str) or not name.strip() for name in entries):
-            raise ValueError("mounted Harness environment names must be non-blank strings")
-        for entry in entries.values():
-            _require_environment_entry(entry)
-        default = self.default_environment
-        if default is not None and default not in entries:
-            raise ValueError("default Harness environment must name a supplied mount")
-        object.__setattr__(self, "entries", MappingProxyType(entries))
-        object.__setattr__(
-            self,
-            "runtime",
-            create_environment_runtime(
-                mounts=entries,
-                default_mount=default if default is not None else next(iter(entries)) if len(entries) == 1 else None,
-            ),
-        )
-
-
-type ServiceHarnessEnvironment = NoHarnessEnvironment | SingleHarnessEnvironment | MountedHarnessEnvironments
-
-
-@dataclass(frozen=True, slots=True)
-class HarnessCollaborators:
-    """Fresh typed collaborators supplied to one logical Harness Run."""
-
-    instance: AgentInstanceContext
-    web: WebBinding | None = None
-    file_media_understanding: MediaUnderstandingProvider | None = None
-    model_resolver: RunModelResolver | None = None
-    capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
-    model_context: ModelContextMiddleware | None = None
-    observation: HarnessObservationContext | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.instance, AgentInstanceContext):
-            raise TypeError("Service Harness instance must be an AgentInstanceContext")
-        object.__setattr__(self, "capabilities", tuple(self.capabilities))
-        object.__setattr__(self, "metadata", MappingProxyType(deepcopy(dict(self.metadata))))
-
-    def create_bindings(self) -> RunBindings:
-        """Create the fresh logical-Run binding value at invocation time."""
-
-        return RunBindings(
-            instance=self.instance,
-            web=self.web,
-            file_media_understanding=self.file_media_understanding,
-            model_resolver=self.model_resolver,
-            capabilities=self.capabilities,
-            metadata=self.metadata,
-            model_context=self.model_context,
-            observation=self.observation,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class HarnessInvocation[OutputT]:
     """Complete non-authoritative inputs for one entered Harness stream."""
 
     definition: AgentDefinition[OutputT]
     input: HarnessInput
-    collaborators: HarnessCollaborators
-    environment: ServiceHarnessEnvironment = field(default_factory=NoHarnessEnvironment)
+    bindings: RunBindings
     deferred_resume: DeferredToolResume | None = None
     usage: RunUsage | None = None
     usage_limits: UsageLimits | None = None
@@ -184,13 +92,16 @@ class HarnessInvocation[OutputT]:
             raise TypeError("Service Harness definition must be an AgentDefinition")
         if not isinstance(self.input, ImmediateHarnessInput | MaterializedHarnessInput):
             raise TypeError("Service Harness input source is invalid")
-        if not isinstance(self.collaborators, HarnessCollaborators):
-            raise TypeError("Service Harness collaborators are invalid")
-        if not isinstance(
-            self.environment,
-            NoHarnessEnvironment | SingleHarnessEnvironment | MountedHarnessEnvironments,
-        ):
-            raise TypeError("Service Harness environment selection is invalid")
+        if not isinstance(self.bindings, RunBindings):
+            raise TypeError("Service Harness bindings must be RunBindings")
+        if not isinstance(self.bindings.instance, AgentInstanceContext):
+            raise TypeError("Service Harness instance must be an AgentInstanceContext")
+        if self.bindings.environment is None:
+            object.__setattr__(
+                self, "bindings", replace(self.bindings, environment=create_environment_runtime(mounts={}))
+            )
+        elif not isinstance(self.bindings.environment, EnvironmentRuntime):
+            raise TypeError("Service Harness environment must be an EnvironmentRuntime")
         if self.deferred_resume is not None and not isinstance(self.deferred_resume, DeferredToolResume):
             raise TypeError("Service deferred resume must be a DeferredToolResume or None")
         if self.usage is not None and not isinstance(self.usage, RunUsage):
@@ -257,19 +168,17 @@ class HarnessDriver:
         definition = compose_run_control(invocation.definition, self._control, self)
         pricing_catalog = await to_thread.run_sync(get_current_pricing_catalog)
         executable = self._builder.build(definition, pricing_catalog=pricing_catalog)
-        bindings = invocation.collaborators.create_bindings()
         stream = _create_stream(
             executable,
             input_source=input_source,
-            bindings=bindings,
-            environment=_observe_environment(invocation.environment, self._projector),
+            bindings=invocation.bindings,
             previous_state=state,
             deferred_resume=deferred_resume,
             usage=invocation.usage,
             usage_limits=invocation.usage_limits,
         )
         async with stream as entered:
-            self._attach(entered, invocation.collaborators.instance, state.thread_id)
+            self._attach(entered, invocation.bindings.instance, state.thread_id)
             try:
                 await self._control.enter_harness(
                     HarnessRunIdentity(thread_id=entered.thread_id, run_id=entered.run_id),
@@ -570,7 +479,6 @@ def _create_stream[OutputT](
     *,
     input_source: HarnessInput,
     bindings: RunBindings,
-    environment: ServiceHarnessEnvironment,
     previous_state: RunCheckpoint,
     deferred_resume: DeferredToolResume | None,
     usage: RunUsage | None,
@@ -582,27 +490,6 @@ def _create_stream[OutputT](
     else:
         input_value = input_source.value
         input_factory = None
-    if isinstance(environment, SingleHarnessEnvironment):
-        return executable.stream(
-            input_value,
-            input_factory=input_factory,
-            environment=environment.entry,
-            bindings=bindings,
-            previous_state=previous_state.harness,
-            deferred_resume=deferred_resume,
-            usage=usage,
-            usage_limits=usage_limits,
-        )
-    if isinstance(environment, MountedHarnessEnvironments):
-        return executable.stream(
-            input_value,
-            input_factory=input_factory,
-            bindings=replace(bindings, environment=environment.runtime),
-            previous_state=previous_state.harness,
-            deferred_resume=deferred_resume,
-            usage=usage,
-            usage_limits=usage_limits,
-        )
     return executable.stream(
         input_value,
         input_factory=input_factory,
@@ -614,30 +501,11 @@ def _create_stream[OutputT](
     )
 
 
-def _observe_environment(
-    environment: ServiceHarnessEnvironment,
-    projector: HarnessEventProjector,
-) -> ServiceHarnessEnvironment:
-    if isinstance(environment, SingleHarnessEnvironment):
-        return SingleHarnessEnvironment(observe_environment_entry(environment.entry, projector))
-    return environment
-
-
-def _require_environment_entry(entry: object) -> None:
-    if not isinstance(entry, Environment | EnvironmentMount):
-        raise TypeError("Harness environment entry must be an Environment or EnvironmentMount")
-
-
 __all__ = [
-    "HarnessCollaborators",
     "HarnessDriver",
     "HarnessEventProjector",
     "HarnessInput",
     "HarnessInvocation",
     "ImmediateHarnessInput",
     "MaterializedHarnessInput",
-    "MountedHarnessEnvironments",
-    "NoHarnessEnvironment",
-    "ServiceHarnessEnvironment",
-    "SingleHarnessEnvironment",
 ]

@@ -145,7 +145,7 @@ class RunCommands:
             session = Session(
                 purpose=request.session_purpose,
                 id=session_id,
-                organization_id=prepared_input.invocation.organization_id,
+                organization_id=prepared_input.organization_id,
                 workspace_id=workspace_id,
                 labels=request.session_labels,
                 created_at=now,
@@ -153,7 +153,7 @@ class RunCommands:
             )
         else:
             session_scope = await self._require_session(
-                organization_id=prepared_input.invocation.organization_id,
+                organization_id=prepared_input.organization_id,
                 workspace_id=workspace_id,
                 session_id=session_id,
             )
@@ -178,7 +178,7 @@ class RunCommands:
         run = self._policy.create(
             now=now,
             id=run_id,
-            organization_id=prepared_input.invocation.organization_id,
+            organization_id=prepared_input.organization_id,
             authority_principal=actor.principal,
             session_id=session_id,
             thread_id=thread_id,
@@ -193,7 +193,7 @@ class RunCommands:
             id=thread_id,
             version=1,
             queue_version=0,
-            organization_id=prepared_input.invocation.organization_id,
+            organization_id=prepared_input.organization_id,
             session_id=session_id,
             role=ThreadRole.root,
             origin_kind=ThreadOriginKind.new,

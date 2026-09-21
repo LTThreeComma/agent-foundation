@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,23 +13,10 @@ from a13n_service.iam.authorization import (
 )
 from a13n_service.secrets.crypto import SecretProtectionError, SecretProtector
 from a13n_service.secrets.models import SecretRecord
+from a13n_service.secrets.snapshots import EncryptedSecret
 from a13n_service.storage import short_session
 
 from .errors import GitHubCredentialError
-
-
-@dataclass(frozen=True, slots=True)
-class _EncryptedSecret:
-    secret_id: str
-    organization_id: str
-    workspace_id: str
-    owner_type: str
-    owner_id: str
-    key: str
-    version: int
-    ciphertext: bytes
-    nonce: bytes
-    encryption_key_id: str
 
 
 class DatabaseGitHubCredentialResolver:
@@ -74,7 +59,7 @@ class DatabaseGitHubCredentialResolver:
             )
             if record is None or record.ciphertext is None or record.nonce is None or record.encryption_key_id is None:
                 raise GitHubCredentialError("the selected GitHub credential is unavailable")
-            encrypted = _EncryptedSecret(
+            encrypted = EncryptedSecret(
                 secret_id=record.id,
                 organization_id=record.organization_id,
                 workspace_id=record.workspace_id,

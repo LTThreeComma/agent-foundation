@@ -17,7 +17,7 @@ from a13n_service.connectivity.connectors.reconciler import ConnectorReconciler
 from a13n_service.connectivity.execution import AttemptToolScope
 from a13n_service.connectivity.mcp.transport import RemoteTransport
 from a13n_service.connectivity.selection_domain import ConnectionRunSelection
-from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError, FrozenRunConnectivity
+from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError
 from a13n_service.storage import short_session, transaction
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -253,7 +253,7 @@ async def test_authority_change_after_discovery_blocks_action(
             replace(actor(), auth_method="internal"),
             ORG_ID,
             WORKSPACE_ID,
-            FrozenRunConnectivity(()),
+            (),
             (),
             authorization=await execution_authorization(),
         ),

@@ -4,7 +4,6 @@ from datetime import timedelta
 
 import pytest
 from a13n_harness import SafeFailure
-from a13n_service.environments.domain import EnvironmentCommandRequest
 from a13n_service.environments.runtime import prepare_run_environment
 from a13n_service.interactions.models import RunRecord, ThreadRecord
 from a13n_service.interactions.objects import RunPayloadStore
@@ -63,7 +62,7 @@ async def test_second_session_reads_original_file_after_stop_and_resume(
     command = await service.request_command(
         actor=hook_actor(),
         environment_id=environment_id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop-after-session-a",
     )
     assert command.status == "pending"

@@ -983,7 +983,9 @@ async def _load_receipt[ReceiptT: BaseModel](
         )
     else:
         value = ThreadQueueMutationReceipt(thread_id=thread.id, queue_version=thread.queue_version)
-    return response_type.model_validate(value.model_dump())
+    if not isinstance(value, response_type):
+        raise TypeError("Stored submission receipt does not match the requested receipt type")
+    return value
 
 
 def _evidence_scope(actor: AuthenticatedActor, *, operation: str, scope_id: str) -> EvidenceScope:

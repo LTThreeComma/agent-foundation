@@ -596,7 +596,6 @@ async def test_worker_connector_uses_verified_binding_and_preserves_unknown_writ
     from a13n_service.connectivity.execution import AttemptToolScope
     from a13n_service.connectivity.mcp.transport import RemoteTransport
     from a13n_service.connectivity.selection_domain import ConnectionRunSelection
-    from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -670,7 +669,7 @@ async def test_worker_connector_uses_verified_binding_and_preserves_unknown_writ
             replace(actor(), auth_method="internal"),
             ORG_ID,
             WORKSPACE_ID,
-            FrozenRunConnectivity(()),
+            (),
             (),
             authorization=await execution_authorization(),
         ),

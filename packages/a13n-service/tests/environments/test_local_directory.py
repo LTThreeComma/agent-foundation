@@ -50,7 +50,6 @@ async def test_service_allocates_distinct_manual_environments_and_cleans_only_ow
         CreateManagedEnvironmentRequest,
         CreateProviderRequest,
         CreateTemplateRequest,
-        EnvironmentCommandRequest,
     )
     from a13n_service.environments.lifecycle import EnvironmentLifecycle
     from a13n_service.environments.models import EnvironmentProviderRecord, EnvironmentRecord
@@ -101,7 +100,7 @@ async def test_service_allocates_distinct_manual_environments_and_cleans_only_ow
             actor=actor(),
             environment_id=first.id,
             idempotency_key=action,
-            request=EnvironmentCommandRequest(action=action),
+            action=action,
         )
         await lifecycle.maintain(first.id)
         if action == "stop":

@@ -150,7 +150,6 @@ async def test_installed_connector_account_credentials(
             from a13n_service.connectivity.execution import AttemptToolScope
             from a13n_service.connectivity.mcp.transport import RemoteTransport
             from a13n_service.connectivity.selection_domain import ConnectionRunSelection
-            from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
             from pydantic_ai.models.test import TestModel
 
             from .conftest import NOW, ORG_ID
@@ -223,7 +222,7 @@ async def test_installed_connector_account_credentials(
                     replace(actor(), auth_method="internal"),
                     ORG_ID,
                     WORKSPACE_ID,
-                    FrozenRunConnectivity(()),
+                    (),
                     (),
                     authorization=await execution_authorization(),
                 ),

@@ -119,7 +119,6 @@ async def test_native_runtime_observes_unknown_without_repeating_effect(
     from a13n_service.connectivity.native import native_capability
     from a13n_service.connectivity.native_context import AccountRunContext, InboundRunContext
     from a13n_service.connectivity.providers.slack.adapter import CONTEXT_VERSION
-    from a13n_service.connectivity.selection_resolution import FrozenRunConnectivity
     from a13n_service.storage import transaction
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -159,7 +158,7 @@ async def test_native_runtime_observes_unknown_without_repeating_effect(
         replace(actor(), auth_method="internal"),
         ORG_ID,
         WORKSPACE_ID,
-        FrozenRunConnectivity(()),
+        (),
         (context,),
         authorization=await execution_authorization(),
     )

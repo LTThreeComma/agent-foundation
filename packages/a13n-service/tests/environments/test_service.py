@@ -6,7 +6,6 @@ from a13n_service.environments.domain import (
     CreateProviderRequest,
     CreateTemplateRequest,
     CreateTemplateRevisionRequest,
-    EnvironmentCommandRequest,
     EnvironmentStatus,
     NewEnvironmentSelection,
     ReplaceCredentialRequest,
@@ -214,14 +213,17 @@ async def test_manual_command_is_a_durable_idempotent_receipt(environment_servic
         request=CreateManagedEnvironmentRequest(template_id=template.id),
         idempotency_key="env",
     )
-    request = EnvironmentCommandRequest(action="delete")
+    with pytest.raises(EnvironmentManagementError, match="Unsupported lifecycle action"):
+        await environment_service.request_command(
+            actor=actor(), environment_id=environment.id, action="restart", idempotency_key="invalid"
+        )
     command = await environment_service.request_command(
-        actor=actor(), environment_id=environment.id, request=request, idempotency_key="delete"
+        actor=actor(), environment_id=environment.id, action="delete", idempotency_key="delete"
     )
     assert command.status == "pending"
     assert (
         await environment_service.request_command(
-            actor=actor(), environment_id=environment.id, request=request, idempotency_key="delete"
+            actor=actor(), environment_id=environment.id, action="delete", idempotency_key="delete"
         )
         == command
     )
@@ -232,7 +234,7 @@ async def test_manual_command_is_a_durable_idempotent_receipt(environment_servic
         await environment_service.request_command(
             actor=actor(),
             environment_id=environment.id,
-            request=EnvironmentCommandRequest(action="stop"),
+            action="stop",
             idempotency_key="stop",
         )
 

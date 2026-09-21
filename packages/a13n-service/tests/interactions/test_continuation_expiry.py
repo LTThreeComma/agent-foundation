@@ -3,14 +3,13 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from a13n_harness import AgentDefinition, AgentIdentityRef, AgentInstanceContext, AgentSpec, HarnessBuilder
+from a13n_harness import AgentDefinition, AgentIdentityRef, AgentInstanceContext, AgentSpec, HarnessBuilder, RunBindings
 from a13n_service.interactions.attempt_executor import RunAttemptExecutor
 from a13n_service.interactions.attempt_resources import attempt_resource_stack
 from a13n_service.interactions.attempts import AttemptExecutionService
 from a13n_service.interactions.control_models import ThreadInboxRecord
 from a13n_service.interactions.harness_results import AttemptDisposition
 from a13n_service.interactions.harness_runtime import (
-    HarnessCollaborators,
     HarnessDriver,
     HarnessInvocation,
     MaterializedHarnessInput,
@@ -105,7 +104,7 @@ async def test_completed_recovery_rechecks_input_after_runtime_preparation(
     invocation = HarnessInvocation(
         definition=AgentDefinition(agent=AgentSpec(), output_type=str, model=FunctionModel(stream_function=model)),
         input=MaterializedHarnessInput(input_factory),
-        collaborators=HarnessCollaborators(
+        bindings=RunBindings(
             instance=AgentInstanceContext(
                 identity=AgentIdentityRef(issuer="foundation", subject="test-user"),
                 agent_instance_id=parent.thread_id,

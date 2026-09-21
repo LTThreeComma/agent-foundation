@@ -16,6 +16,7 @@ from a13n_service.interactions.models import SessionRecord
 from a13n_service.lifecycle.models import LifecycleEventRecord
 from a13n_service.lifecycle.projections import public_lifecycle_payload
 from a13n_service.secrets.models import SecretRecord
+from a13n_service.secrets.snapshots import EncryptedSecret
 from a13n_service.temporal import assume_utc
 
 from .delivery import DeliveryEnvelope
@@ -23,25 +24,11 @@ from .models import HookSubscriptionRevisionRecord
 
 
 @dataclass(frozen=True, slots=True)
-class EncryptedSigningSecret:
-    secret_id: str
-    organization_id: str
-    workspace_id: str
-    owner_type: str
-    owner_id: str
-    key: str
-    version: int
-    ciphertext: bytes
-    nonce: bytes
-    encryption_key_id: str
-
-
-@dataclass(frozen=True, slots=True)
 class WebhookDeliveryMaterial:
     endpoint_url: str
     signature_profile: str
     envelope: DeliveryEnvelope
-    signing_secret: EncryptedSigningSecret
+    signing_secret: EncryptedSecret
 
 
 class WebhookMaterialError(RuntimeError):
@@ -156,7 +143,7 @@ async def load_webhook_delivery(
         endpoint_url=revision.endpoint_url,
         signature_profile=revision.signature_profile,
         envelope=envelope,
-        signing_secret=EncryptedSigningSecret(
+        signing_secret=EncryptedSecret(
             secret_id=secret.id,
             organization_id=secret.organization_id,
             workspace_id=secret.workspace_id,
@@ -180,7 +167,6 @@ def _resource_type(value: str) -> Literal["run", "run_attempt"]:
 
 
 __all__ = [
-    "EncryptedSigningSecret",
     "WebhookDeliveryMaterial",
     "WebhookMaterialError",
     "claim_webhook_deliveries",

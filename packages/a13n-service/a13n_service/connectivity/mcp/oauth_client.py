@@ -88,7 +88,6 @@ class OAuthDiscovery:
     token_endpoint: str
     scope: str | None
     metadata: AuthorizationMetadata
-    resource_metadata: ProtectedResourceMetadata
     token_auth_methods: tuple[OAuthTokenAuthMethod, ...]
     grant_types: tuple[OAuthGrantType, ...]
     client_registration: Literal["dynamic", "manual"]
@@ -236,7 +235,6 @@ class MCPOAuthClient:
             token_endpoint=token_endpoint,
             scope=scope,
             metadata=metadata,
-            resource_metadata=resource_metadata,
             token_auth_methods=methods,
             grant_types=tuple(usable_grants),
             client_registration=_automatic_registration(metadata, methods),

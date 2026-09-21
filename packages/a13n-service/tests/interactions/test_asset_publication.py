@@ -383,7 +383,6 @@ async def test_publication_capability_is_selected_independently_for_inline_child
     from a13n_service.agents.domain import ChildAgentExecution, ResolvedSubagentEdge
     from a13n_service.interactions.agent_resources import prepare_agent_resources
     from a13n_service.interactions.models import RunRecord
-    from a13n_service.skills.runtime import PreparedSkillRuntime
 
     from .conftest import effective_agent_config
 
@@ -423,7 +422,7 @@ async def test_publication_capability_is_selected_independently_for_inline_child
     async def no_external_tools(*args, **kwargs):
         yield ()
 
-    skills = {revision: PreparedSkillRuntime(None, None, None) for revision in (AGENT_REVISION_ID, child_revision_id)}
+    skills = {revision: None for revision in (AGENT_REVISION_ID, child_revision_id)}
     async with AsyncExitStack() as stack:
         resources = await prepare_agent_resources(
             run=run,

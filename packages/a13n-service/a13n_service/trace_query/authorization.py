@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 from sqlalchemy import and_, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -20,7 +20,7 @@ from a13n_service.storage import short_session
 
 from .domain import TraceCorrelation
 from .errors import TraceQueryError
-from .service import AuthorizedRunAttempt, TraceQueryScope
+from .service import TraceQueryScope
 
 
 class RunTraceAccessAuthorizer:
@@ -47,7 +47,7 @@ class RunTraceAccessAuthorizer:
         actor: AuthenticatedActor,
         scope: TraceQueryScope,
         correlations: Sequence[TraceCorrelation],
-    ) -> Mapping[str, AuthorizedRunAttempt]:
+    ) -> frozenset[str]:
         candidates = {
             item.run_attempt_id: item
             for item in correlations
@@ -63,9 +63,9 @@ class RunTraceAccessAuthorizer:
                     database, actor=actor, workspace_id=scope.workspace_id, action=WorkspaceAction.run_read
                 )
             except AuthorizationError:
-                return {}
+                return frozenset()
             if trace_access.workspace.organization_id != scope.organization_id or not candidates:
-                return {}
+                return frozenset()
             query = (
                 select(
                     RunAttemptRecord.id,
@@ -106,7 +106,7 @@ class RunTraceAccessAuthorizer:
                         ),
                     )
                 )
-            authorized = {}
+            authorized: set[str] = set()
             for row in await database.execute(query):
                 expected = TraceCorrelation(
                     organization_id=scope.organization_id,
@@ -119,5 +119,5 @@ class RunTraceAccessAuthorizer:
                 )
                 if candidates[row.id] != expected:
                     continue
-                authorized[row.id] = AuthorizedRunAttempt(row.id)
-            return authorized
+                authorized.add(row.id)
+            return frozenset(authorized)

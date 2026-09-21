@@ -13,7 +13,6 @@ from a13n_service.storage import transaction
 from a13n_service.trace_query import TraceQueryError, TraceQueryService, TraceView
 from a13n_service.trace_query import authorization as trace_authorization
 from a13n_service.trace_query.authorization import RunTraceAccessAuthorizer
-from a13n_service.trace_query.service import AuthorizedRunAttempt
 from sqlalchemy import delete
 from tests.hooks.support import hook_actor
 from tests.interactions.conftest import NOW, USER_ID
@@ -38,7 +37,7 @@ async def test_authorizes_attempt_independently_of_lifecycle_state(interaction_s
     decisions = await authorizer.authorize_run_attempts(
         actor=hook_actor(), scope=scope, correlations=(trace_correlation,)
     )
-    assert decisions == {trace_correlation.run_attempt_id: AuthorizedRunAttempt(trace_correlation.run_attempt_id)}
+    assert decisions == frozenset({trace_correlation.run_attempt_id})
 
 
 @pytest.mark.parametrize(
@@ -51,7 +50,7 @@ async def test_rejects_each_forged_correlation(interaction_sessions, trace_corre
         await authorizer.authorize_run_attempts(
             actor=hook_actor(), scope=scope, correlations=(trace_correlation.model_copy(update={field: "forged"}),)
         )
-        == {}
+        == frozenset()
     )
 
 
@@ -73,7 +72,10 @@ async def test_direct_agent_viewer_and_workspace_viewer_share_run_visibility(int
     async with transaction(interaction_sessions) as database:
         binding = await database.get(RoleBindingRecord, "rb_hookws717171717")
         binding.resource_id = "agt_other1234567890"
-    assert await authorizer.authorize_run_attempts(actor=actor, scope=scope, correlations=(trace_correlation,)) == {}
+    assert (
+        await authorizer.authorize_run_attempts(actor=actor, scope=scope, correlations=(trace_correlation,))
+        == frozenset()
+    )
 
 
 async def test_checks_actual_session_workspace_not_only_backend_scope(interaction_sessions, trace_correlation):
@@ -95,7 +97,7 @@ async def test_checks_actual_session_workspace_not_only_backend_scope(interactio
         session.workspace_id = "ws_other1234567890"
     assert (
         await authorizer.authorize_run_attempts(actor=hook_actor(), scope=scope, correlations=(trace_correlation,))
-        == {}
+        == frozenset()
     )
 
 
@@ -115,7 +117,7 @@ async def test_reauthorizes_after_provider_io(interaction_sessions, trace_correl
             workspace.deleted_at = NOW
     assert (
         await authorizer.authorize_run_attempts(actor=hook_actor(), scope=scope, correlations=(trace_correlation,))
-        == {}
+        == frozenset()
     )
 
 
@@ -182,7 +184,7 @@ async def test_requires_both_trace_and_run_read(interaction_sessions, trace_corr
     )
     assert (
         await authorizer.authorize_run_attempts(actor=hook_actor(), scope=scope, correlations=(trace_correlation,))
-        == {}
+        == frozenset()
     )
     if missing_action == WorkspaceAction.trace_read:
         with pytest.raises(TraceQueryError) as caught:
@@ -210,4 +212,7 @@ async def test_rechecks_service_credential_revocation(interaction_sessions, trac
     async with transaction(interaction_sessions) as database:
         credential = await database.get(AuthSessionRecord, actor.credential_id)
         credential.revoked_at = now
-    assert await authorizer.authorize_run_attempts(actor=actor, scope=scope, correlations=(trace_correlation,)) == {}
+    assert (
+        await authorizer.authorize_run_attempts(actor=actor, scope=scope, correlations=(trace_correlation,))
+        == frozenset()
+    )

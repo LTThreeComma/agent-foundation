@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 
 from a13n_envd_client.eip.v1 import DirectoryListResult
 from a13n_harness.providers.catalog import ProviderCatalog
@@ -44,7 +44,6 @@ from .domain import (
     CreateTemplateRevisionRequest,
     Environment,
     EnvironmentCommand,
-    EnvironmentCommandRequest,
     EnvironmentDetail,
     EnvironmentProviderAccount,
     EnvironmentProviderMetadata,
@@ -987,11 +986,13 @@ class EnvironmentService:
         *,
         actor: AuthenticatedActor,
         environment_id: str,
-        request: EnvironmentCommandRequest,
+        action: Literal["stop", "delete"],
         idempotency_key: str,
     ) -> EnvironmentCommand:
         from .retention import has_active_use
 
+        if action not in ("stop", "delete"):
+            raise invalid_environment("Unsupported lifecycle action")
         now = utc_now()
         identity = request_identity(idempotency_key)
         async with transaction(self.sessions) as session:
@@ -1026,13 +1027,13 @@ class EnvironmentService:
             if provider is None:
                 raise environment_not_found()
             implementation = provider_implementation(self.catalog, provider.type)
-            supported = implementation.supports_stop if request.action == "stop" else implementation.supports_destroy
+            supported = implementation.supports_stop if action == "stop" else implementation.supports_destroy
             if not supported:
                 raise invalid_environment("Provider does not support this lifecycle action")
             command = EnvironmentCommandRecord(
                 id=new_object_id("envop"),
                 environment_id=environment.id,
-                action=request.action,
+                action=action,
                 principal_type=actor.principal.principal_type.value,
                 principal_id=actor.principal.principal_id,
                 status="pending",
@@ -1047,7 +1048,7 @@ class EnvironmentService:
             )
             session.add(command)
             environment.operation_id = command.id
-            environment.operation_action = request.action
+            environment.operation_action = action
             environment.next_maintenance_at = now
             return command.to_resource()
 

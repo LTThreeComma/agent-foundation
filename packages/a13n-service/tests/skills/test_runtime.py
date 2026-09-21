@@ -186,13 +186,10 @@ async def test_worker_materializes_every_effective_skill(
         working_directory=working_directory,
     )
 
-    assert runtime.manager is not None
-    assert tuple(item.name for item in await runtime.manager.scan(files=_files(tmp_path))) == ("deploy", "review")
-    assert runtime.materialization_root is not None
-    assert runtime.materialization_root.startswith(
-        f"/environment/workspace{working_directory.rstrip('/')}/.a13n/skills/version-1/"
-    )
-    root = tmp_path / runtime.materialization_root.lstrip("/")
+    assert runtime is not None
+    assert tuple(item.name for item in await runtime.scan(files=_files(tmp_path))) == ("deploy", "review")
+    assert runtime.roots[0].startswith(f"/environment/workspace{working_directory.rstrip('/')}/.a13n/skills/version-1/")
+    root = tmp_path / runtime.roots[0].lstrip("/")
     assert (root / runtime_fixture.review.manifest.content_digest / "checklist.md").read_bytes() == b"# Checklist\n"
     assert (root / runtime_fixture.deploy.manifest.content_digest / "scripts/deploy.sh").is_file()
     assert (root / ".a13n-service-complete.json").is_file()
@@ -202,9 +199,7 @@ async def test_worker_materializes_every_effective_skill(
 async def test_empty_effective_skill_list_needs_no_runtime(runtime_fixture: RuntimeFixture) -> None:
     runtime = await runtime_fixture.runtime.prepare(organization_id=ORG_ID, workspace_id=WORKSPACE_ID, locks=())
 
-    assert runtime.manager is None
-    assert runtime.catalog_digest is None
-    assert runtime.materialization_root is None
+    assert runtime is None
 
 
 @pytest.mark.anyio
@@ -235,11 +230,10 @@ async def test_materializer_rejects_conflicting_content_without_repair(
         workspace_id=WORKSPACE_ID,
         locks=_locks(runtime_fixture, (DEPLOY_REVISION_ID,)),
     )
-    assert runtime.manager is not None
-    assert runtime.materialization_root is not None
+    assert runtime is not None
     files = _files(tmp_path)
-    await runtime.manager.scan(files=files)
-    root = tmp_path / runtime.materialization_root.lstrip("/")
+    await runtime.scan(files=files)
+    root = tmp_path / runtime.roots[0].lstrip("/")
     skill_root = root / runtime_fixture.deploy.manifest.content_digest
     document = skill_root / "SKILL.md"
     if corruption == "bytes":
@@ -274,7 +268,7 @@ async def test_materializer_rejects_conflicting_content_without_repair(
     before = snapshot()
 
     with pytest.raises(DefinitionError) as invalid:
-        await runtime.manager.scan(files=files)
+        await runtime.scan(files=files)
 
     assert invalid.value.code == "skill_materialization_invalid"
     assert invalid.value.retry_hint == "dependency_change"
@@ -291,11 +285,10 @@ async def test_materializer_completes_missing_content_and_reuses_verified_files(
         workspace_id=WORKSPACE_ID,
         locks=_locks(runtime_fixture, (DEPLOY_REVISION_ID,)),
     )
-    assert runtime.manager is not None
-    assert runtime.materialization_root is not None
+    assert runtime is not None
     files = _files(tmp_path)
-    await runtime.manager.scan(files=files)
-    root = tmp_path / runtime.materialization_root.lstrip("/")
+    await runtime.scan(files=files)
+    root = tmp_path / runtime.roots[0].lstrip("/")
     skill_root = root / runtime_fixture.deploy.manifest.content_digest
     document = skill_root / "SKILL.md"
     before = (document.stat().st_ino, document.stat().st_mtime_ns)
@@ -303,7 +296,7 @@ async def test_materializer_completes_missing_content_and_reuses_verified_files(
     (skill_root / "scripts/deploy.sh").unlink()
     (root / ".a13n-service-staging/abandoned").write_bytes(b"partial private upload")
 
-    assert tuple(item.name for item in await runtime.manager.scan(files=files)) == ("deploy",)
+    assert tuple(item.name for item in await runtime.scan(files=files)) == ("deploy",)
     assert (document.stat().st_ino, document.stat().st_mtime_ns) == before
     assert (skill_root / "scripts/deploy.sh").read_bytes() == b"#!/bin/sh\n"
     assert (root / ".a13n-service-complete.json").is_file()
@@ -315,7 +308,7 @@ async def test_materializer_completes_missing_content_and_reuses_verified_files(
     # verified Environment copy needs no second download during scanning.
     key = skill_package_object_key(ORG_ID, WORKSPACE_ID, runtime_fixture.deploy.manifest.content_digest)
     await runtime_fixture.objects.put(key, b"unavailable source", content_type="application/zip")
-    assert tuple(item.name for item in await runtime.manager.scan(files=files)) == ("deploy",)
+    assert tuple(item.name for item in await runtime.scan(files=files)) == ("deploy",)
     assert (document.stat().st_ino, document.stat().st_mtime_ns) == before
 
 
@@ -349,7 +342,7 @@ async def test_concurrent_materializers_reconcile_file_and_completion_publicatio
     monkeypatch.setattr(LocalFileOperator, "move", concurrent_move)
 
     async def scan(index: int) -> None:
-        manager = runtimes[index].manager
+        manager = runtimes[index]
         assert manager is not None
         assert tuple(item.name for item in await manager.scan(files=_files(tmp_path))) == ("deploy", "review")
 
@@ -374,8 +367,8 @@ async def test_other_materializer_finishes_while_a_private_publication_is_paused
         )
         for _ in range(2)
     ]
-    assert first.manager is not None
-    assert second.manager is not None
+    assert first is not None
+    assert second is not None
     staged = Event()
     release = Event()
     original_move = LocalFileOperator.move
@@ -393,20 +386,20 @@ async def test_other_materializer_finishes_while_a_private_publication_is_paused
         async with create_task_group() as group:
 
             async def scan_first() -> None:
-                assert first.manager is not None
-                await first.manager.scan(files=_files(tmp_path))
+                assert first is not None
+                await first.scan(files=_files(tmp_path))
 
             group.start_soon(scan_first)
             await staged.wait()
             assert not list(tmp_path.rglob("SKILL.md"))
             assert not list(tmp_path.rglob(".a13n-service-complete.json"))
-            assert len(await second.manager.scan(files=_files(tmp_path))) == 2
+            assert len(await second.scan(files=_files(tmp_path))) == 2
             if cancel_first:
                 group.cancel_scope.cancel()
             else:
                 release.set()
     assert not list(tmp_path.glob("**/.a13n-service-staging/*"))
-    assert len(await second.manager.scan(files=_files(tmp_path))) == 2
+    assert len(await second.scan(files=_files(tmp_path))) == 2
 
 
 @pytest.mark.anyio
@@ -434,9 +427,9 @@ async def test_materializer_checks_attempt_fence_after_staging_before_publicatio
         return result
 
     monkeypatch.setattr(LocalFileOperator, "write_bytes_stream", expiring_write)
-    assert runtime.manager is not None
+    assert runtime is not None
     with pytest.raises(DefinitionError) as stale:
-        await runtime.manager.scan(files=_files(tmp_path))
+        await runtime.scan(files=_files(tmp_path))
     assert stale.value.code == "skill_materialization_stale"
     assert not list(tmp_path.rglob("SKILL.md"))
     assert not list(tmp_path.rglob(".a13n-service-complete.json"))
@@ -466,8 +459,8 @@ async def test_materializer_accepts_concurrent_directory_creation(
         raise EnvironmentError("Another writer created the directory.", code="environment_conflict")
 
     monkeypatch.setattr(LocalFileOperator, "mkdir", raced_mkdir)
-    assert runtime.manager is not None
-    assert len(await runtime.manager.scan(files=_files(tmp_path))) == 2
+    assert runtime is not None
+    assert len(await runtime.scan(files=_files(tmp_path))) == 2
 
 
 @pytest.mark.anyio
@@ -487,13 +480,12 @@ async def test_materializer_bounds_directory_conflicts_without_progress(
         raise EnvironmentError("Conflicting directory creation.", code="environment_conflict")
 
     monkeypatch.setattr(LocalFileOperator, "mkdir", conflicting_mkdir)
-    assert runtime.manager is not None
-    assert runtime.materialization_root is not None
+    assert runtime is not None
     with fail_after(5), pytest.raises(DefinitionError) as unavailable:
-        await runtime.manager.scan(files=_files(tmp_path))
+        await runtime.scan(files=_files(tmp_path))
     assert unavailable.value.code == "skill_materialization_unavailable"
     assert unavailable.value.retry_hint == "new_run"
-    assert 1 < calls <= len(Path(runtime.materialization_root).parts) + 1
+    assert 1 < calls <= len(Path(runtime.roots[0]).parts) + 1
     assert not list(tmp_path.rglob(".a13n-service-complete.json"))
 
 
@@ -517,15 +509,15 @@ async def test_new_materializer_recovers_from_unknown_file_publication_outcome(
 
     with monkeypatch.context() as patch:
         patch.setattr(LocalFileOperator, "move", lost_response)
-        assert first.manager is not None
+        assert first is not None
         with pytest.raises(DefinitionError) as unavailable:
-            await first.manager.scan(files=_files(tmp_path))
+            await first.scan(files=_files(tmp_path))
     assert unavailable.value.code == "skill_materialization_unavailable"
     assert unavailable.value.retry_hint == "new_run"
     assert len(list(tmp_path.rglob("SKILL.md"))) == 1
     assert not list(tmp_path.rglob(".a13n-service-complete.json"))
-    assert replacement.manager is not None
-    assert len(await replacement.manager.scan(files=_files(tmp_path))) == 2
+    assert replacement is not None
+    assert len(await replacement.scan(files=_files(tmp_path))) == 2
 
 
 @pytest.mark.anyio
@@ -549,9 +541,9 @@ async def test_materializer_does_not_overwrite_a_conflicting_publication_winner(
         return await original_move(self, source, destination, replace=replace)
 
     monkeypatch.setattr(LocalFileOperator, "move", raced_move)
-    assert runtime.manager is not None
+    assert runtime is not None
     with pytest.raises(DefinitionError) as invalid:
-        await runtime.manager.scan(files=_files(tmp_path))
+        await runtime.scan(files=_files(tmp_path))
     assert invalid.value.code == "skill_materialization_invalid"
     assert len(conflicting) == 1
     assert conflicting[0].read_bytes() == b"conflicting writer"
@@ -566,14 +558,13 @@ async def test_materializer_does_not_clean_up_another_writers_staging_file(
     runtime = await runtime_fixture.runtime.prepare(
         organization_id=ORG_ID, workspace_id=WORKSPACE_ID, locks=_locks(runtime_fixture)
     )
-    assert runtime.materialization_root is not None
-    existing = tmp_path / runtime.materialization_root.lstrip("/") / ".a13n-service-staging" / ("a" * 32)
+    existing = tmp_path / runtime.roots[0].lstrip("/") / ".a13n-service-staging" / ("a" * 32)
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"another writer")
     monkeypatch.setattr("a13n_service.skills.materialization.uuid4", lambda: UUID(hex="a" * 32))
-    assert runtime.manager is not None
+    assert runtime is not None
     with pytest.raises(DefinitionError) as unavailable:
-        await runtime.manager.scan(files=_files(tmp_path))
+        await runtime.scan(files=_files(tmp_path))
     assert unavailable.value.code == "skill_materialization_unavailable"
     assert existing.read_bytes() == b"another writer"
     assert not list(tmp_path.rglob(".a13n-service-complete.json"))
@@ -586,10 +577,9 @@ async def test_materializer_tolerates_completion_publication_between_listing_pag
     runtime = await runtime_fixture.runtime.prepare(
         organization_id=ORG_ID, workspace_id=WORKSPACE_ID, locks=_locks(runtime_fixture)
     )
-    assert runtime.manager is not None
-    assert runtime.materialization_root is not None
-    await runtime.manager.scan(files=_files(tmp_path))
-    root = tmp_path / runtime.materialization_root.lstrip("/")
+    assert runtime is not None
+    await runtime.scan(files=_files(tmp_path))
+    root = tmp_path / runtime.roots[0].lstrip("/")
     marker = root / ".a13n-service-complete.json"
     completion = marker.read_bytes()
     marker.unlink()
@@ -598,7 +588,7 @@ async def test_materializer_tolerates_completion_publication_between_listing_pag
     async def paginated_list(
         self: LocalFileOperator, path: str, *, offset: int = 0, max_results: int = 200, include_hidden: bool = False
     ) -> FileEntriesResult:
-        if path == runtime.materialization_root:
+        if path == runtime.roots[0]:
             max_results = 1
             if offset == 1:
                 # The marker sorts before the previous page, so its publication
@@ -607,7 +597,7 @@ async def test_materializer_tolerates_completion_publication_between_listing_pag
         return await original_list(self, path, offset=offset, max_results=max_results, include_hidden=include_hidden)
 
     monkeypatch.setattr(LocalFileOperator, "list", paginated_list)
-    assert len(await runtime.manager.scan(files=_files(tmp_path))) == 2
+    assert len(await runtime.scan(files=_files(tmp_path))) == 2
 
 
 @pytest.mark.anyio
@@ -623,9 +613,9 @@ async def test_materializer_rereads_package_without_retaining_run_lifetime_bytes
     key = skill_package_object_key(ORG_ID, WORKSPACE_ID, runtime_fixture.deploy.manifest.content_digest)
     await runtime_fixture.objects.put(key, b"corrupt", content_type="application/zip")
 
-    assert runtime.manager is not None
+    assert runtime is not None
     with pytest.raises(DefinitionError) as invalid:
-        await runtime.manager.scan(files=_files(tmp_path))
+        await runtime.scan(files=_files(tmp_path))
     assert invalid.value.code == "skill_materialization_invalid"
 
 
@@ -653,7 +643,7 @@ async def test_deletion_blocks_successors_but_keeps_accepted_runtime_executable(
         locks=locks,
     )
 
-    assert runtime.manager is not None
+    assert runtime is not None
 
 
 @pytest.mark.anyio

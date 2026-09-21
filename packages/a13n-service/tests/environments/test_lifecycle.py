@@ -189,7 +189,6 @@ async def test_known_stop_failure_releases_operation_and_records_failed_command(
     from a13n_harness.providers.environment.errors import EnvironmentProviderError
     from a13n_harness.providers.environment.errors import EnvironmentProviderErrorCategory as Category
     from a13n_harness.providers.environment.errors import EnvironmentProviderOutcomeCertainty as Certainty
-    from a13n_service.environments.domain import EnvironmentCommandRequest
     from a13n_service.environments.models import EnvironmentCommandRecord
 
     environment = await fixture_environment(environment_service)
@@ -218,7 +217,7 @@ async def test_known_stop_failure_releases_operation_and_records_failed_command(
     command = await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
         idempotency_key="stop-missing",
     )
     with pytest.raises(Exception, match="Docker target is missing"):
@@ -236,7 +235,7 @@ async def test_known_stop_failure_releases_operation_and_records_failed_command(
     await environment_service.request_command(
         actor=actor(),
         environment_id=environment.id,
-        request=EnvironmentCommandRequest(action="delete"),
+        action="delete",
         idempotency_key="delete-missing",
     )
 
@@ -306,7 +305,6 @@ async def test_absent_docker_allocation_releases_capacity_and_delete_is_idempote
     from a13n_harness.providers.environment.docker.runtime import DockerSDKEngine
     from a13n_harness.providers.environment.models import EnvironmentError
     from a13n_service.environments.capacity import CapacityLimits
-    from a13n_service.environments.domain import EnvironmentCommandRequest
     from a13n_service.environments.models import EnvironmentCommandRecord, EnvironmentTemplateRevisionRecord
     from docker.errors import NotFound
 
@@ -348,7 +346,7 @@ async def test_absent_docker_allocation_releases_capacity_and_delete_is_idempote
         actor=actor(),
         environment_id=first.id,
         idempotency_key="delete-absent",
-        request=EnvironmentCommandRequest(action="delete"),
+        action="delete",
     )
     await lifecycle.maintain(first.id)
     async with short_session(environment_sessions) as session:
@@ -437,7 +435,6 @@ async def test_unknown_stop_retains_operation_receipt_until_reconciled(
     from a13n_harness.providers.environment.errors import EnvironmentProviderError
     from a13n_harness.providers.environment.errors import EnvironmentProviderErrorCategory as Category
     from a13n_harness.providers.environment.errors import EnvironmentProviderOutcomeCertainty as Certainty
-    from a13n_service.environments.domain import EnvironmentCommandRequest
     from a13n_service.environments.models import EnvironmentCommandRecord
 
     environment = await fixture_environment(environment_service)
@@ -469,7 +466,7 @@ async def test_unknown_stop_retains_operation_receipt_until_reconciled(
         actor=actor(),
         environment_id=environment.id,
         idempotency_key="uncertain-stop",
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
     )
     with pytest.raises(Exception, match="Stop response lost"):
         await lifecycle.maintain(environment.id)
@@ -595,7 +592,6 @@ async def test_competing_maintenance_does_not_shorten_pending_operation_deadline
 async def test_stop_preserves_absent_status_and_still_stops_stateless_targets(
     environment_service, environment_sessions, provider_catalog, protector, tmp_path, monkeypatch, status
 ):
-    from a13n_service.environments.domain import EnvironmentCommandRequest
 
     environment = await fixture_environment(environment_service)
     now = datetime(2026, 9, 5, tzinfo=UTC)
@@ -612,7 +608,7 @@ async def test_stop_preserves_absent_status_and_still_stops_stateless_targets(
         actor=actor(),
         environment_id=environment.id,
         idempotency_key="stop-absent",
-        request=EnvironmentCommandRequest(action="stop"),
+        action="stop",
     )
     await lifecycle.maintain(environment.id)
     assert events == (["stop", "close"] if status == "running" else ["close"])

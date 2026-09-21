@@ -33,7 +33,7 @@ from .package import (
     normalize_skill_zip,
     skill_package_object_key,
 )
-from .runtime import PreparedSkillRuntime, SkillRuntimeError, SkillRuntimePreparer
+from .runtime import SkillRuntimeError, SkillRuntimePreparer
 
 __all__ = [
     "AcquiredGitHubSkill",
@@ -45,7 +45,6 @@ __all__ = [
     "GitHubSkillImportProvenance",
     "NormalizedSkillFile",
     "NormalizedSkillPackage",
-    "PreparedSkillRuntime",
     "Skill",
     "SkillAgentReference",
     "SkillAgentReferenceCollection",

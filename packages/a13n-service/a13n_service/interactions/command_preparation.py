@@ -12,7 +12,6 @@ from a13n_service.agents.domain import AgentRunOverride, EffectiveAgentConfig
 from a13n_service.agents.invocation_resolution import (
     AgentInvocationResolver,
     FrozenAgentInvocation,
-    PreparedAgentInvocation,
 )
 from a13n_service.application_errors import ErrorCategory
 from a13n_service.assets import Asset, UploadedAssetSource
@@ -39,7 +38,7 @@ from .input import AcceptedAgentInput
 
 @dataclass(frozen=True, slots=True)
 class PreparedCommandInput:
-    invocation: PreparedAgentInvocation
+    organization_id: str
     frozen: FrozenAgentInvocation
     input: AcceptedAgentInput
 
@@ -86,7 +85,7 @@ class CommandInput:
             inherited_environment_working_directory=inherited_environment_working_directory,
             prepared_assets=prepared_assets,
         )
-        return PreparedCommandInput(prepared, frozen, accepted)
+        return PreparedCommandInput(prepared.organization_id, frozen, accepted)
 
     async def accept(
         self,

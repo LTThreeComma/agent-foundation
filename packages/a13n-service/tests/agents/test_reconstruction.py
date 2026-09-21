@@ -559,7 +559,6 @@ def test_child_run_bindings_use_exact_node_context_and_fresh_web_collaborators()
 
     from a13n_harness import RunBindings
     from a13n_harness.capabilities import WebBinding
-    from a13n_service.interactions.harness_runtime import HarnessCollaborators
 
     contexts = []
 
@@ -601,7 +600,3 @@ def test_child_run_bindings_use_exact_node_context_and_fresh_web_collaborators()
     assert first.web.policy is not resumed.web.policy
     assert first.web.client is resumed.web.client is transport
     assert first.capabilities == resumed.capabilities == ()
-
-    collaborators = HarnessCollaborators(instance=baseline.instance, web=first.web)
-    root_bindings = collaborators.create_bindings()
-    assert root_bindings.web is first.web and root_bindings.capabilities == ()
