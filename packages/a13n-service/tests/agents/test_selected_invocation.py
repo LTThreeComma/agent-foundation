@@ -1,7 +1,7 @@
 """Run selection survives concurrent edits without adopting another configuration."""
 
 import pytest
-from a13n_service.agents.domain import CreateAgentRequest, CreateAgentRevisionRequest
+from a13n_service.agents.domain import AgentConfig, CreateAgentRequest, CreateAgentRevisionRequest
 from a13n_service.agents.errors import AgentError
 from a13n_service.agents.invocation_resolution.skills import validate_retained_skills
 from a13n_service.agents.models import AgentRecord
@@ -13,6 +13,7 @@ from a13n_service.interactions.errors import InteractionCommandError
 from a13n_service.interactions.models import RunRecord
 from a13n_service.interactions.objects import RunStateStore
 from a13n_service.models.models import ModelRecord
+from a13n_service.models.runtime import AcceptedModelSelector
 from a13n_service.skills.models import SkillRecord, SkillRevisionRecord
 from a13n_service.storage import short_session, transaction
 from a13n_service.storage.object_store import LocalObjectStore
@@ -21,7 +22,7 @@ from sqlalchemy import delete, event
 from tests.gateway.test_commands import _commands, _complete_run, _request
 from tests.skills.test_runtime import DEPLOY_REVISION_ID, DEPLOY_SKILL_ID, _add_skill, _package
 
-from .conftest import MODEL_ID, WORKSPACE_ID, actor, add_model, agent_config
+from .conftest import MODEL_ID, MODEL_KEY, WORKSPACE_ID, actor, add_model, agent_config
 
 pytestmark = pytest.mark.anyio
 
@@ -132,6 +133,68 @@ async def test_command_keeps_selected_config_and_authority_across_input_io(
         await commands.runs.start(
             actor=actor(), workspace_id=WORKSPACE_ID, idempotency_key="next-operation", request=request
         )
+
+
+async def test_graph_captures_one_model_across_primary_reviewer_media_and_children(
+    agent_management, agent_invocation_resolver, agent_sessions, monkeypatch
+):
+    def config(temperature, **changes):
+        payload = agent_config(media_understanding={"image": MODEL_KEY.upper()}).model_dump(mode="json")
+        payload["model"]["settings"] = {"temperature": temperature}
+        payload["reviewer"] = {
+            "model": MODEL_ID,
+            "instruction": "Review writes.",
+            "model_settings": {"temperature": 0.9},
+        }
+        return AgentConfig.model_validate({**payload, **changes})
+
+    child = await agent_management.commands.create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="shared-model-child",
+        request=CreateAgentRequest(name="Child", config=config(0.4)),
+    )
+    parent = await agent_management.commands.create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="shared-model-parent",
+        request=CreateAgentRequest(
+            name="Parent", config=config(0.2, subagents={"helper": {"agent_id": child.agent.id}})
+        ),
+    )
+    prepare = AcceptedModelSelector.prepare
+    reads = []
+
+    async def edit_after_first_capture(self, **kwargs):
+        selected = await prepare(self, **kwargs)
+        reads.append(selected.resource)
+        if len(reads) == 1:
+            async with transaction(agent_sessions) as session:
+                model = await session.get(ModelRecord, MODEL_ID)
+                model.upstream_model = "edited-between-roles"
+                model.settings = {"top_p": 0.8}
+        return selected
+
+    monkeypatch.setattr(AcceptedModelSelector, "prepare", edit_after_first_capture)
+    resolver = agent_invocation_resolver
+    prepared = await resolver.preparation.prepare(actor=actor(), agent_id=parent.agent.id)
+    frozen = resolver.freezing.freeze_selected(prepared=prepared)
+    assert len(reads) == 1
+    effective = frozen.effective_config
+    child_config = effective.child_configs[child.revision.id].effective_config
+    for node, temperature in ((effective, 0.2), (child_config, 0.4)):
+        assert node.resolved_model.settings == {"temperature": temperature}
+        assert node.resolved_reviewer_model.settings == {"temperature": 0.9}
+        assert node.media_understanding["image"].settings == {}
+        assert node.resolved_model.execution.upstream_model != "edited-between-roles"
+        assert node.resolved_reviewer_model.execution == node.resolved_model.execution
+        assert node.media_understanding["image"].execution == node.resolved_model.execution
+    fresh = resolver.freezing.freeze_selected(
+        prepared=await resolver.preparation.prepare(actor=actor(), agent_id=parent.agent.id)
+    )
+    assert len(reads) == 2
+    assert fresh.effective_config.resolved_model.execution.upstream_model == "edited-between-roles"
+    assert fresh.effective_config.resolved_model.settings == {"top_p": 0.8, "temperature": 0.2}
 
 
 @pytest.mark.parametrize("child", [False, True])
@@ -430,8 +493,6 @@ async def test_unusable_workspace_default_is_skipped_but_explicit_selection_reje
 async def test_shared_media_model_is_read_once_for_the_accepted_graph(
     agent_management, agent_invocation_resolver, agent_sessions, monkeypatch
 ):
-    from a13n_service.models.runtime import AcceptedModelSelector
-
     await _media_models(agent_sessions, agent_vision=("image_understanding",))
     selection = {"image": "agent-vision"}
     child = await agent_management.commands.create(
@@ -459,7 +520,6 @@ async def test_shared_media_model_is_read_once_for_the_accepted_graph(
     monkeypatch.setattr(AcceptedModelSelector, "prepare", counted)
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=parent.agent.id)
     assert keys.count("agent-vision") == 1
-    assert prepared.media_models["image"] is prepared.subagents[0].invocation.media_models["image"]
     effective = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared).effective_config
     child_config = next(iter(effective.child_configs.values())).effective_config
     assert effective.media_understanding["image"].execution == child_config.media_understanding["image"].execution

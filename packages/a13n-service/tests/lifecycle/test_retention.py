@@ -180,7 +180,6 @@ async def test_retention_releases_expired_terminal_deliveries_and_preserves_pins
         event_horizon=timedelta(days=10),
         published_delivery_horizon=timedelta(days=5),
         dead_letter_horizon=timedelta(days=5),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: now,
     )
@@ -217,7 +216,6 @@ async def test_retention_sweeps_events_in_bounded_batches(
         event_horizon=timedelta(days=10),
         published_delivery_horizon=timedelta(days=5),
         dead_letter_horizon=timedelta(days=5),
-        poll_interval_seconds=60,
         batch_limit=2,
         clock=lambda: now,
     )
@@ -264,7 +262,6 @@ async def test_retention_preserves_organization_cursor_prefix_across_resources(
         event_horizon=timedelta(days=10),
         published_delivery_horizon=timedelta(days=5),
         dead_letter_horizon=timedelta(days=5),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: now,
     )
@@ -289,7 +286,6 @@ async def test_retention_prefix_query_runs_on_postgresql(
         event_horizon=timedelta(days=10),
         published_delivery_horizon=timedelta(days=5),
         dead_letter_horizon=timedelta(days=5),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: now,
     )
@@ -316,7 +312,6 @@ async def test_unfinished_hook_dispatch_pins_later_settled_facts(lifecycle_inter
         event_horizon=timedelta(days=1),
         published_delivery_horizon=timedelta(days=1),
         dead_letter_horizon=timedelta(days=1),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: NOW + timedelta(days=3),
     )
@@ -337,7 +332,6 @@ async def test_retention_rejects_invalid_policy(
             event_horizon=timedelta(0),
             published_delivery_horizon=timedelta(days=1),
             dead_letter_horizon=timedelta(days=1),
-            poll_interval_seconds=60,
             batch_limit=100,
         )
 
@@ -358,7 +352,6 @@ async def test_asset_cleanup_retention_preserves_unfinished_progress(lifecycle_i
         event_horizon=timedelta(days=30),
         published_delivery_horizon=timedelta(days=7),
         dead_letter_horizon=timedelta(days=30),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: now,
     )

@@ -43,7 +43,7 @@ async def wait_for_blocked_heartbeat(sessions):
                     text(
                         "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
                         "WHERE datname = current_database() AND wait_event_type = 'Lock' "
-                        "AND query LIKE '%FOR UPDATE OF run_attempts%')"
+                        "AND query LIKE '%run_attempts%' AND query LIKE '%FOR UPDATE%')"
                     )
                 )
             if blocked:
@@ -72,22 +72,30 @@ async def test_heartbeat_renews_while_thread_and_run_are_locked(heartbeat_case):
     assert renewed.lease_expires_at == NOW + timedelta(seconds=32)
 
 
+@pytest.mark.parametrize("operation", ["renew", "prepare", "yield", "fail"])
 @pytest.mark.parametrize("offset", [0, 1])
-async def test_heartbeat_checks_expiry_after_waiting_for_attempt_lock(heartbeat_case, offset):
+async def test_attempt_mutations_check_expiry_after_waiting_for_attempt_lock(heartbeat_case, offset, operation):
     sessions, _, claim, authority = heartbeat_case
     now = NOW + timedelta(seconds=2)
     execution = AttemptExecutionService(sessions, clock=lambda: now, lifecycle=test_lifecycle_writer())
 
-    async def renew():
+    async def mutate():
         with pytest.raises(AttemptAuthorityError):
-            await execution.heartbeat(authority, lease_duration=timedelta(seconds=30))
+            if operation == "renew":
+                await execution.heartbeat(authority, lease_duration=timedelta(seconds=30))
+            elif operation == "prepare":
+                await execution.commit_preparation_success(authority)
+            elif operation == "yield":
+                await execution.yield_attempt(authority, RunAttemptYieldReason.service_drain)
+            else:
+                await execution.fail(authority, SafeFailure(code="test_failure", message="Failed"), retryable=False)
 
     async with create_task_group() as tasks:
         async with transaction(sessions) as blocker:
             await blocker.scalar(
                 select(RunAttemptRecord).where(RunAttemptRecord.id == authority.run_attempt_id).with_for_update()
             )
-            tasks.start_soon(renew)
+            tasks.start_soon(mutate)
             await wait_for_blocked_heartbeat(sessions)
             now = claim.attempt.lease_expires_at + timedelta(seconds=offset)
     async with short_session(sessions) as database:

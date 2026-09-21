@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Protocol
 
 import rfc8785
@@ -15,7 +14,7 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 from pydantic_ai.tools import DeferredToolRequests
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
-from .attempts import AttemptContext
+from .attempts import AttemptContext, AttemptOutcome
 from .domain import JsonObject, PendingCallKind, PendingCallSummary, RunPendingSummary, RunWaitReason
 from .objects import RunPayloadStore, StoredRunState
 from .outcomes import VerifiedRunOutcome
@@ -50,33 +49,6 @@ class HarnessOutcomeAdapter(Protocol):
     """Map one successful Harness result into Service-owned state fields."""
 
     async def project[OutputT](self, result: HarnessRunResult[OutputT]) -> HarnessOutcomeProjection: ...
-
-
-class AttemptDisposition(StrEnum):
-    waiting = "waiting"
-    completed = "completed"
-    retrying = "retrying"
-    continuing = "continuing"
-    failed = "failed"
-    cancelled = "cancelled"
-
-
-@dataclass(frozen=True, slots=True)
-class AttemptOutcome:
-    disposition: AttemptDisposition
-    run_version: int
-    attempt_version: int
-    thread_version: int | None
-
-    def __post_init__(self) -> None:
-        if self.run_version < 1:
-            raise ValueError("Attempt outcome Run version must be positive")
-        if self.attempt_version < 1:
-            raise ValueError("Attempt outcome Attempt version must be positive")
-        if self.thread_version is not None and self.thread_version < 1:
-            raise ValueError("Attempt outcome Thread version must be positive")
-        if (self.disposition is AttemptDisposition.retrying) != (self.thread_version is None):
-            raise ValueError("only a retrying Attempt outcome omits the Thread version")
 
 
 class AttemptCommitter(Protocol):
@@ -263,8 +235,6 @@ def _serialize_deferred(requests: DeferredToolRequests) -> JsonObject:
 
 __all__ = [
     "AttemptCommitter",
-    "AttemptDisposition",
-    "AttemptOutcome",
     "HarnessOutcomeAdapter",
     "HarnessOutcomeProjection",
     "HarnessOutcomeProjectionError",

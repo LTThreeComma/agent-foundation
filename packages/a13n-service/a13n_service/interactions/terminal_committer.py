@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import timedelta
 
 from a13n_harness import SafeFailure
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.storage import short_session
 
-from .attempts import AttemptAuthorityError, AttemptContext, AttemptExecutionService
+from .attempts import AttemptAuthorityError, AttemptContext, AttemptDisposition, AttemptExecutionService, AttemptOutcome
 from .domain import RunStatus
-from .harness_results import AttemptDisposition, AttemptOutcome
 from .models import RunAttemptRecord, RunRecord, ThreadRecord
 from .objects import StoredRunState
 from .outcomes import RunOutcomeService, VerifiedRunOutcome
@@ -54,31 +54,24 @@ class DatabaseAttemptCommitter:
             "skill_materialization_unavailable",
             "skill_materialization_stale",
         }
-        await self._execution.fail(authority, failure, retryable=retryable, retry_after=timedelta(seconds=1))
-        return await self._read_terminal(authority)
+        return await self._execution.fail(authority, failure, retryable=retryable, retry_after=timedelta(seconds=1))
 
     async def reconcile_cancelled(self, authority: AttemptContext) -> AttemptOutcome:
-        receipt = await self._read_terminal(authority)
-        if receipt.disposition is not AttemptDisposition.cancelled:
-            raise AttemptAuthorityError("Local cancellation does not prove durable cancellation")
-        return receipt
-
-    async def _read_terminal(self, authority: AttemptContext) -> AttemptOutcome:
         async with short_session(self._sessions) as session:
-            run = await session.get(RunRecord, authority.run_id)
-            attempt = await session.get(RunAttemptRecord, authority.run_attempt_id)
-            thread = await session.get(ThreadRecord, authority.thread_id)
-            if (
-                run is None
-                or attempt is None
-                or thread is None
-                or run.organization_id != authority.organization_id
-                or attempt.run_id != run.id
-                or run.thread_id != thread.id
-            ):
-                raise AttemptAuthorityError("Run terminal authority is unavailable")
-            if run.status == RunStatus.running.value and attempt.status == "failed":
-                return AttemptOutcome(AttemptDisposition.retrying, run.version, attempt.version, None)
-            if run.status not in {"failed", "cancelled"}:
-                raise AttemptAuthorityError("Run has no matching terminal decision")
-            return AttemptOutcome(AttemptDisposition(run.status), run.version, attempt.version, thread.version)
+            versions = (
+                await session.execute(
+                    select(RunRecord.version, RunAttemptRecord.version, ThreadRecord.version)
+                    .join(RunAttemptRecord, RunAttemptRecord.run_id == RunRecord.id)
+                    .join(ThreadRecord, ThreadRecord.id == RunRecord.thread_id)
+                    .where(
+                        RunRecord.organization_id == authority.organization_id,
+                        RunRecord.id == authority.run_id,
+                        RunRecord.status == RunStatus.cancelled.value,
+                        RunAttemptRecord.id == authority.run_attempt_id,
+                        ThreadRecord.id == authority.thread_id,
+                    )
+                )
+            ).one_or_none()
+        if versions is None:
+            raise AttemptAuthorityError("Local cancellation does not prove durable cancellation")
+        return AttemptOutcome(AttemptDisposition.cancelled, *versions)

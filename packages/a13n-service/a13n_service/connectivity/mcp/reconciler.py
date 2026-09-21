@@ -3,7 +3,7 @@
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.storage import transaction
 from a13n_service.temporal import Clock, assume_utc, utc_now
 
@@ -11,18 +11,10 @@ from .models import MCPAuthorizationRecord, MCPConnectionRecord
 
 
 class MCPReconciler:
-    def __init__(
-        self, sessions: async_sessionmaker[AsyncSession], *, poll_interval_seconds: float = 2, clock: Clock = utc_now
-    ) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, clock: Clock = utc_now) -> None:
         self._sessions = sessions
-        self._poll_interval_seconds = poll_interval_seconds
         self._clock = clock
         self._last_lag: float | None = None
-
-    async def run(self) -> None:
-        await PeriodicTask(
-            "mcp_oauth_reconciliation", self.scan, interval_seconds=self._poll_interval_seconds, timeout_seconds=30
-        ).run()
 
     async def scan(self) -> Sweep:
         self._last_lag = None

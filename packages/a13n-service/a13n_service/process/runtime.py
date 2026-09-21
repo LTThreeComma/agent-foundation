@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from a13n_service.connectivity.runtime import ConnectivityRuntime
     from a13n_service.environments.devices import DeviceDiscovery
     from a13n_service.environments.lifecycle import EnvironmentLifecycle
-    from a13n_service.environments.maintenance import EnvironmentMaintenanceLoop
     from a13n_service.environments.mounts import RunEnvironmentMountService
     from a13n_service.environments.service import EnvironmentService
     from a13n_service.environments.websocket.relay_runtime import RelayResponseRuntime
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from a13n_service.models.provider_service import ModelProviderService
     from a13n_service.models.service import ModelService
     from a13n_service.observability import ObservabilityRuntime
+    from a13n_service.process.background import BackgroundTask
     from a13n_service.run_stream import RedisRunStream, RunDisplayStore
     from a13n_service.secrets import SecretProtector
     from a13n_service.settings import Settings
@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from a13n_service.skills.runtime import SkillRuntimePreparer
     from a13n_service.skills.uploads import SkillUploadService
     from a13n_service.storage import StorageResources
-    from a13n_service.subagents.maintenance import SubagentMaintenance
     from a13n_service.trace_query.service import TraceQueryService
     from a13n_service.web.service import WebProviderService
 
@@ -82,7 +81,6 @@ class ControlRuntime:
     hook_subscriptions: HookSubscriptionService
     lifecycle_events: LifecycleEventService
     gateway: GatewayRuntime
-    subagent_maintenance: SubagentMaintenance
     web_providers: WebProviderService | None = None
     memory_providers: MemoryProviderService | None = None
     identity: IdentityRuntime | None = None
@@ -97,7 +95,6 @@ class WorkerRuntime:
     external_tools: ExternalToolRuntime
     native_model_factory: NativeModelFactory
     skill_runtime: SkillRuntimePreparer
-    environment_maintenance: EnvironmentMaintenanceLoop
     environments: EnvironmentLifecycle
     run_stream: RedisRunStream
     run_display: RunDisplayStore
@@ -126,24 +123,15 @@ class ProcessRuntime:
     worker: WorkerRuntime | None
     connectivity: ConnectivityRuntime | None
     bots: BotService | None = None
+    background_components: tuple[BackgroundTask, ...] = ()
 
     def begin_drain(self) -> None:
         """Reject new work before the HTTP server waits for connections to close."""
         first_request = not self.status.draining
         self.status.draining = True
-        if self.connectivity is not None and self.connectivity.data is not None:
-            if self.connectivity.data.event_connections is not None:
-                self.connectivity.data.event_connections.drain()
-        if self.worker is not None:
-            if self.worker.execution_loop is not None:
-                self.worker.execution_loop.begin_drain()
-            self.worker.environment_maintenance.drain()
-            if self.worker.client_connections is not None:
-                self.worker.client_connections.stop_admission()
-        if self.control is not None:
-            self.control.subagent_maintenance.drain()
-            if self.control.client_connections is not None:
-                self.control.client_connections.begin_drain()
+        for component in self.background_components:
+            if component.drain is not None:
+                component.drain()
         if first_request:
             logger.info(
                 "service_drain_started",

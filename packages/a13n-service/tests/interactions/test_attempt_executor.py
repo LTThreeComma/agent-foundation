@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock
 
@@ -25,9 +25,11 @@ from a13n_service.interactions.attempt_executor import ControlWatcher, LeaseMoni
 from a13n_service.interactions.attempts import (
     AttemptAuthorityError,
     AttemptContext,
+    AttemptDisposition,
     AttemptExecutionService,
     AttemptLease,
     AttemptMutationReceipt,
+    AttemptOutcome,
     AttemptPreparationAccepted,
     AttemptPreparationRejected,
     AttemptPreparationResult,
@@ -35,11 +37,7 @@ from a13n_service.interactions.attempts import (
 from a13n_service.interactions.domain import RunAttemptYieldReason
 from a13n_service.interactions.environment_observation import EnvironmentHookObservation
 from a13n_service.interactions.harness_control import HarnessContextBinding, HarnessHookBoundary, HarnessRunIdentity
-from a13n_service.interactions.harness_results import (
-    AttemptDisposition,
-    AttemptOutcome,
-    HarnessOutcomeProjection,
-)
+from a13n_service.interactions.harness_results import HarnessOutcomeProjection
 from a13n_service.interactions.harness_runtime import (
     HarnessDriver,
     HarnessInvocation,
@@ -54,6 +52,7 @@ from a13n_service.storage import ObjectStore
 from anyio import Event, create_task_group, sleep, sleep_forever
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from sqlalchemy.exc import DBAPIError
 
 from .conftest import ATTEMPT_ID, NOW, ORGANIZATION_ID, RUN_ID, initial_state
 
@@ -609,7 +608,9 @@ async def test_active_reconciliation_uses_driver_steer_without_consuming_receipt
     assert control.current_state.envelope.host.inbox_receipts == ()
 
 
-@pytest.mark.parametrize("failure", [None, "cleanup", "yield"])
+@pytest.mark.parametrize(
+    "failure", [None, "cleanup", "yield", "transient", "lost-response", "unavailable", "cancelled", "lease-lost"]
+)
 async def test_handoff_closes_runtime_while_renewing_before_yield(
     interaction_object_store,
     monkeypatch,
@@ -647,8 +648,52 @@ async def test_handoff_closes_runtime_while_renewing_before_yield(
                     raise RuntimeError("cleanup unavailable")
                 trace.append("cleanup:end")
 
-    if failure == "yield":
-        monkeypatch.setattr(execution, "yield_attempt", AsyncMock(side_effect=RuntimeError("PG unavailable")))
+    committed = None
+    yield_calls = 0
+    yield_attempt = execution.yield_attempt
+    heartbeat = execution.heartbeat
+
+    async def yield_with_failure(context, reason):
+        nonlocal committed, yield_calls
+        yield_calls += 1
+        if committed is not None:
+            raise AttemptAuthorityError("already yielded")
+        if failure == "lost-response":
+            committed = await yield_attempt(context, reason)
+        if failure == "unavailable" or yield_calls == 1:
+            trace.append("yield:response-lost" if committed is not None else "yield:unavailable")
+            raise DBAPIError(None, None, ConnectionError("PG unavailable"), connection_invalidated=True)
+        return await yield_attempt(context, reason)
+
+    async def heartbeat_after_yield(context, *, lease_duration):
+        if committed is not None:
+            trace.append("yield:observed-by-renewal")
+            raise AttemptAuthorityError("already yielded")
+        return await heartbeat(context, lease_duration=lease_duration)
+
+    committer = _Committer(trace)
+    if failure in {"cancelled", "lease-lost"}:
+        monkeypatch.setattr(execution, "yield_attempt", AsyncMock(side_effect=AttemptAuthorityError("selection lost")))
+        monkeypatch.setattr(execution, "read_yielded", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            committer,
+            "reconcile_cancelled",
+            AsyncMock(return_value=AttemptOutcome(AttemptDisposition.cancelled, 3, 3, 2))
+            if failure == "cancelled"
+            else AsyncMock(side_effect=AttemptAuthorityError("not a durable cancellation")),
+        )
+    elif failure == "yield":
+        monkeypatch.setattr(execution, "yield_attempt", AsyncMock(side_effect=RuntimeError("invalid transition")))
+    elif failure in {"transient", "lost-response", "unavailable"}:
+        monkeypatch.setattr(execution, "yield_attempt", yield_with_failure)
+        monkeypatch.setattr(execution, "heartbeat", heartbeat_after_yield)
+        monkeypatch.setattr(execution, "read_yielded", AsyncMock(side_effect=lambda *_: committed))
+    if failure == "unavailable":
+        context = replace(context, reconciliation_timeout=timedelta(milliseconds=30))
+        control = RunAttemptControl(
+            context=context, execution=execution, states=states, state=stored, inbox=_Inbox(trace)
+        )
+        driver = HarnessDriver(HarnessBuilder(instrumentation=None), control=control, projector=_Projector())
     await control.request_handoff(RunAttemptYieldReason.service_drain)
     executor = RunAttemptExecutor(
         activate_publication=AsyncMock(side_effect=lambda context: trace.append("publication:activate")),
@@ -658,19 +703,31 @@ async def test_handoff_closes_runtime_while_renewing_before_yield(
         preparer=ClosingPreparer(context, invocation, wakeups, execution.heartbeat_seen, trace),
         wakeups=wakeups,
         adapter=_Adapter,
-        committer=_Committer(trace),
+        committer=committer,
         capacity_slot=capacity,
     )
-    if failure is not None:
-        with pytest.raises((ExceptionGroup, RuntimeError)):
+    if failure in {"cleanup", "yield", "unavailable", "lease-lost"}:
+        with pytest.raises((ExceptionGroup, RuntimeError, TimeoutError)):
             await executor.run()
         assert "attempt:yield" not in trace
-        if failure == "yield":
+        if failure != "cleanup":
             assert trace.count("cleanup:start") == trace.count("cleanup:end") == 1
+        if failure == "unavailable":
+            assert yield_calls > 1
+            assert "attempt:heartbeat" in trace[trace.index("yield:unavailable") :]
+    elif failure == "cancelled":
+        outcome = await executor.run()
+        assert outcome.disposition is AttemptDisposition.cancelled
+        assert "attempt:yield" not in trace
+        assert trace.count("cleanup:start") == trace.count("cleanup:end") == 1
     else:
         await executor.run()
         start, end = trace.index("cleanup:start"), trace.index("cleanup:end")
         assert "attempt:heartbeat" in trace[start:end]
         assert end < trace.index("attempt:yield") < trace.index("capacity:release")
+        assert trace.count("attempt:yield") == trace.count("cleanup:start") == trace.count("cleanup:end") == 1
+        if failure == "transient":
+            assert yield_calls == 2
+            assert "attempt:heartbeat" in trace[trace.index("yield:unavailable") : trace.index("attempt:yield")]
     assert wakeups.stopped.is_set()
     assert capacity.releases == 1

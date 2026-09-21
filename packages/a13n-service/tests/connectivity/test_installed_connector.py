@@ -195,7 +195,6 @@ async def test_installed_connector_account_credentials(
                 connector_http,
                 setup.setup_coordinator,
                 instance_id="fixture",
-                poll_interval_seconds=1,
                 lease_seconds=60,
                 clock=lambda: NOW + timedelta(seconds=6),
             )

@@ -18,7 +18,7 @@ from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.credentials import CredentialSnapshot
 from a13n_service.durable_operations.http_delivery import (
     DeliveryFailure,
@@ -203,7 +203,6 @@ class A2APushPublisher:
         endpoint_policy: EndpointPolicy,
         secret_protector: SecretProtector,
         *,
-        poll_interval_seconds: float,
         lease_seconds: float,
         claim_limit: int,
         max_attempts: int,
@@ -214,8 +213,8 @@ class A2APushPublisher:
         max_redirects: int,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if poll_interval_seconds <= 0 or lease_seconds <= delivery_timeout_seconds:
-            raise ValueError("A2A push polling and lease bounds are invalid")
+        if lease_seconds <= delivery_timeout_seconds:
+            raise ValueError("A2A push lease must exceed the delivery timeout")
         if claim_limit < 1 or claim_limit > 100 or max_attempts < 1:
             raise ValueError("A2A push claim and attempt bounds are invalid")
         if retry_base_seconds <= 0 or retry_max_seconds < retry_base_seconds:
@@ -226,7 +225,6 @@ class A2APushPublisher:
         self._http_client = http_client
         self._endpoint_policy = endpoint_policy
         self._secret_protector = secret_protector
-        self._poll_interval_seconds = poll_interval_seconds
         self._lease_duration = timedelta(seconds=lease_seconds)
         self._claim_limit = claim_limit
         self._max_attempts = max_attempts
@@ -236,20 +234,18 @@ class A2APushPublisher:
         self._max_response_bytes = max_response_bytes
         self._max_redirects = max_redirects
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._draining = False
 
-    async def run(self) -> None:
-        await PeriodicTask(
-            "a2a_push_publication",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=self._lease_duration.total_seconds() + self._delivery_timeout_seconds + 1,
-        ).run()
+    def drain(self) -> None:
+        self._draining = True
 
     async def publish_once(self) -> int:
         return (await self.scan()).examined
 
     async def scan(self) -> Sweep:
         async with transaction(self._sessions) as database:
+            if self._draining:
+                return Sweep()
             claims = await claim_a2a_push_deliveries(
                 database,
                 now=self._now(),
@@ -263,6 +259,7 @@ class A2APushPublisher:
             timeout_seconds=self._lease_duration.total_seconds() + self._delivery_timeout_seconds,
             concurrency=self._claim_limit,
             clock=self._now,
+            is_draining=lambda: self._draining,
         )
 
     async def _publish_claim(self, claim: OutboxClaim) -> None:
@@ -271,7 +268,7 @@ class A2APushPublisher:
         except A2APushMaterialError as error:
             await self._settle_failure(claim, DeliveryFailure(error.error_code, error.retryable))
             return
-        if material is None:
+        if material is None or self._draining:
             return
         failure = await self._deliver(material)
         if failure is None:

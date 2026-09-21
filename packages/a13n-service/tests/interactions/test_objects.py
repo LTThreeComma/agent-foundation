@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 
 import pytest
 import zstandard
@@ -241,7 +242,7 @@ async def test_run_state_read_verifies_every_selected_seal_field(
         await store.read_run(altered)
 
 
-@pytest.mark.parametrize("operation", ["create", "checkpoint", "claim"])
+@pytest.mark.parametrize("operation", ["create", "checkpoint", "claim", "delayed_checkpoint"])
 @pytest.mark.parametrize("failure", [TimeoutError, ObjectStoreUnavailable])
 async def test_state_write_lost_response_recovers_exact_committed_receipt(
     object_store: ObjectStore, monkeypatch, operation: str, failure: type[Exception]
@@ -251,14 +252,30 @@ async def test_state_write_lost_response_recovers_exact_committed_receipt(
     state = None
     if operation != "create":
         state = await store.create(ORGANIZATION_ID, initial)
-    put = object_store.put
+    put, open_object = object_store.put, object_store.open
     committed = []
+    pending = None
 
     async def lose_response(*args, **kwargs):
-        committed.append(await put(*args, **kwargs))
+        nonlocal pending
+        if operation == "delayed_checkpoint":
+            pending = (args, kwargs)
+        else:
+            committed.append(await put(*args, **kwargs))
         raise failure("write response lost")
 
+    @asynccontextmanager
+    async def read_after_publication(*args, **kwargs):
+        nonlocal pending
+        if pending is not None:
+            put_args, put_kwargs = pending
+            pending = None
+            committed.append(await put(*put_args, **put_kwargs))
+        async with open_object(*args, **kwargs) as reader:
+            yield reader
+
     monkeypatch.setattr(object_store, "put", lose_response)
+    monkeypatch.setattr(object_store, "open", read_after_publication)
     if operation == "create":
         result = await store.create(ORGANIZATION_ID, initial)
     elif operation == "claim":

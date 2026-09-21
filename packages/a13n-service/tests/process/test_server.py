@@ -60,8 +60,9 @@ async def test_server_drains_application_before_waiting_for_active_http(
                         runtime = app.state.runtime
                         assert runtime.status.startup_complete
                         assert runtime.worker.execution_loop.is_draining()
-                        assert runtime.worker.environment_maintenance.is_draining()
-                        assert runtime.control.subagent_maintenance.is_draining()
+                        components = {component.name: component for component in runtime.background_components}
+                        for name in ("environment_maintenance", "Subagent reconciliation", "webhook_publication"):
+                            assert components[name].return_is_expected()
                         assert not request.done(), "HTTP finished before application drain began"
 
                         # The listener is closing; verify the application's response to an

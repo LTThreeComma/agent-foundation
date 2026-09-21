@@ -579,7 +579,7 @@ Each accepted Run owns one complete state object at a deterministic key, stable 
 organizations/{organization_id}/runs/{run_id}/state.json
 ```
 
-State metadata adds `schema-version`, `run-id`, `thread-id`, `checkpoint-seq`, and `writer-fence` to the shared encoding metadata. Object stat supplies the encoded size and current publication version.
+State metadata adds `schema-version`, `run-id`, `thread-id`, `checkpoint-seq`, and `writer-fence` to the shared encoding metadata. The object read supplies the encoded size and publication version corresponding to its body.
 
 Acceptance publishes the initial object create-only. A current attempt does not write until it has conditionally claimed the current object version for its monotonic Run fence. Every state replacement then supplies the exact object version returned by the claim or previous successful write. The replacement is visible as the complete new object or not visible at all.
 
@@ -647,7 +647,7 @@ During execution, a checkpoint operation:
 
 A checkpoint publishes the complete continuation and all corresponding `InboxReceipt` receipts atomically in the same envelope. A receipt cannot be published separately from the state it describes or paired with another continuation. The [active-control contract](19-agent-control-active-execution.md#offer-incorporation-and-durable-consumption) owns receipt validation, FIFO consumption, recovery repair, and terminal races; object publication alone does not mark an inbox entry consumed.
 
-Checkpoint writes do not create a Run row, attempt row, lifecycle transition, or historical checkpoint selector. A failed or unknown put is reconciled by `stat` and exact body validation before any retry.
+Checkpoint writes do not create a Run row, attempt row, lifecycle transition, or historical checkpoint selector. A failed or unknown put is reconciled by a coherent read of the body, metadata, and publication version, with exact body validation before any retry.
 
 ### Outcome Sealing
 

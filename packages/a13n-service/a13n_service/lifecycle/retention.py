@@ -10,7 +10,7 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.durable_operations.models import OutboxRecord
 from a13n_service.storage import short_session, transaction
 from a13n_service.temporal import assume_utc
@@ -35,31 +35,19 @@ class LifecycleRetentionReconciler:
         event_horizon: timedelta,
         published_delivery_horizon: timedelta,
         dead_letter_horizon: timedelta,
-        poll_interval_seconds: float,
         batch_limit: int,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if min(event_horizon, published_delivery_horizon, dead_letter_horizon) <= timedelta(0):
             raise ValueError("Lifecycle and delivery retention horizons must be positive")
-        if poll_interval_seconds <= 0:
-            raise ValueError("Lifecycle retention poll interval must be positive")
         if batch_limit < 1 or batch_limit > 1000:
             raise ValueError("Lifecycle retention batch limit must be between 1 and 1000")
         self._sessions = sessions
         self._event_horizon = event_horizon
         self._published_delivery_horizon = published_delivery_horizon
         self._dead_letter_horizon = dead_letter_horizon
-        self._poll_interval_seconds = poll_interval_seconds
         self._batch_limit = batch_limit
         self._clock = clock or (lambda: datetime.now(UTC))
-
-    async def run(self) -> None:
-        await PeriodicTask(
-            "evidence_lifecycle_retention",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=30,
-        ).run()
 
     async def scan(self) -> Sweep:
         result = await self.reconcile_once()

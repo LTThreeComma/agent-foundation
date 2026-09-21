@@ -9,7 +9,7 @@ from a13n_service.assets.cleanup import AssetCleanupReconciler
 from a13n_service.assets.objects import AssetObjectStore
 from a13n_service.assets.staging import AssetStaging
 from a13n_service.assets.uploads import AssetUploadService
-from a13n_service.process.background import BackgroundTask
+from a13n_service.process.background import BackgroundTask, periodic_task
 from a13n_service.process.runtime import SharedRuntime
 from a13n_service.settings import Settings
 
@@ -38,14 +38,19 @@ async def build_asset_bundle(
     cleanup = AssetCleanupReconciler(
         shared.storage.sessions,
         objects,
-        poll_interval_seconds=settings.assets.cleanup_poll_interval_seconds,
         lease_seconds=settings.assets.cleanup_lease_seconds,
         max_attempts=settings.assets.cleanup_max_attempts,
     )
     return _AssetBundle(
         catalog=AssetCatalog(shared.storage.sessions, objects),
         uploads=uploads,
-        cleanup_task=BackgroundTask("asset cleanup reconciler", cleanup.run),
+        cleanup_task=periodic_task(
+            "asset_content_cleanup",
+            cleanup.scan,
+            interval_seconds=settings.assets.cleanup_poll_interval_seconds,
+            timeout_seconds=(settings.assets.cleanup_lease_seconds + 1) * 25,
+            drain=cleanup.drain,
+        ),
     )
 
 

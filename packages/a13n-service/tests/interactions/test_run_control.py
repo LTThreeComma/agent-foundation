@@ -27,18 +27,16 @@ from a13n_harness.providers.environment.models import EnvironmentState
 from a13n_service.iam.attempts import AttemptAuthorization
 from a13n_service.interactions.attempts import (
     AttemptContext,
+    AttemptDisposition,
     AttemptExecutionService,
     AttemptLease,
     AttemptMutationReceipt,
+    AttemptOutcome,
     AttemptPreparationAccepted,
 )
 from a13n_service.interactions.domain import RunAttemptYieldReason
 from a13n_service.interactions.environment_observation import EnvironmentHookObservation
-from a13n_service.interactions.harness_results import (
-    AttemptDisposition,
-    AttemptOutcome,
-    StoredHarnessOutcomeAdapter,
-)
+from a13n_service.interactions.harness_results import StoredHarnessOutcomeAdapter
 from a13n_service.interactions.harness_runtime import (
     HarnessDriver,
     HarnessInvocation,

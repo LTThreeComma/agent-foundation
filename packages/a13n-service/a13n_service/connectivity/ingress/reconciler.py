@@ -59,8 +59,16 @@ class IngressAdmissionReconciler:
         self._clock = clock
         self._observations = observations
 
+        self._draining = False
+
+    def drain(self) -> None:
+        self._draining = True
+
+    def is_draining(self) -> bool:
+        return self._draining
+
     async def run(self) -> None:
-        while True:
+        while not self._draining:
             if not await self.run_once():
                 await anyio.sleep(self._poll_interval_seconds)
 
@@ -73,7 +81,7 @@ class IngressAdmissionReconciler:
         except ValueError:
             await self._complete(claim, RejectedInputOutcome(reason_code="input_invalid"))
             return True
-        if prepared is None:
+        if prepared is None or self._draining:
             return True
         try:
             outcome = await self._acceptor.accept_ingress_batch(prepared)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import nullcontext
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,14 +25,6 @@ class ConnectivitySelectionError(RuntimeError):
         self.path = path
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedConnectivity:
-    actor: AuthenticatedActor
-    organization_id: str
-    workspace_id: str
-    selections: tuple[ConnectionRunSelection, ...]
-
-
 class ConnectivitySelectionResolver:
     """Freeze connection identity and authorization at Run acceptance."""
 
@@ -46,31 +38,17 @@ class ConnectivitySelectionResolver:
         organization_id: str,
         workspace_id: str,
         connection_tools: tuple[ConnectionToolSelection, ...],
-    ) -> PreparedConnectivity:
-        async with short_session(self._sessions) as session:
-            selections = await self.resolve_in_session(
-                session,
+        session: AsyncSession | None = None,
+    ) -> tuple[ConnectionRunSelection, ...]:
+        async with nullcontext(session) if session is not None else short_session(self._sessions) as selection_session:
+            return await self.resolve_in_session(
+                selection_session,
                 actor=actor,
                 organization_id=organization_id,
                 workspace_id=workspace_id,
                 connection_tools=connection_tools,
+                lock=session is not None,
             )
-        return PreparedConnectivity(actor, organization_id, workspace_id, selections)
-
-    async def freeze(
-        self, session: AsyncSession, *, prepared: PreparedConnectivity
-    ) -> tuple[ConnectionRunSelection, ...]:
-        current = await self.resolve_in_session(
-            session,
-            actor=prepared.actor,
-            organization_id=prepared.organization_id,
-            workspace_id=prepared.workspace_id,
-            connection_tools=prepared.selections,
-            lock=True,
-        )
-        if current != prepared.selections:
-            raise ConnectivitySelectionError("connection_changed", path="connection_tools")
-        return prepared.selections
 
     async def require_current_source(
         self,

@@ -50,17 +50,26 @@ async def test_connector_snapshot_readers_overlap_while_provider_and_account_edi
         session_uri=f"session://{launch.attempt_id}",
     )
     resolver = ConnectivitySelectionResolver(sessions)
-    prepared = await resolver.prepare(
-        actor=actor(),
-        organization_id=ORG_ID,
-        workspace_id=WORKSPACE_ID,
-        connection_tools=(ConnectionToolSelection(connection_id=connection.id),),
-    )
     async with transaction(sessions) as first:
-        expected = await resolver.freeze(first, prepared=prepared)
+        expected = await resolver.prepare(
+            actor=actor(),
+            organization_id=ORG_ID,
+            workspace_id=WORKSPACE_ID,
+            connection_tools=(ConnectionToolSelection(connection_id=connection.id),),
+            session=first,
+        )
         async with transaction(sessions) as second:
             await second.execute(text("SET LOCAL lock_timeout = '100ms'"))
-            assert await resolver.freeze(second, prepared=prepared) == expected
+            assert (
+                await resolver.prepare(
+                    actor=actor(),
+                    organization_id=ORG_ID,
+                    workspace_id=WORKSPACE_ID,
+                    connection_tools=(ConnectionToolSelection(connection_id=connection.id),),
+                    session=second,
+                )
+                == expected
+            )
             for model, identity in ((ConnectorConnectionRecord, connection.id), (ConnectorProviderRecord, provider.id)):
                 with pytest.raises(OperationalError) as conflict:
                     async with transaction(sessions) as updating:

@@ -1,46 +1,36 @@
-"""Two-phase Agent Revision-creation resolution."""
+"""Agent Revision resolution inside its owning management transaction."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass, field
 
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.memory import MemoryProviderDefinition
 from a13n_harness.providers.web.builtins import built_in_web_providers
 from a13n_harness.providers.web.definition import WebProviderDefinition
-from a13n_harness.toolsets.file_media import NativeInputMediaKind
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from a13n_service.connectivity.selection_resolution import ConnectivitySelectionResolver, PreparedConnectivity
+from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError, ConnectivitySelectionResolver
 from a13n_service.environments.authoring import authorize_template
 from a13n_service.iam import AuthenticatedActor, authorize_agent, authorize_agent_skill_binding, authorize_workspace
 from a13n_service.iam.authorization import WorkspaceAction
 from a13n_service.memory.domain import memory_provider_ids
 from a13n_service.memory.resources import MemoryProviderError, require_memory_configuration
-from a13n_service.models.runtime import AcceptedModelSelector, PreparedModelExecution
-from a13n_service.storage import short_session
+from a13n_service.models.runtime import AcceptedModelSelector
+from a13n_service.models.selection import InvocationModelSelection
 from a13n_service.web.domain import ScrapeSelection, provider_selections
 from a13n_service.web.resources import WebProviderError, require_operation
 from a13n_service.web.resources import require_provider as require_web_provider
 
-from .connectivity_resolution import freeze_revision_connectivity, prepare_revision_connectivity
 from .domain import (
     AgentConfig,
     ResolvedAgentModel,
     ResolvedRevisionContent,
     ResolvedSkillBinding,
     ResolvedSubagentEdge,
-    SubagentSelection,
 )
 from .errors import AgentError, agent_revision_create_failed
 from .models import AgentRecord, AgentRevisionRecord
-from .skill_resolution import (
-    PreparedSkillBinding,
-    SkillSelectionInvalid,
-    freeze_skill_bindings,
-    prepare_skill_bindings,
-)
+from .skill_resolution import SkillSelectionInvalid, resolve_skill_bindings
 from .toolsets import web_selection
 from .validation import AgentConfigValidationError, AgentProtocolPolicy, validate_agent_config
 
@@ -48,33 +38,8 @@ MAX_SUBAGENT_DEPTH = 16
 MAX_SUBAGENT_NODES = 256
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedSubagent:
-    name: str
-    selection: SubagentSelection
-    child_revision_id: str
-    child_revision_digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedRevisionResolution:
-    actor: AuthenticatedActor
-    organization_id: str
-    workspace_id: str
-    agent_id: str
-    config: AgentConfig
-    model: PreparedModelExecution
-    skills: tuple[PreparedSkillBinding, ...]
-    subagents: tuple[PreparedSubagent, ...]
-    connectivity: PreparedConnectivity
-    reviewer_model: PreparedModelExecution | None = None
-    media_models: dict[NativeInputMediaKind, PreparedModelExecution] = field(default_factory=dict)
-    creation: bool = False
-    authorization_agent_id: str | None = None
-
-
 class AgentResolver:
-    """Resolve only exact durable resources and recheck them in the commit transaction."""
+    """Resolve durable bindings once, retaining locks until the management write commits."""
 
     def __init__(
         self,
@@ -95,8 +60,9 @@ class AgentResolver:
             memory_provider_catalog if memory_provider_catalog is not None else ProviderCatalog()
         )
 
-    async def prepare(
+    async def resolve(
         self,
+        session: AsyncSession,
         *,
         actor: AuthenticatedActor,
         organization_id: str,
@@ -104,120 +70,46 @@ class AgentResolver:
         agent_id: str,
         config: AgentConfig,
         creation: bool = False,
-        authorization_agent_id: str | None = None,
-    ) -> PreparedRevisionResolution:
-        self._validate_local_config(config)
-        model = await self._model_selector.prepare(
-            organization_id=organization_id,
-            workspace_id=workspace_id,
-            model_key=config.model.model_key,
-            settings=config.model.settings,
-        )
-        reviewer_model = (
-            await self._model_selector.prepare(
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                model_id=config.reviewer.model,
-                settings=config.reviewer.model_settings or {},
-            )
-            if config.reviewer is not None
-            else None
-        )
-        media_models = await self._model_selector.prepare_media_selection(
-            organization_id=organization_id, workspace_id=workspace_id, selection=config.media_understanding
-        )
-        async with short_session(self._sessions) as session:
-            await _authorize_revision(
-                session,
-                actor=actor,
-                workspace_id=workspace_id,
-                agent_id=authorization_agent_id or agent_id,
-                creation=creation,
-            )
-            await authorize_template(
-                session,
-                actor=actor,
-                workspace_id=workspace_id,
-                template_id=config.default_environment_template_id,
-            )
-            skills = await self._prepare_skills(
-                session,
-                actor=actor,
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                config=config,
-            )
-            subagents = await self._prepare_subagents(
-                session,
-                actor=actor,
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                config=config,
-            )
-        connectivity = await prepare_revision_connectivity(
-            self._connectivity_resolver,
-            actor=actor,
-            organization_id=organization_id,
-            workspace_id=workspace_id,
-            config=config,
-        )
-        return PreparedRevisionResolution(
-            actor=actor,
-            organization_id=organization_id,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            config=config,
-            model=model,
-            skills=skills,
-            subagents=subagents,
-            connectivity=connectivity,
-            reviewer_model=reviewer_model,
-            media_models=media_models,
-            creation=creation,
-            authorization_agent_id=authorization_agent_id,
-        )
-
-    async def freeze_in_transaction(
-        self,
-        session: AsyncSession,
-        *,
-        prepared: PreparedRevisionResolution,
     ) -> ResolvedRevisionContent:
-        await _authorize_revision(
-            session,
-            actor=prepared.actor,
-            workspace_id=prepared.workspace_id,
-            agent_id=prepared.authorization_agent_id or prepared.agent_id,
-            creation=prepared.creation,
-        )
+        self._validate_local_config(config)
+        await _authorize_revision(session, actor=actor, workspace_id=workspace_id, agent_id=agent_id, creation=creation)
         await authorize_template(
             session,
-            actor=prepared.actor,
-            workspace_id=prepared.workspace_id,
-            template_id=prepared.config.default_environment_template_id,
+            actor=actor,
+            workspace_id=workspace_id,
+            template_id=config.default_environment_template_id,
         )
-        if prepared.config.memory is not None:
-            if memory_provider_ids(prepared.config.memory):
+        models = InvocationModelSelection(
+            self._sessions,
+            self._model_selector,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            session=session,
+        )
+        model = await models.prepare(model_key=config.model.model_key, settings=config.model.settings)
+        if config.reviewer is not None:
+            await models.prepare(model_id=config.reviewer.model, settings=config.reviewer.model_settings or {})
+        await models.resolve(config.media_understanding, include_defaults=False)
+        if config.memory is not None:
+            if memory_provider_ids(config.memory):
                 await authorize_workspace(
                     session,
-                    actor=prepared.actor,
-                    workspace_id=prepared.workspace_id,
+                    actor=actor,
+                    workspace_id=workspace_id,
                     action=WorkspaceAction.memory_provider_read,
                 )
             await require_memory_configuration(
                 session,
-                selection=prepared.config.memory,
-                organization_id=prepared.organization_id,
-                workspace_id=prepared.workspace_id,
+                selection=config.memory,
+                organization_id=organization_id,
+                workspace_id=workspace_id,
                 catalog=self._memory_provider_catalog,
             )
-        for operation, selection in provider_selections(web_selection(prepared.config.toolsets)):
+        for operation, selection in provider_selections(web_selection(config.toolsets)):
             provider = await require_web_provider(
                 session,
-                organization_id=prepared.organization_id,
-                workspace_id=prepared.workspace_id,
+                organization_id=organization_id,
+                workspace_id=workspace_id,
                 provider_id=selection.provider_id,
                 eligible=True,
                 catalog=self._web_provider_catalog,
@@ -228,23 +120,42 @@ class AgentResolver:
                 self._web_provider_catalog,
                 selection=selection if isinstance(selection, ScrapeSelection) else None,
             )
-        model = await self._model_selector.freeze_in_transaction(session, prepared=prepared.model)
-        if prepared.reviewer_model is not None:
-            await self._model_selector.freeze_in_transaction(session, prepared=prepared.reviewer_model)
-        for media_model in prepared.media_models.values():
-            await self._model_selector.freeze_in_transaction(session, prepared=media_model)
-        skills = await self._freeze_skills(session, prepared)
-        subagents = await self._freeze_subagents(session, prepared)
-        await freeze_revision_connectivity(self._connectivity_resolver, session, prepared.connectivity)
+        skills = await self._resolve_skills(
+            session,
+            actor=actor,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            config=config,
+        )
+        subagents = await self._resolve_subagents(
+            session,
+            actor=actor,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            config=config,
+        )
+        try:
+            await self._connectivity_resolver.resolve_in_session(
+                session,
+                actor=actor,
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+                connection_tools=config.connection_tools,
+                lock=True,
+            )
+        except ConnectivitySelectionError as error:
+            raise agent_revision_create_failed(error.code, path=error.path) from error
         return ResolvedRevisionContent(
             resolved_model=ResolvedAgentModel(
-                model_id=model.model_id,
-                model_key=model.model_key,
-                settings=prepared.config.model.settings,
-                characteristics=prepared.config.model.characteristics,
+                model_id=model.resource.id,
+                model_key=model.resource.key,
+                settings=config.model.settings,
+                characteristics=config.model.characteristics,
             ),
             resolved_skills=skills,
-            connection_tools=prepared.config.connection_tools,
+            connection_tools=config.connection_tools,
             resolved_subagents=subagents,
         )
 
@@ -259,7 +170,7 @@ class AgentResolver:
         except AgentConfigValidationError as error:
             raise agent_revision_create_failed(error.reason, path=error.path) from error
 
-    async def _prepare_skills(
+    async def _resolve_skills(
         self,
         session: AsyncSession,
         *,
@@ -268,7 +179,7 @@ class AgentResolver:
         workspace_id: str,
         agent_id: str,
         config: AgentConfig,
-    ) -> tuple[PreparedSkillBinding, ...]:
+    ) -> tuple[ResolvedSkillBinding, ...]:
         if not config.skills:
             return ()
         await authorize_agent_skill_binding(
@@ -278,16 +189,17 @@ class AgentResolver:
             agent_id=agent_id,
         )
         try:
-            return await prepare_skill_bindings(
+            return await resolve_skill_bindings(
                 session,
                 organization_id=organization_id,
                 workspace_id=workspace_id,
                 selections=config.skills,
+                lock=True,
             )
         except SkillSelectionInvalid as error:
             raise agent_revision_create_failed("skill_selection_invalid", path="skills") from error
 
-    async def _prepare_subagents(
+    async def _resolve_subagents(
         self,
         session: AsyncSession,
         *,
@@ -296,8 +208,8 @@ class AgentResolver:
         workspace_id: str,
         agent_id: str,
         config: AgentConfig,
-    ) -> tuple[PreparedSubagent, ...]:
-        result: list[PreparedSubagent] = []
+    ) -> tuple[ResolvedSubagentEdge, ...]:
+        result: list[ResolvedSubagentEdge] = []
         for name, selection in config.subagents.items():
             await authorize_template(
                 session, actor=actor, workspace_id=workspace_id, revision_id=selection.environment.template_revision_id
@@ -310,11 +222,13 @@ class AgentResolver:
                 action=WorkspaceAction.agent_read,
             )
             child = await session.scalar(
-                select(AgentRecord).where(
+                select(AgentRecord)
+                .where(
                     AgentRecord.id == selection.agent_id,
                     AgentRecord.organization_id == organization_id,
                     AgentRecord.workspace_id == workspace_id,
                 )
+                .with_for_update(read=True)
             )
             if child is None or not child.enabled or child.archived_at is not None:
                 raise agent_revision_create_failed("subagent_unavailable", path=f"subagents.{name}")
@@ -327,7 +241,7 @@ class AgentResolver:
                 revision_query = revision_query.where(AgentRevisionRecord.id == child.default_revision_id)
             else:
                 revision_query = revision_query.where(AgentRevisionRecord.version == selection.version)
-            revision = await session.scalar(revision_query)
+            revision = await session.scalar(revision_query.with_for_update(read=True))
             if revision is None:
                 raise agent_revision_create_failed("subagent_revision_not_found", path=f"subagents.{name}.version")
             await self._validate_subagent_graph(
@@ -337,11 +251,14 @@ class AgentResolver:
                 path=f"subagents.{name}",
             )
             result.append(
-                PreparedSubagent(
+                ResolvedSubagentEdge(
                     name=name,
-                    selection=selection,
-                    child_revision_id=revision.id,
-                    child_revision_digest=revision.content_digest,
+                    child_agent_id=selection.agent_id,
+                    child_agent_revision_id=revision.id,
+                    description=selection.description,
+                    context=selection.context,
+                    usage_limits=selection.usage_limits,
+                    environment=selection.environment,
                 )
             )
         return tuple(result)
@@ -376,68 +293,6 @@ class AgentResolver:
             if len(children) != len(set(child_ids)):
                 raise agent_revision_create_failed("subagent_revision_not_found", path=path)
             pending.extend((child, depth + 1) for child in children)
-
-    async def _freeze_skills(
-        self,
-        session: AsyncSession,
-        prepared: PreparedRevisionResolution,
-    ) -> tuple[ResolvedSkillBinding, ...]:
-        if not prepared.skills:
-            return ()
-        await authorize_agent_skill_binding(
-            session,
-            actor=prepared.actor,
-            workspace_id=prepared.workspace_id,
-            agent_id=prepared.agent_id,
-        )
-        try:
-            return await freeze_skill_bindings(
-                session,
-                organization_id=prepared.organization_id,
-                workspace_id=prepared.workspace_id,
-                prepared=prepared.skills,
-            )
-        except SkillSelectionInvalid as error:
-            raise agent_revision_create_failed("skill_selection_invalid", path="skills") from error
-
-    async def _freeze_subagents(
-        self,
-        session: AsyncSession,
-        prepared: PreparedRevisionResolution,
-    ) -> tuple[ResolvedSubagentEdge, ...]:
-        result: list[ResolvedSubagentEdge] = []
-        for expected in prepared.subagents:
-            await authorize_agent(
-                session,
-                actor=prepared.actor,
-                workspace_id=prepared.workspace_id,
-                agent_id=expected.selection.agent_id,
-                action=WorkspaceAction.agent_read,
-            )
-            revision = await session.scalar(
-                select(AgentRevisionRecord)
-                .where(
-                    AgentRevisionRecord.id == expected.child_revision_id,
-                    AgentRevisionRecord.agent_id == expected.selection.agent_id,
-                    AgentRevisionRecord.organization_id == prepared.organization_id,
-                    AgentRevisionRecord.workspace_id == prepared.workspace_id,
-                )
-                .with_for_update()
-            )
-            if revision is None or revision.content_digest != expected.child_revision_digest:
-                raise agent_revision_create_failed("subagent_revision_changed", path=f"subagents.{expected.name}")
-            result.append(
-                ResolvedSubagentEdge(
-                    name=expected.name,
-                    child_agent_id=expected.selection.agent_id,
-                    child_agent_revision_id=expected.child_revision_id,
-                    description=expected.selection.description,
-                    context=expected.selection.context,
-                    usage_limits=expected.selection.usage_limits,
-                    environment=expected.selection.environment,
-                )
-            )
-        return tuple(result)
 
 
 async def _authorize_revision(

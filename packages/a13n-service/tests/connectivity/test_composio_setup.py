@@ -173,7 +173,6 @@ async def composio_setup(composio_sessions, credential_protector):
             connector_http,
             service.setup_coordinator,
             instance_id="control",
-            poll_interval_seconds=2,
             lease_seconds=60,
             clock=lambda: now[0],
         )

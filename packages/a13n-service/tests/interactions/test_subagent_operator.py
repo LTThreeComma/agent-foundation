@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 import pytest
-from a13n_harness import (
-    AgentDefinition,
-    AgentIdentityRef,
-    HarnessBuilder,
-    SubagentDefinition,
-)
-from a13n_harness.builder import DelegationContextPolicy
 from a13n_harness.capabilities import (
     AsyncDelegateRequest,
     AsyncResumeRequest,
-    ResolvedDelegationContext,
     SubagentCancelRequest,
     SubagentDelegationPlan,
     SubagentInfoRequest,
@@ -23,7 +15,6 @@ from a13n_harness.capabilities import (
     SubagentToolCallContext,
     SubagentWaitRequest,
 )
-from a13n_harness.context import BuiltSubagent
 from a13n_service.iam.models import RoleBindingRecord
 from a13n_service.interactions.attempts import AttemptContext
 from a13n_service.interactions.domain import Run
@@ -33,28 +24,27 @@ from a13n_service.interactions.objects import RunPayloadStore, RunStateStore
 from a13n_service.interactions.outcomes import RunOutcomeService
 from a13n_service.interactions.scheduling import AttemptScheduler
 from a13n_service.interactions.state import CompletedOutcomeCandidate
-from a13n_service.storage import ObjectStore, short_session, transaction
+from a13n_service.storage import ObjectNotFound, ObjectStore, short_session, transaction
 from a13n_service.subagents import (
     ChildRunAcceptanceService,
     ChildRunAdmissionPreparer,
     DurableSubagentOperator,
 )
 from a13n_service.subagents.execution_store import ACTIVITY_OUTPUT_PREVIEW_LIMIT, SubagentOperatorError
-from pydantic_ai.agent.spec import AgentSpec
-from pydantic_ai.models.test import TestModel
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.lifecycle_support import test_lifecycle_writer
 from tests.memory.selection_support import ordinary_memory
 
-from .conftest import NOW
+from .conftest import NOW, ORGANIZATION_ID
 from .test_attempt_execution import _authority, _worker
 from .test_subagent_acceptance import (
     CHILD_DEFINITION_ID,
     _accept_parent,
     _complete_run,
     _grant_and_seed_child,
+    _plan,
 )
 
 pytestmark = pytest.mark.anyio
@@ -125,6 +115,32 @@ async def test_operator_delegates_reads_steers_waits_and_cancels(
     assert steered.accepted is True and steered.enqueue_id is not None
     assert cancelled.accepted is True and cancelled.status == "cancelled"
     assert waited.executions[0].status == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "code"),
+    [
+        ("parent", "subagent_parent_context_mismatch"),
+        ("name", "subagent_plan_invalid"),
+        ("definition", "subagent_definition_conflict"),
+    ],
+)
+async def test_delegate_validates_the_native_plan_before_publication(
+    interaction_sessions, interaction_object_store, mismatch, code
+):
+    operator, context, plan, states, _, _ = await _operator(interaction_sessions, interaction_object_store)
+    request = AsyncDelegateRequest(subagent_name="researcher", prompt="research")
+    if mismatch == "parent":
+        plan = replace(plan, parent=replace(context, parent_run_id="other-parent"))
+    elif mismatch == "name":
+        request = AsyncDelegateRequest(subagent_name="other-child", prompt="research")
+    else:
+        plan = _plan(context, child_definition_id=f"agent-config-{'f' * 24}")
+    with pytest.raises(SubagentOperatorError) as error:
+        await operator.delegate(plan, request)
+    assert error.value.code == code
+    with pytest.raises(ObjectNotFound):
+        await states.read(ORGANIZATION_ID, "run_ffffffffffffffff")
 
 
 async def test_operator_treats_repeated_delegate_calls_as_distinct(
@@ -285,7 +301,6 @@ async def _operator(
     acceptance = ChildRunAcceptanceService(
         sessions,
         states,
-        RunPayloadStore(objects),
         bindings=ordinary_memory(sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
@@ -309,32 +324,6 @@ async def _operator(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     return operator, context, _plan(context), states, run_ids, authority_box
-
-
-def _plan(
-    context: SubagentOperatorContext,
-    *,
-    delegated_input: str = '{"delegated_task":"research"}',
-    child_definition_id: str = CHILD_DEFINITION_ID,
-) -> SubagentDelegationPlan:
-    child = AgentDefinition(
-        agent=AgentSpec(),
-        output_type=str,
-        definition_id=child_definition_id,
-        model=TestModel(),
-    )
-    executable = HarnessBuilder().build(child)
-    declaration = SubagentDefinition(name="researcher", description="Research", agent=child)
-    return SubagentDelegationPlan(
-        child=BuiltSubagent(declaration=declaration, definition=child, executable=executable),
-        child_identity=AgentIdentityRef(issuer="a13n.service", subject="child"),
-        context=ResolvedDelegationContext(
-            input=delegated_input,
-            policy=DelegationContextPolicy(),
-        ),
-        usage_limits=None,
-        parent=context,
-    )
 
 
 async def _run(sessions: async_sessionmaker[AsyncSession], run_id: str) -> Run:

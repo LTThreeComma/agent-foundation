@@ -106,14 +106,14 @@ class RunOutcomeService:
             raise RunOutcomeError("Output verification does not belong to this Run and outcome service")
         state = verified.state
         validate_outcome_candidate(state, authority)
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as database:
             run, attempt, thread = await lock_attempt_authority(
                 database,
                 authority,
-                now,
+                self._clock,
                 lock_inbox_origins=True,
             )
+            now = assume_utc(self._clock())
             validate_outcome_candidate_scope(state, run, thread)
             # Recovery can repair Host receipts while preserving an existing
             # candidate. That checkpoint carries the current attempt_number even though
@@ -293,7 +293,7 @@ class RunOutcomeService:
 
         validate_outcome_candidate(state, authority)
         async with short_session(self._sessions) as database:
-            run, _, thread = await read_attempt_authority(database, authority, self._clock())
+            run, _, thread = await read_attempt_authority(database, authority, self._clock)
             validate_outcome_candidate_scope(state, run, thread)
         candidate = state.envelope.outcome_candidate
         if isinstance(candidate, CompletedOutcomeCandidate) and candidate.output_object is not None:

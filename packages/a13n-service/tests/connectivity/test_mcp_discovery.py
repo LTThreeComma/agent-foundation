@@ -244,3 +244,55 @@ async def test_discovery_without_receipt_rechecks_authority_before_ready(
     async with connectivity_sessions() as session:
         record = await require_connection(session, connection.id)
         assert record.status == "pending"
+
+
+@pytest.mark.parametrize("boundary", ["before_snapshot", "before_completion"])
+async def test_management_preview_fences_the_requested_version_without_publishing_readiness(
+    mcp_services, connectivity_sessions, monkeypatch, boundary
+):
+    connections, _oauth, remote = mcp_services
+    remote.allow_anonymous = True
+    connection = await management(connections).create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="preview-version",
+        request=CreateConnectionRequest(
+            name="Preview", source=MCPSource(kind="mcp", endpoint_url=MCP_ENDPOINT, auth_mode=MCPAuthMode.none)
+        ),
+    )
+    discovery = connections._discovery
+
+    async def change_version():
+        async with transaction(connectivity_sessions) as session:
+            current = await require_connection(session, connection.id, lock=True)
+            current.name = "Concurrent edit"
+            current.version += 1
+
+    if boundary == "before_snapshot":
+        original = discovery._credentials.current
+
+        async def edit_before_snapshot(connection_id):
+            await change_version()
+            return await original(connection_id)
+
+        monkeypatch.setattr(discovery._credentials, "current", edit_before_snapshot)
+    else:
+        original_connect = discovery._transport.connect
+
+        @asynccontextmanager
+        async def edit_before_completion(*args, **kwargs):
+            async with original_connect(*args, **kwargs) as client:
+                yield client
+            await change_version()
+
+        monkeypatch.setattr(discovery._transport, "connect", edit_before_completion)
+
+    before = len(remote.requests)
+    with pytest.raises(MCPConnectionError) as failure:
+        await connections.discover_tools(actor=actor(), connection_id=connection.id, expected_version=1)
+    assert failure.value.code == "connection_changed"
+    assert (len(remote.requests) == before) is (boundary == "before_snapshot")
+    async with connectivity_sessions() as session:
+        current = await require_connection(session, connection.id)
+        assert current.version == 2
+        assert current.status == "pending"

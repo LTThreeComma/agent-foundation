@@ -12,7 +12,7 @@ from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.durable_operations.http_delivery import retry_delay_seconds
 from a13n_service.lifecycle.models import LifecycleEventRecord
 from a13n_service.storage import transaction
@@ -37,34 +37,24 @@ class HookDispatcher:
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
-        poll_interval_seconds: float = 1,
         batch_limit: int = 16,
         max_attempts: int = 10,
         retry_base_seconds: float = 2,
         retry_max_seconds: float = 300,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
-        if any(not isfinite(value) or value <= 0 for value in (poll_interval_seconds, retry_base_seconds)):
+        if not isfinite(retry_base_seconds) or retry_base_seconds <= 0:
             raise ValueError("Hook dispatch timing bounds must be finite and positive")
         if not isfinite(retry_max_seconds) or retry_max_seconds < retry_base_seconds:
             raise ValueError("Hook dispatch maximum retry delay must cover the base delay")
         if not 1 <= batch_limit <= 100 or not 1 <= max_attempts <= 1000:
             raise ValueError("Hook dispatch batch and attempt bounds are invalid")
         self._sessions = sessions
-        self._poll_interval_seconds = poll_interval_seconds
         self._batch_limit = batch_limit
         self._max_attempts = max_attempts
         self._retry_base_seconds = retry_base_seconds
         self._retry_max_seconds = retry_max_seconds
         self._clock = clock
-
-    async def run(self) -> None:
-        await PeriodicTask(
-            "hook_dispatch",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=30,
-        ).run()
 
     async def scan(self) -> Sweep:
         now = require_aware_utc(self._clock())

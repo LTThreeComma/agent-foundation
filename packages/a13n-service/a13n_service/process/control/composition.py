@@ -29,7 +29,7 @@ from a13n_service.interactions.queue import QueuedSubmissionStore
 from a13n_service.interactions.submissions import QueuedSubmissionService
 from a13n_service.memory.providers import MemoryProviderService
 from a13n_service.process.agents import AgentResources, build_agent_resolver
-from a13n_service.process.background import BackgroundTask
+from a13n_service.process.background import BackgroundTask, periodic_task
 from a13n_service.process.components import Components
 from a13n_service.process.resources import ExecutionResources
 from a13n_service.process.runtime import ControlRuntime, SharedRuntime
@@ -137,7 +137,6 @@ async def build_control_runtime(
             a2a_http_client,
             a2a_endpoint_policy,
             shared.secret_protector,
-            poll_interval_seconds=settings.webhooks.poll_interval_seconds,
             lease_seconds=settings.webhooks.claim_lease_seconds,
             claim_limit=settings.webhooks.claim_limit,
             max_attempts=settings.webhooks.max_attempts,
@@ -241,7 +240,6 @@ async def build_control_runtime(
         hook_subscriptions=hooks.subscriptions,
         lifecycle_events=hooks.lifecycle_events,
         gateway=gateway,
-        subagent_maintenance=subagents,
         identity=identity,
         client_connections=client_connections,
         configuration=build_configuration_service(
@@ -264,6 +262,7 @@ async def build_control_runtime(
             subagents.run,
             subagents.is_draining,
             shutdown=partial(subagents.shutdown, timeout_seconds=settings.subagents.reconcile_drain_seconds),
+            drain=subagents.drain,
         ),
     ]
     background_tasks.extend(build_recovery_tasks(settings, shared, gateway_commands))
@@ -276,10 +275,19 @@ async def build_control_runtime(
                 reconciler.run,
                 reconciler.is_draining,
                 shutdown=partial(reconciler.shutdown, timeout_seconds=5),
+                drain=client_connections.begin_drain,
             )
         )
     if a2a_publisher is not None:
-        background_tasks.append(BackgroundTask("A2A push publisher", a2a_publisher.run))
+        background_tasks.append(
+            periodic_task(
+                "a2a_push_publication",
+                a2a_publisher.scan,
+                interval_seconds=settings.webhooks.poll_interval_seconds,
+                timeout_seconds=settings.webhooks.claim_lease_seconds + settings.webhooks.request_timeout_seconds + 1,
+                drain=a2a_publisher.drain,
+            )
+        )
     return runtime, tuple(background_tasks)
 
 

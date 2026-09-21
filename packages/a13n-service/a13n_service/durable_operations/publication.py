@@ -27,6 +27,7 @@ async def dispatch_outbox_batch(
     timeout_seconds: float,
     concurrency: int,
     clock: Clock = utc_now,
+    is_draining: Callable[[], bool] = lambda: False,
 ) -> Sweep:
     if not claims:
         return Sweep()
@@ -35,6 +36,8 @@ async def dispatch_outbox_batch(
 
     async def dispatch(claim: OutboxClaim) -> None:
         async with limiter:
+            if is_draining():
+                return
             try:
                 with anyio.fail_after(timeout_seconds):
                     await publish(claim)

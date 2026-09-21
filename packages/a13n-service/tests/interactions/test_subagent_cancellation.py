@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.lifecycle_support import test_lifecycle_writer
 from tests.memory.selection_support import ordinary_memory
 
-from .conftest import NOW, ORGANIZATION_ID, effective_agent_config
+from .conftest import NOW, ORGANIZATION_ID
 from .test_attempt_execution import _authority, _worker
 from .test_subagent_acceptance import (
     _accept_parent,
@@ -83,7 +83,7 @@ async def _cancel_parent_with_children(
     objects: ObjectStore,
 ) -> tuple[Run, str, str, RunOutcomeService]:
     await _grant_and_seed_child(sessions)
-    states, parent, parent_state = await _accept_parent(sessions, objects)
+    states, parent, _ = await _accept_parent(sessions, objects)
     claim = await AttemptScheduler(
         sessions,
         clock=lambda: NOW + timedelta(seconds=1),
@@ -93,38 +93,29 @@ async def _cancel_parent_with_children(
     ).claim(parent.id, _worker())
     assert claim is not None
     authority = _authority(claim)
-    running_parent = await _run(sessions, parent.id)
-    child_config = effective_agent_config()
     acceptance = ChildRunAcceptanceService(
         sessions,
         states,
-        RunPayloadStore(objects),
         bindings=ordinary_memory(sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
     )
     requested = await acceptance.accept(
-        _prepared_child(
-            running_parent,
-            parent_state,
-            authority.run_attempt_id,
-            authority.attempt_number,
-            child_config,
+        await _prepared_child(
+            sessions,
+            states,
+            authority,
             suffix="a",
             cancellation_policy=ChildCancellationPolicy.request_child_cancel,
         ),
-        authority,
     )
     independent = await acceptance.accept(
-        _prepared_child(
-            running_parent,
-            parent_state,
-            authority.run_attempt_id,
-            authority.attempt_number,
-            child_config,
+        await _prepared_child(
+            sessions,
+            states,
+            authority,
             suffix="b",
         ),
-        authority,
     )
     requested_claim = await AttemptScheduler(
         sessions,

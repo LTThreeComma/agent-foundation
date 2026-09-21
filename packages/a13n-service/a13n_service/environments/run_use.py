@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.iam.authorization import WorkspaceAction, authorize_persisted_agent_principal_actions
 from a13n_service.interactions.models import RunRecord, SessionRecord
+from a13n_service.temporal import Clock
 
 from .capacity import CapacityLimits
 from .models import EnvironmentProviderRecord, EnvironmentRecord
@@ -57,14 +58,14 @@ async def lock_run_environment_use(
     environment_id: str,
     attempt: AttemptContext,
     capacity: CapacityLimits,
-    now: datetime,
+    clock: Clock,
     *,
     mount_name: str = "workspace",
 ) -> tuple[RunEnvironmentBinding, EnvironmentRecord, EnvironmentProviderRecord]:
     from a13n_service.interactions.attempts import lock_attempt_authority
 
-    attempt.lease.require_current(now)
-    run, _, _ = await lock_attempt_authority(session, attempt, now)
+    attempt.lease.require_current(clock())
+    run, _, _ = await lock_attempt_authority(session, attempt, clock)
     binding = await load_run_environment_binding(session, run, name=mount_name, for_update=True)
     if binding is None or binding.environment_id != environment_id:
         raise ValueError("Environment is not the Run's accepted selection")

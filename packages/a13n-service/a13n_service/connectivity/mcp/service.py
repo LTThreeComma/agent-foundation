@@ -6,7 +6,6 @@ import json
 from typing import Any, Literal, Protocol
 
 import anyio
-from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,7 +58,6 @@ class MCPConnectionService:
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
-        endpoint_policy: EndpointPolicy,
         protector: SecretProtector,
         discovery: ConnectionDiscovery,
         *,
@@ -67,7 +65,6 @@ class MCPConnectionService:
         clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
-        self._endpoint_policy = endpoint_policy
         self._protector = protector
         self._discovery = discovery
         self._registration_cleaner = registration_cleaner
@@ -80,11 +77,7 @@ class MCPConnectionService:
             record = await require_connection(session, connection_id)
             await authorize_connection(session, actor, record, mode="manage")
             require_version(record.version, expected_version)
-        result = await self._discovery.discover(connection_id, actor=actor)
-        async with transaction(self._sessions) as session:
-            record = await require_connection(session, connection_id)
-            await authorize_connection(session, actor, record, mode="manage")
-            require_version(record.version, expected_version)
+        result = await self._discovery.discover(connection_id, actor=actor, expected_version=expected_version)
         return MCPToolCollection(items=result.tools)
 
     async def replace_credentials(
@@ -210,21 +203,6 @@ class MCPConnectionService:
                 outcome = "unknown"
             outcomes.append(outcome)
         return "unknown" if "unknown" in outcomes else "failed" if "failed" in outcomes else "succeeded"
-
-
-def _validate_auth_identity(auth_mode: MCPAuthMode, header_names: tuple[str, ...]) -> None:
-    if auth_mode is MCPAuthMode.static_headers and not header_names:
-        raise MCPConnectionError(
-            "invalid_mcp_connection",
-            "static_headers requires a non-empty header name set.",
-            category=ErrorCategory.invalid_request,
-        )
-    if auth_mode is not MCPAuthMode.static_headers and header_names:
-        raise MCPConnectionError(
-            "invalid_mcp_connection",
-            "Static header names require static_headers authentication.",
-            category=ErrorCategory.invalid_request,
-        )
 
 
 def _credential_value(record: MCPConnectionRecord, request: ReplaceMCPCredentialsRequest) -> str:

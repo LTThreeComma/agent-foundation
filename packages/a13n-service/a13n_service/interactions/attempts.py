@@ -7,6 +7,7 @@ import hmac
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import cast
 
 import rfc8785
@@ -99,6 +100,33 @@ class AttemptContext:
             raise ValueError("Attempt cleanup timeout must be positive")
 
 
+class AttemptDisposition(StrEnum):
+    waiting = "waiting"
+    completed = "completed"
+    retrying = "retrying"
+    continuing = "continuing"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptOutcome:
+    disposition: AttemptDisposition
+    run_version: int
+    attempt_version: int
+    thread_version: int | None
+
+    def __post_init__(self) -> None:
+        if self.run_version < 1:
+            raise ValueError("Attempt outcome Run version must be positive")
+        if self.attempt_version < 1:
+            raise ValueError("Attempt outcome Attempt version must be positive")
+        if self.thread_version is not None and self.thread_version < 1:
+            raise ValueError("Attempt outcome Thread version must be positive")
+        if (self.disposition is AttemptDisposition.retrying) != (self.thread_version is None):
+            raise ValueError("only a retrying Attempt outcome omits the Thread version")
+
+
 @dataclass(frozen=True, slots=True)
 class AttemptMutationReceipt:
     run_version: int
@@ -148,9 +176,8 @@ class AttemptExecutionService:
     async def validate(self, authority: AttemptContext) -> AttemptMutationReceipt:
         """Revalidate current lease and fencing attempt number without mutating durable state."""
 
-        now = assume_utc(self._clock())
         async with short_session(self._sessions) as session:
-            run, attempt, _ = await read_attempt_authority(session, authority, now, load_execution_state=False)
+            run, attempt, _ = await read_attempt_authority(session, authority, self._clock, load_execution_state=False)
             return _receipt(run, attempt)
 
     async def heartbeat(
@@ -236,9 +263,8 @@ class AttemptExecutionService:
     async def can_handoff(self, authority: AttemptContext) -> bool:
         """Check the current handoff budget before stopping local execution."""
 
-        now = assume_utc(self._clock())
         async with short_session(self._sessions) as session:
-            run, _, _ = await read_attempt_authority(session, authority, now)
+            run, _, _ = await read_attempt_authority(session, authority, self._clock)
             return run.handoffs_completed < run.max_handoffs
 
     async def enter_harness(
@@ -255,9 +281,9 @@ class AttemptExecutionService:
             or preparation.attempt_number != authority.attempt_number
         ):
             raise AttemptMutationError("Harness entry requires the matching successful preparation decision")
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as session:
-            run, attempt, _ = await lock_attempt_authority(session, authority, now)
+            run, attempt, _ = await lock_attempt_authority(session, authority, self._clock)
+            now = assume_utc(self._clock())
             if attempt.status != RunAttemptStatus.leased.value:
                 raise AttemptMutationError("Harness entry requires a leased Attempt")
             attempt.status = RunAttemptStatus.running.value
@@ -285,14 +311,14 @@ class AttemptExecutionService:
     ) -> AttemptPreparationResult:
         """Commit the decision after exact state, dependency, and Principal preflight succeeds."""
 
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as session:
             run, attempt, thread = await lock_attempt_authority(
                 session,
                 authority,
-                now,
+                self._clock,
                 lock_inbox_origins=True,
             )
+            now = assume_utc(self._clock())
             failure = _active_budget_failure(run, attempt, now)
             if failure is None:
                 return AttemptPreparationAccepted(
@@ -325,9 +351,9 @@ class AttemptExecutionService:
         authority: AttemptContext,
         delta: RunUsage,
     ) -> AttemptMutationReceipt:
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as session:
-            run, attempt, _ = await lock_attempt_authority(session, authority, now)
+            run, attempt, _ = await lock_attempt_authority(session, authority, self._clock)
+            now = assume_utc(self._clock())
             if attempt.status != RunAttemptStatus.running.value:
                 raise AttemptMutationError("usage can be recorded only after Harness entry")
             usage = attempt.to_resource().usage.plus(delta)
@@ -409,11 +435,8 @@ class AttemptExecutionService:
                 or run is None
                 or attempt is None
                 or run.thread_id != authority.thread_id
-                or attempt.attempt_number != authority.attempt_number
-                or attempt.worker_id != authority.worker_id
-                or attempt.worker_build_id != authority.worker_build_id
+                or not _matches_attempt_owner(attempt, authority)
                 or attempt.harness_run_id != harness_run_id
-                or not hmac.compare_digest(attempt.lease_token_digest, _token_digest(authority.lease_token))
             ):
                 raise AttemptAuthorityError("Usage receipt does not match its originating Attempt")
             now = assume_utc(self._clock())
@@ -477,9 +500,8 @@ class AttemptExecutionService:
     ) -> StoredRunState:
         """Validate relational authority, then replace state outside the DB session."""
 
-        now = assume_utc(self._clock())
         async with short_session(self._sessions) as session:
-            await read_attempt_authority(session, authority, now)
+            await read_attempt_authority(session, authority, self._clock)
         return await states.replace(
             current,
             successor,
@@ -494,17 +516,17 @@ class AttemptExecutionService:
         *,
         retryable: bool,
         retry_after: timedelta = timedelta(0),
-    ) -> AttemptMutationReceipt:
+    ) -> AttemptOutcome:
         if retry_after < timedelta(0):
             raise ValueError("retry_after must not be negative")
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as session:
             run, attempt, thread = await lock_attempt_authority(
                 session,
                 authority,
-                now,
+                self._clock,
                 lock_inbox_origins=True,
             )
+            now = assume_utc(self._clock())
             terminalize_attempt(attempt, RunAttemptStatus.failed, now, failure=failure)
             charge_attempt_usage(run, attempt)
             run.current_run_attempt_id = None
@@ -534,16 +556,41 @@ class AttemptExecutionService:
                     mutation_id=mutation_id,
                     failed_attempt=attempt,
                 )
-            return _receipt(run, attempt)
+            return AttemptOutcome(
+                disposition=AttemptDisposition.retrying
+                if run.status == RunStatus.running.value
+                else AttemptDisposition.failed,
+                run_version=run.version,
+                attempt_version=attempt.version,
+                thread_version=None if run.status == RunStatus.running.value else thread.version,
+            )
+
+    async def read_yielded(
+        self, authority: AttemptContext, reason: RunAttemptYieldReason
+    ) -> AttemptMutationReceipt | None:
+        """Recognize this owner's committed yield, never infer it from a later Run status."""
+        async with short_session(self._sessions) as session:
+            row = (await session.execute(_attempt_authority_query(authority, load_execution_state=True))).one_or_none()
+            if row is None:
+                return None
+            run, attempt, _ = row
+            if (
+                run.thread_id == authority.thread_id
+                and _matches_attempt_owner(attempt, authority)
+                and attempt.status == RunAttemptStatus.yielded.value
+                and attempt.yield_reason == reason.value
+            ):
+                return _receipt(run, attempt)
+            return None
 
     async def yield_attempt(
         self,
         authority: AttemptContext,
         reason: RunAttemptYieldReason,
     ) -> AttemptMutationReceipt:
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as session:
-            run, attempt, _ = await lock_attempt_authority(session, authority, now)
+            run, attempt, _ = await lock_attempt_authority(session, authority, self._clock)
+            now = assume_utc(self._clock())
             if run.handoffs_completed >= run.max_handoffs:
                 raise AttemptMutationError("the Run handoff budget is exhausted")
             terminalize_attempt(attempt, RunAttemptStatus.yielded, now, yield_reason=reason)
@@ -567,10 +614,12 @@ class AttemptExecutionService:
 async def lock_attempt_authority(
     session: AsyncSession,
     authority: AttemptContext,
-    now: datetime,
+    clock: Clock,
     *,
     lock_inbox_origins: bool = False,
 ) -> tuple[RunRecord, RunAttemptRecord, ThreadRecord]:
+    """Check authority after acquiring all locks, never against a caller's stale timestamp."""
+
     thread = await session.scalar(
         select(ThreadRecord)
         .where(ThreadRecord.organization_id == authority.organization_id, ThreadRecord.id == authority.thread_id)
@@ -603,7 +652,7 @@ async def lock_attempt_authority(
         )
         .with_for_update()
     )
-    _validate_lease(run, attempt, thread, authority, now)
+    _validate_lease(run, attempt, thread, authority, assume_utc(clock()))
     assert run is not None and attempt is not None and thread is not None
     return run, attempt, thread
 
@@ -611,18 +660,18 @@ async def lock_attempt_authority(
 async def read_attempt_authority(
     session: AsyncSession,
     authority: AttemptContext,
-    now: datetime,
+    clock: Clock,
     *,
     load_execution_state: bool = True,
 ) -> tuple[RunRecord, RunAttemptRecord, ThreadRecord]:
-    """Validate current authority; pure checks can omit execution payloads and budgets."""
+    """Observe lease expiry after the query; pure checks can omit execution payloads and budgets."""
 
     result = await session.execute(_attempt_authority_query(authority, load_execution_state=load_execution_state))
     row = result.one_or_none()
     if row is None:
         raise AttemptAuthorityError("Attempt authority was not found")
     run, attempt, thread = row
-    _validate_lease(run, attempt, thread, authority, now)
+    _validate_lease(run, attempt, thread, authority, assume_utc(clock()))
     return run, attempt, thread
 
 
@@ -683,20 +732,25 @@ def _validate_lease(
 ) -> None:
     if run is None or attempt is None or thread is None:
         raise AttemptAuthorityError("Attempt authority was not found")
-    token_matches = hmac.compare_digest(attempt.lease_token_digest, _token_digest(authority.lease_token))
     if (
         run.thread_id != authority.thread_id
         or thread.current_run_id != run.id
         or run.status != RunStatus.running.value
         or run.current_run_attempt_id != attempt.id
         or attempt.status not in {RunAttemptStatus.leased.value, RunAttemptStatus.running.value}
-        or attempt.attempt_number != authority.attempt_number
-        or attempt.worker_id != authority.worker_id
-        or attempt.worker_build_id != authority.worker_build_id
-        or not token_matches
+        or not _matches_attempt_owner(attempt, authority)
         or assume_utc(attempt.lease_expires_at) <= now
     ):
         raise AttemptAuthorityError("Attempt lease, fencing number, or selection is no longer authoritative")
+
+
+def _matches_attempt_owner(attempt: RunAttemptRecord, authority: AttemptContext) -> bool:
+    return (
+        attempt.attempt_number == authority.attempt_number
+        and attempt.worker_id == authority.worker_id
+        and attempt.worker_build_id == authority.worker_build_id
+        and hmac.compare_digest(attempt.lease_token_digest, _token_digest(authority.lease_token))
+    )
 
 
 def _successor_budget_remains(run: RunRecord, available_at: datetime) -> bool:
@@ -743,9 +797,11 @@ def _token_digest(token: str) -> str:
 __all__ = [
     "AttemptAuthorityError",
     "AttemptContext",
+    "AttemptDisposition",
     "AttemptExecutionService",
     "AttemptMutationError",
     "AttemptMutationReceipt",
+    "AttemptOutcome",
     "AttemptPreparationAccepted",
     "AttemptPreparationRejected",
     "AttemptPreparationResult",

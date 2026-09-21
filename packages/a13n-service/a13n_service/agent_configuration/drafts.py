@@ -54,8 +54,8 @@ class ConfigurationDrafts:
     ) -> ConfigurationDraft:
         identity = request_identity(idempotency_key)
         async with transaction(self._sessions) as session:
-            _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True)
-            await require_attempt(session, record=record, attempt=attempt, now=self._clock())
+            _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True, lock=True)
+            await require_attempt(session, record=record, attempt=attempt, clock=self._clock)
             replay = await load_replay(
                 session,
                 actor=actor,
@@ -70,40 +70,17 @@ class ConfigurationDrafts:
             if request.expected_digest is not None and record.content_digest != request.expected_digest:
                 raise failure("configuration_draft_conflict", "The expected candidate digest changed.")
             current = record.to_resource()
-        candidate = edit_config(current.config, request.operations) if request.operations else current.config
-        metadata = current.creation_metadata
-        suggested_summary = current.suggested_change_summary
-        if "suggested_change_summary" in request.model_fields_set:
-            suggested_summary = request.suggested_change_summary
-        if "creation_metadata" in request.model_fields_set:
-            if current.mode != "create":
-                raise failure("configuration_metadata_invalid", "Only create drafts can change creation metadata.")
-            metadata = request.creation_metadata
-        if candidate is None:
-            raise failure("configuration_uninitialized", "Initialize a complete configuration before saving.")
-        if attempt is not None:
-            async with short_session(self._sessions) as session:
-                await authorize_candidate_snapshot(
-                    session,
-                    actor=actor,
-                    config=candidate,
-                    target_agent_id=current.target_agent_id,
-                    snapshot=attempt.authorization.snapshot,
-                )
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=current.organization_id,
-                workspace_id=current.workspace_id,
-                agent_id=current.target_agent_id or new_agent_id(),
-                config=candidate,
-                creation=current.mode == "create",
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-        async with transaction(self._sessions) as session:
-            _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True, lock=True)
-            await require_attempt(session, record=record, attempt=attempt, now=self._clock())
+            candidate = edit_config(current.config, request.operations) if request.operations else current.config
+            metadata = current.creation_metadata
+            suggested_summary = current.suggested_change_summary
+            if "suggested_change_summary" in request.model_fields_set:
+                suggested_summary = request.suggested_change_summary
+            if "creation_metadata" in request.model_fields_set:
+                if current.mode != "create":
+                    raise failure("configuration_metadata_invalid", "Only create drafts can change creation metadata.")
+                metadata = request.creation_metadata
+            if candidate is None:
+                raise failure("configuration_uninitialized", "Initialize a complete configuration before saving.")
             if attempt is not None:
                 await authorize_candidate_snapshot(
                     session,
@@ -112,19 +89,16 @@ class ConfigurationDrafts:
                     target_agent_id=current.target_agent_id,
                     snapshot=attempt.authorization.snapshot,
                 )
-            replay = await load_replay(
-                session,
-                actor=actor,
-                operation="configuration.draft.update",
-                scope_id=draft_id,
-                identity=identity,
-                now=self._clock(),
-            )
-            if replay is not None:
-                return record.to_resource()
-            require_open(record, expected_version=request.expected_version, if_match=if_match)
             try:
-                resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                resolved = await self._resolver.resolve(
+                    session,
+                    actor=actor,
+                    organization_id=current.organization_id,
+                    workspace_id=current.workspace_id,
+                    agent_id=current.target_agent_id or new_agent_id(),
+                    config=candidate,
+                    creation=current.mode == "create",
+                )
             except Exception as error:
                 raise resolution_error(error) from error
             digest = candidate_digest(candidate, metadata)
@@ -138,7 +112,14 @@ class ConfigurationDrafts:
             record.latest_validation = ConfigurationValidation(
                 draft_version=record.version,
                 content_digest=digest,
-                dependency_digest=await dependency_digest(session, prepared=prepared, resolved=resolved),
+                dependency_digest=await dependency_digest(
+                    session,
+                    actor=actor,
+                    organization_id=record.organization_id,
+                    workspace_id=record.workspace_id,
+                    config=candidate,
+                    resolved=resolved,
+                ),
                 checked_at=self._clock(),
             ).model_dump(mode="json")
             record.updated_at = next_updated_at(record.updated_at, self._clock())
@@ -174,32 +155,6 @@ class ConfigurationDrafts:
 
         identity = request_identity(idempotency_key)
         async with transaction(self._sessions) as session:
-            _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True)
-            replay = await load_replay(
-                session,
-                actor=actor,
-                operation="configuration.draft.rebase",
-                scope_id=draft_id,
-                identity=identity,
-                now=self._clock(),
-            )
-            if replay is not None:
-                return record.to_resource()
-            require_open(record, expected_version=request.expected_version, if_match=if_match)
-            current = record.to_resource()
-        if current.mode != "update" or current.target_agent_id is None:
-            raise failure("configuration_rebase_invalid", "Only update drafts have a target baseline to rebase.")
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=current.organization_id,
-                workspace_id=current.workspace_id,
-                agent_id=current.target_agent_id,
-                config=request.config,
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-        async with transaction(self._sessions) as session:
             _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True, lock=True)
             replay = await load_replay(
                 session,
@@ -212,11 +167,21 @@ class ConfigurationDrafts:
             if replay is not None:
                 return record.to_resource()
             require_open(record, expected_version=request.expected_version, if_match=if_match)
+            current = record.to_resource()
+            if current.mode != "update" or current.target_agent_id is None:
+                raise failure("configuration_rebase_invalid", "Only update drafts have a target baseline to rebase.")
             target = await lock_agent(session, record.organization_id, record.workspace_id, current.target_agent_id)
             if resource_etag(target.id, target.updated_at) != request.expected_target_etag:
                 raise failure("configuration_target_conflict", "The target changed after review; review it again.")
             try:
-                resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                resolved = await self._resolver.resolve(
+                    session,
+                    actor=actor,
+                    organization_id=record.organization_id,
+                    workspace_id=record.workspace_id,
+                    agent_id=current.target_agent_id,
+                    config=request.config,
+                )
             except Exception as error:
                 raise resolution_error(error) from error
             record.config = request.config.model_dump(mode="json", by_alias=True)
@@ -229,7 +194,14 @@ class ConfigurationDrafts:
             record.latest_validation = ConfigurationValidation(
                 draft_version=record.version,
                 content_digest=record.content_digest,
-                dependency_digest=await dependency_digest(session, prepared=prepared, resolved=resolved),
+                dependency_digest=await dependency_digest(
+                    session,
+                    actor=actor,
+                    organization_id=record.organization_id,
+                    workspace_id=record.workspace_id,
+                    config=request.config,
+                    resolved=resolved,
+                ),
                 checked_at=self._clock(),
             ).model_dump(mode="json")
             result = record.to_resource()
@@ -275,11 +247,11 @@ class ConfigurationDrafts:
 
 
 async def require_attempt(
-    session: AsyncSession, *, record: ConfigurationDraftRecord, attempt: AttemptContext | None, now
+    session: AsyncSession, *, record: ConfigurationDraftRecord, attempt: AttemptContext | None, clock: Clock
 ) -> None:
     if attempt is None:
         return
-    run, _, _ = await lock_attempt_authority(session, attempt, now)
+    run, _, _ = await lock_attempt_authority(session, attempt, clock)
     context = run.configuration_context
     conversation = await session.get(SessionRecord, record.session_id)
     if (

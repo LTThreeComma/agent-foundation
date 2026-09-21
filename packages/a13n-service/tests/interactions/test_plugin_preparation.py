@@ -1,5 +1,7 @@
 """Preparation commits configuration, never Agent progress or stale-writer authority."""
 
+from contextlib import asynccontextmanager
+
 import pytest
 from a13n_service.agents.domain import PluginSelection, PreparedAgentPlugins
 from a13n_service.digests import digest_request
@@ -93,12 +95,14 @@ async def test_new_writer_recovers_preparation_when_response_and_reconciliation_
         await put(*args, **kwargs)
         raise ObjectStoreUnavailable("response lost")
 
+    @asynccontextmanager
     async def unavailable(*args, **kwargs):
         raise ObjectStoreUnavailable("read unavailable")
+        yield  # pragma: no cover
 
     with monkeypatch.context() as failure:
         failure.setattr(interaction_object_store, "put", lose_response)
-        failure.setattr(interaction_object_store, "stat", unavailable)
+        failure.setattr(interaction_object_store, "open", unavailable)
         with pytest.raises(ObjectStoreUnavailable):
             await states.prepare_plugins(claimed, normalized_plugins(), attempt_number=1)
     recovered = await states.claim_writer(await states.read(ORGANIZATION_ID, claimed.envelope.run_id), attempt_number=2)

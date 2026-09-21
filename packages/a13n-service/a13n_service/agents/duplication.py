@@ -45,7 +45,6 @@ from .persistence import (
     request_identity,
     require_etag,
 )
-from .queries import AgentQueries
 
 
 class AgentDuplication:
@@ -53,13 +52,11 @@ class AgentDuplication:
         self,
         sessions: async_sessionmaker[AsyncSession],
         invocation_resolver: AgentInvocationResolver,
-        queries: AgentQueries,
         *,
         clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
         self._invocation_resolver = invocation_resolver
-        self._queries = queries
         self._clock = clock
 
     async def duplicate(
@@ -72,18 +69,6 @@ class AgentDuplication:
         if_match: str,
     ) -> Agent:
         identity = request_identity(idempotency_key)
-        replay = await self._duplicate_replay(actor=actor, agent_id=agent_id, identity=identity)
-        if replay is not None:
-            return replay
-        current = await self._queries.get(actor=actor, agent_id=agent_id)
-        if current.archived_at is not None:
-            raise agent_archived()
-        prepared_graph = await self._invocation_resolver.preparation.prepare(
-            actor=actor,
-            agent_id=agent_id,
-            agent_revision_id=current.default_revision_id,
-            root_state_policy=RootAgentStatePolicy.disabled_allowed,
-        )
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
@@ -135,9 +120,12 @@ class AgentDuplication:
                     workspace_id=source_workspace.workspace_id,
                     template_id=source_revision.config.get("default_environment_template_id"),
                 )
-                await self._invocation_resolver.freezing.freeze_in_transaction(
+                await self._invocation_resolver.validate(
                     session,
-                    prepared=prepared_graph,
+                    actor=actor,
+                    agent_id=agent_id,
+                    agent_revision_id=source_revision.id,
+                    root_state_policy=RootAgentStatePolicy.disabled_allowed,
                 )
                 duplicate_agent_id = new_agent_id()
                 new_revision_id = new_agent_revision_id()

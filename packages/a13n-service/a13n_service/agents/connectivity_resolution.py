@@ -10,47 +10,16 @@ from a13n_service.connectivity.selection_domain import ConnectionRunSelection
 from a13n_service.connectivity.selection_resolution import (
     ConnectivitySelectionError,
     ConnectivitySelectionResolver,
-    PreparedConnectivity,
 )
 from a13n_service.iam import AuthenticatedActor
 
 from .domain import ConnectionToolSelection
-from .errors import agent_revision_create_failed, agent_revision_not_executable
+from .errors import agent_revision_not_executable
 
 
 class _ConnectivityConfig(Protocol):
     @property
     def connection_tools(self) -> tuple[ConnectionToolSelection, ...]: ...
-
-
-async def prepare_revision_connectivity(
-    resolver: ConnectivitySelectionResolver,
-    *,
-    actor: AuthenticatedActor,
-    organization_id: str,
-    workspace_id: str,
-    config: _ConnectivityConfig,
-) -> PreparedConnectivity:
-    try:
-        return await resolver.prepare(
-            actor=actor,
-            organization_id=organization_id,
-            workspace_id=workspace_id,
-            connection_tools=config.connection_tools,
-        )
-    except ConnectivitySelectionError as error:
-        raise agent_revision_create_failed(error.code, path=error.path) from error
-
-
-async def freeze_revision_connectivity(
-    resolver: ConnectivitySelectionResolver,
-    session: AsyncSession,
-    prepared: PreparedConnectivity,
-) -> None:
-    try:
-        await resolver.freeze(session, prepared=prepared)
-    except ConnectivitySelectionError as error:
-        raise agent_revision_create_failed(error.code, path=error.path) from error
 
 
 async def prepare_invocation_connectivity(
@@ -60,32 +29,15 @@ async def prepare_invocation_connectivity(
     organization_id: str,
     workspace_id: str,
     config: _ConnectivityConfig,
-) -> PreparedConnectivity:
+    session: AsyncSession | None = None,
+) -> tuple[ConnectionRunSelection, ...]:
     try:
         return await resolver.prepare(
             actor=actor,
             organization_id=organization_id,
             workspace_id=workspace_id,
             connection_tools=config.connection_tools,
+            session=session,
         )
     except ConnectivitySelectionError as error:
         raise agent_revision_not_executable(error.code) from error
-
-
-async def freeze_invocation_connectivity(
-    resolver: ConnectivitySelectionResolver,
-    session: AsyncSession,
-    prepared: PreparedConnectivity,
-) -> tuple[ConnectionRunSelection, ...]:
-    try:
-        return await resolver.freeze(session, prepared=prepared)
-    except ConnectivitySelectionError as error:
-        raise agent_revision_not_executable(error.code) from error
-
-
-__all__ = [
-    "freeze_invocation_connectivity",
-    "freeze_revision_connectivity",
-    "prepare_invocation_connectivity",
-    "prepare_revision_connectivity",
-]

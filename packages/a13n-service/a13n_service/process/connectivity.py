@@ -45,7 +45,7 @@ from a13n_service.connectivity.runtime import (
 )
 from a13n_service.connectivity.transports.supervisor import EventConnectionSupervisor
 from a13n_service.ids import new_object_id
-from a13n_service.process.background import BackgroundTask
+from a13n_service.process.background import BackgroundTask, periodic_task
 from a13n_service.provider_plugins import ProviderCatalogs
 from a13n_service.secrets import SecretProtector
 from a13n_service.settings import Settings
@@ -211,8 +211,18 @@ async def _build_control_runtime(
         ),
     )
     background_components = (
-        BackgroundTask("connector reconciler", connector.reconciler.run),
-        BackgroundTask("MCP reconciler", mcp.reconciler.run),
+        periodic_task(
+            "connector_setup_reconciliation",
+            connector.reconciler.scan,
+            interval_seconds=settings.connectivity.connector_reconcile_poll_interval_seconds,
+            timeout_seconds=settings.connectivity.connector_reconcile_lease_seconds,
+        ),
+        periodic_task(
+            "mcp_oauth_reconciliation",
+            mcp.reconciler.scan,
+            interval_seconds=settings.connectivity.connector_reconcile_poll_interval_seconds,
+            timeout_seconds=30,
+        ),
     )
     return runtime, background_components
 
@@ -244,7 +254,6 @@ def _build_connector_control(
         connector_http,
         connections.setup_coordinator,
         instance_id=instance_id,
-        poll_interval_seconds=settings.connectivity.connector_reconcile_poll_interval_seconds,
         lease_seconds=settings.connectivity.connector_reconcile_lease_seconds,
     )
     return _ConnectorControl(service=service, connections=connections, reconciler=reconciler)
@@ -263,7 +272,6 @@ def _build_mcp_control(
     discovery = MCPDiscoveryService(storage.sessions, clients.transport, clients.credentials)
     connections = MCPConnectionService(
         storage.sessions,
-        endpoint_policy,
         secret_protector,
         discovery,
         registration_cleaner=clients.oauth,
@@ -282,7 +290,6 @@ def _build_mcp_control(
     )
     reconciler = MCPReconciler(
         storage.sessions,
-        poll_interval_seconds=settings.connectivity.connector_reconcile_poll_interval_seconds,
     )
     return _MCPControl(
         discovery=discovery,
@@ -350,10 +357,10 @@ async def _build_data_runtime(
     )
     runtime = ConnectivityDataRuntime(ingress_events=ingress_events, event_connections=sockets)
     background_components = (
-        BackgroundTask("event connection supervisor", sockets.run, return_is_expected=sockets.is_draining),
-        BackgroundTask("ingress admission reconciler", admission.run),
-        BackgroundTask("ingress retention reconciler", retention.run),
-        BackgroundTask("GitHub notification polling", poller.run),
+        BackgroundTask("event connection supervisor", sockets.run, sockets.is_draining, drain=sockets.drain),
+        BackgroundTask("ingress admission reconciler", admission.run, admission.is_draining, drain=admission.drain),
+        BackgroundTask("ingress retention reconciler", retention.run, retention.is_draining, drain=retention.drain),
+        BackgroundTask("GitHub notification polling", poller.run, poller.is_draining, drain=poller.drain),
     )
     return runtime, background_components
 

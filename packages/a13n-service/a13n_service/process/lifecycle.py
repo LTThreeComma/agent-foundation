@@ -16,7 +16,6 @@ from a13n_harness.providers.model.definition import ModelProviderDefinition
 from anyio import create_task_group, to_thread
 from pydantic_ai import prices
 
-from a13n_service.background import PeriodicTask
 from a13n_service.bots.connectivity.ingress import BotIngress
 from a13n_service.bots.connectivity.replies import ReplyObservations
 from a13n_service.bots.connectivity.service import BotService
@@ -47,7 +46,12 @@ from a13n_service.memory.ordinary import OrdinaryMemory
 from a13n_service.object_retention.publication import PublicationObjectStore
 from a13n_service.observability import build_observability_runtime
 from a13n_service.process.agents import build_agent_resolver, build_agent_resources
-from a13n_service.process.background import BackgroundTask, run_critical_component, shutdown_background_components
+from a13n_service.process.background import (
+    BackgroundTask,
+    periodic_task,
+    run_critical_component,
+    shutdown_background_components,
+)
 from a13n_service.process.client_environments import build_relay_responses
 from a13n_service.process.components import Components
 from a13n_service.process.connectivity import build_connectivity_runtime
@@ -319,54 +323,17 @@ async def open_process_runtime(
                     protector,
                     public_origin=settings.iam.public_origin,
                 )
-                progress_loop = PeriodicTask(
-                    "bot_task_progress",
-                    progress.scan,
-                    interval_seconds=2,
-                    timeout_seconds=240,
-                )
-
-                async def shutdown_progress() -> None:
-                    await progress_loop.shutdown(timeout_seconds=5)
-
                 progress_background = (
-                    BackgroundTask(
-                        "bot task progress",
-                        progress_loop.run,
-                        return_is_expected=progress_loop.is_draining,
-                        shutdown=shutdown_progress,
-                    ),
+                    periodic_task("bot_task_progress", progress.scan, interval_seconds=2, timeout_seconds=240),
                 )
                 routines = RoutineScheduler(
                     storage.sessions,
                     control.gateway.commands,
                     RoutineCards(storage.sessions, memory_http, protector, settings.connectivity_endpoint_policy()),
                 )
-                routine_loop = PeriodicTask("bot_routines", routines.scan, interval_seconds=5, timeout_seconds=650)
-
-                async def shutdown_routines() -> None:
-                    await routine_loop.shutdown(timeout_seconds=5)
-
                 progress_background += (
-                    BackgroundTask(
-                        "bot routines",
-                        routine_loop.run,
-                        return_is_expected=routine_loop.is_draining,
-                        shutdown=shutdown_routines,
-                    ),
+                    periodic_task("bot_routines", routines.scan, interval_seconds=5, timeout_seconds=650),
                 )
-            runtime = ProcessRuntime(
-                settings=settings,
-                status=status,
-                request_authenticator=components.request_authenticator
-                or (control.identity.authenticator if control is not None and control.identity is not None else None),
-                observability=observability,
-                shared=shared,
-                control=control,
-                worker=worker,
-                connectivity=connectivity,
-                bots=bot_service,
-            )
             relay_background = (
                 (
                     BackgroundTask(
@@ -386,8 +353,21 @@ async def open_process_runtime(
                 *progress_background,
                 *relay_background,
             )
+            runtime = ProcessRuntime(
+                settings=settings,
+                status=status,
+                request_authenticator=components.request_authenticator
+                or (control.identity.authenticator if control is not None and control.identity is not None else None),
+                observability=observability,
+                shared=shared,
+                control=control,
+                worker=worker,
+                connectivity=connectivity,
+                bots=bot_service,
+                background_components=background_components,
+            )
             async with create_task_group() as background_tasks:
-                for component in background_components:
+                for component in runtime.background_components:
                     background_tasks.start_soon(
                         run_critical_component,
                         component.name,
@@ -409,7 +389,7 @@ async def open_process_runtime(
                     yield runtime
                 finally:
                     runtime.begin_drain()
-                    await shutdown_background_components(background_components)
+                    await shutdown_background_components(runtime.background_components)
                     background_tasks.cancel_scope.cancel()
                     logger.info(
                         "service_stopped",

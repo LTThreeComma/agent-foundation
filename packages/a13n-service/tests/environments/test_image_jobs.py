@@ -146,7 +146,7 @@ async def test_connectivity_refreshes_while_image_execution_is_blocked(monkeypat
             assert count >= 3
             assert await redis.ttl("probe") > 0
         finally:
-            await probe.shutdown()
+            probe.drain()
             await worker.shutdown()
             probing.cancel()
             running.cancel()

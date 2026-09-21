@@ -607,3 +607,104 @@ async def test_agent_replay_rejects_organization_boundary(agent_sessions: async_
                 identity=request_identity("workspace-only"),
                 now=NOW,
             )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["create", "revision", "set_default", "duplicate", "enable", "unarchive"])
+async def test_management_resolves_shared_models_once_in_one_transaction(
+    agent_management,
+    agent_sessions,
+    operation,
+):
+    from a13n_service.agents.domain import AgentConfig
+    from sqlalchemy import event
+
+    from .conftest import MODEL_ID, MODEL_KEY
+
+    config = AgentConfig.model_validate(
+        {
+            **agent_config(media_understanding={"image": MODEL_KEY.upper()}).model_dump(),
+            "reviewer": {"model": MODEL_ID, "model_settings": {"temperature": 0.6}},
+        }
+    )
+    created = await agent_management.commands.create(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="shared-model-base",
+        request=CreateAgentRequest(name="Shared model", config=config),
+    )
+    agent = created.agent
+    if operation in {"enable", "unarchive"}:
+        agent = await agent_management.commands.change_lifecycle(
+            actor=actor(),
+            agent_id=agent.id,
+            action="disable",
+            idempotency_key="disable-base",
+            if_match=resource_etag(agent.id, agent.updated_at),
+        )
+    if operation == "unarchive":
+        agent = await agent_management.commands.change_lifecycle(
+            actor=actor(),
+            agent_id=agent.id,
+            action="archive",
+            idempotency_key="archive-base",
+            if_match=resource_etag(agent.id, agent.updated_at),
+        )
+    engine = agent_sessions.kw["bind"].sync_engine
+    transactions = []
+    statements = []
+
+    def begin(connection):
+        transactions.append(connection)
+
+    def execute(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(engine, "begin", begin)
+    event.listen(engine, "before_cursor_execute", execute)
+    try:
+        if operation == "create":
+            await agent_management.commands.create(
+                actor=actor(),
+                workspace_id=WORKSPACE_ID,
+                idempotency_key="shared-model-create",
+                request=CreateAgentRequest(name="Created", config=config),
+            )
+        elif operation == "revision":
+            await agent_management.revisions.create_revision(
+                actor=actor(),
+                agent_id=agent.id,
+                idempotency_key="shared-model-revision",
+                request=CreateAgentRevisionRequest(config=config.model_copy(update={"instructions": "Updated."})),
+                if_match=resource_etag(agent.id, agent.updated_at),
+            )
+        elif operation == "set_default":
+            await agent_management.revisions.set_default_revision(
+                actor=actor(),
+                agent_id=agent.id,
+                revision_id=created.revision.id,
+                idempotency_key="shared-model-default",
+                request=SetDefaultAgentRevisionRequest(),
+                if_match=resource_etag(agent.id, agent.updated_at),
+            )
+        elif operation == "duplicate":
+            await agent_management.duplication.duplicate(
+                actor=actor(),
+                agent_id=agent.id,
+                idempotency_key="shared-model-duplicate",
+                request=DuplicateAgentRequest(name="Duplicate"),
+                if_match=resource_etag(agent.id, agent.updated_at),
+            )
+        else:
+            await agent_management.commands.change_lifecycle(
+                actor=actor(),
+                agent_id=agent.id,
+                action=operation,
+                idempotency_key="shared-model-lifecycle",
+                if_match=resource_etag(agent.id, agent.updated_at),
+            )
+    finally:
+        event.remove(engine, "begin", begin)
+        event.remove(engine, "before_cursor_execute", execute)
+    assert len(transactions) == 1
+    assert sum("FROM models JOIN model_providers" in statement for statement in statements) == 1

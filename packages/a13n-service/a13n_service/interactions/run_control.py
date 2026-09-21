@@ -18,7 +18,7 @@ from a13n_harness import (
 from a13n_harness.errors import RunError
 from a13n_harness.usage import UsageRecord
 from a13n_logging import get_logger
-from anyio import sleep_forever
+from anyio import fail_after, sleep, sleep_forever
 from pydantic_ai.capabilities import NodeResult
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
@@ -28,6 +28,7 @@ from pydantic_graph import End
 from a13n_service.agents.domain import EffectiveAgentConfig, PreparedAgentPlugins
 from a13n_service.observability import observe_phase, observe_phase_result
 from a13n_service.storage import ObjectStoreUnavailable
+from a13n_service.storage.relational import is_database_contention, is_database_unavailable
 
 if TYPE_CHECKING:
     from a13n_service.environments.mount_runtime import RunMountRuntime
@@ -35,8 +36,10 @@ if TYPE_CHECKING:
 from .attempts import (
     AttemptAuthorityError,
     AttemptContext,
+    AttemptDisposition,
     AttemptExecutionService,
     AttemptMutationReceipt,
+    AttemptOutcome,
     AttemptPreparationAccepted,
     AttemptPreparationRejected,
     AttemptPreparationResult,
@@ -49,13 +52,7 @@ from .harness_control import (
     HarnessHookBoundary,
     HarnessRunIdentity,
 )
-from .harness_results import (
-    AttemptCommitter,
-    AttemptDisposition,
-    AttemptOutcome,
-    HarnessOutcomeAdapter,
-    HarnessOutcomeProjection,
-)
+from .harness_results import AttemptCommitter, HarnessOutcomeAdapter, HarnessOutcomeProjection
 from .inbox_delivery import AdaptedThreadInboxEntry, incorporated_receipts, merge_receipts, retained_inbox_ids
 from .objects import RunStateStore, StaleStateWriter, StoredRunState
 from .state import (
@@ -145,6 +142,7 @@ class RunAttemptControl:
         self._driver: HarnessControlDriver | None = None
         self._cancel_executor: Callable[[], None] | None = None
         self._pre_execution_outcome: AttemptOutcome | None = None
+        self._yielded: AttemptMutationReceipt | None = None
         self._mounts: RunMountRuntime | None = None
 
     async def bind_environment_mounts(self, mounts: RunMountRuntime) -> None:
@@ -491,6 +489,17 @@ class RunAttemptControl:
                     if renew is None
                     else await renew(self._context)
                 )
+            except AttemptAuthorityError:
+                # A lost yield response can race the next renewal. Observe the exact
+                # old Attempt, not the mutable Run or its possible successor.
+                reason = self._gate.handoff_reason
+                if self._gate.phase is _CoordinatorPhase.handoff_ready and reason is not None:
+                    yielded = await self._execution.read_yielded(self._context, reason)
+                    if yielded is not None:
+                        self._finish_yield(yielded)
+                        return
+                self._context.lease.invalidate()
+                raise
             except BaseException:
                 self._context.lease.invalidate()
                 raise
@@ -559,16 +568,13 @@ class RunAttemptControl:
                 if reason is None:  # pragma: no cover - maintained by the private gate
                     raise RuntimeError("handoff-ready control is missing its reason")
                 try:
-                    async with self._authority_lock:
-                        if self._gate.phase is not _CoordinatorPhase.handoff_ready:
-                            raise AttemptAuthorityError("Attempt lost authority before yielding")
-                        mutation = await self._execution.yield_attempt(self._context, reason)
-                        self._context.lease.invalidate()
-                        self._gate.phase = _CoordinatorPhase.yielded
-                        return mutation
+                    return await self._yield_handoff(reason)
                 except AttemptAuthorityError:
-                    await self._fence()
-                    raise
+                    # A durable user cancellation may win after checkpoint confirmation.
+                    receipt = await committer.reconcile_cancelled(self._context)
+                    self._context.lease.invalidate()
+                    self._gate.phase = _CoordinatorPhase.terminal
+                    return receipt
             self._require_open()
             try:
                 if result.status == "cancelled":
@@ -602,6 +608,34 @@ class RunAttemptControl:
             except AttemptAuthorityError:
                 await self._fence()
                 raise
+
+    def _finish_yield(self, receipt: AttemptMutationReceipt) -> AttemptMutationReceipt:
+        self._yielded = receipt
+        self._context.lease.invalidate()
+        self._gate.phase = _CoordinatorPhase.yielded
+        return receipt
+
+    async def _yield_handoff(self, reason: RunAttemptYieldReason) -> AttemptMutationReceipt:
+        """Retry only the quiesced SQL decision, with renewal free to run between attempts."""
+        with fail_after(self._context.reconciliation_timeout.total_seconds()):
+            while True:
+                try:
+                    async with self._authority_lock:
+                        if self._yielded is not None:
+                            return self._yielded
+                        if self._gate.phase is not _CoordinatorPhase.handoff_ready:
+                            raise AttemptAuthorityError("Attempt lost authority before yielding")
+                        try:
+                            receipt = await self._execution.yield_attempt(self._context, reason)
+                        except AttemptAuthorityError:
+                            receipt = await self._execution.read_yielded(self._context, reason)
+                            if receipt is None:
+                                raise
+                        return self._finish_yield(receipt)
+                except Exception as error:
+                    if not (is_database_unavailable(error) or is_database_contention(error)):
+                        raise
+                await sleep(min(0.1, self._context.renewal_interval.total_seconds()))
 
     async def recover_outcome(self, committer: AttemptCommitter) -> AttemptOutcome | None:
         """Commit a saved candidate or continue its accepted pending input."""

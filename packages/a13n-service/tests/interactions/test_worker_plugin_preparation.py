@@ -1,6 +1,7 @@
 """Real Worker execution only starts after its plugin configuration is durable."""
 
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import Mock
 
 import pytest
@@ -71,7 +72,7 @@ async def test_worker_preserves_initial_input_and_uses_durable_plugin_defaults(
     failed_write = False
     failed_read = False
     put = interaction_object_store.put
-    stat = interaction_object_store.stat
+    open_object = interaction_object_store.open
 
     async def intercept_put(key, body, **kwargs):
         nonlocal failed_write
@@ -89,15 +90,17 @@ async def test_worker_preserves_initial_input_and_uses_durable_plugin_defaults(
                 raise ObjectStoreUnavailable("preparation response lost")
         return await put(key, body, **kwargs)
 
-    async def intercept_stat(*args, **kwargs):
+    @asynccontextmanager
+    async def intercept_open(*args, **kwargs):
         nonlocal failed_read
         if phase == "unconfirmed-write" and failed_write and not failed_read:
             failed_read = True
             raise ObjectStoreUnavailable("preparation reconciliation unavailable")
-        return await stat(*args, **kwargs)
+        async with open_object(*args, **kwargs) as reader:
+            yield reader
 
     monkeypatch.setattr(interaction_object_store, "put", intercept_put)
-    monkeypatch.setattr(interaction_object_store, "stat", intercept_stat)
+    monkeypatch.setattr(interaction_object_store, "open", intercept_open)
 
     class NewConfiguration(Configuration):
         limit: int = 60

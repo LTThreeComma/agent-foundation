@@ -233,12 +233,9 @@ class RunStateStore:
             # A lost response can follow a durable write. Never repeat a mutation
             # using its old token, or accept another writer's bytes as our receipt.
             try:
-                observed = await self._objects.stat(key)
                 actual, info = await _read_object(self._objects, key, max_bytes=self._max_encoded_bytes)
             except (ObjectNotFound, ObjectStoreUnavailable, TimeoutError) as read_error:
                 raise error from read_error
-            if info.version != observed.version:
-                raise StaleStateWriter("Run state changed during write reconciliation") from error
             if actual != body:
                 if info.version != if_match:
                     raise StaleStateWriter("Run state changed after an uncertain write") from error

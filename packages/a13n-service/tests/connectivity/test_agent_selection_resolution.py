@@ -79,19 +79,11 @@ async def test_agent_revision_and_invocation_use_connectivity_resolver(
         idempotency_key="create-selection-agent",
         request=CreateAgentRequest(name="Selection agent", config=config),
     )
-    retained = await invocation_resolver.preparation.prepare(
-        actor=actor(),
-        agent_id=created.agent.id,
-    )
-    async with transaction(connectivity_sessions) as session:
-        await invocation_resolver.freezing.freeze_in_transaction(session, prepared=retained)
-
     prepared = await invocation_resolver.preparation.prepare(
         actor=actor(),
         agent_id=created.agent.id,
     )
-    async with transaction(connectivity_sessions) as session:
-        frozen = await invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = invocation_resolver.freezing.freeze_selected(prepared=prepared)
 
     assert created.revision.connection_tools[0].connection_id == CONNECTOR_CONNECTION_ID
     assert frozen.connection_selections[0].tools == ("find_order",)

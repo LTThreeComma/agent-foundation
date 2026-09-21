@@ -25,9 +25,15 @@ from a13n_service.environments.websocket.coordination import ConnectionCoordinat
 from a13n_service.environments.websocket.worker_connections import WorkerClientConnections
 from a13n_service.gateway.queries import NativeInteractionQueries
 from a13n_service.interactions.attempt_executor import RunAttemptExecutor
-from a13n_service.interactions.attempts import AttemptContext, AttemptExecutionService, read_attempt_authority
+from a13n_service.interactions.attempts import (
+    AttemptContext,
+    AttemptDisposition,
+    AttemptExecutionService,
+    AttemptOutcome,
+    read_attempt_authority,
+)
 from a13n_service.interactions.control_wakeups import AttemptControlWakeups
-from a13n_service.interactions.harness_results import AttemptDisposition, AttemptOutcome, StoredHarnessOutcomeAdapter
+from a13n_service.interactions.harness_results import StoredHarnessOutcomeAdapter
 from a13n_service.interactions.harness_runtime import HarnessDriver
 from a13n_service.interactions.inbox import DatabaseThreadInboxReconciler, RedisThreadControlSignals, ThreadInboxStore
 from a13n_service.interactions.lease_renewals import LeaseRenewalBatcher
@@ -114,7 +120,6 @@ class WorkerAttempts:
         self._subagents = ServiceSubagents(
             shared.storage.sessions,
             self._states,
-            self._payloads,
             ThreadInboxStore(shared.storage.sessions, signals=self._signals),
             outcomes,
             lifecycle=shared.lifecycle,
@@ -134,7 +139,7 @@ class WorkerAttempts:
         # lease monitor before any dependency preparation or Harness construction.
         with fail_after(context.renewal_timeout.total_seconds()):
             async with short_session(sessions) as session:
-                row, attempt_row, _ = await read_attempt_authority(session, context, utc_now())
+                row, attempt_row, _ = await read_attempt_authority(session, context, utc_now)
                 run = row.to_resource()
                 attempt = attempt_row.to_resource()
                 owner = await session.get(SessionRecord, run.session_id)

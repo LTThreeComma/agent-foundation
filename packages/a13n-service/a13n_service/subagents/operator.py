@@ -22,7 +22,6 @@ from a13n_harness.capabilities import (
     SubagentWaitRequest,
     SubagentWaitResult,
 )
-from a13n_harness.usage import intersect_usage_limits
 from anyio import current_time, sleep
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,15 +39,12 @@ from .acceptance import ChildRunAcceptanceReceipt, ChildRunAcceptanceService
 from .admission import ChildRunAdmissionPreparer
 from .execution_store import (
     AttemptAuthoritySource,
-    RetainedChildExecution,
     SubagentExecutionStore,
     SubagentOperatorError,
     compact_execution_view,
-    execution_input,
     full_execution_view,
     is_resumable,
 )
-from .preparation import PreparedChildRunAcceptance, PreparedChildRunResume
 
 _ACTIVE_STATUSES = {RunStatus.accepted, RunStatus.running}
 _STEERABLE_STATUSES = {*_ACTIVE_STATUSES, RunStatus.waiting}
@@ -102,10 +98,8 @@ class DurableSubagentOperator(SubagentOperator):
         del tool_call
         authority = self._require_plan(plan, request.subagent_name)
         delegated_input = _delegated_input(plan)
-        admission = await self._admission_preparer.prepare_delegate(authority, plan, request, delegated_input)
-        prepared = admission.candidate
-        _validate_delegate_candidate(prepared, authority=authority, plan=plan, delegated_input=delegated_input)
-        receipt = await self._acceptance.accept(prepared, authority, parent_source=admission.parent)
+        prepared = await self._admission_preparer.prepare_delegate(authority, plan, delegated_input)
+        receipt = await self._acceptance.accept(prepared)
         return _accepted_view(
             receipt,
             child_definition_id=prepared.child_definition_id,
@@ -271,24 +265,8 @@ class DurableSubagentOperator(SubagentOperator):
                 "subagent_not_resumable",
                 "The retained subagent execution is not a selected completed child head",
             )
-        admission = await self._admission_preparer.prepare_resume(
-            authority,
-            source,
-            plan,
-            request,
-            delegated_input,
-        )
-        prepared = admission.candidate
-        _validate_resume_candidate(
-            prepared,
-            authority=authority,
-            source=source,
-            plan=plan,
-            delegated_input=delegated_input,
-        )
-        receipt = await self._acceptance.accept_resume(
-            prepared, authority, parent_source=admission.parent, source_state=admission.source_state
-        )
+        prepared = await self._admission_preparer.prepare_resume(authority, source, plan, delegated_input)
+        receipt = await self._acceptance.accept_resume(prepared)
         return _accepted_view(
             receipt,
             child_definition_id=prepared.child_definition_id,
@@ -304,51 +282,6 @@ class DurableSubagentOperator(SubagentOperator):
                 "Harness child plan identity is inconsistent",
             )
         return authority
-
-
-def _validate_delegate_candidate(
-    prepared: PreparedChildRunAcceptance,
-    *,
-    authority: AttemptContext,
-    plan: SubagentDelegationPlan,
-    delegated_input: str,
-) -> None:
-    if (
-        prepared.relationship.parent_run_id != authority.run_id
-        or prepared.relationship.subagent_name != plan.child.declaration.name
-        or prepared.run.parent_agent_instance_id != plan.parent.parent_agent_instance_id
-        or execution_input(prepared.run) != delegated_input
-        or prepared.child_definition_id != plan.child.definition.definition_id
-        or intersect_usage_limits(prepared.state.usage_limits, plan.usage_limits) != prepared.state.usage_limits
-    ):
-        raise SubagentOperatorError(
-            "subagent_admission_candidate_invalid",
-            "Prepared child admission does not match the Harness plan",
-        )
-
-
-def _validate_resume_candidate(
-    prepared: PreparedChildRunResume,
-    *,
-    authority: AttemptContext,
-    source: RetainedChildExecution,
-    plan: SubagentDelegationPlan,
-    delegated_input: str,
-) -> None:
-    if (
-        prepared.resumed_from_relationship_id != source.relationship.id
-        or prepared.resumed_from_child_run_id != source.run.id
-        or prepared.relationship.parent_run_id != authority.run_id
-        or prepared.relationship.subagent_name != plan.child.declaration.name
-        or prepared.run.parent_agent_instance_id != plan.parent.parent_agent_instance_id
-        or execution_input(prepared.run) != delegated_input
-        or prepared.child_definition_id != source.child_definition_id
-        or intersect_usage_limits(prepared.state.usage_limits, plan.usage_limits) != prepared.state.usage_limits
-    ):
-        raise SubagentOperatorError(
-            "subagent_resume_candidate_invalid",
-            "Prepared child continuation does not match the Harness plan",
-        )
 
 
 def _accepted_view(

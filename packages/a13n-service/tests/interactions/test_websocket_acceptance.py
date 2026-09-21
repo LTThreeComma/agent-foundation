@@ -213,25 +213,29 @@ async def test_expired_commit_evidence_rolls_back_all_relational_effects_before_
     original = coordination.observe
     observations = 0
     attempts = 0
+    clock = monotonic()
+    deadline = clock
+    monkeypatch.setattr("a13n_service.environments.websocket.admission.monotonic", lambda: clock)
 
     async def observe(*target):
-        nonlocal observations
+        nonlocal observations, deadline
         observations += 1
         assert interaction_sessions.kw["bind"].sync_engine.pool.checkedout() == 0
-        result = await original(*target)
-        # The first response has spent most of its grant horizon in transit.
-        return replace(result, request_started_at=result.request_started_at - 1.8) if observations == 1 else result
+        result = replace(await original(*target), request_started_at=clock)
+        deadline = result.deadline().monotonic_at
+        return result
 
     async def accept(database, online):
-        nonlocal attempts
+        nonlocal attempts, clock
         attempts += 1
         row = await database.get(EnvironmentRecord, environment.id, with_for_update=True)
         assert row.labels == {}
         online.require(ORGANIZATION_ID, environment.id)
         row.labels = {"acceptance": str(attempts)}
         if attempts == 2:
-            # Slow SQL may consume the remaining horizon even without external I/O.
-            await database.execute(text("SELECT pg_sleep(0.25)"))
+            # Expire evidence after the write but before final validation without
+            # depending on scheduler speed. The real SQL transaction must roll back.
+            clock = deadline + 0.001
         return attempts
 
     monkeypatch.setattr(coordination, "observe", observe)

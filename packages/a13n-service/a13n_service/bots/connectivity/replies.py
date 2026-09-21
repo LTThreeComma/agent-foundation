@@ -126,7 +126,7 @@ class BotReplyObserver:
         identity = new_object_id("brr")
         context = self._context
         async with transaction(self._sessions) as database:
-            run, _, _ = await read_attempt_authority(database, self._attempt, now)
+            run, _, _ = await read_attempt_authority(database, self._attempt, self._clock)
             account = await require_account(database, context.account_id)
             if (
                 context not in parse_native_contexts(run.native_tool_contexts_json)
@@ -228,7 +228,7 @@ class ReplyObservations:
 
     async def has_reply(self, *, attempt: AttemptContext, context: InboundRunContext) -> bool:
         async with short_session(self.sessions) as session:
-            await read_attempt_authority(session, attempt, utc_now())
+            await read_attempt_authority(session, attempt, utc_now)
             return (
                 await session.scalar(
                     select(BotReplyRecord.id)

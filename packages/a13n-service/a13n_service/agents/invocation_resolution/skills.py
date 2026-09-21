@@ -19,14 +19,9 @@ from ..errors import (
     agent_revision_not_executable,
 )
 from ..skill_resolution import (
-    PreparedSkillLock,
     SkillSelectionInvalid,
-    freeze_skill_locks,
-    prepare_skill_locks_from_bindings,
-    prepare_skill_locks_from_selections,
-)
-from .contracts import (
-    PreparedAgentInvocation,
+    resolve_skill_locks_from_bindings,
+    resolve_skill_locks_from_selections,
 )
 
 
@@ -38,7 +33,8 @@ async def prepare_skills(
     workspace_id: str,
     selections: tuple[SkillSelection, ...],
     retained: tuple[ResolvedSkillBinding, ...] | None,
-) -> tuple[PreparedSkillLock, ...]:
+    lock: bool = False,
+) -> tuple[SkillRevisionLock, ...]:
     if not selections:
         return ()
     await authorize_workspace(
@@ -53,17 +49,19 @@ async def prepare_skills(
                 (item.skill_key, item.version) for item in selections
             ):
                 raise SkillSelectionInvalid
-            return await prepare_skill_locks_from_bindings(
+            return await resolve_skill_locks_from_bindings(
                 session,
                 organization_id=organization_id,
                 workspace_id=workspace_id,
                 bindings=retained,
+                lock=lock,
             )
-        return await prepare_skill_locks_from_selections(
+        return await resolve_skill_locks_from_selections(
             session,
             organization_id=organization_id,
             workspace_id=workspace_id,
             selections=selections,
+            lock=lock,
         )
     except SkillSelectionInvalid as error:
         raise agent_revision_not_executable("skill_selection_invalid") from error
@@ -79,46 +77,17 @@ async def validate_retained_skills(
     """Check a successor's retained selections once, without locking configuration."""
 
     # A successor retains exact versions even when the source selected current.
-    prepared = tuple(
-        PreparedSkillLock(
-            binding=ResolvedSkillBinding(skill_id=lock.skill_id, skill_key=lock.skill_key, version=lock.version),
-            revision_id=lock.skill_revision_id,
-            revision_version=lock.version,
-            content_digest=lock.content_digest,
-        )
-        for lock in locks
-    )
     try:
-        observed = await prepare_skill_locks_from_bindings(
+        observed = await resolve_skill_locks_from_bindings(
             session,
             organization_id=organization_id,
             workspace_id=workspace_id,
-            bindings=tuple(item.binding for item in prepared),
+            bindings=tuple(
+                ResolvedSkillBinding(skill_id=item.skill_id, skill_key=item.skill_key, version=item.version)
+                for item in locks
+            ),
         )
-        if observed != prepared:
+        if observed != locks:
             raise SkillSelectionInvalid
-    except SkillSelectionInvalid as error:
-        raise agent_revision_not_executable("skill_selection_invalid") from error
-
-
-async def freeze_skills(
-    session: AsyncSession,
-    prepared: PreparedAgentInvocation,
-) -> tuple[SkillRevisionLock, ...]:
-    if not prepared.skills:
-        return ()
-    await authorize_workspace(
-        session,
-        actor=prepared.actor,
-        workspace_id=prepared.workspace_id,
-        action=WorkspaceAction.skill_read,
-    )
-    try:
-        return await freeze_skill_locks(
-            session,
-            organization_id=prepared.organization_id,
-            workspace_id=prepared.workspace_id,
-            prepared=prepared.skills,
-        )
     except SkillSelectionInvalid as error:
         raise agent_revision_not_executable("skill_selection_invalid") from error

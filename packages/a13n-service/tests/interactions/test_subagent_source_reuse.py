@@ -19,7 +19,6 @@ from a13n_service.subagents import (
     AsyncSubagentSuccessorReconciler,
     ChildRunAcceptanceError,
 )
-from a13n_service.subagents.execution_store import SubagentOperatorError
 from a13n_service.subagents.models import ChildRunRelationshipRecord
 from a13n_service.subagents.result_payload import read_async_subagent_result_authority
 from sqlalchemy import delete, func, select
@@ -104,14 +103,14 @@ async def test_resume_revalidates_observed_child_at_commit(
 
         monkeypatch.setattr(states, "create", advance_after_publication)
     else:
-        prepare = operator._admission_preparer.prepare_resume
+        read_run = states.read_run
 
-        async def corrupt_observed_digest(*args, **kwargs):
-            admission = await prepare(*args, **kwargs)
-            # The sealed database row is immutable; a forwarded object must still match its digest.
-            return replace(admission, source_state=replace(admission.source_state, digest_sha256="f" * 64))
+        async def mismatched_observation(run):
+            stored = await read_run(run)
+            # SQL keeps sealed rows immutable. The object observation must agree with that reference at commit.
+            return replace(stored, digest_sha256="f" * 64) if run.id == delegated.child_run_id else stored
 
-        monkeypatch.setattr(operator._admission_preparer, "prepare_resume", corrupt_observed_digest)
+        monkeypatch.setattr(states, "read_run", mismatched_observation)
     with pytest.raises(ChildRunAcceptanceError) as error:
         await operator.resume(_plan(context), AsyncResumeRequest(execution_id=delegated.execution_id, prompt="next"))
     assert error.value.code == (
@@ -122,29 +121,6 @@ async def test_resume_revalidates_observed_child_at_commit(
         assert await database.scalar(select(func.count()).select_from(RunRecord)) == 2
         thread = await database.get(ThreadRecord, delegated.thread_id)
         assert thread.current_run_id == delegated.child_run_id
-
-
-@pytest.mark.parametrize("mismatch", ["attempt", "thread"])
-async def test_forwarded_parent_observation_cannot_change_scope(
-    interaction_sessions, interaction_object_store, monkeypatch, mismatch
-):
-    operator, _, plan, _, _, _ = await _operator(interaction_sessions, interaction_object_store)
-    prepare = operator._admission_preparer.prepare_delegate
-
-    async def retarget(*args, **kwargs):
-        admission = await prepare(*args, **kwargs)
-        parent = admission.parent
-        if mismatch == "attempt":
-            parent = replace(parent, authority=replace(parent.authority, attempt_number=99))
-        else:
-            parent = replace(parent, thread=parent.thread.model_copy(update={"id": "thread-other"}))
-        return replace(admission, parent=parent)
-
-    monkeypatch.setattr(operator._admission_preparer, "prepare_delegate", retarget)
-    with pytest.raises(SubagentOperatorError, match="changed scope"):
-        await operator.delegate(plan, AsyncDelegateRequest(subagent_name="researcher", prompt="research"))
-    async with short_session(interaction_sessions) as database:
-        assert await database.scalar(select(func.count()).select_from(ChildRunRelationshipRecord)) == 0
 
 
 @pytest.mark.parametrize("mutation", ["relationship", "grants"])

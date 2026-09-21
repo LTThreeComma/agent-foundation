@@ -128,7 +128,7 @@ class ExternalToolRuntime:
         child_agent_id: str | None = None,
         accepted: AttemptToolScope | None = None,
     ) -> AttemptToolScope:
-        run, _, _ = await read_attempt_authority(session, context, utc_now())
+        run, _, _ = await read_attempt_authority(session, context, utc_now)
         conversation = await session.get(SessionRecord, run.session_id)
         if conversation is None:
             raise ValueError("run_session_unavailable")

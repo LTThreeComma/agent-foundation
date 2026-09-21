@@ -7,9 +7,8 @@ from a13n_service.hooks.domain import InlineHookSubscriptionInput, WebhookDestin
 from a13n_service.hooks.models import HookSubscriptionRecord
 from a13n_service.hooks.persistence import create_inline_hook_subscription
 from a13n_service.iam.models import UserRecord
-from a13n_service.interactions.attempts import AttemptExecutionService
+from a13n_service.interactions.attempts import AttemptDisposition, AttemptExecutionService
 from a13n_service.interactions.control_models import QueuedSubmissionRecord
-from a13n_service.interactions.harness_results import AttemptDisposition
 from a13n_service.interactions.inbox import ThreadInboxStore
 from a13n_service.interactions.inline_hooks import InlineHookAcceptance
 from a13n_service.interactions.models import RunAttemptRecord, RunRecord, ThreadRecord

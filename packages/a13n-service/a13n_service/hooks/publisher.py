@@ -11,7 +11,7 @@ import httpx2
 from a13n_harness.providers.endpoint_policy import EndpointPolicyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.durable_operations.http_delivery import (
     DeliveryFailure,
     http_failure,
@@ -46,7 +46,6 @@ class WebhookPublisher:
         endpoint_validator: EndpointValidator,
         secret_protector: SecretProtector,
         *,
-        poll_interval_seconds: float = 1,
         lease_seconds: float = 30,
         claim_limit: int = 25,
         max_attempts: int = 10,
@@ -56,8 +55,8 @@ class WebhookPublisher:
         max_response_bytes: int = 64 * 1024,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if poll_interval_seconds <= 0 or lease_seconds <= 0:
-            raise ValueError("Webhook polling and lease durations must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("Webhook lease duration must be positive")
         if claim_limit < 1 or claim_limit > 100 or max_attempts < 1:
             raise ValueError("Webhook claim and attempt bounds are invalid")
         if retry_base_seconds <= 0 or retry_max_seconds < retry_base_seconds:
@@ -68,7 +67,6 @@ class WebhookPublisher:
         self._http_client = http_client
         self._endpoint_validator = endpoint_validator
         self._secret_protector = secret_protector
-        self._poll_interval_seconds = poll_interval_seconds
         self._lease_duration = timedelta(seconds=lease_seconds)
         self._claim_limit = claim_limit
         self._max_attempts = max_attempts
@@ -77,20 +75,18 @@ class WebhookPublisher:
         self._delivery_timeout_seconds = delivery_timeout_seconds
         self._max_response_bytes = max_response_bytes
         self._clock = clock or utc_now
+        self._draining = False
 
-    async def run(self) -> None:
-        await PeriodicTask(
-            "webhook_publication",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=self._lease_duration.total_seconds() + self._delivery_timeout_seconds + 1,
-        ).run()
+    def drain(self) -> None:
+        self._draining = True
 
     async def publish_once(self) -> int:
         return (await self.scan()).examined
 
     async def scan(self) -> Sweep:
         async with transaction(self._sessions) as database:
+            if self._draining:
+                return Sweep()
             claims = await claim_webhook_deliveries(
                 database,
                 now=self._now(),
@@ -104,6 +100,7 @@ class WebhookPublisher:
             timeout_seconds=self._lease_duration.total_seconds() + self._delivery_timeout_seconds,
             concurrency=self._claim_limit,
             clock=self._now,
+            is_draining=lambda: self._draining,
         )
 
     async def _publish_claim(self, claim: OutboxClaim) -> None:
@@ -112,7 +109,7 @@ class WebhookPublisher:
         except WebhookMaterialError as error:
             await self._settle_failure(claim, DeliveryFailure(error.error_code, retryable=False))
             return
-        if material is None:
+        if material is None or self._draining:
             return
         failure = await self._deliver(material)
         if failure is None:

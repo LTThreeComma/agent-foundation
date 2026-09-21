@@ -21,6 +21,6 @@ class CurrentSkillAttempt:
     async def require_current(self) -> None:
         try:
             async with short_session(self.sessions) as session:
-                await read_attempt_authority(session, self.current_context(), self.clock())
+                await read_attempt_authority(session, self.current_context(), self.clock)
         except AttemptAuthorityError as error:
             raise SkillMaterializationStale("The Skill's owning Attempt is no longer current.") from error

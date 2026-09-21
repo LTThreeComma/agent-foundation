@@ -44,7 +44,6 @@ from .control_domain import (
     QueuedSubmissionFailure,
     RunAcceptanceReceipt,
 )
-from .control_models import QueuedSubmissionRecord
 from .domain import (
     Run,
     RunInputKind,
@@ -373,20 +372,6 @@ class RunAcceptanceService:
         """Atomically consume the first queue row and accept its prepared Run."""
 
         validate_prepared_run(run, state)
-        replay = await self._load_replay(run)
-        if replay is not None:
-            consumed = await self._validate_queue_replay(
-                run=run,
-                queued_submission_id=queued.queued_submission_id,
-                submission_digest_sha256=queued.submission_digest_sha256,
-            )
-            publish_run_acceptance(replay.run_id)
-            return QueuedSubmissionConsumptionReceipt(
-                outcome="run_accepted",
-                queued_submission=consumed.to_resource(),
-                queue_version=expected_queue_version + 1,
-                run=replay,
-            )
         if session_scope is None:
             session_scope = await self._observe_session(run)
         # Reuse the detached intent; the final locked queue check verifies its digest.
@@ -476,8 +461,6 @@ class RunAcceptanceService:
                 now=now,
             )
             await self._lifecycle.append_accepted_run_lifecycle(database, run_record_value)
-            if consumed.consumed_run_id != run.id:
-                raise RuntimeError("queue consumption lost its accepted Run correlation")
             receipt = QueuedSubmissionConsumptionReceipt(
                 outcome="run_accepted",
                 queued_submission=consumed.to_resource(),
@@ -498,24 +481,7 @@ class RunAcceptanceService:
 
         try:
             receipt = await self._online.commit(accept)
-        except (IntegrityError, EvidenceAlreadyCommitted, EnvironmentManagementError, RunAcceptanceError) as error:
-            replay = await self._load_replay(run)
-            if replay is not None:
-                consumed = await self._validate_queue_replay(
-                    run=run,
-                    queued_submission_id=queued.queued_submission_id,
-                    submission_digest_sha256=queued.submission_digest_sha256,
-                )
-                receipt = QueuedSubmissionConsumptionReceipt(
-                    outcome="run_accepted",
-                    queued_submission=consumed.to_resource(),
-                    queue_version=expected_queue_version + 1,
-                    run=replay,
-                )
-                publish_run_acceptance(replay.run_id)
-                return receipt
-            if not isinstance(error, (IntegrityError, EvidenceAlreadyCommitted)):
-                raise
+        except (IntegrityError, EvidenceAlreadyCommitted) as error:
             raise RunAcceptanceError(
                 "run_acceptance_conflict", "Queue consumption lost a concurrent mutation"
             ) from error
@@ -667,32 +633,6 @@ class RunAcceptanceService:
         if not isinstance(error, (IntegrityError, EvidenceAlreadyCommitted)):
             raise error
         raise RunAcceptanceError("run_acceptance_conflict", "Run acceptance lost a concurrent mutation") from error
-
-    async def _validate_queue_replay(
-        self,
-        *,
-        run: Run,
-        queued_submission_id: str,
-        submission_digest_sha256: str,
-    ) -> QueuedSubmissionRecord:
-        async with short_session(self._sessions) as database:
-            queued = await database.scalar(
-                select(QueuedSubmissionRecord).where(
-                    QueuedSubmissionRecord.organization_id == run.organization_id,
-                    QueuedSubmissionRecord.id == queued_submission_id,
-                )
-            )
-            if (
-                queued is None
-                or queued.thread_id != run.thread_id
-                or queued.submission_digest_sha256 != submission_digest_sha256
-                or queued.consumed_run_id != run.id
-            ):
-                raise RunAcceptanceError(
-                    "queue_consumption_replay_conflict",
-                    "Accepted Run does not match the queued-submission replay",
-                )
-            return queued
 
 
 async def validate_session_scope(database: AsyncSession, run: Run, scope: SessionScope) -> None:

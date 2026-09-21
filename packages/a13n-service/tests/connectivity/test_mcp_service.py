@@ -10,7 +10,7 @@ import pytest
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from a13n_service.application_errors import ErrorCategory
 from a13n_service.connectivity.connections.access import ConnectionError
-from a13n_service.connectivity.connections.domain import CreateConnectionRequest, MCPSource, UpdateConnectionRequest
+from a13n_service.connectivity.connections.domain import CreateConnectionRequest, MCPSource
 from a13n_service.connectivity.mcp.discovery import MCPDiscoveryService
 from a13n_service.connectivity.mcp.domain import (
     ConfigureMCPOAuthClientRequest,
@@ -231,7 +231,6 @@ async def service_bundle(connectivity_sessions, credential_protector):
         )
         connections = MCPConnectionService(
             connectivity_sessions,
-            policy,
             credential_protector,
             discovery,
             registration_cleaner=oauth_client,
@@ -295,8 +294,8 @@ async def test_bearer_connection_is_pending_until_credentials_then_becomes_ready
 
 
 @pytest.mark.anyio
-async def test_management_tool_preview_rechecks_version_and_authority(
-    mcp_services, connectivity_sessions, monkeypatch
+async def test_management_tool_preview_rejects_stale_version_and_revoked_authority_before_io(
+    mcp_services, connectivity_sessions
 ) -> None:
     connections, _oauth, remote = mcp_services
     remote.allow_anonymous = True
@@ -310,37 +309,16 @@ async def test_management_tool_preview_rechecks_version_and_authority(
     )
     tools = await connections.discover_tools(actor=actor(), connection_id=created.id, expected_version=1)
     assert [tool.name for tool in tools.items] == ["search"]
-    original = connections._discovery.discover
-
-    async def changed_during_discovery(connection_id, **kwargs):
-        result = await original(connection_id, **kwargs)
-        await management(connections).update(
-            actor=actor(),
-            connection_id=connection_id,
-            request=UpdateConnectionRequest(name="Changed", expected_version=1),
-        )
-        return result
-
-    monkeypatch.setattr(connections._discovery, "discover", changed_during_discovery)
-    with pytest.raises(MCPConnectionError, match="changed concurrently"):
-        await connections.discover_tools(actor=actor(), connection_id=created.id, expected_version=1)
-
-    async def revoked_during_discovery(connection_id, **kwargs):
-        result = await original(connection_id, **kwargs)
-        async with transaction(connectivity_sessions) as session:
-            await session.execute(
-                update(RoleBindingRecord)
-                .where(RoleBindingRecord.id == "rb_connectivity_admin")
-                .values(role_key="viewer")
-            )
-        return result
-
-    monkeypatch.setattr(connections._discovery, "discover", revoked_during_discovery)
-    with pytest.raises(MCPConnectionError):
-        await connections.discover_tools(actor=actor(), connection_id=created.id, expected_version=2)
     count = len(remote.requests)
-    with pytest.raises(MCPConnectionError):
+    with pytest.raises(MCPConnectionError, match="changed concurrently"):
         await connections.discover_tools(actor=actor(), connection_id=created.id, expected_version=2)
+    assert len(remote.requests) == count
+    async with transaction(connectivity_sessions) as session:
+        await session.execute(
+            update(RoleBindingRecord).where(RoleBindingRecord.id == "rb_connectivity_admin").values(role_key="viewer")
+        )
+    with pytest.raises(MCPConnectionError):
+        await connections.discover_tools(actor=actor(), connection_id=created.id, expected_version=1)
     assert len(remote.requests) == count
 
 

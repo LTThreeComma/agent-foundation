@@ -230,14 +230,14 @@ class DatabaseThreadInboxReconciler:
         authority: AttemptContext,
         state: StoredRunState,
     ) -> AttemptMutationReceipt:
-        now = assume_utc(self._clock())
         async with transaction(self._sessions) as database:
             run, attempt, thread = await lock_attempt_authority(
                 database,
                 authority,
-                now,
+                self._clock,
                 lock_inbox_origins=True,
             )
+            now = assume_utc(self._clock())
             await reconcile_checkpoint(database, thread=thread, run=run, state=state, now=now)
             return AttemptMutationReceipt(
                 run_version=run.version,
@@ -250,7 +250,6 @@ class DatabaseThreadInboxReconciler:
         authority: AttemptContext,
         config: EffectiveAgentConfig,
     ) -> Sequence[AdaptedThreadInboxEntry]:
-        now = assume_utc(self._clock())
         async with short_session(self._sessions) as database:
             has_pending = await database.scalar(
                 select(
@@ -264,10 +263,11 @@ class DatabaseThreadInboxReconciler:
                 )
             )
             if not has_pending:
-                await read_attempt_authority(database, authority, now, load_execution_state=False)
+                await read_attempt_authority(database, authority, self._clock, load_execution_state=False)
                 return ()
         async with transaction(self._sessions) as database:
-            run, _, thread = await lock_attempt_authority(database, authority, now, lock_inbox_origins=True)
+            run, _, thread = await lock_attempt_authority(database, authority, self._clock, lock_inbox_origins=True)
+            now = assume_utc(self._clock())
             pending = tuple(
                 (
                     await database.scalars(

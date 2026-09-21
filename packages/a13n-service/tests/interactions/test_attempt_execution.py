@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -15,6 +16,7 @@ from a13n_service.interactions.acceptance import RunAcceptanceService
 from a13n_service.interactions.attempts import (
     AttemptAuthorityError,
     AttemptContext,
+    AttemptDisposition,
     AttemptExecutionService,
     AttemptLease,
     AttemptPreparationAccepted,
@@ -39,7 +41,6 @@ from a13n_service.interactions.domain import (
     ThreadRole,
 )
 from a13n_service.interactions.environment_selection import EnvironmentDefault, ExplicitEnvironment
-from a13n_service.interactions.harness_results import AttemptDisposition
 from a13n_service.interactions.initialization import RunStateSeed, initialize_start_state
 from a13n_service.interactions.models import RunAttemptRecord, RunRecord, ThreadRecord
 from a13n_service.interactions.objects import RunObjectIntegrityError, RunPayloadStore, RunStateStore
@@ -445,6 +446,94 @@ async def test_skill_failure_recovery_respects_budget_and_fencing(
         assert current.failure_json["code"] == failure_code
 
 
+@pytest.mark.parametrize("successor_action", ["claim", "fail", "cancel"])
+async def test_failure_receipt_is_its_committed_decision_not_a_later_successor(
+    interaction_sessions, interaction_object_store, monkeypatch, successor_action
+):
+    sessions = interaction_sessions
+    _, run, _ = await _accept_root(sessions, interaction_object_store, max_attempts=2)
+    now = NOW + timedelta(seconds=1)
+    scheduler = AttemptScheduler(sessions, clock=lambda: now, lifecycle=test_lifecycle_writer())
+    execution = AttemptExecutionService(sessions, clock=lambda: now, lifecycle=test_lifecycle_writer())
+    outcomes = RunOutcomeService(
+        sessions, RunPayloadStore(interaction_object_store), clock=lambda: now, lifecycle=test_lifecycle_writer()
+    )
+    committer = DatabaseAttemptCommitter(sessions, outcomes, execution)
+    claim = await scheduler.claim(run.id, _worker())
+    assert isinstance(claim, ClaimedAttempt)
+    fail = execution.fail
+    committed = []
+
+    async def advance_before_return(*args, **kwargs):
+        nonlocal now
+        receipt = await fail(*args, **kwargs)
+        committed.append(receipt)
+        now += timedelta(seconds=2)
+        successor = await scheduler.claim(run.id, _worker(worker_id="successor"))
+        assert isinstance(successor, ClaimedAttempt)
+        if successor_action == "fail":
+            await fail(_authority(successor), SafeFailure(code="failed", message="Failed"), retryable=False)
+        elif successor_action == "cancel":
+            await outcomes.cancel(
+                organization_id=run.organization_id,
+                run_id=run.id,
+                expected_run_version=successor.run_version,
+                expected_thread_version=1,
+                failure=SafeFailure(code="cancelled", message="Cancelled"),
+            )
+        return receipt
+
+    monkeypatch.setattr(execution, "fail", advance_before_return)
+    receipt = await committer.commit_failure(_authority(claim), SafeFailure(code="timeout", message="Timed out"))
+
+    assert receipt == committed[0]
+    assert receipt.disposition is AttemptDisposition.retrying
+    assert receipt.thread_version is None
+    async with short_session(sessions) as database:
+        current = await database.get(RunRecord, run.id)
+        assert current is not None
+        assert current.version > receipt.run_version
+        assert current.status == {"claim": "running", "fail": "failed", "cancel": "cancelled"}[successor_action]
+
+
+async def test_cancellation_reconciliation_requires_the_scoped_durable_decision(
+    interaction_sessions, interaction_object_store
+):
+    sessions = interaction_sessions
+    _, run, _ = await _accept_root(sessions, interaction_object_store)
+    scheduler = AttemptScheduler(sessions, clock=lambda: NOW + timedelta(seconds=1), lifecycle=test_lifecycle_writer())
+    execution = AttemptExecutionService(sessions, lifecycle=test_lifecycle_writer())
+    outcomes = RunOutcomeService(
+        sessions,
+        RunPayloadStore(interaction_object_store),
+        clock=lambda: NOW + timedelta(seconds=2),
+        lifecycle=test_lifecycle_writer(),
+    )
+    committer = DatabaseAttemptCommitter(sessions, outcomes, execution)
+    claim = await scheduler.claim(run.id, _worker())
+    assert isinstance(claim, ClaimedAttempt)
+    authority = _authority(claim)
+    with pytest.raises(AttemptAuthorityError, match="does not prove"):
+        await committer.reconcile_cancelled(authority)
+    cancelled = await outcomes.cancel(
+        organization_id=run.organization_id,
+        run_id=run.id,
+        expected_run_version=claim.run_version,
+        expected_thread_version=1,
+        failure=SafeFailure(code="cancelled", message="Cancelled"),
+    )
+    receipt = await committer.reconcile_cancelled(authority)
+    assert receipt.disposition is AttemptDisposition.cancelled
+    assert (receipt.run_version, receipt.attempt_version, receipt.thread_version) == (
+        cancelled.run_version,
+        cancelled.attempt_version,
+        cancelled.thread_version,
+    )
+    for field in ("organization_id", "run_id", "run_attempt_id", "thread_id"):
+        with pytest.raises(AttemptAuthorityError, match="does not prove"):
+            await committer.reconcile_cancelled(replace(authority, **{field: "other"}))
+
+
 async def test_zero_execution_budget_seals_without_creating_an_attempt(
     interaction_sessions: async_sessionmaker[AsyncSession],
     interaction_object_store: ObjectStore,
@@ -577,9 +666,14 @@ async def test_yield_prefers_a_different_build_without_consuming_execution_budge
     )
     first = await scheduler.claim(run.id, _worker())
     assert isinstance(first, ClaimedAttempt)
-    await AttemptExecutionService(
+    execution = AttemptExecutionService(
         interaction_sessions, clock=lambda: NOW + timedelta(seconds=2), lifecycle=test_lifecycle_writer()
-    ).yield_attempt(_authority(first), reason=RunAttemptYieldReason.service_drain)
+    )
+    authority = _authority(first)
+    reason = RunAttemptYieldReason.service_drain
+    assert await execution.read_yielded(authority, reason) is None
+    yielded = await execution.yield_attempt(authority, reason=reason)
+    assert await execution.read_yielded(authority, reason) == yielded
 
     same_build = AttemptScheduler(
         interaction_sessions, clock=lambda: NOW + timedelta(seconds=3), lifecycle=test_lifecycle_writer()
@@ -598,6 +692,20 @@ async def test_yield_prefers_a_different_build_without_consuming_execution_budge
     assert isinstance(second, ClaimedAttempt)
     assert second.attempt.start_reason == "planned_handoff"
     assert second.attempt.replaces_run_attempt_id is None
+    # Reconciliation follows the immutable old Attempt even after a new owner exists.
+    observed = await execution.read_yielded(authority, reason)
+    assert observed is not None and observed.attempt_version == yielded.attempt_version
+    for changed in (
+        {"lease_token": "wrong-token"},
+        {"worker_id": "another-worker"},
+        {"worker_build_id": "another-build"},
+        {"attempt_number": 99},
+        {"thread_id": "thr_ffffffffffffffff"},
+    ):
+        assert await execution.read_yielded(replace(authority, **changed), reason) is None
+    assert await execution.read_yielded(_authority(second), reason) is None
+    with pytest.raises(AttemptAuthorityError):
+        await execution.yield_attempt(authority, reason)
     async with short_session(interaction_sessions) as database:
         current = await database.get(RunRecord, run.id)
         assert current is not None

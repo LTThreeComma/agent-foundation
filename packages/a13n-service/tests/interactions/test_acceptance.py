@@ -64,7 +64,7 @@ def _accepted_run(
     *,
     run_id: str,
     thread_id: str,
-    idempotency_key: str,
+    idempotency_key: str | None,
     config: EffectiveAgentConfig | None = None,
 ) -> Run:
     config = config or effective_agent_config()

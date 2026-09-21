@@ -26,7 +26,7 @@ from a13n_service.interactions.domain import Run, RunStatus, Thread
 from a13n_service.interactions.input import AcceptedAgentInput, TextContent
 from a13n_service.interactions.models import RunRecord, SessionRecord, ThreadRecord
 from a13n_service.storage import short_session
-from a13n_service.temporal import Clock, assume_utc, utc_now
+from a13n_service.temporal import Clock, utc_now
 
 from .authorization import ChildRunAuthorizationError, authorize_parent_child_action
 from .domain import ChildRunRelationship
@@ -134,7 +134,7 @@ class SubagentExecutionStore:
         authority = self.require_context(context)
         query_offset = 0 if execution_id is not None else offset
         async with short_session(self._sessions) as database:
-            parent, _, _ = await read_attempt_authority(database, authority, assume_utc(self._clock()))
+            parent, _, _ = await read_attempt_authority(database, authority, self._clock)
             session = await _require_session(database, parent)
             origin_parent = aliased(RunRecord)
             filters = [

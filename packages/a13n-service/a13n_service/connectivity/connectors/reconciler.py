@@ -16,7 +16,7 @@ from sqlalchemy import and_, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.application_errors import ErrorCategory
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.connectivity.connections.domain import ConnectionStatus, ConnectionStatusReason
 from a13n_service.storage import short_session, transaction
 from a13n_service.temporal import Clock, assume_utc, utc_now
@@ -36,7 +36,6 @@ class ConnectorReconciler:
         setup: ConnectorSetupCoordinator,
         *,
         instance_id: str,
-        poll_interval_seconds: float,
         lease_seconds: int,
         clock: Clock = utc_now,
     ) -> None:
@@ -45,17 +44,8 @@ class ConnectorReconciler:
         self._connector_http = connector_http
         self._setup = setup
         self._instance_id = instance_id
-        self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._clock = clock
-
-    async def run(self) -> None:
-        await PeriodicTask(
-            "connector_setup_reconciliation",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=self._lease_seconds,
-        ).run()
 
     async def scan(self) -> Sweep:
         if await self._expire_attempt():

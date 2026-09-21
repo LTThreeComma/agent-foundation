@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
+from a13n_harness import AgentDefinition, AgentIdentityRef, HarnessBuilder, SubagentDefinition
+from a13n_harness.builder import DelegationContextPolicy
+from a13n_harness.capabilities import ResolvedDelegationContext, SubagentDelegationPlan, SubagentOperatorContext
+from a13n_harness.context import BuiltSubagent
 from a13n_service.agents.domain import (
     ChildAgentExecution,
     ChildEnvironmentPolicy,
-    EffectiveAgentConfig,
     PreparedAgentPlugins,
     ResolvedSubagentEdge,
 )
@@ -18,7 +22,11 @@ from a13n_service.connectivity.selection_domain import (
 from a13n_service.digests import digest_request
 from a13n_service.iam.models import RoleBindingRecord, UserRecord
 from a13n_service.interactions.acceptance import RunAcceptanceService
-from a13n_service.interactions.attempts import AttemptExecutionService, AttemptPreparationAccepted
+from a13n_service.interactions.attempts import (
+    AttemptAuthorityError,
+    AttemptExecutionService,
+    AttemptPreparationAccepted,
+)
 from a13n_service.interactions.domain import Run, Session, Thread, ThreadOriginKind, ThreadRole
 from a13n_service.interactions.initialization import RunStateSeed, initialize_start_state
 from a13n_service.interactions.models import RunRecord, ThreadRecord
@@ -31,10 +39,12 @@ from a13n_service.subagents import (
     ChildCancellationPolicy,
     ChildRunAcceptanceError,
     ChildRunAcceptanceService,
-    prepare_child_resume,
-    prepare_child_run,
+    ChildRunAdmissionPreparer,
+    RetainedChildExecution,
 )
 from a13n_service.subagents.models import ChildRunRelationshipRecord
+from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.models.test import TestModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -116,58 +126,24 @@ async def test_child_acceptance_is_fenced_atomic_and_non_idempotent(
         running_parent = parent_record.to_resource()
 
     assert running_parent.native_tool_contexts
-    child_config = effective_agent_config()
-    first = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        child_config,
-        suffix="3",
-        connection_selections=(CONNECTOR_SELECTION, MCP_SELECTION),
-    )
+    first = await _prepared_child(interaction_sessions, states, authority, suffix="3")
     service = ChildRunAcceptanceService(
         interaction_sessions,
         states,
-        RunPayloadStore(interaction_object_store),
         bindings=ordinary_memory(interaction_sessions),
         clock=lambda: NOW + timedelta(seconds=3),
         lifecycle=test_lifecycle_writer(),
     )
 
-    altered_config = child_config.model_copy(update={"instructions": "Changed after parent acceptance"})
-    altered_config = altered_config.model_copy(
-        update={
-            "content_digest": digest_request(
-                altered_config.model_dump(mode="json", by_alias=True, exclude={"content_digest"}),
-            )
-        }
-    )
-    altered = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        altered_config,
-        suffix="9",
-        connection_selections=(CONNECTOR_SELECTION, MCP_SELECTION),
-    )
-    with pytest.raises(ChildRunAcceptanceError, match="accepted execution snapshot"):
-        await service.accept(altered, authority)
+    selected = parent_state.effective_agent_config.child_configs[CHILD_REVISION_ID]
+    assert first.state.effective_agent_config == selected.effective_config
+    assert first.state.prepared_plugins == parent_state.prepared_plugins.children[CHILD_REVISION_ID]
 
-    accepted = await service.accept(first, authority)
+    accepted = await service.accept(first)
     with pytest.raises(ChildRunAcceptanceError, match="already contains accepted state"):
-        await service.accept(first, authority)
-    second = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        child_config,
-        suffix="4",
-        connection_selections=(CONNECTOR_SELECTION, MCP_SELECTION),
-    )
-    second_accepted = await service.accept(second, authority)
+        await service.accept(first)
+    second = await _prepared_child(interaction_sessions, states, authority, suffix="4")
+    second_accepted = await service.accept(second)
 
     assert second_accepted.relationship.id != accepted.relationship.id
     assert second_accepted.child_run_id != accepted.child_run_id
@@ -213,7 +189,7 @@ async def test_child_acceptance_rejects_stale_fence_before_publishing_state(
     interaction_object_store: ObjectStore,
 ) -> None:
     await _grant_and_seed_child(interaction_sessions)
-    states, parent, parent_state = await _accept_parent(interaction_sessions, interaction_object_store)
+    states, parent, _ = await _accept_parent(interaction_sessions, interaction_object_store)
     scheduler = AttemptScheduler(
         interaction_sessions,
         clock=lambda: NOW + timedelta(seconds=1),
@@ -224,31 +200,13 @@ async def test_child_acceptance_rejects_stale_fence_before_publishing_state(
     claim = await scheduler.claim(parent.id, _worker())
     assert claim is not None
     authority = _authority(claim)
-    async with short_session(interaction_sessions) as database:
-        parent_record = await database.get(RunRecord, parent.id)
-        assert parent_record is not None
-        running_parent = parent_record.to_resource()
-    prepared = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number + 1,
-        effective_agent_config(),
-        suffix="6",
-    )
-
-    with pytest.raises(ChildRunAcceptanceError, match="parent authority changed"):
-        await ChildRunAcceptanceService(
-            interaction_sessions,
-            states,
-            RunPayloadStore(interaction_object_store),
-            bindings=ordinary_memory(interaction_sessions),
-            clock=lambda: NOW + timedelta(seconds=2),
-            lifecycle=test_lifecycle_writer(),
-        ).accept(prepared, authority)
+    with pytest.raises(AttemptAuthorityError):
+        await _prepared_child(
+            interaction_sessions, states, replace(authority, attempt_number=authority.attempt_number + 1), suffix="6"
+        )
 
     with pytest.raises(ObjectNotFound):
-        await states.read(ORGANIZATION_ID, prepared.run.id)
+        await states.read(ORGANIZATION_ID, "run_6666666666666666")
 
 
 async def test_child_acceptance_reauthorizes_persisted_parent_principal(
@@ -256,7 +214,7 @@ async def test_child_acceptance_reauthorizes_persisted_parent_principal(
     interaction_object_store: ObjectStore,
 ) -> None:
     await _grant_and_seed_child(interaction_sessions)
-    states, parent, parent_state = await _accept_parent(interaction_sessions, interaction_object_store)
+    states, parent, _ = await _accept_parent(interaction_sessions, interaction_object_store)
     scheduler = AttemptScheduler(
         interaction_sessions,
         clock=lambda: NOW + timedelta(seconds=1),
@@ -267,22 +225,10 @@ async def test_child_acceptance_reauthorizes_persisted_parent_principal(
     claim = await scheduler.claim(parent.id, _worker())
     assert claim is not None
     authority = _authority(claim)
-    async with short_session(interaction_sessions) as database:
-        parent_record = await database.get(RunRecord, parent.id)
-        assert parent_record is not None
-        running_parent = parent_record.to_resource()
-    prepared = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        effective_agent_config(),
-        suffix="8",
-    )
+    prepared = await _prepared_child(interaction_sessions, states, authority, suffix="8")
     service = ChildRunAcceptanceService(
         interaction_sessions,
         states,
-        RunPayloadStore(interaction_object_store),
         bindings=ordinary_memory(interaction_sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
@@ -293,7 +239,7 @@ async def test_child_acceptance_reauthorizes_persisted_parent_principal(
         await database.delete(binding)
 
     with pytest.raises(ChildRunAcceptanceError, match="no longer authorized"):
-        await service.accept(prepared, authority)
+        await service.accept(prepared)
 
     with pytest.raises(ObjectNotFound):
         await states.read(ORGANIZATION_ID, prepared.run.id)
@@ -304,7 +250,7 @@ async def test_concurrent_child_acceptance_keeps_distinct_relationships_on_postg
 ) -> None:
     sessions = interaction_sessions
     await _grant_and_seed_child(sessions)
-    states, parent, parent_state = await _accept_parent(sessions, interaction_object_store)
+    states, parent, _ = await _accept_parent(sessions, interaction_object_store)
     scheduler = AttemptScheduler(
         sessions,
         clock=lambda: NOW + timedelta(seconds=1),
@@ -315,32 +261,16 @@ async def test_concurrent_child_acceptance_keeps_distinct_relationships_on_postg
     claim = await scheduler.claim(parent.id, _worker())
     assert claim is not None
     authority = _authority(claim)
-    async with short_session(sessions) as database:
-        parent_record = await database.get(RunRecord, parent.id)
-        assert parent_record is not None
-        running_parent = parent_record.to_resource()
-    child_config = effective_agent_config()
-    candidates = tuple(
-        _prepared_child(
-            running_parent,
-            parent_state,
-            authority.run_attempt_id,
-            authority.attempt_number,
-            child_config,
-            suffix=suffix,
-        )
-        for suffix in ("a", "b")
-    )
+    candidates = [await _prepared_child(sessions, states, authority, suffix=suffix) for suffix in ("a", "b")]
     service = ChildRunAcceptanceService(
         sessions,
         states,
-        RunPayloadStore(interaction_object_store),
         bindings=ordinary_memory(sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
     )
 
-    receipts = await asyncio.gather(*(service.accept(candidate, authority) for candidate in candidates))
+    receipts = await asyncio.gather(*(service.accept(candidate) for candidate in candidates))
 
     assert receipts[0].relationship.id != receipts[1].relationship.id
     async with short_session(sessions) as database:
@@ -356,7 +286,7 @@ async def test_completed_child_can_resume_as_linked_continuation(
     interaction_object_store: ObjectStore,
 ) -> None:
     await _grant_and_seed_child(interaction_sessions)
-    states, parent, parent_state = await _accept_parent(
+    states, parent, _ = await _accept_parent(
         interaction_sessions,
         interaction_object_store,
         connection_selections=(CONNECTOR_SELECTION, MCP_SELECTION),
@@ -374,25 +304,15 @@ async def test_completed_child_can_resume_as_linked_continuation(
         parent_record = await database.get(RunRecord, parent.id)
         assert parent_record is not None
         running_parent = parent_record.to_resource()
-    child_config = effective_agent_config()
-    first = _prepared_child(
-        running_parent,
-        parent_state,
-        parent_authority.run_attempt_id,
-        parent_authority.attempt_number,
-        child_config,
-        suffix="d",
-        connection_selections=(CONNECTOR_SELECTION, MCP_SELECTION),
-    )
+    first = await _prepared_child(interaction_sessions, states, parent_authority, suffix="d")
     service = ChildRunAcceptanceService(
         interaction_sessions,
         states,
-        RunPayloadStore(interaction_object_store),
         bindings=ordinary_memory(interaction_sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
     )
-    accepted = await service.accept(first, parent_authority)
+    accepted = await service.accept(first)
     child_claim = await AttemptScheduler(
         interaction_sessions,
         clock=lambda: NOW + timedelta(seconds=3),
@@ -416,26 +336,36 @@ async def test_completed_child_can_resume_as_linked_continuation(
         source_thread = source_thread_record.to_resource()
         source_relationship = source_relationship_record.to_resource()
 
-    resumed = prepare_child_resume(
-        parent_run=running_parent,
-        parent_state=parent_state,
-        parent_run_attempt_id=parent_authority.run_attempt_id,
-        parent_run_attempt_fence=parent_authority.attempt_number,
-        parent_agent_instance_id="agent-parent",
-        subagent_name="researcher",
-        delegated_input='{"delegated_task":"continue"}',
-        child_definition_id=CHILD_DEFINITION_ID,
-        source_relationship=source_relationship,
-        source_parent_run=running_parent,
-        source_thread=source_thread,
-        source_run=completed_child,
-        source_state=source_state.envelope,
-        child_run_id="run_eeeeeeeeeeeeeeee",
-        relationship_id="crr_eeeeeeeeeeeeeeee",
-        created_at=NOW + timedelta(seconds=5),
+    resumed = await ChildRunAdmissionPreparer(
+        interaction_sessions,
+        states,
+        run_id_factory=lambda: "run_eeeeeeeeeeeeeeee",
+        relationship_id_factory=lambda: "crr_eeeeeeeeeeeeeeee",
+        clock=lambda: NOW + timedelta(seconds=5),
+    ).prepare_resume(
+        parent_authority,
+        RetainedChildExecution(
+            relationship=source_relationship,
+            parent_run=running_parent,
+            thread=source_thread,
+            run=completed_child,
+            resumed_from_relationship_id=None,
+            child_definition_id=CHILD_DEFINITION_ID,
+            segment_index=0,
+            input='{"delegated_task":"research"}',
+        ),
+        _plan(
+            SubagentOperatorContext(
+                parent_thread_id=parent.thread_id,
+                parent_run_id=parent.id,
+                parent_agent_instance_id="agent-parent",
+                host_refs={},
+            )
+        ),
+        '{"delegated_task":"continue"}',
     )
 
-    receipt = await service.accept_resume(resumed, parent_authority)
+    receipt = await service.accept_resume(resumed)
 
     assert receipt.child_thread_id == source_thread.id
     assert receipt.child_run_id == resumed.run.id
@@ -502,36 +432,61 @@ async def _complete_run(
         return row.to_resource()
 
 
-def _prepared_child(
-    parent: Run,
-    parent_state,
-    attempt_id: str,
-    attempt_number: int,
-    child_config: EffectiveAgentConfig,
+async def _prepared_child(
+    sessions,
+    states,
+    authority,
     *,
     suffix: str,
     cancellation_policy: ChildCancellationPolicy = ChildCancellationPolicy.independent,
-    connection_selections: tuple[ConnectionRunSelection, ...] = (),
 ):
-    return prepare_child_run(
-        parent_run=parent,
-        parent_state=parent_state,
-        parent_run_attempt_id=attempt_id,
-        parent_run_attempt_fence=attempt_number,
-        parent_agent_instance_id="agent-parent",
-        subagent_name="researcher",
-        delegated_input='{"delegated_task":"research"}',
-        child_definition_id=CHILD_DEFINITION_ID,
-        child_agent_id=CHILD_AGENT_ID,
-        child_agent_revision_id=CHILD_REVISION_ID,
-        child_effective_config=child_config,
-        connection_selections=connection_selections,
-        child_thread_id=f"thread-{suffix * 32}",
-        child_run_id=f"run_{suffix * 16}",
-        relationship_id=f"crr_{suffix * 16}",
-        execution_budget=parent.execution_budget,
-        created_at=NOW + timedelta(seconds=2),
-        cancellation_policy=cancellation_policy,
+    prepared = await ChildRunAdmissionPreparer(
+        sessions,
+        states,
+        thread_id_factory=lambda: f"thread-{suffix * 32}",
+        run_id_factory=lambda: f"run_{suffix * 16}",
+        relationship_id_factory=lambda: f"crr_{suffix * 16}",
+        clock=lambda: NOW + timedelta(seconds=2),
+    ).prepare_delegate(
+        authority,
+        _plan(
+            SubagentOperatorContext(
+                parent_thread_id=authority.thread_id,
+                parent_run_id=authority.run_id,
+                parent_agent_instance_id="agent-parent",
+                host_refs={},
+            )
+        ),
+        '{"delegated_task":"research"}',
+    )
+    return replace(
+        prepared, relationship=prepared.relationship.model_copy(update={"cancellation_policy": cancellation_policy})
+    )
+
+
+def _plan(
+    context: SubagentOperatorContext,
+    *,
+    delegated_input: str = '{"delegated_task":"research"}',
+    child_definition_id: str = CHILD_DEFINITION_ID,
+) -> SubagentDelegationPlan:
+    child = AgentDefinition(
+        agent=AgentSpec(),
+        output_type=str,
+        definition_id=child_definition_id,
+        model=TestModel(),
+    )
+    executable = HarnessBuilder().build(child)
+    declaration = SubagentDefinition(name="researcher", description="Research", agent=child)
+    return SubagentDelegationPlan(
+        child=BuiltSubagent(declaration=declaration, definition=child, executable=executable),
+        child_identity=AgentIdentityRef(issuer="a13n.service", subject="child"),
+        context=ResolvedDelegationContext(
+            input=delegated_input,
+            policy=DelegationContextPolicy(),
+        ),
+        usage_limits=None,
+        parent=context,
     )
 
 

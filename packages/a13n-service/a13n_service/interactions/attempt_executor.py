@@ -26,10 +26,11 @@ from .attempts import (
     AttemptAuthorityError,
     AttemptContext,
     AttemptMutationReceipt,
+    AttemptOutcome,
     AttemptPreparationAccepted,
     AttemptPreparationRejected,
 )
-from .harness_results import AttemptCommitter, AttemptOutcome, HarnessOutcomeAdapter
+from .harness_results import AttemptCommitter, HarnessOutcomeAdapter
 from .harness_runtime import HarnessDriver, HarnessInvocation
 from .lease_renewals import LeaseRenewalBatcher
 from .run_control import RunAttemptControl

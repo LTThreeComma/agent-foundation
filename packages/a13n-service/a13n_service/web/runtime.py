@@ -228,7 +228,7 @@ class WebRuntime:
         self._require_invocation(tool_id)
         try:
             async with short_session(self._sessions) as session:
-                run, _, _ = await read_attempt_authority(session, current_context(), self._clock())
+                run, _, _ = await read_attempt_authority(session, current_context(), self._clock)
                 self._verify_run(expected, run)
                 await self._authorize_selected_agents(session, expected, workspace_id, agent_id, current_context)
         except (AttemptAuthorityError, AuthorizationError) as error:
@@ -255,7 +255,7 @@ class WebRuntime:
     ) -> WebProviderSnapshot:
         try:
             async with short_session(self._sessions) as session:
-                run, _, _ = await read_attempt_authority(session, current_context(), self._clock())
+                run, _, _ = await read_attempt_authority(session, current_context(), self._clock)
                 self._verify_run(expected, run)
                 await self._authorize_selected_agents(session, expected, workspace_id, agent_id, current_context)
                 provider = await require_provider(

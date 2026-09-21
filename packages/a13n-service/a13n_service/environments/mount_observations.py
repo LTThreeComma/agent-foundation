@@ -31,7 +31,7 @@ class RunMountObservations:
         now = assume_utc(self._clock())
         attempt.lease.require_current(now)
         async with transaction(self._sessions) as session:
-            await lock_attempt_authority(session, attempt, now)
+            await lock_attempt_authority(session, attempt, self._clock)
             rows = await session.scalars(
                 select(RunEnvironmentMountRecord)
                 .where(
@@ -73,7 +73,7 @@ class RunMountObservations:
         from a13n_service.interactions.attempts import lock_attempt_authority
 
         attempt.lease.require_current(now)
-        await lock_attempt_authority(session, attempt, now)
+        await lock_attempt_authority(session, attempt, self._clock)
         if mount.run_id != attempt.run_id:
             raise ValueError("Mount does not belong to this Attempt's Run")
         row = await session.get(RunEnvironmentMountRecord, (mount.run_id, mount.name), with_for_update=True)

@@ -152,7 +152,7 @@ class DockerImageTestWorker:
             except Exception:
                 logger.warning("docker_image_test_invalid_queue_entry")
                 continue
-            if not await self._valid(request):
+            if not await self._valid(request) or self.draining:
                 continue
             self.current = asyncio.create_task(self._execute(request))
             try:
@@ -160,8 +160,11 @@ class DockerImageTestWorker:
             finally:
                 self.current = None
 
-    async def shutdown(self) -> None:
+    def drain(self) -> None:
         self.draining = True
+
+    async def shutdown(self) -> None:
+        self.drain()
         if self.current is not None:
             self.current.cancel()
             await asyncio.gather(self.current, return_exceptions=True)
@@ -246,7 +249,7 @@ class DockerConnectivityProbe:
                 logger.exception("docker_connectivity_probe_failed")
             await asyncio.sleep(_PROBE_INTERVAL)
 
-    async def shutdown(self) -> None:
+    def drain(self) -> None:
         self.draining = True
 
     async def probe_connectivity(self) -> None:
@@ -260,6 +263,8 @@ class DockerConnectivityProbe:
                 )
             )
         for provider_id, docker_host in providers:
+            if self.draining:
+                return
             client = None
             try:
                 client = await asyncio.to_thread(DockerSDKEngine.connect, docker_host, timeout_seconds=3)

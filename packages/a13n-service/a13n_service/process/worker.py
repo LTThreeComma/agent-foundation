@@ -237,7 +237,6 @@ async def build_worker_runtime(
         external_tools=external_tools,
         native_model_factory=execution.native_model_factory,
         skill_runtime=skills,
-        environment_maintenance=environment_maintenance,
         environments=environments,
         run_stream=run_stream,
         run_display=run_display,
@@ -250,7 +249,11 @@ async def build_worker_runtime(
         await execution_loop.wait_stopped()
 
     execution_task = BackgroundTask(
-        "RunAttempt execution", execution_loop.run, execution_loop.is_draining, shutdown_execution
+        "RunAttempt execution",
+        execution_loop.run,
+        execution_loop.is_draining,
+        shutdown_execution,
+        drain=execution_loop.begin_drain,
     )
     image_test_tasks: tuple[BackgroundTask, ...] = ()
     if image_test_worker is not None:
@@ -260,13 +263,14 @@ async def build_worker_runtime(
                 name="docker_connectivity_probe",
                 run=docker_connectivity.run,
                 return_is_expected=lambda: docker_connectivity.draining,
-                shutdown=docker_connectivity.shutdown,
+                drain=docker_connectivity.drain,
             ),
             BackgroundTask(
                 name="docker_image_tests",
                 run=image_test_worker.run,
                 return_is_expected=lambda: image_test_worker.draining,
                 shutdown=image_test_worker.shutdown,
+                drain=image_test_worker.drain,
             ),
         )
     organization_tasks: tuple[BackgroundTask, ...] = ()
@@ -280,6 +284,7 @@ async def build_worker_runtime(
                 organizer.run,
                 organizer.is_draining,
                 partial(organizer.shutdown, timeout_seconds=125),
+                drain=organizer.drain,
             ),
         )
     background_tasks = [
@@ -293,6 +298,7 @@ async def build_worker_runtime(
             shutdown=partial(
                 environment_maintenance.shutdown, timeout_seconds=settings.environments.operation_timeout_seconds
             ),
+            drain=environment_maintenance.drain,
         ),
         BackgroundTask("lifecycle Run Stream projector", lifecycle_projector.run),
         BackgroundTask(
@@ -306,6 +312,7 @@ async def build_worker_runtime(
                 client_connections.run,
                 client_connections.is_closed,
                 client_connections.close,
+                drain=client_connections.stop_admission,
             )
         )
     return runtime, tuple(background_tasks)

@@ -2,7 +2,7 @@ import pytest
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.memory.builtins import MEM0_OSS
 from a13n_service.agents.application import AgentManagement
-from a13n_service.agents.domain import AgentConfig, AgentRunOverride, CreateAgentRequest
+from a13n_service.agents.domain import AgentConfig, AgentRunOverride, CreateAgentRequest, SetDefaultAgentRevisionRequest
 from a13n_service.agents.errors import AgentError
 from a13n_service.agents.invocation import merge_agent_run_override
 from a13n_service.agents.invocation_resolution import AgentInvocationResolver
@@ -14,7 +14,6 @@ from a13n_service.memory.resources import MemoryProviderError
 from a13n_service.memory.runtime import graph_uses_memory
 from a13n_service.models.providers import built_in_model_provider_catalog
 from a13n_service.models.runtime import AcceptedModelSelector
-from a13n_service.storage import transaction
 
 from tests.models.conftest import protector
 
@@ -74,8 +73,7 @@ async def test_memory_selection_survives_authoring_and_freezing(agent_sessions, 
         request=CreateAgentRequest(name="Memory", config=config),
     )
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
     assert created.revision.config.memory == frozen.effective_config.memory == selection
     assert frozen.effective_config.toolsets["web"] == config.toolsets["web"]
     _reconstruct(frozen.effective_config)
@@ -126,8 +124,7 @@ async def test_provider_selection_is_frozen_but_eligibility_is_rechecked(agent_s
         request=CreateAgentRequest(name="Frozen memory", config=config),
     )
     prepared = await invocations.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await invocations.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = invocations.freezing.freeze_selected(prepared=prepared)
     updated = await providers.update(
         actor=actor(),
         workspace_id=WORKSPACE_ID,
@@ -138,8 +135,14 @@ async def test_provider_selection_is_frozen_but_eligibility_is_rechecked(agent_s
     assert frozen.effective_config.memory.provider_id == provider.id
     assert "rotated-secret" not in frozen.effective_config.model_dump_json()
     with pytest.raises(MemoryProviderError) as disabled:
-        async with transaction(agent_sessions) as session:
-            await invocations.freezing.freeze_in_transaction(session, prepared=prepared)
+        await management.revisions.set_default_revision(
+            actor=actor(),
+            agent_id=created.agent.id,
+            revision_id=created.revision.id,
+            idempotency_key="disabled-memory-default",
+            request=SetDefaultAgentRevisionRequest(),
+            if_match=resource_etag(created.agent.id, created.agent.updated_at),
+        )
     assert disabled.value.code == "memory_provider_disabled"
     references = await providers.references(actor=actor(), workspace_id=WORKSPACE_ID, provider_id=updated.id)
     assert [item.agent_revision_id for item in references.items] == [created.revision.id]

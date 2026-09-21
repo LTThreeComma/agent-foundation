@@ -27,7 +27,7 @@ from .test_websocket_use_authorization import client_environment as client_envir
 pytestmark = pytest.mark.anyio
 
 
-async def test_queue_admission_waits_for_online_at_consumption_and_retains_original_replay(
+async def test_queue_acceptance_requires_online_and_retains_consumption_after_disconnect(
     interaction_sessions, interaction_object_store, client_environment, relay_redis
 ):
     _, _, environment = client_environment
@@ -60,7 +60,7 @@ async def test_queue_admission_waits_for_online_at_consumption_and_retains_origi
     run = _accepted_run(
         run_id=state.run_id,
         thread_id=source.thread_id,
-        idempotency_key="consume-client",
+        idempotency_key=None,
         config=config,
     ).model_copy(update={"input": accepted_input.model_dump(mode="json", by_alias=True, exclude_none=True)})
     coordination = ConnectionCoordination(relay_redis)
@@ -108,4 +108,12 @@ async def test_queue_admission_waits_for_online_at_consumption_and_retains_origi
         assert accepted.environment_id == environment.id
         assert accepted.environment_working_directory == "/queued"
     await coordination.retire(connection)
-    assert await consume() == receipt
+    # Replay belongs to QueueCommands, covered by the gateway consumption tests.
+    # Losing the live connection cannot undo the accepted business facts.
+    retained = await queue.get(
+        organization_id=ORGANIZATION_ID, queued_submission_id=queued.queued_submission.queued_submission_id
+    )
+    assert retained == receipt.queued_submission
+    async with short_session(interaction_sessions) as database:
+        thread = await database.get(ThreadRecord, source.thread_id)
+        assert (thread.version, thread.queue_version, thread.current_run_id) == (3, 2, run.id)

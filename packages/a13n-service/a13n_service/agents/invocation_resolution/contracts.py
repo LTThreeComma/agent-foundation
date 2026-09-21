@@ -7,26 +7,17 @@ from enum import StrEnum
 
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
 
-from a13n_service.agent_configuration.context import ConfigurationRunContext
 from a13n_service.connectivity.selection_domain import (
     ConnectionRunSelection,
 )
-from a13n_service.connectivity.selection_resolution import (
-    PreparedConnectivity,
-)
-from a13n_service.iam import (
-    AuthenticatedActor,
-)
 from a13n_service.models.runtime import PreparedModelExecution
+from a13n_service.skills.domain import SkillRevisionLock
 
 from ..domain import (
     EffectiveAgentConfig,
     ResolvedSubagentEdge,
 )
 from ..invocation import MergedAgentRunConfig
-from ..skill_resolution import (
-    PreparedSkillLock,
-)
 
 
 class AgentSelectorKind(StrEnum):
@@ -38,7 +29,6 @@ class AgentSelectorKind(StrEnum):
 class RootAgentStatePolicy(StrEnum):
     invocable = "invocable"
     disabled_allowed = "disabled_allowed"
-    archived_allowed = "archived_allowed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,32 +39,18 @@ class PreparedChildInvocation:
 
 @dataclass(frozen=True, slots=True)
 class PreparedAgentInvocation:
-    root_state_policy: RootAgentStatePolicy
-    actor: AuthenticatedActor
     organization_id: str
-    workspace_id: str
     agent_id: str
     agent_revision_id: str | None
     selector_kind: AgentSelectorKind
-    expected_default_revision_id: str | None
     revision_content_digest: str | None
     merged: MergedAgentRunConfig
     model: PreparedModelExecution
-    skills: tuple[PreparedSkillLock, ...]
+    skills: tuple[SkillRevisionLock, ...]
     subagents: tuple[PreparedChildInvocation, ...]
-    connectivity: PreparedConnectivity
+    connectivity: tuple[ConnectionRunSelection, ...]
     media_models: dict[NativeInputMediaKind, PreparedModelExecution] = field(default_factory=dict)
     reviewer_model: PreparedModelExecution | None = None
-    configuration_context: ConfigurationRunContext | None = None
-
-    def __post_init__(self) -> None:
-        protected = self.configuration_context is not None
-        if protected != (self.selector_kind is AgentSelectorKind.configuration):
-            raise ValueError("Only protected configuration invocation can omit an AgentRevision")
-        if (protected and (self.agent_revision_id is not None or self.revision_content_digest is not None)) or (
-            not protected and (self.agent_revision_id is None or self.revision_content_digest is None)
-        ):
-            raise ValueError("Invocation source and Revision identity disagree")
 
 
 @dataclass(frozen=True, slots=True)

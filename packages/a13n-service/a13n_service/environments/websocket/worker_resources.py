@@ -33,11 +33,10 @@ class ClientUseResources:
     async def admit(
         self, attempt: AttemptContext, environment_id: str, *, mount_name: str = "workspace"
     ) -> ClientUseTarget:
-        now = utc_now()
         attempt.authorization.require_environment(environment_id)
         async with transaction(self._sessions) as session:
             binding, row, provider = await lock_run_environment_use(
-                session, environment_id, attempt, self._capacity, now, mount_name=mount_name
+                session, environment_id, attempt, self._capacity, utc_now, mount_name=mount_name
             )
             if (
                 provider.type != WEBSOCKET_PROVIDER_KEY
@@ -51,7 +50,7 @@ class ClientUseResources:
             state = EnvironmentState.model_validate(row.state)
             decode_state(WEBSOCKET_PROVIDER_KEY, state)
             await self._capacity.admit(session, row)
-            mark_run_environment_use(binding, row, now)
+            mark_run_environment_use(binding, row, utc_now())
             return ClientUseTarget(
                 state=state,
                 generation=row.generation,

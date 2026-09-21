@@ -161,7 +161,7 @@ class AssetRuntime:
         self, session: AsyncSession, authority: AttemptContext, selection: PublicationSelection, *, lock: bool
     ) -> AuthenticatedActor:
         run, attempt, _ = await (lock_attempt_authority if lock else read_attempt_authority)(
-            session, authority, self._clock()
+            session, authority, self._clock
         )
         owner = await session.get(SessionRecord, run.session_id)
         revision = await session.get(AgentRevisionRecord, selection.agent_revision_id)

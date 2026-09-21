@@ -7,7 +7,7 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from a13n_service.background import PeriodicTask, Sweep
+from a13n_service.background import Sweep
 from a13n_service.durable_operations.outbox import OutboxClaim, claim_outbox, complete_outbox, fail_outbox
 from a13n_service.durable_operations.publication import dispatch_outbox_batch
 from a13n_service.storage import transaction
@@ -24,25 +24,19 @@ class AssetCleanupReconciler:
         sessions: async_sessionmaker[AsyncSession],
         objects: AssetObjectStore,
         *,
-        poll_interval_seconds: float = 5,
         lease_seconds: float = 30,
         max_attempts: int = 10,
         clock: Clock | None = None,
     ) -> None:
         self._sessions = sessions
         self._objects = objects
-        self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_attempts = max_attempts
         self._clock = clock or utc_now
+        self._draining = False
 
-    async def run(self) -> None:
-        await PeriodicTask(
-            "asset_content_cleanup",
-            self.scan,
-            interval_seconds=self._poll_interval_seconds,
-            timeout_seconds=(self._lease_seconds + 1) * 25,
-        ).run()
+    def drain(self) -> None:
+        self._draining = True
 
     async def reconcile_once(self, *, limit: int = 25) -> int:
         return (await self.scan(limit=limit)).examined
@@ -56,10 +50,13 @@ class AssetCleanupReconciler:
             timeout_seconds=self._lease_seconds,
             concurrency=1,
             clock=self._clock,
+            is_draining=lambda: self._draining,
         )
 
     async def _publish_claim(self, claim: OutboxClaim) -> None:
         owner = await self._load_owner(claim.source_id)
+        if self._draining:
+            return
         if owner is None:
             await self._finish(claim, error_code="asset_cleanup_source_missing")
             return
@@ -78,6 +75,8 @@ class AssetCleanupReconciler:
     async def _claim(self, *, limit: int) -> tuple[OutboxClaim, ...]:
         now = self._clock()
         async with transaction(self._sessions) as session:
+            if self._draining:
+                return ()
             return await claim_outbox(
                 session,
                 source_kind="asset",

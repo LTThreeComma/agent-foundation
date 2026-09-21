@@ -29,7 +29,6 @@ from a13n_service.temporal import Clock, next_updated_at, utc_now
 from .domain import (
     Agent,
     AgentRevisionCreateResult,
-    AgentSource,
     CreateAgentRequest,
     UpdateAgentRequest,
     new_agent_id,
@@ -39,7 +38,7 @@ from .errors import (
     agent_not_found,
     map_authorization_error,
 )
-from .invocation_resolution import AgentInvocationResolver, PreparedAgentInvocation, RootAgentStatePolicy
+from .invocation_resolution import AgentInvocationResolver, RootAgentStatePolicy
 from .models import AgentRecord
 from .persistence import (
     apply_lifecycle_transition,
@@ -55,7 +54,6 @@ from .persistence import (
     touch_agent,
 )
 from .publication import create_agent
-from .queries import AgentQueries
 from .resolution import AgentResolver, resolution_error
 
 
@@ -65,14 +63,12 @@ class AgentCommands:
         sessions: async_sessionmaker[AsyncSession],
         resolver: AgentResolver,
         invocation_resolver: AgentInvocationResolver,
-        queries: AgentQueries,
         *,
         clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
         self._resolver = resolver
         self._invocation_resolver = invocation_resolver
-        self._queries = queries
         self._clock = clock
 
     async def create(
@@ -107,43 +103,16 @@ class AgentCommands:
                 )
                 if replay_ref is not None:
                     return await created_agent_result(session, replay_ref)
-                organization_id = workspace.organization_id
-        except AuthorizationError as error:
-            raise map_authorization_error(error) from error
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                config=request.config,
-                creation=True,
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-        try:
-            async with transaction(self._sessions) as session:
-                workspace = await authorize_workspace(
-                    session,
-                    actor=actor,
-                    workspace_id=workspace_id,
-                    action=WorkspaceAction.agent_create,
-                )
-                replay_ref = await find_by_key(
-                    session,
-                    AgentRecord,
-                    entity_key(
-                        actor,
-                        operation="agent.create",
-                        scope_id=workspace_id,
-                        key_digest=identity.key_digest,
-                        workspace_id=workspace_id,
-                    ),
-                )
-                if replay_ref is not None:
-                    return await created_agent_result(session, replay_ref)
                 try:
-                    resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                    resolved = await self._resolver.resolve(
+                        session,
+                        actor=actor,
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                        config=request.config,
+                        creation=True,
+                    )
                 except Exception as error:
                     raise resolution_error(error) from error
                 record, revision = await create_agent(
@@ -298,39 +267,6 @@ class AgentCommands:
     ) -> Agent:
         operation = f"agent.{action}"
         identity = request_identity(idempotency_key)
-        replay = await self._agent_command_replay(
-            actor=actor,
-            agent_id=agent_id,
-            operation=operation,
-            identity=identity,
-            action=WorkspaceAction.agent_lifecycle,
-        )
-        if replay is not None:
-            return replay
-        prepared_lifecycle: PreparedAgentInvocation | None = None
-        if action in {"enable", "unarchive"}:
-            current = await self._queries.get(actor=actor, agent_id=agent_id)
-            if action == "enable" and (current.archived_at is not None or current.enabled):
-                raise AgentError(
-                    "agent_state_conflict",
-                    "The Agent cannot be enabled from its current state.",
-                    category=ErrorCategory.conflict,
-                )
-            if action == "unarchive" and (current.archived_at is None or current.source is not AgentSource.custom):
-                raise AgentError(
-                    "agent_state_conflict",
-                    "The Agent cannot be unarchived from its current state.",
-                    category=ErrorCategory.conflict,
-                )
-            prepared_lifecycle = await self._invocation_resolver.preparation.prepare(
-                actor=actor,
-                agent_id=agent_id,
-                root_state_policy=(
-                    RootAgentStatePolicy.archived_allowed
-                    if action == "unarchive"
-                    else RootAgentStatePolicy.disabled_allowed
-                ),
-            )
         now = self._clock()
         try:
             async with transaction(self._sessions) as session:
@@ -348,10 +284,12 @@ class AgentCommands:
                     return record.to_resource()
                 require_etag(record, if_match)
                 apply_lifecycle_transition(record, action=action, now=now)
-                if prepared_lifecycle is not None:
-                    await self._invocation_resolver.freezing.freeze_in_transaction(
+                if action in {"enable", "unarchive"}:
+                    await self._invocation_resolver.validate(
                         session,
-                        prepared=prepared_lifecycle,
+                        actor=actor,
+                        agent_id=agent_id,
+                        root_state_policy=RootAgentStatePolicy.disabled_allowed,
                     )
                 if action == "disable":
                     await require_not_in_use(session, record)

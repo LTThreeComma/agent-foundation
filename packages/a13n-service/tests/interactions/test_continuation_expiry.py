@@ -6,9 +6,8 @@ import pytest
 from a13n_harness import AgentDefinition, AgentIdentityRef, AgentInstanceContext, AgentSpec, HarnessBuilder, RunBindings
 from a13n_service.interactions.attempt_executor import RunAttemptExecutor
 from a13n_service.interactions.attempt_resources import attempt_resource_stack
-from a13n_service.interactions.attempts import AttemptExecutionService
+from a13n_service.interactions.attempts import AttemptDisposition, AttemptExecutionService
 from a13n_service.interactions.control_models import ThreadInboxRecord
-from a13n_service.interactions.harness_results import AttemptDisposition
 from a13n_service.interactions.harness_runtime import (
     HarnessDriver,
     HarnessInvocation,

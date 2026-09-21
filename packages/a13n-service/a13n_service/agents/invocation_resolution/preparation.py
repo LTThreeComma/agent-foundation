@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from a13n_harness.providers.catalog import ProviderCatalog
@@ -21,6 +22,7 @@ from a13n_service.iam import (
     authorize_workspace,
 )
 from a13n_service.models.runtime import AcceptedModelSelector
+from a13n_service.models.selection import InvocationModelSelection
 from a13n_service.models.service import ModelError
 from a13n_service.storage import short_session
 
@@ -47,7 +49,6 @@ from .contracts import (
     PreparedChildInvocation,
     RootAgentStatePolicy,
 )
-from .media import MediaUnderstandingResolution
 from .queries import (
     load_agent_record,
     load_revision_record,
@@ -92,9 +93,10 @@ class AgentInvocationPreparer:
         expected_default_revision_id: str | None = None,
         config_override: AgentRunOverride | None = None,
         root_state_policy: RootAgentStatePolicy = RootAgentStatePolicy.invocable,
+        session: AsyncSession | None = None,
         _active_agents: tuple[str, ...] = (),
         _budget: _GraphBudget | None = None,
-        _media: MediaUnderstandingResolution | None = None,
+        _models: InvocationModelSelection | None = None,
     ) -> PreparedAgentInvocation:
         budget = _budget or _GraphBudget()
         budget.remaining -= 1
@@ -106,20 +108,22 @@ class AgentInvocationPreparer:
             raise agent_revision_not_executable("subagent_graph_too_deep")
         workspace_id = actor.workspace_id
         try:
-            async with short_session(self._sessions) as session:
+            async with (
+                nullcontext(session) if session is not None else short_session(self._sessions) as selection_session
+            ):
                 authorized = await authorize_agent(
-                    session,
+                    selection_session,
                     actor=actor,
                     workspace_id=workspace_id,
                     agent_id=agent_id,
                     action=WorkspaceAction.agent_invoke,
                 )
                 agent = await load_agent_record(
-                    session,
+                    selection_session,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
                     agent_id=agent_id,
-                    for_update=False,
+                    for_update=session is not None,
                 )
                 require_invocable_agent(agent, policy=root_state_policy)
                 if (
@@ -132,12 +136,12 @@ class AgentInvocationPreparer:
                 if revision_id is None:
                     raise agent_default_revision_missing()
                 revision_record = await load_revision_record(
-                    session,
+                    selection_session,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
                     agent_id=agent_id,
                     revision_id=revision_id,
-                    for_update=False,
+                    for_update=session is not None,
                 )
                 revision = revision_record.to_resource()
                 merged = merge_agent_run_override(revision.config, config_override)
@@ -146,7 +150,7 @@ class AgentInvocationPreparer:
                 except AgentConfigValidationError as error:
                     raise agent_revision_not_executable(error.reason) from error
                 await validate_selected_resources(
-                    session,
+                    selection_session,
                     actor=actor,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
@@ -156,7 +160,7 @@ class AgentInvocationPreparer:
                     web_provider_catalog=self._web_provider_catalog,
                 )
                 await authorize_workspace(
-                    session,
+                    selection_session,
                     actor=actor,
                     workspace_id=workspace_id,
                     action=WorkspaceAction.models_read,
@@ -164,33 +168,33 @@ class AgentInvocationPreparer:
                 # Explicit Skill overrides resolve active keys even when their values match the Revision.
                 skills_overridden = config_override is not None and "skills" in config_override.model_fields_set
                 skills = await prepare_skills(
-                    session,
+                    selection_session,
                     actor=actor,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
                     selections=merged.skills,
                     retained=None if skills_overridden else revision.resolved_skills,
+                    lock=session is not None,
                 )
-            async with short_session(self._sessions) as session:
                 subagents = await self._prepare_subagents(
-                    session,
+                    selection_session,
                     actor=actor,
                     organization_id=authorized.organization_id,
                     workspace_id=workspace_id,
                     revision=revision,
                     config=merged,
+                    lock=session is not None,
                 )
-            media = _media or MediaUnderstandingResolution(
+            models = _models or InvocationModelSelection(
                 self._sessions,
                 self._model_selector,
                 organization_id=authorized.organization_id,
                 workspace_id=workspace_id,
+                session=session,
             )
             try:
-                media_models = await media.resolve(merged.media_understanding)
-                model = await self._model_selector.prepare(
-                    organization_id=authorized.organization_id,
-                    workspace_id=workspace_id,
+                media_models = await models.resolve(merged.media_understanding)
+                model = await models.prepare(
                     model_id=(
                         revision.resolved_model.model_id
                         if merged.model.model_key == revision.config.model.model_key
@@ -203,9 +207,7 @@ class AgentInvocationPreparer:
                     settings_override=merged.model_settings_override,
                 )
                 reviewer_model = (
-                    await self._model_selector.prepare(
-                        organization_id=authorized.organization_id,
-                        workspace_id=workspace_id,
+                    await models.prepare(
                         model_id=merged.reviewer.model,
                         settings=merged.reviewer.model_settings or {},
                     )
@@ -220,6 +222,7 @@ class AgentInvocationPreparer:
                 organization_id=authorized.organization_id,
                 workspace_id=workspace_id,
                 config=merged,
+                session=session,
             )
         except AuthorizationError as error:
             raise map_authorization_error(error) from error
@@ -233,21 +236,18 @@ class AgentInvocationPreparer:
                         agent_revision_id=edge.child_agent_revision_id,
                         _active_agents=(*_active_agents, agent_id),
                         _budget=budget,
-                        _media=media,
+                        _models=models,
+                        session=session,
                     ),
                 )
                 for edge in subagents
             ]
         )
         return PreparedAgentInvocation(
-            root_state_policy=root_state_policy,
-            actor=actor,
             organization_id=authorized.organization_id,
-            workspace_id=workspace_id,
             agent_id=agent_id,
             agent_revision_id=revision.id,
             selector_kind=selector_kind,
-            expected_default_revision_id=expected_default_revision_id,
             revision_content_digest=revision.content_digest,
             merged=merged,
             model=model,
@@ -282,15 +282,14 @@ class AgentInvocationPreparer:
                     memory_provider_catalog=self._memory_provider_catalog,
                     web_provider_catalog=self._web_provider_catalog,
                 )
-            media_models = await MediaUnderstandingResolution(
+            models = InvocationModelSelection(
                 self._sessions,
                 self._model_selector,
                 organization_id=authorized.organization_id,
                 workspace_id=actor.workspace_id,
-            ).resolve(merged.media_understanding)
-            model = await self._model_selector.prepare(
-                organization_id=authorized.organization_id,
-                workspace_id=actor.workspace_id,
+            )
+            media_models = await models.resolve(merged.media_understanding)
+            model = await models.prepare(
                 model_key=config.model.model_key,
                 settings=config.model.settings,
             )
@@ -308,21 +307,16 @@ class AgentInvocationPreparer:
         except ModelError as error:
             raise map_model_error(error) from error
         return PreparedAgentInvocation(
-            root_state_policy=RootAgentStatePolicy.invocable,
-            actor=actor,
             organization_id=authorized.organization_id,
-            workspace_id=actor.workspace_id,
             agent_id=agent_id,
             agent_revision_id=None,
             selector_kind=AgentSelectorKind.configuration,
-            expected_default_revision_id=None,
             revision_content_digest=None,
             merged=merged,
             model=model,
             skills=(),
             subagents=(),
             connectivity=connectivity,
-            configuration_context=context,
             media_models=media_models,
         )
 
@@ -335,6 +329,7 @@ class AgentInvocationPreparer:
         workspace_id: str,
         revision: AgentRevision,
         config,
+        lock: bool = False,
     ) -> tuple[ResolvedSubagentEdge, ...]:
         base_edges = {item.name: item for item in revision.resolved_subagents}
         result: list[ResolvedSubagentEdge] = []
@@ -356,7 +351,7 @@ class AgentInvocationPreparer:
                 organization_id=organization_id,
                 workspace_id=workspace_id,
                 agent_id=selection.agent_id,
-                for_update=False,
+                for_update=lock,
             )
             require_invocable_agent(child)
             if exact_revision_id is None:

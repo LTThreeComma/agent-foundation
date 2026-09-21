@@ -12,9 +12,8 @@ import pytest
 from a13n_service.agents.domain import ResolvedSkillBinding, SkillSelection
 from a13n_service.agents.models import AgentRecord, AgentRevisionRecord
 from a13n_service.agents.skill_resolution import (
-    freeze_skill_locks,
-    prepare_skill_locks_from_bindings,
-    prepare_skill_locks_from_selections,
+    resolve_skill_locks_from_bindings,
+    resolve_skill_locks_from_selections,
 )
 from a13n_service.durable_operations.models import IdempotencyEvidenceRecord
 from a13n_service.etags import resource_etag
@@ -460,26 +459,20 @@ async def test_unpinned_binding_resolves_the_default_revision_at_run_acceptance(
 
     sessions = create_session_factory(skill_services.engine)
     async with transaction(sessions) as session:
-        from_binding = await prepare_skill_locks_from_bindings(
+        from_binding = await resolve_skill_locks_from_bindings(
             session,
             organization_id=ORG_ID,
             workspace_id=WORKSPACE_ID,
             bindings=(ResolvedSkillBinding(skill_id=skill.id, skill_key=skill.key, version=None),),
         )
-        from_override = await prepare_skill_locks_from_selections(
+        from_override = await resolve_skill_locks_from_selections(
             session,
             organization_id=ORG_ID,
             workspace_id=WORKSPACE_ID,
             selections=(SkillSelection(skill_key=skill.key, version=None),),
         )
         assert from_override == from_binding
-        locks = await freeze_skill_locks(
-            session,
-            organization_id=ORG_ID,
-            workspace_id=WORKSPACE_ID,
-            prepared=from_binding,
-        )
-    assert [(lock.skill_revision_id, lock.version) for lock in locks] == [(created.result.revision.id, 1)]
+    assert [(lock.skill_revision_id, lock.version) for lock in from_binding] == [(created.result.revision.id, 1)]
 
 
 @pytest.mark.anyio

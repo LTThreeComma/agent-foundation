@@ -97,7 +97,7 @@ async def authorize(
             "memory_scope_unverified", "Current conversation access has not been verified.", ErrorCategory.forbidden
         )
     context = authority.context()
-    run, _, _ = await read_attempt_authority(session, context, utc_now())
+    run, _, _ = await read_attempt_authority(session, context, utc_now)
     retained = await require_binding(session, run.id)
     assert account_settings is not None
     if (

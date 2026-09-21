@@ -526,3 +526,41 @@ async def test_webhook_delivery_omits_legacy_output_storage_locator(
     async with short_session(hook_interaction_sessions) as database:
         record = await database.scalar(select(LifecycleEventRecord))
         assert record.payload["output_object"]["object_key"] == "private/output.json"
+
+
+@pytest.mark.parametrize("boundary", ["before_scan", "after_material"])
+async def test_draining_publisher_leaves_unsent_delivery_recoverable(hook_interaction_sessions, monkeypatch, boundary):
+    sessions = hook_interaction_sessions
+    delivery_id, _, protector = await _prepare_delivery(sessions)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx2.Response(204)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        publisher = WebhookPublisher(sessions, client, _AllowEndpoint(), protector, clock=lambda: NOW)
+        if boundary == "before_scan":
+            publisher.drain()
+        else:
+            load = publisher._load_material
+
+            async def drain_after_material(claim):
+                material = await load(claim)
+                publisher.drain()
+                return material
+
+            monkeypatch.setattr(publisher, "_load_material", drain_after_material)
+        result = await publisher.scan()
+        assert result.completed == result.failed == 0
+        assert result.examined == result.deferred == int(boundary == "after_material")
+        assert requests == []
+        async with short_session(sessions) as database:
+            delivery = await database.get(OutboxRecord, delivery_id)
+            assert delivery.status == ("pending" if boundary == "before_scan" else "publishing")
+            assert delivery.published_at is None
+        successor = WebhookPublisher(
+            sessions, client, _AllowEndpoint(), protector, clock=lambda: NOW + timedelta(seconds=31)
+        )
+        assert (await successor.scan()).completed == 1
+        assert len(requests) == 1

@@ -7,7 +7,7 @@ from a13n_service.environments.websocket.coordination import ConnectionCoordinat
 from a13n_service.interactions.domain import Run
 from a13n_service.interactions.inbox import ThreadInboxStore
 from a13n_service.interactions.lifecycle import LifecycleWriter
-from a13n_service.interactions.objects import RunPayloadStore, RunStateStore
+from a13n_service.interactions.objects import RunStateStore
 from a13n_service.interactions.outcomes import RunOutcomeService
 from a13n_service.interactions.ports.memory import ExecutionBindings
 from a13n_service.interactions.run_control import RunAttemptControl
@@ -24,7 +24,6 @@ class ServiceSubagents:
         self,
         sessions: async_sessionmaker[AsyncSession],
         states: RunStateStore,
-        payloads: RunPayloadStore,
         inbox: ThreadInboxStore,
         outcomes: RunOutcomeService,
         *,
@@ -35,7 +34,7 @@ class ServiceSubagents:
         self._sessions = sessions
         self._admission = ChildRunAdmissionPreparer(sessions, states)
         self._acceptance = ChildRunAcceptanceService(
-            sessions, states, payloads, lifecycle=lifecycle, bindings=bindings, coordination=coordination
+            sessions, states, lifecycle=lifecycle, bindings=bindings, coordination=coordination
         )
         self._inbox = inbox
         self._outcomes = outcomes

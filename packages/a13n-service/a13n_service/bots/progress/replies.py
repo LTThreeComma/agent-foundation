@@ -131,7 +131,7 @@ class CardReplies:
         now = utc_now()
         attempt.lease.require_current(now)
         async with transaction(self.delivery.sessions) as session:
-            run, _, _ = await read_attempt_authority(session, attempt, now)
+            run, _, _ = await read_attempt_authority(session, attempt, utc_now)
             account = await session.get(AccountRecord, context.account_id)
             if (
                 account is None

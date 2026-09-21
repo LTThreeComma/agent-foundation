@@ -169,11 +169,11 @@ When the target changes, apply reports a conflict and preserves the candidate. T
 
 Apply is a deterministic authenticated user command, absent from the assistant toolset. Questions, model output, conversational agreement, and an `approved` tool argument do not invoke it or provide authority. The request identifies the reviewed draft version/digest, accepted dependency observations, selected verification Run references, any explicit unverified/failure acknowledgement with reason, and an idempotency key.
 
-After checking current User authority, Service first resolves any retained application receipt for the reviewed version; an exact replay does not depend on reconstructing the draft's old mutable state. For a new application, Service reads and prepares the exact candidate and dependency resolution outside the final transaction. It never holds a database session while calling a model, Provider, tool or storage backend. The final short transaction:
+After checking current User authority, Service first resolves any retained application receipt for the reviewed version; an exact replay does not depend on reconstructing the draft's old mutable state. A new application resolves and validates the exact candidate and its dependencies in the same bounded database transaction as publication. No model, Provider, tool or storage-backend call occurs inside that transaction. The transaction:
 
 1. checks current User authority and resolves a matching retained receipt/idempotent replay before evaluating current draft-version preconditions;
 2. serializes the Session association, shared draft and business Agent consistently;
-3. rechecks open status, owner, Workspace, exact draft version/digest, target baseline, references, verification applicability and prepared dependency observations;
+3. checks open status, owner, Workspace, exact draft version/digest, target baseline, references and verification applicability, and compares resolved dependencies with the reviewed observations;
 4. creates the business Agent and Revision v1, or appends a business Agent Revision and advances its head under Agent Management;
 5. records the immutable receipt for the reviewed draft version and digest, result Agent/Revision, applying User, time and verification acknowledgement;
 6. binds the first created target if needed, establishes the result Revision as the draft's new base, advances draft version once and invalidates observations tied to the earlier version while keeping the candidate and draft open; and

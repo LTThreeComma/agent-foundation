@@ -3,7 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from a13n_service.agents.skill_resolution import SkillSelectionInvalid, prepare_skill_bindings
+from a13n_service.agents.skill_resolution import SkillSelectionInvalid, resolve_skill_bindings
 from a13n_service.application_errors import ErrorCategory
 from a13n_service.connectivity.errors import NativeError
 from a13n_service.connectivity.selection_resolution import ConnectivitySelectionError, ConnectivitySelectionResolver
@@ -36,7 +36,7 @@ async def validate_override(
             await authorize_workspace(
                 session, actor=actor, workspace_id=workspace_id, action=WorkspaceAction.skill_bind
             )
-            await prepare_skill_bindings(
+            await resolve_skill_bindings(
                 session, organization_id=organization_id, workspace_id=workspace_id, selections=override.skills
             )
         if override.model is not None:

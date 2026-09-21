@@ -5,17 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from a13n_harness.capabilities import SubagentDelegationPlan
 from a13n_harness.usage import intersect_usage_limits
 from pydantic import JsonValue
-from pydantic_ai.usage import UsageLimits
 
 from a13n_service.agents.domain import (
     EffectiveAgentConfig,
     ResolvedSubagentEdge,
 )
-from a13n_service.connectivity.selection_domain import (
-    ConnectionRunSelection,
-)
+from a13n_service.interactions.attempts import AttemptContext
 from a13n_service.interactions.domain import (
     ExecutionBudget,
     JsonObject,
@@ -34,6 +32,7 @@ from a13n_service.interactions.initialization import (
     initialize_start_state,
 )
 from a13n_service.interactions.input import AcceptedAgentInput, TextContent
+from a13n_service.interactions.objects import StoredRunState
 from a13n_service.interactions.state import RunCheckpoint
 from a13n_service.secrets.agent_inputs import select_child_secret_bindings
 
@@ -43,12 +42,23 @@ from .domain import (
     ChildRunRelationship,
     child_relationship_is_visible,
 )
+from .execution_store import RetainedChildExecution, SubagentOperatorError
+
+
+@dataclass(frozen=True, slots=True)
+class ParentRunSource:
+    """Parent SQL and checkpoint observations, fenced again at child commit."""
+
+    authority: AttemptContext
+    run: Run
+    state: StoredRunState
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedChildRunAcceptance:
     """Complete state-first child acceptance candidate."""
 
+    parent: ParentRunSource
     thread: Thread
     run: Run
     state: RunCheckpoint
@@ -60,46 +70,38 @@ class PreparedChildRunAcceptance:
 class PreparedChildRunResume:
     """Complete state-first linked child-continuation candidate."""
 
+    parent: ParentRunSource
     run: Run
     state: RunCheckpoint
     relationship: ChildRunRelationship
     child_definition_id: str
-    resumed_from_relationship_id: str
-    resumed_from_child_run_id: str
-    source_parent_run_id: str
-    source_thread_version: int
-    source_state: RunCheckpoint
+    source: RetainedChildExecution
+    source_state: StoredRunState
 
 
 def prepare_child_run(
     *,
-    parent_run: Run,
-    parent_state: RunCheckpoint,
-    parent_run_attempt_id: str,
-    parent_run_attempt_fence: int,
-    parent_agent_instance_id: str,
-    subagent_name: str,
+    parent: ParentRunSource,
+    plan: SubagentDelegationPlan,
     delegated_input: str,
-    child_definition_id: str,
-    child_agent_id: str,
-    child_agent_revision_id: str,
-    child_effective_config: EffectiveAgentConfig,
-    connection_selections: tuple[ConnectionRunSelection, ...],
     child_thread_id: str,
     child_run_id: str,
     relationship_id: str,
-    execution_budget: ExecutionBudget,
     created_at: datetime,
     cancellation_policy: ChildCancellationPolicy = ChildCancellationPolicy.independent,
     result_visibility: ChildResultVisibility = ChildResultVisibility.parent_thread,
-    usage_limits: UsageLimits | None = None,
 ) -> PreparedChildRunAcceptance:
     """Construct the exact child records without mutable lookup or I/O."""
 
+    parent_run, parent_state = parent.run, parent.state.envelope
+    subagent_name = plan.child.declaration.name
     edge = require_frozen_subagent_edge(parent_run, parent_state, subagent_name)
-    if (edge.child_agent_id, edge.child_agent_revision_id) != (child_agent_id, child_agent_revision_id):
-        raise ValueError("prepared child Agent does not match the frozen subagent edge")
-    _validate_child_definition_id(child_definition_id)
+    child = parent_state.effective_agent_config.child_configs[edge.child_agent_revision_id]
+    child_definition_id = f"agent-config-{child.revision_content_digest[:24]}"
+    if child_definition_id != plan.child.definition.definition_id:
+        raise SubagentOperatorError("subagent_definition_conflict", "Harness child differs from its accepted snapshot")
+    child_agent_id, child_agent_revision_id = edge.child_agent_id, edge.child_agent_revision_id
+    child_effective_config = child.effective_config
     if parent_state.prepared_plugins is None:
         raise ValueError("Child execution requires the parent plugin preparation")
     accepted_input = AcceptedAgentInput(
@@ -110,8 +112,8 @@ def prepare_child_run(
     relationship = _relationship(
         relationship_id=relationship_id,
         parent_run=parent_run,
-        parent_run_attempt_id=parent_run_attempt_id,
-        parent_run_attempt_fence=parent_run_attempt_fence,
+        parent_run_attempt_id=parent.authority.run_attempt_id,
+        parent_run_attempt_fence=parent.authority.attempt_number,
         subagent_name=subagent_name,
         child_run_id=child_run_id,
         child_thread_id=child_thread_id,
@@ -142,7 +144,7 @@ def prepare_child_run(
             effective_agent_config=child_effective_config,
             prepared_plugins=parent_state.prepared_plugins.children[child_agent_revision_id],
             secret_bindings=accepted_input.secret_bindings,
-            usage_limits=intersect_usage_limits(parent_state.usage_limits, edge.usage_limits, usage_limits),
+            usage_limits=intersect_usage_limits(parent_state.usage_limits, edge.usage_limits, plan.usage_limits),
         ),
         thread_id=child_thread_id,
     )
@@ -154,17 +156,20 @@ def prepare_child_run(
         lineage_parent_run_id=None,
         trigger_type="async_subagent",
         relationship=relationship,
-        parent_agent_instance_id=parent_agent_instance_id,
+        parent_agent_instance_id=plan.parent.parent_agent_instance_id,
         child_agent_id=child_agent_id,
         child_agent_revision_id=child_agent_revision_id,
         child_effective_config=child_effective_config,
-        connection_selections=tuple(item.model_dump(mode="json", by_alias=True) for item in connection_selections),
-        execution_budget=execution_budget,
+        connection_selections=tuple(
+            item.model_dump(mode="json", by_alias=True) for item in child.connection_selections
+        ),
+        execution_budget=parent_run.execution_budget,
         input_payload=input_payload,
         delegated_input=delegated_input,
         created_at=created_at,
     )
     return PreparedChildRunAcceptance(
+        parent=parent,
         thread=thread,
         run=run,
         state=state,
@@ -175,44 +180,37 @@ def prepare_child_run(
 
 def prepare_child_resume(
     *,
-    parent_run: Run,
-    parent_state: RunCheckpoint,
-    parent_run_attempt_id: str,
-    parent_run_attempt_fence: int,
-    parent_agent_instance_id: str,
-    subagent_name: str,
+    parent: ParentRunSource,
+    plan: SubagentDelegationPlan,
     delegated_input: str,
-    child_definition_id: str,
-    source_relationship: ChildRunRelationship,
-    source_parent_run: Run,
-    source_thread: Thread,
-    source_run: Run,
-    source_state: RunCheckpoint,
+    source: RetainedChildExecution,
+    source_state: StoredRunState,
     child_run_id: str,
     relationship_id: str,
     created_at: datetime,
     cancellation_policy: ChildCancellationPolicy = ChildCancellationPolicy.independent,
     result_visibility: ChildResultVisibility = ChildResultVisibility.parent_thread,
-    usage_limits: UsageLimits | None = None,
 ) -> PreparedChildRunResume:
     """Construct a child continuation without adding non-contract relationship fields."""
 
+    parent_run, parent_state = parent.run, parent.state.envelope
+    subagent_name = plan.child.declaration.name
+    source_run, source_thread = source.run, source.thread
     edge = require_frozen_subagent_edge(parent_run, parent_state, subagent_name)
-    _validate_child_definition_id(child_definition_id)
     _validate_resume_source(
         parent_run=parent_run,
         subagent_name=subagent_name,
-        source_relationship=source_relationship,
-        source_parent_run=source_parent_run,
+        source_relationship=source.relationship,
+        source_parent_run=source.parent_run,
         source_thread=source_thread,
         source_run=source_run,
-        source_state=source_state,
+        source_state=source_state.envelope,
     )
     child_agent_id = source_run.agent_id
     child_agent_revision_id = source_run.agent_revision_id
     if child_agent_revision_id is None:
         raise ValueError("Subagent continuation requires an exact AgentRevision")
-    child_effective_config = source_state.effective_agent_config
+    child_effective_config = source_state.envelope.effective_agent_config
     accepted_input = AcceptedAgentInput(
         schema_version="1",
         content=(TextContent(text=delegated_input),),
@@ -221,8 +219,8 @@ def prepare_child_resume(
     relationship = _relationship(
         relationship_id=relationship_id,
         parent_run=parent_run,
-        parent_run_attempt_id=parent_run_attempt_id,
-        parent_run_attempt_fence=parent_run_attempt_fence,
+        parent_run_attempt_id=parent.authority.run_attempt_id,
+        parent_run_attempt_fence=parent.authority.attempt_number,
         subagent_name=subagent_name,
         child_run_id=child_run_id,
         child_thread_id=source_thread.id,
@@ -238,9 +236,9 @@ def prepare_child_resume(
             agent_revision_id=child_agent_revision_id,
             effective_agent_config=child_effective_config,
             secret_bindings=accepted_input.secret_bindings,
-            usage_limits=intersect_usage_limits(parent_state.usage_limits, edge.usage_limits, usage_limits),
+            usage_limits=intersect_usage_limits(parent_state.usage_limits, edge.usage_limits, plan.usage_limits),
         ),
-        source_state,
+        source_state.envelope,
     )
     run = _child_run(
         child_run_id=child_run_id,
@@ -250,7 +248,7 @@ def prepare_child_resume(
         lineage_parent_run_id=source_run.id,
         trigger_type="async_subagent_resume",
         relationship=relationship,
-        parent_agent_instance_id=parent_agent_instance_id,
+        parent_agent_instance_id=plan.parent.parent_agent_instance_id,
         child_agent_id=child_agent_id,
         child_agent_revision_id=child_agent_revision_id,
         child_effective_config=child_effective_config,
@@ -261,21 +259,14 @@ def prepare_child_resume(
         created_at=created_at,
     )
     return PreparedChildRunResume(
+        parent=parent,
         run=run,
         state=state,
         relationship=relationship,
-        child_definition_id=child_definition_id,
-        resumed_from_relationship_id=source_relationship.id,
-        resumed_from_child_run_id=source_run.id,
-        source_parent_run_id=source_parent_run.id,
-        source_thread_version=source_thread.version,
+        child_definition_id=source.child_definition_id,
+        source=source,
         source_state=source_state,
     )
-
-
-def _validate_child_definition_id(value: str) -> None:
-    if not value.startswith("agent-config-") or len(value) != 37:
-        raise ValueError("Harness child definition identity is not canonical")
 
 
 def _relationship(

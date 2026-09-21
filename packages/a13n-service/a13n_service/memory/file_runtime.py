@@ -92,7 +92,7 @@ async def filesystem_store(
     async def authorize(write: bool) -> None:
         attempt = current_context()
         async with short_session(service.authorizer.sessions) as session:
-            current, _, _ = await read_attempt_authority(session, attempt, utc_now())
+            current, _, _ = await read_attempt_authority(session, attempt, utc_now)
             if (
                 current.id != run.id
                 or current.authority_principal_id != run.authority_principal.principal_id
@@ -253,7 +253,7 @@ async def bind_filesystem_store(
         created = False
         try:
             async with transaction(service.authorizer.sessions) as session:
-                await read_attempt_authority(session, current_context(), utc_now())
+                await read_attempt_authority(session, current_context(), utc_now)
                 storage = await session.scalar(
                     select(MemoryStorageRecord).where(MemoryStorageRecord.target_digest == target_digest)
                 )
@@ -334,7 +334,7 @@ async def bind_filesystem_store(
         else:
             await store.index()  # A retained pending binding must already have its marker.
         async with transaction(service.authorizer.sessions) as session:
-            await read_attempt_authority(session, current_context(), utc_now())
+            await read_attempt_authority(session, current_context(), utc_now)
             record = await session.get(MemoryStorageRecord, storage.id)
             if record is None:
                 raise MemoryDocumentError("memory_storage_unavailable")
@@ -342,7 +342,7 @@ async def bind_filesystem_store(
     if organization_policy is not None:
         token = await store.organization_token()
         async with transaction(service.authorizer.sessions) as session:
-            await read_attempt_authority(session, current_context(), utc_now())
+            await read_attempt_authority(session, current_context(), utc_now)
             binding = await session.get(RunMemoryStorageRecord, (run.id, selection_digest), with_for_update=True)
             if (
                 binding is not None

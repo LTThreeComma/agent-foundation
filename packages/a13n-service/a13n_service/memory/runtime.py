@@ -203,7 +203,7 @@ def memory_capability(
         try:
             async with short_session(service.authorizer.sessions) as session:
                 context = current_context()
-                current, _, _ = await read_attempt_authority(session, context, utc_now())
+                current, _, _ = await read_attempt_authority(session, context, utc_now)
                 if (
                     current.id != run.id
                     or current.authority_principal_id != run.authority_principal.principal_id

@@ -71,7 +71,7 @@ def require_invocable_agent(
 ) -> None:
     if not agent.enabled and policy is RootAgentStatePolicy.invocable:
         raise agent_disabled()
-    if agent.archived_at is not None and policy is not RootAgentStatePolicy.archived_allowed:
+    if agent.archived_at is not None:
         raise agent_archived()
 
 

@@ -60,37 +60,6 @@ class BuiltinAgents:
     ) -> AgentRevisionCreateResult:
         """Register or upgrade one distribution-owned built-in Agent."""
 
-        try:
-            async with transaction(self._sessions) as session:
-                workspace = await authorize_workspace(
-                    session,
-                    actor=actor,
-                    workspace_id=workspace_id,
-                    action=WorkspaceAction.agent_create,
-                )
-                current = await session.get(AgentRecord, registration.agent_id)
-                if current is not None and (
-                    current.organization_id != workspace.organization_id
-                    or current.workspace_id != workspace.workspace_id
-                    or current.source != AgentSource.builtin.value
-                    or current.system_purpose is not None
-                ):
-                    raise builtin_identity_conflict()
-                organization_id = workspace.organization_id
-        except AuthorizationError as error:
-            raise map_authorization_error(error) from error
-
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=organization_id,
-                workspace_id=workspace_id,
-                agent_id=registration.agent_id,
-                config=registration.config,
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-
         expected_content_digest: str | None = None
         now = self._clock()
         try:
@@ -129,7 +98,15 @@ class BuiltinAgents:
                     )
 
                 try:
-                    resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                    resolved = await self._resolver.resolve(
+                        session,
+                        actor=actor,
+                        organization_id=workspace.organization_id,
+                        workspace_id=workspace_id,
+                        agent_id=registration.agent_id,
+                        config=registration.config,
+                        creation=created,
+                    )
                 except Exception as error:
                     raise resolution_error(error) from error
                 if created:

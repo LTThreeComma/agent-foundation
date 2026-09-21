@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx2
 import pytest
 from a13n_service.app import Components, create_app
+from a13n_service.background import PeriodicTask
 from a13n_service.connectivity.adapters import IngressAdapter
 from a13n_service.connectivity.composition import AdapterDefinition, AdapterRegistry
 from a13n_service.environments.maintenance import EnvironmentMaintenanceLoop
@@ -104,7 +105,6 @@ async def test_lifespan_constructs_storage_once_and_readiness_uses_it(local_sett
 
         assert isinstance(runtime.worker.external_tools, ExternalToolRuntime)
         assert isinstance(runtime.worker.skill_runtime, SkillRuntimePreparer)
-        assert isinstance(runtime.worker.environment_maintenance, EnvironmentMaintenanceLoop)
         assert runtime.control.trace_queries is not None
 
         transport = httpx2.ASGITransport(app=app)
@@ -346,6 +346,13 @@ async def test_shutdown_stops_admission_before_waiting_in_composition_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     trace: list[str] = []
+    drained_scans: set[str] = set()
+    periodic_drain = PeriodicTask.drain
+
+    def drain_periodic(loop: PeriodicTask) -> None:
+        drained_scans.add(loop.name)
+        periodic_drain(loop)
+
     execution_wait = WorkerExecutionLoop.wait_stopped
     environment_drain = EnvironmentMaintenanceLoop.drain
     environment_wait = EnvironmentMaintenanceLoop.wait_stopped
@@ -356,6 +363,27 @@ async def test_shutdown_stops_admission_before_waiting_in_composition_order(
         assert app.state.runtime.status.draining
         assert loop.is_draining()
         assert trace == ["environment draining", "subagents draining"]
+        assert drained_scans == {
+            "hook_dispatch",
+            "webhook_publication",
+            "a2a_push_publication",
+            "evidence_lifecycle_retention",
+            "asset_content_cleanup",
+            "queued_submission_recovery",
+            "connector_setup_reconciliation",
+            "mcp_oauth_reconciliation",
+            "bot_task_progress",
+            "bot_routines",
+            "identity_token_cleanup",
+            "owner_deletion_cleanup",
+            "asset_tombstone_retention",
+            "secret_owner_cleanup",
+            "web_provider_owner_cleanup",
+            "skill_upload_retention",
+            "hook_history_retention",
+            "orphan_object_collection",
+            "object_collection_recovery",
+        }
         await execution_wait(loop)
         trace.append("execution stopped")
 
@@ -381,6 +409,7 @@ async def test_shutdown_stops_admission_before_waiting_in_composition_order(
         await subagent_wait(loop)
         trace.append("subagents stopped")
 
+    monkeypatch.setattr(PeriodicTask, "drain", drain_periodic)
     monkeypatch.setattr(WorkerExecutionLoop, "wait_stopped", wait_execution)
     monkeypatch.setattr(EnvironmentMaintenanceLoop, "drain", drain_environment)
     monkeypatch.setattr(EnvironmentMaintenanceLoop, "wait_stopped", wait_environment)
@@ -388,7 +417,10 @@ async def test_shutdown_stops_admission_before_waiting_in_composition_order(
     monkeypatch.setattr(SubagentMaintenance, "wait_stopped", wait_subagents)
     app = create_app(local_settings(tmp_path))
     async with app.router.lifespan_context(app):
-        pass
+        # HTTP shutdown enters this synchronous boundary before lifespan cleanup.
+        app.state.runtime.begin_drain()
+        assert len(drained_scans) == 19
+        assert trace == ["environment draining", "subagents draining"]
     assert trace == [
         "environment draining",
         "subagents draining",

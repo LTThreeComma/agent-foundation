@@ -85,16 +85,20 @@ async def control_relay(relay_redis):
     started = monotonic()
     seconds, micros = await relay_redis.time()
     now = seconds * 1000 + micros // 1000
+    # These tests exercise relay framing and backpressure, not renewal. Keep the
+    # synthetic grant alive across large transfers on a contended test runner;
+    # authority expiry and renewal have their own bounded-clock tests.
+    expires_at = now + 60_000
     observed = ConfirmedObservation(
         ConnectionObservation(
             code="ok",
             now_ms=now,
             status="online",
             connection=CONNECTION,
-            expires_at_ms=now + 5000,
+            expires_at_ms=expires_at,
             barrier_ms=0,
             retiring=None,
-            uses={USE.use_id: UseGrant(identity=USE, expires_at_ms=now + 5000)},
+            uses={USE.use_id: UseGrant(identity=USE, expires_at_ms=expires_at)},
             error=None,
         ),
         started,

@@ -57,7 +57,6 @@ async def test_inline_and_fact_retention_wait_for_dispatch_then_delivery(
         event_horizon=timedelta(days=1),
         published_delivery_horizon=timedelta(days=1),
         dead_letter_horizon=timedelta(days=1),
-        poll_interval_seconds=60,
         batch_limit=100,
         clock=lambda: now,
     )

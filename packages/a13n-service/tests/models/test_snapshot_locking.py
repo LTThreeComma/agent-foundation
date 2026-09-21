@@ -38,8 +38,8 @@ async def postgres_models(pg_url):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("change", ["model_disabled", "model_provider_disabled", "model_configuration_changed"])
-async def test_shared_snapshot_readers_block_edits_and_revalidate_after_commit(postgres_models, change):
+@pytest.mark.parametrize("change", ["model_disabled", "model_provider_disabled", "model_updated"])
+async def test_management_readers_share_locks_and_next_operation_observes_committed_edits(postgres_models, change):
     registry = built_in_model_provider_catalog()
     providers = ModelProviderService(
         postgres_models, registry, EndpointPolicy(), protector(), clock=lambda: NOW, resolve_dns_on_save=False
@@ -61,14 +61,19 @@ async def test_shared_snapshot_readers_block_edits_and_revalidate_after_commit(p
         ),
     )
     selector = AcceptedModelSelector(postgres_models, registry)
-    prepared = await selector.prepare(organization_id=ORG_ID, workspace_id=WORKSPACE_ID, model_id=model.id, settings={})
     ready = [Event(), Event()]
     release = Event()
 
     async def reader(index):
         async with transaction(postgres_models) as session:
-            frozen = await selector.freeze_in_transaction(session, prepared=prepared)
-            assert frozen.model_id == model.id
+            selected = await selector.prepare(
+                organization_id=ORG_ID,
+                workspace_id=WORKSPACE_ID,
+                model_id=model.id,
+                settings={},
+                session=session,
+            )
+            assert selected.resource.id == model.id
             ready[index].set()
             await release.wait()
 
@@ -92,7 +97,23 @@ async def test_shared_snapshot_readers_block_edits_and_revalidate_after_commit(p
             release.set()
     async with transaction(postgres_models) as session:
         await session.execute(edit)
-    with pytest.raises(ModelError) as error:
-        async with transaction(postgres_models) as session:
-            await selector.freeze_in_transaction(session, prepared=prepared)
-    assert error.value.code == change
+    async with transaction(postgres_models) as session:
+        if change == "model_updated":
+            selected = await selector.prepare(
+                organization_id=ORG_ID,
+                workspace_id=WORKSPACE_ID,
+                model_id=model.id,
+                settings={},
+                session=session,
+            )
+            assert selected.resource.updated_at == NOW + timedelta(seconds=1)
+        else:
+            with pytest.raises(ModelError) as error:
+                await selector.prepare(
+                    organization_id=ORG_ID,
+                    workspace_id=WORKSPACE_ID,
+                    model_id=model.id,
+                    settings={},
+                    session=session,
+                )
+            assert error.value.code == change

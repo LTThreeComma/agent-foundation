@@ -92,28 +92,6 @@ class ConfigurationApplication:
     ) -> ConfigurationApplicationReceipt:
         identity = request_identity(idempotency_key)
         async with transaction(self._sessions) as session:
-            _, record = await load_owned_draft(session, actor=actor, draft_id=draft_id, write=True, lock=True)
-            retained = await application_replay(
-                session, actor=actor, record=record, request=request, identity=identity, now=self._clock()
-            )
-            if retained is not None:
-                return retained
-            require_review(record, request=request, if_match=if_match)
-            candidate = record.to_resource()
-        assert candidate.config is not None
-        agent_id = candidate.target_agent_id or new_agent_id()
-        try:
-            prepared = await self._resolver.prepare(
-                actor=actor,
-                organization_id=candidate.organization_id,
-                workspace_id=candidate.workspace_id,
-                agent_id=agent_id,
-                config=candidate.config,
-                creation=candidate.mode == "create",
-            )
-        except Exception as error:
-            raise resolution_error(error) from error
-        async with transaction(self._sessions) as session:
             conversation, record = await load_owned_draft(
                 session, actor=actor, draft_id=draft_id, write=True, lock=True
             )
@@ -123,6 +101,9 @@ class ConfigurationApplication:
             if retained is not None:
                 return retained
             require_review(record, request=request, if_match=if_match)
+            candidate = record.to_resource()
+            assert candidate.config is not None
+            agent_id = candidate.target_agent_id or new_agent_id()
             now = next_updated_at(record.updated_at, self._clock())
             target = None
             if record.mode == "update":
@@ -134,10 +115,28 @@ class ConfigurationApplication:
                         "The target has changed; review and explicitly rebase the candidate.",
                     )
             try:
-                resolved = await self._resolver.freeze_in_transaction(session, prepared=prepared)
+                resolved = await self._resolver.resolve(
+                    session,
+                    actor=actor,
+                    organization_id=record.organization_id,
+                    workspace_id=record.workspace_id,
+                    agent_id=agent_id,
+                    config=candidate.config,
+                    creation=candidate.mode == "create",
+                )
             except Exception as error:
                 raise resolution_error(error) from error
-            if await dependency_digest(session, prepared=prepared, resolved=resolved) != request.dependency_digest:
+            if (
+                await dependency_digest(
+                    session,
+                    actor=actor,
+                    organization_id=record.organization_id,
+                    workspace_id=record.workspace_id,
+                    config=candidate.config,
+                    resolved=resolved,
+                )
+                != request.dependency_digest
+            ):
                 raise failure(
                     "configuration_dependencies_changed",
                     "Dependencies changed after review; save and review a fresh validation.",

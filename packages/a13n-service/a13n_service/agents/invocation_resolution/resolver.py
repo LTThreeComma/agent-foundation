@@ -9,9 +9,11 @@ from a13n_harness.providers.web.definition import WebProviderDefinition
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from a13n_service.connectivity.selection_resolution import ConnectivitySelectionResolver
+from a13n_service.iam import AuthenticatedActor
 from a13n_service.models.runtime import AcceptedModelSelector
 
 from ..validation import AgentProtocolPolicy
+from .contracts import RootAgentStatePolicy
 from .freezing import AgentInvocationFreezer
 from .preparation import AgentInvocationPreparer
 
@@ -43,9 +45,23 @@ class AgentInvocationResolver:
             web_provider_catalog=web,
             memory_provider_catalog=memory,
         )
-        self.freezing = AgentInvocationFreezer(
-            model_selector,
-            connectivity_resolver=connectivity,
-            web_provider_catalog=web,
-            memory_provider_catalog=memory,
+        self.freezing = AgentInvocationFreezer()
+
+    async def validate(
+        self,
+        session: AsyncSession,
+        *,
+        actor: AuthenticatedActor,
+        agent_id: str,
+        agent_revision_id: str | None = None,
+        root_state_policy: RootAgentStatePolicy = RootAgentStatePolicy.invocable,
+    ) -> None:
+        """Validate a management write with the same full composition used at Run acceptance."""
+        selected = await self.preparation.prepare(
+            actor=actor,
+            agent_id=agent_id,
+            agent_revision_id=agent_revision_id,
+            root_state_policy=root_state_policy,
+            session=session,
         )
+        self.freezing.freeze_selected(prepared=selected)

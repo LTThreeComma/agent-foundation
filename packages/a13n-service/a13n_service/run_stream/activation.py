@@ -120,7 +120,7 @@ class PublicationActivator:
             fact = await _fact(database, fact.organization_id, fact.run_id, fact.event_type, fact.run_attempt_id)
             accepted = await _fact(database, fact.organization_id, fact.run_id, "run.accepted")
             if context is not None:
-                await read_attempt_authority(database, context, self._clock())
+                await read_attempt_authority(database, context, self._clock)
             current = context is not None or await _is_current(database, fact, self._clock())
             if await has_abandoned_run_projection(database, fact.organization_id, fact.run_id):
                 raise PublicationContinuityLost("Run Stream history has an abandoned projection")

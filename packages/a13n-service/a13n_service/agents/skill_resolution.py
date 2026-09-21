@@ -1,8 +1,6 @@
-"""Two-phase resolution for stable Skill bindings and exact Run locks."""
+"""Stable Skill authoring bindings and exact Run revision selection."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 from pydantic import ValidationError
 from sqlalchemy import select, tuple_
@@ -18,50 +16,55 @@ class SkillSelectionInvalid(RuntimeError):
     """A selected Skill cannot be resolved without changing its meaning."""
 
 
-@dataclass(frozen=True, slots=True)
-class PinnedSkillRevisionEvidence:
-    revision_id: str
-    content_digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSkillBinding:
-    binding: ResolvedSkillBinding
-    pinned: PinnedSkillRevisionEvidence | None
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSkillLock:
-    binding: ResolvedSkillBinding
-    revision_id: str
-    revision_version: int
-    content_digest: str
-
-
-async def prepare_skill_bindings(
+async def resolve_skill_bindings(
     session: AsyncSession,
     *,
     organization_id: str,
     workspace_id: str,
     selections: tuple[SkillSelection, ...],
-) -> tuple[PreparedSkillBinding, ...]:
+    lock: bool = False,
+) -> tuple[ResolvedSkillBinding, ...]:
     """Resolve public keys to stable active identities for an AgentRevision."""
 
-    if not selections:
-        return ()
-    keys = tuple(item.skill_key for item in selections)
-    records = tuple(
-        (
-            await session.scalars(
-                select(SkillRecord).where(
-                    SkillRecord.organization_id == organization_id,
-                    SkillRecord.workspace_id == workspace_id,
-                    SkillRecord.key.in_(keys),
-                    SkillRecord.deleted_at.is_(None),
-                )
-            )
-        ).all()
+    bindings, _ = await _resolve_bindings(
+        session,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        selections=selections,
+        lock=lock,
     )
+    await _load_pinned_revisions(
+        session,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        bindings=bindings,
+        for_update=lock,
+    )
+    return bindings
+
+
+async def _resolve_bindings(
+    session: AsyncSession,
+    *,
+    organization_id: str,
+    workspace_id: str,
+    selections: tuple[SkillSelection, ...],
+    lock: bool,
+) -> tuple[tuple[ResolvedSkillBinding, ...], dict[str, SkillRecord]]:
+    if not selections:
+        return (), {}
+    keys = tuple(item.skill_key for item in selections)
+    query = (
+        select(SkillRecord)
+        .where(
+            SkillRecord.organization_id == organization_id,
+            SkillRecord.workspace_id == workspace_id,
+            SkillRecord.key.in_(keys),
+            SkillRecord.deleted_at.is_(None),
+        )
+        .order_by(SkillRecord.id)
+    )
+    records = tuple(await session.scalars(query.with_for_update(read=True) if lock else query))
     by_key = {record.key: record for record in records}
     if set(by_key) != set(keys):
         raise SkillSelectionInvalid
@@ -75,76 +78,17 @@ async def prepare_skill_bindings(
     )
     if len({item.skill_id for item in bindings}) != len(bindings):
         raise SkillSelectionInvalid
-    pinned = await _load_pinned_revisions(
-        session,
-        organization_id=organization_id,
-        workspace_id=workspace_id,
-        bindings=bindings,
-    )
-    return tuple(
-        PreparedSkillBinding(
-            binding=binding,
-            pinned=(
-                PinnedSkillRevisionEvidence(
-                    revision_id=pinned[(binding.skill_id, binding.version)].id,
-                    content_digest=pinned[(binding.skill_id, binding.version)].content_digest,
-                )
-                if binding.version is not None
-                else None
-            ),
-        )
-        for binding in bindings
-    )
+    return bindings, {record.id: record for record in records}
 
 
-async def freeze_skill_bindings(
-    session: AsyncSession,
-    *,
-    organization_id: str,
-    workspace_id: str,
-    prepared: tuple[PreparedSkillBinding, ...],
-) -> tuple[ResolvedSkillBinding, ...]:
-    """Lock and recheck stable identities before committing an AgentRevision."""
-
-    if not prepared:
-        return ()
-    bindings = tuple(item.binding for item in prepared)
-    records = await _load_active_skills_by_id(
-        session,
-        organization_id=organization_id,
-        workspace_id=workspace_id,
-        skill_ids=tuple(item.skill_id for item in bindings),
-        for_update=True,
-    )
-    if any(records.get(binding.skill_id, None) is None for binding in bindings):
-        raise SkillSelectionInvalid
-    if any(records[binding.skill_id].key != binding.skill_key for binding in bindings):
-        raise SkillSelectionInvalid
-    pinned = await _load_pinned_revisions(
-        session,
-        organization_id=organization_id,
-        workspace_id=workspace_id,
-        bindings=bindings,
-        for_update=True,
-    )
-    for expected in prepared:
-        if expected.binding.version is None and expected.pinned is None:
-            continue
-        if expected.binding.version is None or expected.pinned is None:
-            raise SkillSelectionInvalid
-        revision = pinned[(expected.binding.skill_id, expected.binding.version)]
-        if revision.id != expected.pinned.revision_id or revision.content_digest != expected.pinned.content_digest:
-            raise SkillSelectionInvalid
-    return bindings
-
-
-async def prepare_skill_locks_from_bindings(
+async def resolve_skill_locks_from_bindings(
     session: AsyncSession,
     *,
     organization_id: str,
     workspace_id: str,
     bindings: tuple[ResolvedSkillBinding, ...],
-) -> tuple[PreparedSkillLock, ...]:
+    lock: bool = False,
+) -> tuple[SkillRevisionLock, ...]:
     """Resolve frozen AgentRevision policies to exact active revisions."""
 
     if not bindings:
@@ -155,147 +99,78 @@ async def prepare_skill_locks_from_bindings(
         organization_id=organization_id,
         workspace_id=workspace_id,
         skill_ids=tuple(item.skill_id for item in bindings),
+        for_update=lock,
     )
     if set(records) != {item.skill_id for item in bindings}:
         raise SkillSelectionInvalid
     if any(records[item.skill_id].key != item.skill_key for item in bindings):
         raise SkillSelectionInvalid
-    return await _prepare_locks(
+    return await _resolve_locks(
         session,
         organization_id=organization_id,
         workspace_id=workspace_id,
         bindings=bindings,
         skills=records,
+        lock=lock,
     )
 
 
-async def prepare_skill_locks_from_selections(
+async def resolve_skill_locks_from_selections(
     session: AsyncSession,
     *,
     organization_id: str,
     workspace_id: str,
     selections: tuple[SkillSelection, ...],
-) -> tuple[PreparedSkillLock, ...]:
+    lock: bool = False,
+) -> tuple[SkillRevisionLock, ...]:
     """Resolve one Run override from active keys directly to exact revisions."""
 
-    prepared = await prepare_skill_bindings(
+    bindings, records = await _resolve_bindings(
         session,
         organization_id=organization_id,
         workspace_id=workspace_id,
         selections=selections,
+        lock=lock,
     )
-    return await prepare_skill_locks_from_bindings(
+    return await _resolve_locks(
         session,
         organization_id=organization_id,
         workspace_id=workspace_id,
-        bindings=tuple(item.binding for item in prepared),
+        bindings=bindings,
+        skills=records,
+        lock=lock,
     )
 
 
-async def freeze_skill_locks(
-    session: AsyncSession,
-    *,
-    organization_id: str,
-    workspace_id: str,
-    prepared: tuple[PreparedSkillLock, ...],
-) -> tuple[SkillRevisionLock, ...]:
-    """Revalidate lifecycle heads and exact revisions for Agent management writes."""
-
-    if not prepared:
-        return ()
-    skill_ids = tuple(item.binding.skill_id for item in prepared)
-    skills = await _load_active_skills_by_id(
-        session,
-        organization_id=organization_id,
-        workspace_id=workspace_id,
-        skill_ids=skill_ids,
-        for_update=True,
-    )
-    revision_ids = tuple(
-        {
-            *(item.revision_id for item in prepared),
-            *(skill.default_revision_id for skill in skills.values()),
-        }
-    )
-    revisions = tuple(
-        (
-            await session.scalars(
-                select(SkillRevisionRecord)
-                .where(
-                    SkillRevisionRecord.organization_id == organization_id,
-                    SkillRevisionRecord.workspace_id == workspace_id,
-                    SkillRevisionRecord.id.in_(revision_ids),
-                )
-                .with_for_update()
-            )
-        ).all()
-    )
-    by_revision_id = {record.id: record for record in revisions}
-    locks: list[SkillRevisionLock] = []
-    for expected in prepared:
-        skill = skills.get(expected.binding.skill_id)
-        revision = by_revision_id.get(expected.revision_id)
-        if (
-            skill is None
-            or skill.key != expected.binding.skill_key
-            or revision is None
-            or revision.skill_id != expected.binding.skill_id
-            or revision.version != expected.revision_version
-            or revision.content_digest != expected.content_digest
-            or (expected.binding.version is not None and expected.binding.version != revision.version)
-        ):
-            raise SkillSelectionInvalid
-        _validate_revision(revision, expected.binding.skill_key)
-        if expected.binding.version is None:
-            default = by_revision_id.get(skill.default_revision_id)
-            if default is None or default.skill_id != skill.id:
-                raise SkillSelectionInvalid
-            _validate_revision(default, expected.binding.skill_key)
-            revision = default
-        locks.append(
-            SkillRevisionLock(
-                skill_id=skill.id,
-                skill_revision_id=revision.id,
-                skill_key=skill.key,
-                version=revision.version,
-                content_digest=revision.content_digest,
-            )
-        )
-    return tuple(locks)
-
-
-async def _prepare_locks(
+async def _resolve_locks(
     session: AsyncSession,
     *,
     organization_id: str,
     workspace_id: str,
     bindings: tuple[ResolvedSkillBinding, ...],
     skills: dict[str, SkillRecord],
-) -> tuple[PreparedSkillLock, ...]:
+    lock: bool = False,
+) -> tuple[SkillRevisionLock, ...]:
     pinned = await _load_pinned_revisions(
         session,
         organization_id=organization_id,
         workspace_id=workspace_id,
         bindings=bindings,
+        for_update=lock,
     )
     default_ids = tuple(skills[binding.skill_id].default_revision_id for binding in bindings if binding.version is None)
+    default_query = select(SkillRevisionRecord).where(
+        SkillRevisionRecord.organization_id == organization_id,
+        SkillRevisionRecord.workspace_id == workspace_id,
+        SkillRevisionRecord.id.in_(default_ids),
+    )
     defaults = (
-        tuple(
-            (
-                await session.scalars(
-                    select(SkillRevisionRecord).where(
-                        SkillRevisionRecord.organization_id == organization_id,
-                        SkillRevisionRecord.workspace_id == workspace_id,
-                        SkillRevisionRecord.id.in_(default_ids),
-                    )
-                )
-            ).all()
-        )
+        tuple(await session.scalars(default_query.with_for_update(read=True) if lock else default_query))
         if default_ids
         else ()
     )
     by_default_id = {record.id: record for record in defaults}
-    result: list[PreparedSkillLock] = []
+    result: list[SkillRevisionLock] = []
     for binding in bindings:
         revision = (
             pinned[(binding.skill_id, binding.version)]
@@ -306,10 +181,11 @@ async def _prepare_locks(
             raise SkillSelectionInvalid
         _validate_revision(revision, binding.skill_key)
         result.append(
-            PreparedSkillLock(
-                binding=binding,
-                revision_id=revision.id,
-                revision_version=revision.version,
+            SkillRevisionLock(
+                skill_id=binding.skill_id,
+                skill_key=binding.skill_key,
+                skill_revision_id=revision.id,
+                version=revision.version,
                 content_digest=revision.content_digest,
             )
         )
@@ -331,7 +207,7 @@ async def _load_active_skills_by_id(
         SkillRecord.deleted_at.is_(None),
     )
     if for_update:
-        query = query.with_for_update()
+        query = query.with_for_update(read=True)
     records = tuple((await session.scalars(query)).all())
     return {record.id: record for record in records}
 
@@ -353,7 +229,7 @@ async def _load_pinned_revisions(
         tuple_(SkillRevisionRecord.skill_id, SkillRevisionRecord.version).in_(requested),
     )
     if for_update:
-        query = query.with_for_update()
+        query = query.with_for_update(read=True)
     records = tuple((await session.scalars(query)).all())
     by_identity = {(record.skill_id, record.version): record for record in records}
     if set(by_identity) != set(requested):

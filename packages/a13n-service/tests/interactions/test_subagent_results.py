@@ -492,7 +492,7 @@ async def _accept_child(
     objects: ObjectStore,
 ):
     await _grant_and_seed_child(sessions)
-    states, parent, parent_state = await _accept_parent(sessions, objects)
+    states, parent, _ = await _accept_parent(sessions, objects)
     scheduler = AttemptScheduler(
         sessions,
         clock=lambda: NOW + timedelta(seconds=1),
@@ -507,23 +507,14 @@ async def _accept_child(
         parent_record = await database.get(RunRecord, parent.id)
         assert parent_record is not None
         running_parent = parent_record.to_resource()
-    child_config = effective_agent_config()
-    prepared = _prepared_child(
-        running_parent,
-        parent_state,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        child_config,
-        suffix="c",
-    )
+    prepared = await _prepared_child(sessions, states, authority, suffix="c")
     accepted = await ChildRunAcceptanceService(
         sessions,
         RunStateStore(objects),
-        RunPayloadStore(objects),
         bindings=ordinary_memory(sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
-    ).accept(prepared, authority)
+    ).accept(prepared)
     return states, running_parent, authority, accepted.child_run_id
 
 
@@ -629,24 +620,15 @@ async def test_deferred_result_does_not_starve_the_next_scan_page(
 ):
     from a13n_service.subagents.result_payload import AsyncSubagentResultItemUnavailable
 
-    states, parent, authority, first_id = await _accept_child(interaction_sessions, interaction_object_store)
-    parent_state = await states.read(parent.organization_id, parent.id)
-    next_child = _prepared_child(
-        parent,
-        parent_state.envelope,
-        authority.run_attempt_id,
-        authority.attempt_number,
-        effective_agent_config(),
-        suffix="d",
-    )
+    states, _, authority, first_id = await _accept_child(interaction_sessions, interaction_object_store)
+    next_child = await _prepared_child(interaction_sessions, states, authority, suffix="d")
     await ChildRunAcceptanceService(
         interaction_sessions,
         states,
-        RunPayloadStore(interaction_object_store),
         bindings=ordinary_memory(interaction_sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
-    ).accept(next_child, authority)
+    ).accept(next_child)
     await _fail_child(interaction_sessions, first_id)
     await _fail_child(interaction_sessions, next_child.run.id)
     publisher = AsyncSubagentResultPublisher(

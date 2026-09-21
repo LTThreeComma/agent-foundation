@@ -18,7 +18,6 @@ from a13n_service.subagents import (
     AsyncSubagentResultPublisher,
     AsyncSubagentSuccessorReconciler,
     ChildRunAcceptanceService,
-    prepare_child_run,
     project_accepted_async_subagent_result,
 )
 from redis.asyncio import Redis
@@ -29,9 +28,9 @@ from tests.lifecycle_support import test_lifecycle_writer
 from tests.memory.selection_support import ordinary_memory
 from tests.sql_capture import capture_sql
 
-from .conftest import NOW, ORGANIZATION_ID, effective_agent_config
+from .conftest import NOW, ORGANIZATION_ID
 from .test_attempt_execution import _completed_state, _waiting_state
-from .test_subagent_acceptance import CHILD_AGENT_ID, CHILD_DEFINITION_ID, CHILD_REVISION_ID
+from .test_subagent_acceptance import _prepared_child
 from .test_subagent_results import (
     _accept_child,
     _complete_object_backed_child,
@@ -368,35 +367,14 @@ async def _accept_another_child(
     parent: Run,
     authority,
 ) -> str:
-    parent_state = await states.read(ORGANIZATION_ID, parent.id)
-    child_config = effective_agent_config()
-    prepared = prepare_child_run(
-        parent_run=parent,
-        parent_state=parent_state.envelope,
-        parent_run_attempt_id=authority.run_attempt_id,
-        parent_run_attempt_fence=authority.attempt_number,
-        parent_agent_instance_id="agent-parent",
-        subagent_name="researcher",
-        delegated_input='{"delegated_task":"second"}',
-        child_definition_id=CHILD_DEFINITION_ID,
-        child_agent_id=CHILD_AGENT_ID,
-        child_agent_revision_id=CHILD_REVISION_ID,
-        child_effective_config=child_config,
-        connection_selections=(),
-        child_thread_id="thread-12121212121212121212121212121212",
-        child_run_id="run_1212121212121212",
-        relationship_id="crr_1212121212121212",
-        execution_budget=parent.execution_budget,
-        created_at=NOW + timedelta(seconds=2),
-    )
+    prepared = await _prepared_child(sessions, states, authority, suffix="e")
     accepted = await ChildRunAcceptanceService(
         sessions,
         states,
-        RunPayloadStore(objects),
         bindings=ordinary_memory(sessions),
         clock=lambda: NOW + timedelta(seconds=2),
         lifecycle=test_lifecycle_writer(),
-    ).accept(prepared, authority)
+    ).accept(prepared)
     return accepted.child_run_id
 
 
@@ -545,7 +523,6 @@ async def test_completed_inline_hook_collects_only_after_delivery_retention_ends
         event_horizon=timedelta(days=1),
         published_delivery_horizon=timedelta(days=1),
         dead_letter_horizon=timedelta(days=1),
-        poll_interval_seconds=1,
         batch_limit=10,
         clock=lambda: NOW + timedelta(days=3),
     ).reconcile_once()

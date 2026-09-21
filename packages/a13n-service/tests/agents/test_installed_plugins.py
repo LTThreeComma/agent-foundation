@@ -22,7 +22,6 @@ from a13n_service.agents.reconstruction import AgentReconstructor
 from a13n_service.agents.resolution import AgentResolver
 from a13n_service.models.providers import built_in_model_provider_catalog
 from a13n_service.models.runtime import AcceptedModelSelector
-from a13n_service.storage import transaction
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from .conftest import WORKSPACE_ID, actor, agent_config
@@ -92,8 +91,7 @@ async def test_control_preserves_authored_configuration_and_worker_prepares_it(a
     replacement = build_harness_plugin_factory_catalog(explicit_factories=(replacement_factory,))
     _, invocations = _management(agent_sessions)
     prepared = await invocations.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await invocations.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = invocations.freezing.freeze_selected(prepared=prepared)
     assert frozen.effective_config.plugins == created.revision.config.plugins
     normalized = prepare_agent_plugins(original, frozen.effective_config)
     assert normalized.plugins == (expected,)
@@ -148,8 +146,7 @@ async def test_control_accepts_plugin_selection_without_installed_code(agent_ses
         ),
     )
     prepared = await invocations.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await invocations.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = invocations.freezing.freeze_selected(prepared=prepared)
     assert frozen.effective_config.plugins == created.revision.config.plugins
     with pytest.raises(PluginSelectionError, match="plugin_factory_missing"):
         prepare_agent_plugins(build_harness_plugin_factory_catalog(), frozen.effective_config)

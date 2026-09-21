@@ -27,8 +27,7 @@ async def test_acceptance_retains_requested_scope_without_discovery(connectivity
             *(ConnectionToolSelection(connection_id=MCP_CONNECTION_ID),),
         ),
     )
-    async with transaction(connectivity_sessions) as session:
-        retained = await resolver.freeze(session, prepared=prepared)
+    retained = prepared
     assert retained[0].tools == ("not-discovered",)
     assert retained[0].defer_loading
     assert retained[1].tools is None
@@ -36,7 +35,6 @@ async def test_acceptance_retains_requested_scope_without_discovery(connectivity
         "conn_orders_account",
         "conn_docs",
     ]
-    assert not hasattr(retained, "mcp_tool_snapshot")
 
 
 def test_connection_aliases_only_add_hash_for_collisions():
@@ -57,7 +55,7 @@ async def test_accepted_alias_survives_connection_rename(connectivity_sessions):
         workspace_id=WORKSPACE_ID,
         connection_tools=(ConnectionToolSelection(connection_id=CONNECTOR_CONNECTION_ID),),
     )
-    selection = prepared.selections[0]
+    selection = prepared[0]
     async with transaction(connectivity_sessions) as session:
         connection = await session.get(ConnectorConnectionRecord, CONNECTOR_CONNECTION_ID)
         connection.name = "Renamed account"
@@ -69,7 +67,7 @@ async def test_accepted_alias_survives_connection_rename(connectivity_sessions):
     assert selection.model_alias == "conn_orders_account"
 
 
-async def test_acceptance_rechecks_resource_revocation(connectivity_sessions):
+async def test_dispatch_rechecks_resource_revocation(connectivity_sessions):
     await seed_selection_sources(connectivity_sessions)
     resolver = ConnectivitySelectionResolver(connectivity_sessions)
     prepared = await resolver.prepare(
@@ -83,7 +81,13 @@ async def test_acceptance_rechecks_resource_revocation(connectivity_sessions):
         source.status = "disabled"
     async with transaction(connectivity_sessions) as session:
         with pytest.raises(ConnectivitySelectionError, match="connection_unavailable"):
-            await resolver.freeze(session, prepared=prepared)
+            await resolver.require_current_source(
+                session,
+                actor=actor(),
+                organization_id=ORG_ID,
+                workspace_id=WORKSPACE_ID,
+                selection=prepared[0],
+            )
 
 
 async def test_workspace_sources_reject_another_workspace(connectivity_sessions):
@@ -129,7 +133,7 @@ async def test_dispatch_checks_only_current_source_without_freezing_other_connec
                 actor=actor(),
                 organization_id=ORG_ID,
                 workspace_id=WORKSPACE_ID,
-                selection=prepared.selections[0],
+                selection=prepared[0],
             )
     finally:
         event.remove(engine, "before_execute", record)
@@ -143,7 +147,7 @@ async def test_dispatch_checks_only_current_source_without_freezing_other_connec
                 actor=actor(),
                 organization_id=ORG_ID,
                 workspace_id=WORKSPACE_ID,
-                selection=prepared.selections[1],
+                selection=prepared[1],
             )
 
 
@@ -162,9 +166,7 @@ async def test_reauthorization_fences_accepted_runs_but_credential_refresh_does_
         workspace_id=WORKSPACE_ID,
         connection_tools=(ConnectionToolSelection(connection_id=connection_id),),
     )
-    async with transaction(connectivity_sessions) as session:
-        accepted = await resolver.freeze(session, prepared=prepared)
-    selection = accepted[0]
+    selection = prepared[0]
     async with transaction(connectivity_sessions) as session:
         connection = await session.get(ConnectionRecord, connection_id)
         connection.credential_generation += 1
@@ -180,13 +182,11 @@ async def test_reauthorization_fences_accepted_runs_but_credential_refresh_does_
             await resolver.require_current_source(
                 session, actor=actor(), organization_id=ORG_ID, workspace_id=WORKSPACE_ID, selection=selection
             )
-        with pytest.raises(ConnectivitySelectionError, match="connection_changed"):
-            await resolver.freeze(session, prepared=prepared)
     replacement = await resolver.prepare(
         actor=actor(),
         organization_id=ORG_ID,
         workspace_id=WORKSPACE_ID,
         connection_tools=(ConnectionToolSelection(connection_id=connection_id),),
     )
-    assert replacement.selections[0].connection_id == selection.connection_id
-    assert replacement.selections[0].authorization_generation == selection.authorization_generation + 1
+    assert replacement[0].connection_id == selection.connection_id
+    assert replacement[0].authorization_generation == selection.authorization_generation + 1

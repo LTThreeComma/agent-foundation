@@ -49,9 +49,9 @@ class AgentManagement:
         self.invocations = invocation_resolver
         self.queries = queries
         self.images = AgentImages(sessions)
-        self.commands = AgentCommands(sessions, resolver, invocation_resolver, queries, clock=clock)
-        self.revisions = AgentRevisions(sessions, resolver, invocation_resolver, queries, clock=clock)
-        self.duplication = AgentDuplication(sessions, invocation_resolver, queries, clock=clock)
+        self.commands = AgentCommands(sessions, resolver, invocation_resolver, clock=clock)
+        self.revisions = AgentRevisions(sessions, resolver, invocation_resolver, clock=clock)
+        self.duplication = AgentDuplication(sessions, invocation_resolver, clock=clock)
         self.builtins = BuiltinAgents(sessions, resolver, clock=clock)
         self.toolsets = ToolsetService(
             sessions,

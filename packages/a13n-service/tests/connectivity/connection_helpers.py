@@ -9,8 +9,7 @@ from a13n_service.connectivity.mcp.service import MCPConnectionService
 
 
 def management(protocol: ConnectorConnectionService | MCPConnectionService) -> ConnectionService:
-    policy = protocol._endpoint_policy if isinstance(protocol, MCPConnectionService) else EndpointPolicy()
-    return ConnectionService(protocol._sessions, policy, clock=protocol._clock)
+    return ConnectionService(protocol._sessions, EndpointPolicy(), clock=protocol._clock)
 
 
 def mcp_checks(protocol: MCPConnectionService) -> ConnectionChecks:

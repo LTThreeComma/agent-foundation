@@ -9,6 +9,8 @@ from a13n_service.agents.domain import (
     AgentRunOverride,
     CreateAgentRequest,
     CreateAgentRevisionRequest,
+    DuplicateAgentRequest,
+    SetDefaultAgentRevisionRequest,
 )
 from a13n_service.agents.errors import AgentError
 from a13n_service.agents.invocation import merge_agent_run_override
@@ -231,8 +233,7 @@ async def test_current_invocation_freezes_complete_effective_config(
         agent_id=created.agent.id,
         config_override=AgentRunOverride(instructions="One Run only.", retries={"tools": 0}),
     )
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
 
     assert frozen.selector_kind is AgentSelectorKind.current
     assert frozen.agent_revision_id == created.revision.id
@@ -273,8 +274,7 @@ async def test_run_acceptance_uses_latest_model_without_revising_agent(
         }
 
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
 
     assert frozen.agent_revision_id == created.revision.id
     assert frozen.effective_config.resolved_model.execution.upstream_model == "gpt-new"
@@ -362,8 +362,7 @@ async def test_exact_historical_revision_never_follows_current(
         agent_id=created.agent.id,
         agent_revision_id=created.revision.id,
     )
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
 
     assert frozen.selector_kind is AgentSelectorKind.exact
     assert frozen.agent_revision_id == created.revision.id
@@ -372,7 +371,7 @@ async def test_exact_historical_revision_never_follows_current(
 
 
 @pytest.mark.anyio
-async def test_current_selector_detects_revision_change_between_prepare_and_commit(
+async def test_management_rejects_stale_agent_version_but_selected_run_keeps_its_revision(
     agent_management: AgentManagement,
     agent_invocation_resolver: AgentInvocationResolver,
     agent_sessions: async_sessionmaker[AsyncSession],
@@ -394,10 +393,18 @@ async def test_current_selector_detects_revision_change_between_prepare_and_comm
         if_match=resource_etag(created.agent.id, created.agent.updated_at),
     )
 
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
+    assert frozen.agent_revision_id == created.revision.id
     with pytest.raises(AgentError) as conflict:
-        async with transaction(agent_sessions) as session:
-            await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
-    assert conflict.value.code == "default_revision_conflict"
+        await agent_management.revisions.set_default_revision(
+            actor=actor(),
+            agent_id=created.agent.id,
+            revision_id=created.revision.id,
+            idempotency_key="stale-management-version",
+            request=SetDefaultAgentRevisionRequest(),
+            if_match=resource_etag(created.agent.id, created.agent.updated_at),
+        )
+    assert conflict.value.code == "precondition_failed"
 
 
 @pytest.mark.anyio
@@ -431,8 +438,7 @@ async def test_run_freezes_model_defaults_agent_settings_and_explicit_overrides(
     prepared = await agent_invocation_resolver.preparation.prepare(
         actor=actor(), agent_id=created.agent.id, config_override=AgentRunOverride.model_validate({"model": override})
     )
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
     assert frozen.effective_config.resolved_model.settings == {"temperature": temperature, "max_tokens": 123}
     async with transaction(agent_sessions) as session:
         record = await session.get(ModelRecord, MODEL_ID)
@@ -489,8 +495,7 @@ async def test_run_reasoning_choice_replaces_agent_reasoning_choice(
         agent_id=created.agent.id,
         config_override=AgentRunOverride.model_validate({"model": {"settings": {"thinking": "high"}}}),
     )
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
 
     assert frozen.effective_config.resolved_model.settings == {"thinking": "high", "temperature": 0.2}
 
@@ -546,8 +551,7 @@ async def test_parent_acceptance_freezes_child_model_defaults_and_detects_child_
         assert model is not None
         model.settings = {"max_tokens": 321}
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=parent.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
     accepted_child = frozen.effective_config.child_configs[child.revision.id]
     assert accepted_child.effective_config.resolved_model.execution.pricing is not None
     assert accepted_child.effective_config.resolved_model.execution.pricing.tiers[0].rates.output == 2.0
@@ -565,8 +569,13 @@ async def test_parent_acceptance_freezes_child_model_defaults_and_detects_child_
         assert record is not None
         record.enabled = False
     with pytest.raises(AgentError):
-        async with transaction(agent_sessions) as session:
-            await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+        await agent_management.duplication.duplicate(
+            actor=actor(),
+            agent_id=parent.agent.id,
+            idempotency_key="revoked-child-duplicate",
+            request=DuplicateAgentRequest(name="Rejected duplicate"),
+            if_match=resource_etag(parent.agent.id, parent.agent.updated_at),
+        )
     assert accepted_child.effective_config.resolved_model.settings["max_tokens"] == 321
 
 
@@ -701,8 +710,7 @@ async def test_permissions_and_managed_reviewer_survive_acceptance_and_reconstru
     )
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=created.agent.id)
     assert prepared.reviewer_model is not None
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
     effective = EffectiveAgentConfig.model_validate_json(frozen.effective_config.model_dump_json())
     assert effective == frozen.effective_config
     assert effective.content_digest == digest_request(

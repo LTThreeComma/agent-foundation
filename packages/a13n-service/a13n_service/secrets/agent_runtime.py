@@ -153,7 +153,7 @@ class BoundAgentSecrets:
         return tuple(agent_id for agent_id, _ in selected), selected[0][1]
 
     async def _authorize(self, database: AsyncSession, agent_ids: tuple[str, ...]) -> AuthenticatedActor:
-        run, _, _ = await read_attempt_authority(database, self._current_attempt(), self._runtime._clock())
+        run, _, _ = await read_attempt_authority(database, self._current_attempt(), self._runtime._clock)
         if (
             run.id != self._run.id
             or run.organization_id != self._run.organization_id

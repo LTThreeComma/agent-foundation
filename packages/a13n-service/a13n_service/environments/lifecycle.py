@@ -129,11 +129,11 @@ class EnvironmentLifecycle:
     async def acquire_preparation(
         self, environment_id: str, *, attempt: AttemptContext, mount_name: str = "workspace"
     ) -> LifecycleOperation:
-        now = assume_utc(self.clock())
         async with transaction(self.sessions) as session:
             binding, row, provider = await lock_run_environment_use(
-                session, environment_id, attempt, self.capacity, now, mount_name=mount_name
+                session, environment_id, attempt, self.capacity, self.clock, mount_name=mount_name
             )
+            now = assume_utc(self.clock())
             if await session.scalar(
                 select(EnvironmentFileUseRecord.id)
                 .where(

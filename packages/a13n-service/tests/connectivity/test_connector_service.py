@@ -280,7 +280,6 @@ async def test_reconciler_completes_attached_setup_by_exact_external_reference(
         None,
         connections.setup_coordinator,
         instance_id="reconciler-1",
-        poll_interval_seconds=1,
         lease_seconds=60,
         clock=lambda: NOW,
     )
@@ -340,7 +339,6 @@ async def test_unknown_revoke_is_never_retried(
         None,
         connections.setup_coordinator,
         instance_id="pod",
-        poll_interval_seconds=1,
         lease_seconds=60,
         clock=lambda: NOW + timedelta(seconds=6),
     )
@@ -1014,7 +1012,6 @@ async def test_expired_unattached_setup_requires_action_without_a_binding(
         None,
         connections.setup_coordinator,
         instance_id="expiry",
-        poll_interval_seconds=2,
         lease_seconds=60,
         clock=lambda: NOW + timedelta(seconds=601),
     )

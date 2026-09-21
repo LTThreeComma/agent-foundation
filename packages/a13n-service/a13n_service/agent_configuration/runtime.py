@@ -201,7 +201,7 @@ class ConfigurationCapability(AbstractModelContextCapability):
             raise ModelRetry("The configuration tool binding is invalid.")
         attempt = self._current_context()
         async with short_session(self._sessions) as session:
-            retained, _, _ = await read_attempt_authority(session, attempt, utc_now())
+            retained, _, _ = await read_attempt_authority(session, attempt, utc_now)
             if (
                 retained.id != self._run.id
                 or ConfigurationRunContext.model_validate(retained.configuration_context) != self._binding

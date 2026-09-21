@@ -54,7 +54,7 @@ async def test_shared_models_resolve_by_bare_key_and_use_owned_credentials(
         organization_id=ORG_ID, workspace_id=WORKSPACE_ID, model_key="coding", settings={}
     )
     assert prepared.resource.id == model.id
-    assert prepared.workspace_id == WORKSPACE_ID
+    assert prepared.resource.workspace_id is None
     async with short_session(model_sessions) as session:
         record = await session.get(ModelProviderRecord, org_provider.id)
         assert record is not None

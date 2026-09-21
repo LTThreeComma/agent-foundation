@@ -15,7 +15,7 @@ from a13n_service.hooks.management import HookSubscriptionService
 from a13n_service.hooks.publisher import WebhookPublisher
 from a13n_service.lifecycle.retention import LifecycleRetentionReconciler
 from a13n_service.lifecycle.service import LifecycleEventService
-from a13n_service.process.background import BackgroundTask
+from a13n_service.process.background import BackgroundTask, periodic_task
 from a13n_service.process.runtime import SharedRuntime
 from a13n_service.settings import Settings
 
@@ -59,7 +59,6 @@ async def build_hook_bundle(
     )
     dispatcher = HookDispatcher(
         shared.storage.sessions,
-        poll_interval_seconds=settings.hooks.dispatch_poll_interval_seconds,
         batch_limit=settings.hooks.dispatch_batch_limit,
         max_attempts=settings.hooks.dispatch_max_attempts,
         retry_base_seconds=settings.hooks.dispatch_retry_base_seconds,
@@ -70,7 +69,6 @@ async def build_hook_bundle(
         http_client,
         endpoint_policy,
         shared.secret_protector,
-        poll_interval_seconds=settings.webhooks.poll_interval_seconds,
         lease_seconds=settings.webhooks.claim_lease_seconds,
         claim_limit=settings.webhooks.claim_limit,
         max_attempts=settings.webhooks.max_attempts,
@@ -84,16 +82,31 @@ async def build_hook_bundle(
         event_horizon=timedelta(days=settings.lifecycle.retention_days),
         published_delivery_horizon=timedelta(days=settings.lifecycle.published_delivery_retention_days),
         dead_letter_horizon=timedelta(days=settings.lifecycle.dead_letter_retention_days),
-        poll_interval_seconds=settings.lifecycle.retention_poll_interval_seconds,
         batch_limit=settings.lifecycle.retention_batch_limit,
     )
     return _HookBundle(
         inline_validator=InlineHookValidator(endpoint_policy),
         subscriptions=subscriptions,
         lifecycle_events=LifecycleEventService(shared.storage.sessions),
-        dispatch_task=BackgroundTask("hook dispatcher", dispatcher.run),
-        delivery_task=BackgroundTask("webhook publisher", publisher.run),
-        retention_task=BackgroundTask("lifecycle retention reconciler", retention.run),
+        dispatch_task=periodic_task(
+            "hook_dispatch",
+            dispatcher.scan,
+            interval_seconds=settings.hooks.dispatch_poll_interval_seconds,
+            timeout_seconds=30,
+        ),
+        delivery_task=periodic_task(
+            "webhook_publication",
+            publisher.scan,
+            interval_seconds=settings.webhooks.poll_interval_seconds,
+            timeout_seconds=settings.webhooks.claim_lease_seconds + settings.webhooks.request_timeout_seconds + 1,
+            drain=publisher.drain,
+        ),
+        retention_task=periodic_task(
+            "evidence_lifecycle_retention",
+            retention.scan,
+            interval_seconds=settings.lifecycle.retention_poll_interval_seconds,
+            timeout_seconds=30,
+        ),
     )
 
 

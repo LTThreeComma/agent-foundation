@@ -3,12 +3,11 @@
 from datetime import timedelta
 
 from a13n_service.assets.retention import AssetRetention
-from a13n_service.background import PeriodicTask
 from a13n_service.hooks.retention import HookRetention
 from a13n_service.iam.auth.cleanup import IdentityTokenCleanup
 from a13n_service.iam.cleanup import OwnerCleanup
 from a13n_service.object_retention.collector import ObjectCollector
-from a13n_service.process.background import BackgroundTask
+from a13n_service.process.background import BackgroundTask, periodic_task
 from a13n_service.process.runtime import SharedRuntime
 from a13n_service.secrets.cleanup import SecretOwnerCleanup
 from a13n_service.settings import Settings
@@ -50,14 +49,11 @@ def build_collection_tasks(settings: Settings, shared: SharedRuntime) -> tuple[B
         ("object_collection_recovery", objects.recover),
     )
     return tuple(
-        BackgroundTask(
+        periodic_task(
             name,
-            PeriodicTask(
-                name,
-                scan,
-                interval_seconds=settings.control.collection_poll_interval_seconds,
-                timeout_seconds=(settings.control.collection_timeout_seconds + 1) * limit,
-            ).run,
+            scan,
+            interval_seconds=settings.control.collection_poll_interval_seconds,
+            timeout_seconds=(settings.control.collection_timeout_seconds + 1) * limit,
         )
         for name, scan in scans
     )

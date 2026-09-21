@@ -50,8 +50,16 @@ class GitHubNotificationPoller:
         self.sessions, self.ingress, self.http, self.endpoints = sessions, ingress, http, endpoints
         self.instance_id, self.clock = instance_id, clock
 
+        self._draining = False
+
+    def drain(self) -> None:
+        self._draining = True
+
+    def is_draining(self) -> bool:
+        return self._draining
+
     async def run(self) -> None:
-        while True:
+        while not self._draining:
             try:
                 worked = await self.run_once()
             except Exception:

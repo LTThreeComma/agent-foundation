@@ -28,8 +28,16 @@ class IngressRetentionReconciler:
         self._batch_size = batch_size
         self._clock = clock
 
+        self._draining = False
+
+    def drain(self) -> None:
+        self._draining = True
+
+    def is_draining(self) -> bool:
+        return self._draining
+
     async def run(self) -> None:
-        while True:
+        while not self._draining:
             removed = 0
             try:
                 removed = await self.reconcile_once()

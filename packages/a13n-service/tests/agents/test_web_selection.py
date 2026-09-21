@@ -1,11 +1,16 @@
 import pytest
-from a13n_service.agents.domain import AgentConfig, AgentRunOverride, ChildAgentExecution, CreateAgentRequest
+from a13n_service.agents.domain import (
+    AgentConfig,
+    AgentRunOverride,
+    ChildAgentExecution,
+    CreateAgentRequest,
+    SetDefaultAgentRevisionRequest,
+)
 from a13n_service.agents.errors import AgentError
 from a13n_service.agents.invocation import merge_agent_run_override
 from a13n_service.digests import digest_request
 from a13n_service.etags import resource_etag
 from a13n_service.provider_plugins import load_provider_catalogs
-from a13n_service.storage import transaction
 from a13n_service.web.domain import CreateWebProviderRequest, UpdateWebProviderRequest
 from a13n_service.web.runtime import graph_uses_web
 from a13n_service.web.service import WebProviderService
@@ -73,8 +78,7 @@ async def test_selection_authoring_freezing_and_live_changes(
         request=CreateAgentRequest(name="Search", config=base),
     )
     prepared = await agent_invocation_resolver.preparation.prepare(actor=actor(), agent_id=created.agent.id)
-    async with transaction(agent_sessions) as session:
-        frozen = await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+    frozen = agent_invocation_resolver.freezing.freeze_selected(prepared=prepared)
     assert frozen.effective_config.toolsets["web"] == base.toolsets["web"]
     assert "secret" not in frozen.effective_config.model_dump_json(exclude={"secret_requirements"})
     assert (await providers.references(actor=actor(), workspace_id=WORKSPACE_ID, provider_id=account.id)).items[
@@ -89,8 +93,14 @@ async def test_selection_authoring_freezing_and_live_changes(
     )
     assert frozen.effective_config.toolsets["web"] == base.toolsets["web"]
     with pytest.raises(Exception) as disabled:
-        async with transaction(agent_sessions) as session:
-            await agent_invocation_resolver.freezing.freeze_in_transaction(session, prepared=prepared)
+        await agent_management.revisions.set_default_revision(
+            actor=actor(),
+            agent_id=created.agent.id,
+            revision_id=created.revision.id,
+            idempotency_key="disabled-web-default",
+            request=SetDefaultAgentRevisionRequest(),
+            if_match=resource_etag(created.agent.id, created.agent.updated_at),
+        )
     assert disabled.value.code == "web_provider_disabled"
     with pytest.raises(AgentError) as invalid:
         await agent_management.commands.create(

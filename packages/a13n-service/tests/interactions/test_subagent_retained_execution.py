@@ -458,7 +458,6 @@ def _operator_for_parent(
             ChildRunAcceptanceService(
                 sessions,
                 states,
-                RunPayloadStore(objects),
                 bindings=ordinary_memory(sessions),
                 clock=lambda: NOW + timedelta(seconds=8),
                 lifecycle=test_lifecycle_writer(),
