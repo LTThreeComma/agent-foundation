@@ -136,6 +136,7 @@ class RunBindings:
     environment: EnvironmentRuntime | None = None
     model_resolver: RunModelResolver | None = None
     toolset_instructions: bool | None = None
+    deferred_tools_supported: bool = True
     capabilities: tuple[AbstractCapability[AgentContext], ...] = ()
     web: WebBinding | None = None
     media_reader: MediaReader | None = None
@@ -156,6 +157,8 @@ class RunBindings:
     )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.deferred_tools_supported, bool):
+            raise TypeError("deferred_tools_supported must be a boolean")
         if self.tool_result_directory is not None:
             try:
                 parse_mount_path(self.tool_result_directory)
@@ -201,6 +204,7 @@ class RunBindings:
         environment: EnvironmentRuntime | None = None,
         model_resolver: RunModelResolver | None = None,
         toolset_instructions: bool | None = None,
+        deferred_tools_supported: bool = True,
         model_context: ModelContextMiddleware | None = None,
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         web: WebBinding | None = None,
@@ -225,6 +229,7 @@ class RunBindings:
             environment=environment,
             model_resolver=model_resolver,
             toolset_instructions=toolset_instructions,
+            deferred_tools_supported=deferred_tools_supported,
             model_context=model_context,
             capabilities=tuple(capabilities),
             web=web,
@@ -355,6 +360,7 @@ class AgentContext:
     deferred_resume: DeferredToolResume | None
     metadata: Mapping[str, JsonValue]
     _steering: SteeringBridge = field(repr=False, compare=False)
+    deferred_tools_supported: bool = True
     _tool_recovery: ToolRecoveryPlan | None = field(default=None, repr=False, compare=False)
     _model_recovery: ModelRecoveryState = field(default_factory=ModelRecoveryState, repr=False, compare=False)
     model_context: ModelContextMiddleware | None = None

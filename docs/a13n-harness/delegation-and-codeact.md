@@ -93,43 +93,19 @@ Implement those semantics behind `SubagentOperator` according to the owning Host
 
 ### Deferred Tools in Child Runs
 
-Every invocation with `parent_agent_instance_id is not None` is non-suspending. This applies to inline Harness children and to Host-scheduled children that use the ordinary child bindings:
+Deferred support is selected by fresh `RunBindings.deferred_tools_supported`, not by whether an invocation has a parent. The default is `True`. Roots and children can use native deferred calls, approvals, and Host-configured handlers.
 
-| Deferred path                                                                                                                              | Child behavior                                                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| A prepared `ToolDefinition.defer` is true, including external and declaratively approval-gated tools                                       | The definition and its first-party guidance are absent from the child tool surface                                      |
-| An ordinary function, validator, Capability hook, custom Toolset, or managed policy raises `CallDeferred` or `ApprovalRequired` at runtime | The mandatory Harness boundary returns `ToolDenied` for every request, and Pydantic continues the same child model loop |
-| An unexpected custom or upstream bypass still terminates with `DeferredToolRequests`                                                       | The child fails closed with `subagent_deferred_unsupported`; its parent is never suspended                              |
+A Host without a child-feedback lifecycle sets `deferred_tools_supported=False`. Declaratively deferred tools and their first-party guidance are then omitted. Runtime `CallDeferred` and `ApprovalRequired` become `ToolDenied("Deferred tool interaction is unavailable for this Run.")` results inside the same model loop. A custom handler cannot bypass that setting. Unexpected terminal deferral fails with `deferred_tools_unsupported`. Harness UI currently selects this unsupported mode for async children; ordinary async prompt continuation remains available.
 
-Root runs are unchanged. They can suspend with native deferred requests or use a Pydantic `HandleDeferredToolCalls` Capability to resolve requests inline. The Harness boundary declines root requests so normal Pydantic accumulation dispatch still applies.
+#### Host-Managed Feedback
 
-This distinction matters when authoring a plugin, Toolset, validator, or policy. A function can be statically ordinary but request interaction only for particular arguments:
+The built-in inline executor always disables deferred tools, even when the parent supports them. A child bindings factory cannot re-enable them. Inline `resume_subagent` remains ordinary prompt continuation; it does not accept deferred feedback or suspend the parent on the child's behalf.
 
-```python
-from pydantic_ai.exceptions import ApprovalRequired, CallDeferred
+A Host that owns child execution can enable deferred tools and use the same [native resume flow](state-and-resume.md#structured-suspension) as a root. Retain the exact `HarnessRunResult.deferred` batch together with `result.state`, collect authenticated feedback, then call that child's `ExecutableAgent.run()` or `stream()` directly with fresh bindings, `previous_state`, and `DeferredToolResume`. The Host owns scheduling, checkpoint selection, feedback correlation, and delivery. Observation events alone are not a resumable checkpoint, and no parent model call is required to resume a Host-managed child.
 
+Declare only the child's business `output_type`, including structured Pydantic models. Harness automatically adds native `DeferredToolRequests` support when building roots and children; explicitly including that reserved type in the business output is rejected. Suspended results carry `deferred` and no business output. After successful resume, `output_or_raise()` returns the declared business type.
 
-def publish_report(*, destination: str, require_review: bool) -> str:
-    if require_review:
-        raise ApprovalRequired({"destination": destination})
-    if destination.startswith("client://"):
-        raise CallDeferred({"destination": destination})
-    return publish_without_external_interaction(destination)
-```
-
-A root model receives normal approval or external-execution behavior. A child model receives a normal denied tool result with the message `Deferred tool interaction is unavailable in subagent runs.` and can choose another argument, another tool, or a final answer. The function stays visible because the deferral decision is argument- or policy-specific; the Harness does not permanently hide it after one denial. If restricted CodeAct calls that function, the same handler chain produces the denial, CodeAct ends that runner invocation as a bounded failure because it cannot suspend a Monty frame, and the surrounding child model loop continues.
-
-When designing extension behavior:
-
-1. Set native Pydantic `requires_approval` or external tool kinds honestly. Do not disguise a declaratively deferred tool as an ordinary function merely to keep it visible to children.
-2. Treat `ToolDenied` as an ordinary expected outcome. Give the model enough tool description or adjacent ordinary tools to make progress without Host interaction when child use is intended.
-3. If a tool fundamentally requires a user, browser client, or external executor, accept that it is root-only. Configure a child definition without depending on that tool for its required output path.
-4. Keep argument-sensitive deferral dynamic. Do not remove a function from later child requests merely because one argument or one live policy decision required approval.
-5. Do not install an auto-approving `HandleDeferredToolCalls` handler to bypass child policy. The mandatory child boundary resolves the complete batch first; custom handlers still work for roots.
-6. Treat only a terminal root `HarnessRunResult(status="suspended")` and its exact `deferred` value as suspension authority. Deferred stream events are observations, and child jobs have no deferred-response lifecycle.
-7. Test the same extension as both a root and a child. Cover static surface omission, dynamic `CallDeferred`, dynamic `ApprovalRequired`, managed-policy approval, mixed ordinary/deferred batches, and the model's denial recovery path.
-
-Usage limits remain the bound on a model that repeatedly retries denied interactions. An inline child receives the strictest per-field intersection of the parent effective limit, its own `AgentSpec.usage_limits`, and the authored subagent edge. An async Host receives that same ceiling and may only narrow it. Hosts can use `a13n_harness.usage.intersect_usage_limits` to combine native ceilings without mutating the inputs. a13n Service persists the accepted ceiling for replacement Worker Attempts and child continuations. Harness does not add a second hidden retry counter or mutate the extension definition.
+Usage limits are independent per child Run. Each child receives the strictest per-field intersection of its own definition limits and the authored edge, not its parent's budget or accumulator. An async Host may narrow that ceiling. Child events remain attributed separately; Hosts can aggregate usage for display without introducing a shared enforcement cap.
 
 ## CodeAct
 

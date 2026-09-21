@@ -184,7 +184,6 @@ class DelegationToolset:
             try:
                 child_input = _build_child_input(ctx, child, prompt)
                 limits = intersect_usage_limits(
-                    ctx.usage_limits,
                     child.executable.definition_usage_limits(),
                     child.declaration.usage_limits,
                 )
@@ -363,7 +362,6 @@ class DelegationToolset:
             child_input,
             bindings=bindings,
             previous_state=previous_state,
-            usage=ctx.usage,
             usage_limits=limits,
         )
         forwarder = stream._bind_parent_event_forwarder(ctx.deps.events)
@@ -578,6 +576,7 @@ def _create_inline_child_bindings(
         tool_result_directory=parent.tool_result_directory,
         model_resolver=parent.model_resolver,
         toolset_instructions=parent._toolset_instructions_override,
+        deferred_tools_supported=False,
         capabilities=(invocation_policy,) if invocation_policy is not None else (),
         metadata=parent.metadata,
     )
@@ -591,6 +590,10 @@ def _create_inline_child_bindings(
         raise DefinitionError(
             "Child run bindings factory cannot replace the child instance or borrowed Environment.",
             code="subagent_binding_invalid",
+        )
+    if not bindings.deferred_tools_supported and resolved.deferred_tools_supported:
+        raise DefinitionError(
+            "Child bindings cannot enable unsupported deferred tools.", code="subagent_binding_invalid"
         )
     if invocation_policy is not None and not any(item is invocation_policy for item in resolved.capabilities):
         raise DefinitionError(

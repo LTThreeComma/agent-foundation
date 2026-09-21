@@ -20,7 +20,7 @@ from a13n_harness.context import AgentContext, BuiltSubagent
 from a13n_harness.errors import DefinitionError, StateError
 from a13n_harness.identity import AgentIdentityRef
 from a13n_harness.input import RunInputValue
-from a13n_harness.state import HarnessState
+from a13n_harness.state import AgentContextStateSnapshot, CapabilityState, HarnessState
 
 if TYPE_CHECKING:
     from a13n_harness.builder import DelegationContextPolicy
@@ -457,6 +457,27 @@ class _AsyncSubagentCapability(_SubagentActiveCapability):
 
     def get_toolset(self) -> AbstractToolset[AgentContext]:
         return self._toolset.get_toolset()
+
+
+def _fork_inline_subagent_state(snapshot: AgentContextStateSnapshot) -> AgentContextStateSnapshot:
+    """Fork the owned child tree while preserving opaque Capability namespaces."""
+    entries = snapshot.entries
+    entry = entries.get(SUBAGENT_CAPABILITY_ID)
+    if entry is None:
+        return snapshot
+    if entry.version != _INLINE_SUBAGENT_STATE_VERSION:
+        raise StateError("Cannot fork unsupported inline subagent State.", code="subagent_state_incompatible")
+    state = InlineSubagentCollectionState.model_validate(entry.data)
+    forked = InlineSubagentCollectionState(
+        children={
+            child_id: record.model_copy(update={"state": record.state.fork()})
+            for child_id, record in state.children.items()
+        }
+    )
+    entries[SUBAGENT_CAPABILITY_ID] = CapabilityState(
+        version=_INLINE_SUBAGENT_STATE_VERSION, data=forked.model_dump(mode="json")
+    )
+    return AgentContextStateSnapshot(entries=entries)
 
 
 def _validate_inline_subagent_state(state: InlineSubagentCollectionState, context: AgentContext) -> None:
