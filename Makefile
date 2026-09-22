@@ -575,7 +575,7 @@ image-check-sandbox: ## Smoke-check sandbox defaults, development account, sudo 
 		test "$$(id -u):$$(id -g)" = "1000:1000"; \
 		test "$$A13N_ENVD_EXECUTION_UID:$$A13N_ENVD_EXECUTION_GID" = "1000:1000"; \
 		test "$$A13N_ENVD_FULL_CONTROL" = "true"; \
-		test "$${A13N_ENVD_EGRESS_ENABLED:-false}" = "false"; \
+		test "$${A13N_ENVD_EGRESS_MODE:-inherit}" = "inherit"; \
 		test -w /workspace && test -w /home/sandbox; \
 		test "$$(sudo -n id -u)" = "0"'
 	@docker run --rm "$(SANDBOX_IMAGE)"

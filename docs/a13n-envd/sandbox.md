@@ -93,7 +93,7 @@ Docker exec does not pass through envd: omitting `--user sandbox` uses the image
 | Execution identity | `A13N_ENVD_EXECUTION_UID=1000`, `A13N_ENVD_EXECUTION_GID=1000`                                   |
 | Commands           | `A13N_ENVD_FULL_CONTROL=true` enables the native shell                                           |
 | Sudo               | Existing daemon default allows privilege gains; image sudoers grants `sandbox` passwordless sudo |
-| Egress             | Existing daemon default is disabled; no network policy is implied                                |
+| Egress             | Existing daemon default is `inherit`; no destination filtering is implied                        |
 | Working directory  | `/workspace`                                                                                     |
 | Installation state | `A13N_ENVD_STATE_DIR=/var/lib/a13n-envd`                                                         |
 | Standalone runtime | `A13N_ENVD_RUNTIME_DIR=/run/a13n-envd-state`                                                     |
@@ -110,12 +110,12 @@ This blocks worker setuid/file-capability privilege gains, including native sudo
 
 Image environment values take precedence over daemon JSON. Override the corresponding environment variables or use CLI options when changing these defaults. See [configuration precedence and native identity](configuration.md).
 
-### Opt-in egress
+### Opt-in controlled egress
 
-Egress requires **both** a prepared deployment and a per-Session request:
+Controlled egress requires **both** a prepared deployment and a per-Session request:
 
 1. Select a compatible Linux runtime and grant the [required namespace/kernel facilities](egress.md). Root inside an ordinary Docker container is not sufficient.
-2. Set `A13N_ENVD_EGRESS_ENABLED=true` at daemon startup.
+2. Set `A13N_ENVD_EGRESS_MODE=controlled` at daemon startup.
 3. Have the trusted Host include an `egress` policy in `session.open`.
 
-The image does not grant itself Docker capabilities, auto-elevate or silently fall back. Missing facilities can fail daemon startup or Session preparation. A Session requesting egress on the default disabled daemon is rejected, not executed without its policy. No general-purpose `--privileged` launch is required for the default non-egress image.
+The image does not grant itself Docker capabilities, auto-elevate or silently fall back. Missing facilities can fail daemon startup or Session preparation. A Session supplying an egress policy to the default inherit-mode daemon is rejected, not executed without its policy. A controlled-mode daemon also rejects Sessions that omit their policy. No general-purpose `--privileged` launch is required for the default inherit-mode image.
