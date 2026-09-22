@@ -12,7 +12,7 @@ make harness-dev HARNESS_ARGS=summary
 
 `make harness-dev` creates `dev/harness/.env` from its sibling `.env.example` when missing, without overwriting an existing private file even when the template changes. Use `make env-init` to prepare both Harness development profiles without starting an application or infrastructure.
 
-The example environment contains only public local-test credentials, matching `dev/service/local.toml`. Private `.env` files are ignored by Git. Change the endpoint and headers together if the local Langfuse project is customized. `make harness-dev` uses the official `opentelemetry-instrument` launcher to configure the SDK provider before the scenario runs. The Harness library itself never loads dotenv, initializes exporters or changes global providers.
+The example environment contains only public local-test credentials, matching `dev/observability/langfuse.py`. Private `.env` files are ignored by Git. Change the endpoint and headers together if the local Langfuse project is customized. `make harness-dev` uses the official `opentelemetry-instrument` launcher to configure the SDK provider before the scenario runs. The Harness library itself never loads dotenv, initializes exporters or changes global providers.
 
 These trace-validation scenarios explicitly enable structural tracing and use `A13N_HARNESS_TRACE_CONTENT` to select captured content. They print trace IDs and, for Langfuse endpoints, local trace links. To test an ordinary SDK application with the environment-selected on/off policy instead:
 

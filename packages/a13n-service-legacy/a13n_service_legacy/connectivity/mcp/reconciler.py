@@ -1,0 +1,86 @@
+"""Expire short-lived OAuth state without retrying exchanges or remote cleanup."""
+
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from a13n_service_legacy.background import PeriodicTask, Sweep
+from a13n_service_legacy.storage import transaction
+from a13n_service_legacy.temporal import Clock, assume_utc, utc_now
+
+from .models import MCPAuthorizationRecord, MCPConnectionRecord
+
+
+class MCPReconciler:
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], *, poll_interval_seconds: float = 2, clock: Clock = utc_now
+    ) -> None:
+        self._sessions = sessions
+        self._poll_interval_seconds = poll_interval_seconds
+        self._clock = clock
+        self._last_lag: float | None = None
+
+    async def run(self) -> None:
+        await PeriodicTask(
+            "mcp_oauth_reconciliation", self.scan, interval_seconds=self._poll_interval_seconds, timeout_seconds=30
+        ).run()
+
+    async def scan(self) -> Sweep:
+        self._last_lag = None
+        progressed = await self.reconcile_one()
+        return Sweep(examined=int(progressed), completed=int(progressed), oldest_age_seconds=self._last_lag)
+
+    async def reconcile_one(self) -> bool:
+        now = self._clock()
+        async with transaction(self._sessions) as session:
+            connection = await session.scalar(
+                select(MCPConnectionRecord)
+                .join(MCPAuthorizationRecord, MCPAuthorizationRecord.connection_id == MCPConnectionRecord.id)
+                .where(
+                    MCPAuthorizationRecord.status.in_(("starting", "pending", "received", "exchanging")),
+                    or_(
+                        MCPAuthorizationRecord.expires_at <= now,
+                        (MCPAuthorizationRecord.status == "exchanging")
+                        & (MCPAuthorizationRecord.claim_expires_at <= now),
+                    ),
+                )
+                .order_by(MCPAuthorizationRecord.expires_at, MCPAuthorizationRecord.id)
+                .limit(1)
+                .with_for_update(of=MCPConnectionRecord, skip_locked=True)
+            )
+            if connection is None:
+                return False
+            state = await session.scalar(
+                select(MCPAuthorizationRecord)
+                .where(
+                    MCPAuthorizationRecord.connection_id == connection.id,
+                    MCPAuthorizationRecord.status.in_(("starting", "pending", "received", "exchanging")),
+                    or_(
+                        MCPAuthorizationRecord.expires_at <= now,
+                        (MCPAuthorizationRecord.status == "exchanging")
+                        & (MCPAuthorizationRecord.claim_expires_at <= now),
+                    ),
+                )
+                .order_by(MCPAuthorizationRecord.expires_at, MCPAuthorizationRecord.id)
+                .limit(1)
+                .with_for_update()
+            )
+            if state is None:
+                return False
+            self._last_lag = max(0, (now - assume_utc(state.expires_at)).total_seconds())
+            if state.status == "exchanging" or state.completion_method == "credentials":
+                state.last_error_code = "setup_outcome_unknown"
+            state.status = "expired"
+            state.clear_credential()
+            state.claim_owner = None
+            state.claim_expires_at = None
+            state.updated_at = now
+            if (
+                connection is not None
+                and connection.deleted_at is None
+                and connection.status == "pending"
+                and connection.version == state.connection_version
+            ):
+                connection.status = "action_required"
+                connection.status_reason = "reauthorization_required"
+                connection.updated_at = now
+            return True

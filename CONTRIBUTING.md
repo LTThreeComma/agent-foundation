@@ -38,7 +38,9 @@ make install
 
 The frontend pnpm workspace lives under `frontend/`: applications in `frontend/apps/` and shared UI source in `frontend/packages/`. `frontend/package.json` pins pnpm; install that version before running `make install`. Service SDK development uses the separate repositories' own setup instructions.
 
-Local Service development uses the explicit, public test configuration in `dev/service/local.toml`. `make dev` prepares local PostgreSQL, Redis and Langfuse, applies migrations, and launches Service and Console; no `.env` or manual trace credentials are required. See [the local Service guide](dev/service/README.md) for startup, storage ownership, reset baselines, and fictional login credentials. Service does not automatically load `.env`; environment variables remain available as explicit deployment overrides. `dev/harness/.env.example` and `dev/harness-ui/.env.example` provide separate Langfuse-first development profiles with commented Logfire alternatives. `make harness-dev`, `make cli`, `make webui`, and `make harness-ui-smoke` automatically copy a missing `.env` from its sibling `.env.example`, leaving existing private files unchanged even when templates are newer. Use `make env-init` to prepare both files without starting an application. `HARNESS_ENV` and `HARNESS_UI_ENV` select alternate files; a missing alternate file requires its own sibling `<path>.example` rather than silently falling back to the repository defaults. See the [Harness](dev/harness/README.md) and [Harness UI](dev/harness-ui/README.md) development guides. `.env.harness.example` remains optional reference material for other embedded Harness workflows. Existing examples and live-test targets load private environment files only at their explicit launcher boundaries.
+Local Service foundation development uses fresh checkout-owned PostgreSQL through `make setup` and `make service-dev`. `make dev-status` reports the generated configuration and port. See [the local Service guide](dev/service/README.md) for implemented commands and current limitations. Service does not automatically load `.env`; explicit deployment overrides use `A13N_` sectioned variables. Shared Langfuse remains available through `make langfuse-up` independently of Service.
+
+`dev/harness/.env.example` and `dev/harness-ui/.env.example` provide separate Langfuse-first development profiles with commented Logfire alternatives. `make harness-dev`, `make cli`, `make webui`, and `make harness-ui-smoke` automatically copy a missing `.env` from its sibling `.env.example`, leaving existing private files unchanged even when templates are newer. Use `make env-init` to prepare both files without starting an application. `HARNESS_ENV` and `HARNESS_UI_ENV` select alternate files; a missing alternate file requires its own sibling `<path>.example` rather than silently falling back to the repository defaults. See the [Harness](dev/harness/README.md) and [Harness UI](dev/harness-ui/README.md) development guides. `.env.harness.example` remains optional reference material for other embedded Harness workflows. Existing examples and live-test targets load private environment files only at their explicit launcher boundaries.
 
 The repository selects Python 3.13 through `.python-version`. Python packages are uv workspace members under `packages/`; Rust crates under `crates/` are validated by the same top-level merge gate.
 
@@ -53,7 +55,7 @@ Apply [Code Quality and Design](DEVELOPMENT.md#code-quality-and-design) when imp
 - database sessions never span streams, agent runs, external calls, waits, or background-task boundaries;
 - streaming FastAPI routes complete database-backed authentication and initial reads before constructing the response;
 - logging, process lifespan, role selection, image construction, and graceful shutdown use shared service infrastructure;
-- `a13n-service` uses one artifact for all-in-one, control, worker, and connector deployment roles.
+- `a13n-service` uses one artifact for all-in-one, control and worker deployment roles.
 
 Keep transport handling, application orchestration, domain behavior, and infrastructure adapters separated. Update the accepted design in `spec/` when a change alters ownership, lifecycle, compatibility, security, or deployment semantics; do not use the development guide to introduce product architecture implicitly.
 
@@ -138,7 +140,7 @@ Use `make format` for formatting alone; `make check` applies the same formatters
 
 The Markdown hook runs `uv run --locked mdformat`, sharing the repository's Python environment and locked formatter plugins with direct Make checks. Keep `uv` on PATH; activating `.venv` or wrapping `git commit` in `uv run` is unnecessary. Formatter dependencies belong in `pyproject.toml` and `uv.lock`, not a separate hook environment. The shared `.mdformat.toml` exclusion requires Python 3.13 or newer.
 
-`a13n-service` integration tests use fixture-owned Testcontainers. Application `A13N_SERVICE_*` variables never select test infrastructure. Loopback SSE and fixture-owned S3 clients bypass ambient proxies.
+`a13n-service` integration tests use fixture-owned Testcontainers. Application `A13N_*` variables never select test infrastructure. Loopback SSE and fixture-owned S3 clients bypass ambient proxies.
 
 Testcontainers is pinned to 4.13.1 because 4.15.0 can read Ryuk port mappings before Docker publishes them; upgrades must verify mapped-port startup with Ryuk enabled. Unreturned SQL connections, unhandled thread exceptions, and unraisable exceptions fail the test gate.
 

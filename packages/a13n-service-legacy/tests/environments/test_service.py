@@ -1,0 +1,442 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from a13n_service_legacy.environments.domain import (
+    CreateManagedEnvironmentRequest,
+    CreateProviderRequest,
+    CreateTemplateRequest,
+    CreateTemplateRevisionRequest,
+    EnvironmentCommandRequest,
+    EnvironmentStatus,
+    NewEnvironmentSelection,
+    ReplaceCredentialRequest,
+    RetentionPolicy,
+    UpdateProviderRequest,
+    retention_action,
+)
+from a13n_service_legacy.environments.errors import EnvironmentManagementError
+from a13n_service_legacy.environments.models import EnvironmentRecord
+from a13n_service_legacy.etags import resource_etag
+from a13n_service_legacy.http_errors import application_error_status
+from a13n_service_legacy.interactions.thread_creation import allocate_thread
+from a13n_service_legacy.interactions.thread_domain import CreateThreadRequest
+from a13n_service_legacy.storage import short_session
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
+
+from .conftest import WORKSPACE_ID, actor
+
+pytestmark = pytest.mark.anyio
+
+
+async def create_template_config(service, path, *, preparation="on_run"):
+    provider = await service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="direct_local", name="Local")
+    )
+    template = await service.create_template(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="template_config",
+        request=CreateTemplateRequest(
+            name="Workspace",
+            provider_id=provider.id,
+            configuration={"root": {"path": str(path)}},
+            preparation=preparation,
+            retention={"idle": {"stop_after": None, "delete_after": None}},
+        ),
+    )
+    return provider, template
+
+
+async def test_template_allocation_is_inert_and_revision_is_frozen(environment_service, environment_sessions, tmp_path):
+    root = tmp_path / "absent"
+    provider, template = await create_template_config(environment_service, root)
+    selection = CreateManagedEnvironmentRequest(template_id=template.id)
+    environment = await environment_service.create_environment(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=selection, idempotency_key="allocate"
+    )
+    assert environment.status == "unprepared" and environment.generation == 0
+    assert environment.template_revision_id == template.default_revision_id
+    assert not root.exists()
+    assert (
+        await environment_service.create_environment(
+            actor=actor(), workspace_id=WORKSPACE_ID, request=selection, idempotency_key="allocate"
+        )
+        == environment
+    )
+    revision = await environment_service.create_revision(
+        actor=actor(),
+        template_id=template.id,
+        request=CreateTemplateRevisionRequest(
+            expected_version=1,
+            provider_id=provider.id,
+            configuration={"root": {"path": str(tmp_path / "other")}},
+            preparation="on_use",
+            retention={"idle": {"stop_after": None, "delete_after": None}},
+        ),
+    )
+    assert revision.version == 2
+    async with short_session(environment_sessions) as session:
+        stored = await session.get(EnvironmentRecord, environment.id)
+        assert stored.template_revision_id == template.default_revision_id != revision.id
+        assert stored.state is None and stored.operation_id is None
+    later = await environment_service.create_environment(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=selection, idempotency_key="later"
+    )
+    assert later.id != environment.id and later.template_revision_id == revision.id
+
+
+async def test_empty_thread_allocates_only_metadata_and_distinguishes_null(
+    environment_service, environment_sessions, tmp_path
+):
+    _, template = await create_template_config(environment_service, tmp_path / "absent", preparation="on_use")
+    body = CreateThreadRequest(environment=NewEnvironmentSelection(template_id=template.id))
+    thread = await allocate_thread(
+        environment_sessions, actor=actor(), workspace_id=WORKSPACE_ID, body=body, idempotency_key="thread"
+    )
+    assert thread.current_run_id is None and thread.head_run_id is None and thread.default_environment_id
+    assert (
+        await allocate_thread(
+            environment_sessions, actor=actor(), workspace_id=WORKSPACE_ID, body=body, idempotency_key="thread"
+        )
+        == thread
+    )
+    assert not (tmp_path / "absent").exists()
+    original = await allocate_thread(
+        environment_sessions,
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        body=CreateThreadRequest(),
+        idempotency_key="null-distinction",
+    )
+    replay = await allocate_thread(
+        environment_sessions,
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        body=CreateThreadRequest(environment=None),
+        idempotency_key="null-distinction",
+    )
+    assert replay == original
+
+
+async def test_provider_disable_blocks_new_allocation(environment_service, tmp_path):
+    provider, template = await create_template_config(environment_service, tmp_path)
+    await environment_service.update_provider(
+        actor=actor(),
+        provider_id=provider.id,
+        request=UpdateProviderRequest(enabled=False),
+        if_match=resource_etag(provider.id, provider.updated_at),
+    )
+    with pytest.raises(EnvironmentManagementError, match="unavailable"):
+        await environment_service.create_environment(
+            actor=actor(),
+            workspace_id=WORKSPACE_ID,
+            request=CreateManagedEnvironmentRequest(template_id=template.id),
+            idempotency_key="disabled",
+        )
+
+
+async def test_local_provider_accepts_managed_retention(environment_service, tmp_path):
+    provider = await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="direct_local", name="Local")
+    )
+    await environment_service.create_template(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="unsupported",
+        request=CreateTemplateRequest(
+            name="Managed local",
+            provider_id=provider.id,
+            configuration={"root": {"path": str(tmp_path)}},
+            retention={"idle": {"stop_after": 10, "delete_after": 20}},
+        ),
+    )
+
+
+async def test_stop_never_resets_deletion_deadline():
+    condition, stop = "idle", 600
+    policy = RetentionPolicy.model_validate({"idle": {"stop_after": 600, "delete_after": 604800}})
+    restored = RetentionPolicy.model_validate_json(policy.model_dump_json())
+    assert restored.idle.delete_after == 604800
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    assert (
+        retention_action(
+            restored,
+            condition=condition,
+            since=start,
+            status=EnvironmentStatus.running,
+            now=start + timedelta(seconds=stop),
+        )
+        == "stop"
+    )
+    assert (
+        retention_action(
+            restored, condition=condition, since=start, status=EnvironmentStatus.stopped, now=start + timedelta(days=7)
+        )
+        == "delete"
+    )
+    assert (
+        retention_action(
+            restored, condition="active", since=start, status=EnvironmentStatus.running, now=start + timedelta(days=8)
+        )
+        is None
+    )
+
+
+async def test_explicit_null_disables_action_and_invalid_deadlines_fail():
+    policy = RetentionPolicy.model_validate({"idle": {"stop_after": None, "delete_after": 120}})
+    restored = RetentionPolicy.model_validate_json(policy.model_dump_json())
+    assert restored.idle.stop_after is None
+    assert restored.idle.delete_after == 120
+    with pytest.raises(ValidationError):
+        RetentionPolicy.model_validate({"idle": {"stop_after": 180, "delete_after": 120}})
+    with pytest.raises(ValidationError):
+        RetentionPolicy.model_validate({"idle": {"stop_after": None, "delete_after": None}, "waiting_approval": {}})
+
+
+async def test_manual_command_is_a_durable_idempotent_receipt(environment_service, environment_sessions):
+    provider = await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="docker", name="Docker")
+    )
+    template = await environment_service.create_template(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="docker",
+        request=CreateTemplateRequest(
+            name="Docker",
+            provider_id=provider.id,
+            configuration={},
+            retention={"idle": {"stop_after": 600, "delete_after": 604800}},
+        ),
+    )
+    environment = await environment_service.create_environment(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        request=CreateManagedEnvironmentRequest(template_id=template.id),
+        idempotency_key="env",
+    )
+    request = EnvironmentCommandRequest(action="delete")
+    command = await environment_service.request_command(
+        actor=actor(), environment_id=environment.id, request=request, idempotency_key="delete"
+    )
+    assert command.status == "pending"
+    assert (
+        await environment_service.request_command(
+            actor=actor(), environment_id=environment.id, request=request, idempotency_key="delete"
+        )
+        == command
+    )
+    async with short_session(environment_sessions) as session:
+        stored = await session.get(EnvironmentRecord, environment.id)
+        assert stored.operation_id == command.id and stored.operation_action == "delete"
+    with pytest.raises(EnvironmentManagementError, match="pending work"):
+        await environment_service.request_command(
+            actor=actor(),
+            environment_id=environment.id,
+            request=EnvironmentCommandRequest(action="stop"),
+            idempotency_key="stop",
+        )
+
+
+class _Authorization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr
+
+
+class _NestedCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    authorization: _Authorization
+    revision: int
+
+
+def _secret_definition():
+    """A Provider whose credential nests secrets below the top level."""
+    from dataclasses import replace
+
+    from a13n_harness.providers.authentication import Authentication, CredentialMode
+    from a13n_harness.providers.environment.direct_local.provider import DIRECT_LOCAL
+
+    return replace(
+        DIRECT_LOCAL,
+        type="secret_workspace",
+        display_name="Secret Workspace",
+        credential_model=_NestedCredential,
+        authentication=Authentication(mode=CredentialMode.required),
+    )
+
+
+async def test_provider_credential_uses_owned_encrypted_bundle(environment_service, environment_sessions, protector):
+    from a13n_harness.providers.catalog import ProviderCatalog
+    from a13n_service_legacy.environments.models import EnvironmentProviderRecord
+
+    definition = _secret_definition()
+    environment_service.catalog = ProviderCatalog((*environment_service.catalog.values(), definition))
+
+    def stored_credential(raw: str) -> _NestedCredential:
+        return _NestedCredential.model_validate_json(raw)
+
+    provider = await environment_service.create_provider(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        request=CreateProviderRequest(
+            type="secret_workspace",
+            name="Owned",
+            credential={"authorization": {"token": "initial-token"}, "revision": 1},
+        ),
+    )
+    assert provider.credential_configured and "initial-token" not in provider.model_dump_json()
+    async with short_session(environment_sessions) as session:
+        stored = await session.get(EnvironmentProviderRecord, provider.id)
+        assert b"initial-token" not in stored.ciphertext
+        # A nested SecretStr must survive encryption as its real value, never its mask.
+        decrypted = stored_credential(stored.credential_snapshot().decrypt(protector))
+        assert decrypted.authorization.token.get_secret_value() == "initial-token"
+        assert decrypted.revision == 1
+        generation = stored.credential_generation
+    changed = await environment_service.replace_credential(
+        actor=actor(),
+        provider_id=provider.id,
+        if_match=resource_etag(provider.id, provider.updated_at),
+        request=ReplaceCredentialRequest(credential={"authorization": {"token": "rotated-token"}, "revision": 2}),
+    )
+    async with short_session(environment_sessions) as session:
+        stored = await session.get(EnvironmentProviderRecord, provider.id)
+        assert stored.credential_generation == generation + 1
+        decrypted = stored_credential(stored.credential_snapshot().decrypt(protector))
+        assert decrypted.authorization.token.get_secret_value() == "rotated-token"
+        assert decrypted.revision == 2
+    assert "rotated-token" not in changed.model_dump_json()
+
+
+async def test_provider_type_no_longer_selected_is_a_safe_configuration_error(environment_service, tmp_path):
+    """Dropping a Provider from the deployment selection must not crash management."""
+    from a13n_harness.providers.catalog import ProviderCatalog
+
+    provider, template = await create_template_config(environment_service, tmp_path)
+    environment_service.catalog = ProviderCatalog(())
+    with pytest.raises(EnvironmentManagementError) as failure:
+        await environment_service.create_template(
+            actor=actor(),
+            workspace_id=WORKSPACE_ID,
+            idempotency_key="unavailable",
+            request=CreateTemplateRequest(
+                name="Unavailable",
+                provider_id=provider.id,
+                configuration={"root": {"path": str(tmp_path)}},
+                retention={"idle": {"stop_after": None, "delete_after": None}},
+            ),
+        )
+    assert failure.value.code == "environment_provider_unavailable"
+    assert application_error_status(failure.value) == 503
+    detail = await environment_service.get_template(actor=actor(), resource_id=template.id)
+    assert detail.name == "Workspace"
+
+
+async def test_declared_credential_requirement_is_enforced_on_create_and_update(environment_service):
+    from a13n_harness.providers.catalog import ProviderCatalog
+
+    environment_service.catalog = ProviderCatalog((*environment_service.catalog.values(), _secret_definition()))
+    with pytest.raises(EnvironmentManagementError, match="credential"):
+        await environment_service.create_provider(
+            actor=actor(),
+            workspace_id=WORKSPACE_ID,
+            request=CreateProviderRequest(type="secret_workspace", name="Missing"),
+        )
+    with pytest.raises(EnvironmentManagementError, match="credential"):
+        await environment_service.create_provider(
+            actor=actor(),
+            workspace_id=WORKSPACE_ID,
+            request=CreateProviderRequest(type="direct_local", name="Refused", credential={"token": "unexpected"}),
+        )
+
+
+async def test_collection_cursors_cannot_cross_resource_scope(environment_service, tmp_path):
+    await create_template_config(environment_service, tmp_path)
+    await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="direct_local", name="Second")
+    )
+    first = await environment_service.list_providers(actor=actor(), workspace_id=WORKSPACE_ID, limit=1)
+    assert first.next_cursor
+    next_page = await environment_service.list_providers(
+        actor=actor(), workspace_id=WORKSPACE_ID, limit=1, cursor=first.next_cursor
+    )
+    assert next_page.items[0].id != first.items[0].id
+    with pytest.raises(EnvironmentManagementError, match="another collection"):
+        await environment_service.list_templates(actor=actor(), workspace_id=WORKSPACE_ID, cursor=first.next_cursor)
+
+
+async def test_registering_same_target_under_another_provider_is_a_conflict(environment_service, tmp_path):
+    from a13n_service_legacy.environments.domain import RegisterEnvironmentRequest
+    from a13n_service_legacy.environments.errors import EnvironmentManagementError
+
+    first = await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="direct_local", name="First")
+    )
+    second = await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type="direct_local", name="Second")
+    )
+    request = RegisterEnvironmentRequest(provider_id=first.id, configuration={"root": {"path": str(tmp_path)}})
+    await environment_service.create_environment(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=request, idempotency_key="register-first"
+    )
+    with pytest.raises(EnvironmentManagementError) as caught:
+        await environment_service.create_environment(
+            actor=actor(),
+            workspace_id=WORKSPACE_ID,
+            request=request.model_copy(update={"provider_id": second.id}),
+            idempotency_key="register-second",
+        )
+    assert application_error_status(caught.value) == 409
+
+
+def test_request_identity_depends_only_on_the_key():
+    from a13n_service_legacy.durable_operations.requests import request_identity
+
+    assert request_identity("key") == request_identity("key")
+    assert request_identity("key") != request_identity("another-key")
+
+
+@pytest.mark.parametrize("provider_type", ["direct_local", "docker"])
+async def test_child_sharing_and_dedicated_provider_contract(
+    environment_service, environment_sessions, tmp_path, provider_type
+):
+    from unittest.mock import Mock
+
+    from a13n_service_legacy.agents.domain import ChildEnvironmentPolicy
+    from a13n_service_legacy.environments.authoring import authorize_template
+    from a13n_service_legacy.interactions.environment_selection import child_environment_choice
+
+    provider = await environment_service.create_provider(
+        actor=actor(), workspace_id=WORKSPACE_ID, request=CreateProviderRequest(type=provider_type, name="Child")
+    )
+    template = await environment_service.create_template(
+        actor=actor(),
+        workspace_id=WORKSPACE_ID,
+        idempotency_key="child-template",
+        request=CreateTemplateRequest(
+            name="Child",
+            provider_id=provider.id,
+            configuration={"root": {"path": str(tmp_path)}} if provider_type == "direct_local" else {},
+            retention={"idle": {"stop_after": None, "delete_after": None}},
+        ),
+    )
+    parent = Mock(environment_id="env_parent1234567890", environment_working_directory=None)
+    policy = ChildEnvironmentPolicy(mode="dedicated", template_revision_id=template.default_revision_id)
+    async with short_session(environment_sessions) as session:
+        shared = await child_environment_choice(session, parent=parent, policy=ChildEnvironmentPolicy())
+        assert shared.environment_id == parent.environment_id
+        assert (
+            await child_environment_choice(session, parent=parent, policy=ChildEnvironmentPolicy(mode="none")) is None
+        )
+        if provider_type == "direct_local":
+            with pytest.raises(EnvironmentManagementError, match="dedicated"):
+                await authorize_template(
+                    session, actor=actor(), workspace_id=WORKSPACE_ID, revision_id=template.default_revision_id
+                )
+            with pytest.raises(EnvironmentManagementError, match="dedicated"):
+                await child_environment_choice(session, parent=parent, policy=policy)
+        else:
+            await authorize_template(
+                session, actor=actor(), workspace_id=WORKSPACE_ID, revision_id=template.default_revision_id
+            )
+            dedicated = await child_environment_choice(session, parent=parent, policy=policy)
+            assert dedicated == NewEnvironmentSelection(template_id=template.id, version=1)

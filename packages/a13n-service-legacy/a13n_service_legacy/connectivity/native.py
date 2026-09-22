@@ -1,0 +1,202 @@
+"""Default native MCP tools from protected Run contexts, with fresh authority and credentials."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+import httpx2
+from a13n_harness import AgentContext
+from a13n_harness.observation import record_tool_outcome_unknown
+from a13n_harness.providers.endpoint_policy import EndpointPolicy
+from pydantic import JsonValue
+from pydantic_ai.capabilities import MCP
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from a13n_service_legacy.interactions.attempts import AttemptContext
+from a13n_service_legacy.secrets import SecretProtector
+from a13n_service_legacy.storage import short_session
+
+from .connectors.management import decode_credentials
+from .domain import JsonObject
+from .file_delivery import FileDelivery, SendFileArguments
+from .naming import source_key
+from .native_actions import NativeAction, NativeObservationFactory, action
+from .native_context import AccountRunContext, InboundRunContext, NativeToolContext, authorized_account
+from .native_reply import NativeReplyCapability
+from .providers.definition import InboundActionContext
+from .providers.registry import require_native_provider
+from .toolsets import local_capability
+
+if TYPE_CHECKING:
+    from .execution import AttemptToolScope
+
+
+async def native_capability(
+    sessions: async_sessionmaker[AsyncSession],
+    protector: SecretProtector,
+    scope: AttemptToolScope,
+    context: NativeToolContext,
+    guard: Callable[[], Awaitable[None]],
+    endpoints: EndpointPolicy,
+    http: httpx2.AsyncClient,
+    *,
+    attempt: AttemptContext | None = None,
+    observations: NativeObservationFactory | None = None,
+    files: FileDelivery | None = None,
+) -> MCP[AgentContext] | None:
+    if not context.allowed_actions:
+        return None
+    if context.execution_principal_ref != scope.actor.principal:
+        raise ValueError("native_context_incompatible")
+
+    async def source():
+        await guard()
+        async with short_session(sessions) as session:
+            account = await authorized_account(
+                session,
+                actor=scope.actor,
+                organization_id=scope.organization_id,
+                workspace_id=scope.workspace_id,
+                account_id=context.account_id,
+                snapshot=scope.authorization.snapshot,
+            )
+            if account.provider_key != context.provider_key:
+                raise ValueError("native_source_unavailable")
+            if isinstance(context, InboundRunContext):
+                _validate_context(context)
+            configuration = dict(account.provider_config_json)
+            credential = account.credential_snapshot()
+            generation = account.credential_generation
+            version = account.version
+        return configuration, decode_credentials(credential.decrypt(protector)), generation, version
+
+    configuration, credentials, generation, _ = await source()
+    actions = _actions(context, configuration, credentials, http, endpoints)
+    file_action = None
+    if (
+        files is not None
+        and attempt is not None
+        and isinstance(context, InboundRunContext)
+        and context.provider_key in {"lark", "slack"}
+    ):
+
+        async def send_file(arguments: SendFileArguments):
+            current_configuration, current_credentials, current_generation, current_version = await source()
+
+            async def file_guard() -> None:
+                _, _, latest_generation, latest_version = await source()
+                if latest_generation != current_generation or latest_version != current_version:
+                    raise ValueError("native_source_changed")
+
+            return await files.send(
+                arguments,
+                actor=scope.actor,
+                run_id=attempt.run_id,
+                context=context,
+                configuration=current_configuration,
+                credentials=current_credentials,
+                http=http,
+                endpoints=endpoints,
+                guard=file_guard,
+            )
+
+        file_action = action(f"{context.provider_key}.send_file", SendFileArguments, send_file)
+        actions[file_action.definition.name] = file_action
+    definitions = tuple(item.definition for item in actions.values())
+    reply_capability: NativeReplyCapability | None = None
+
+    async def call(name: str, arguments: JsonObject) -> JsonValue:
+        nonlocal actions, generation, configuration
+        if name not in context.allowed_actions:
+            raise ValueError("native_action_not_authorized")
+        current_configuration, credentials, current_generation, current_version = await source()
+        if current_generation != generation or current_configuration != configuration:
+            configuration = current_configuration
+            actions = _actions(context, configuration, credentials, http, endpoints)
+            generation = current_generation
+            if file_action is not None:
+                actions[file_action.definition.name] = file_action
+        selected = actions.get(name)
+        if selected is None:
+            raise ValueError("native_action_unavailable")
+        await guard()
+        observer = (
+            observations(
+                action=name,
+                attempt=attempt,
+                context=context,
+                workspace_id=scope.workspace_id,
+                account_version=current_version,
+                credential_generation=current_generation,
+            )
+            if observations is not None and attempt is not None
+            else None
+        )
+        if observer is not None:
+            if selected.call_observed is None:
+                raise ValueError("native_observation_unavailable")
+            result = await selected.call_observed(arguments, observer)
+        else:
+            result = await selected.call(arguments)
+        # Native providers own this outcome envelope; arbitrary MCP results do not.
+        if isinstance(result, dict) and result.get("kind") == "outcome_unknown":
+            record_tool_outcome_unknown()
+        if reply_capability is not None and name in {
+            f"{context.provider_key}.reply",
+            f"{context.provider_key}.send_file",
+        }:
+            reply_capability.observe(result)
+        return result
+
+    identifier = context.binding_id if isinstance(context, InboundRunContext) else context.account_id
+    key = source_key(context.kind, identifier)
+    capability = await local_capability(
+        key=key, model_alias=key, tools=definitions, allowed=context.allowed_actions, handler=call
+    )
+    if (
+        capability is not None
+        and isinstance(context, InboundRunContext)
+        and context.provider_key in {"lark", "slack"}
+        and f"{context.provider_key}.reply" in context.allowed_actions
+        and sum(isinstance(item, InboundRunContext) for item in scope.native_tool_contexts) == 1
+    ):
+
+        async def recorded_reply() -> bool:
+            # A recovered Attempt must not repeat a durably observed reply.
+            if attempt is None or observations is None:
+                return False
+            await guard()
+            return await observations.has_reply(attempt=attempt, context=context)
+
+        reply_capability = NativeReplyCapability(capability, recorded_reply=recorded_reply)
+        return reply_capability
+    return capability
+
+
+def _actions(
+    context: NativeToolContext,
+    configuration: JsonObject,
+    credentials: JsonObject,
+    http: httpx2.AsyncClient,
+    endpoints: EndpointPolicy,
+) -> dict[str, NativeAction]:
+    provider = require_native_provider(context.provider_key)
+    if isinstance(context, AccountRunContext):
+        return provider.account_tools.actions(configuration, credentials, context.target_scope, http, endpoints)
+    return provider.inbound_actions(
+        InboundActionContext(
+            provider_context=context.provider_context,
+            action_policy=context.action_policy,
+            configuration=configuration,
+            credentials=credentials,
+            http=http,
+            endpoints=endpoints,
+        )
+    )
+
+
+def _validate_context(context: InboundRunContext) -> None:
+    supported_version = require_native_provider(context.provider_key).context_version
+    if context.provider_context_version != supported_version:
+        raise ValueError("native_context_incompatible")

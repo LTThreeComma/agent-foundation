@@ -290,7 +290,7 @@ Public key: lf_pk_agent_foundation_local
 Secret key: lf_sk_agent_foundation_local
 ```
 
-`make langfuse-up` selects `dev/service/local.toml` by default; use `SERVICE_CONFIG=PATH` to select a different local project. It never loads the root `.env`. Service's `make dev` uses that same configuration and automatically wires trace export and querying.
+`make langfuse-up` uses the machine-shared stack and public test configuration in `dev/observability/langfuse.py`. It does not read Service settings or the root `.env`. Harness and Harness UI explicitly load their own development `.env` files. The new Service foundation does not yet wire trace export or querying.
 
 For an **embedded Harness Host**, explicitly export the following trace-only profile instead. You may keep Host-specific values in a private `.env` and load it explicitly with `uv run --env-file .env ...`; `.env.harness.example` documents optional debugging settings. Harness UI uses its normal YAML configuration plus the process environment and does not implicitly load this file.
 

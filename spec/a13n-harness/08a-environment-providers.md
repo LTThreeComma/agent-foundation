@@ -194,7 +194,7 @@ Ordinary `shell.exec` has a bounded inline result contract. A Provider that inte
 
 ## Host State Authority and Concurrency
 
-The Host owns durable selection, publication, lifecycle serialization, and retention. a13n Service's [Environment records](../a13n-service/29-environment-management.md) and Harness UI's [local state](../a13n-harness-ui/04-projects-threads-and-environments.md#host-authoritative-environment-state) are distinct Host policies over the same contract.
+The Host owns durable selection, publication, lifecycle serialization, and retention. a13n Service's [Environment records](../a13n-service/06-environments.md) and Harness UI's [local state](../a13n-harness-ui/04-projects-threads-and-environments.md#host-authoritative-environment-state) are distinct Host policies over the same contract.
 
 A Host publishes changed state when known and attempts publication from unconditional finalization even after execution, checkpoint, or local-close failure. Equal state needs no write. A stale adapter cannot overwrite newer state solely because it finishes later; distributed Hosts use their own conditional publication and operation reconciliation. The domain prescribes no global table, last-write-wins policy, or exactly-once guarantee.
 

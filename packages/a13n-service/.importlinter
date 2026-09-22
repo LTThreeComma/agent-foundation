@@ -1,0 +1,20 @@
+[importlinter]
+root_package = a13n_service
+
+[importlinter:contract:layers]
+name = Tenancy depends only on infrastructure
+type = layers
+layers =
+    a13n_service.tenancy
+    a13n_service.infra
+
+[importlinter:contract:infrastructure]
+name = Infrastructure cannot import assembly or configuration
+type = forbidden
+source_modules =
+    a13n_service.infra
+forbidden_modules =
+    a13n_service.app
+    a13n_service.distribution
+    a13n_service.settings
+    a13n_service.cli

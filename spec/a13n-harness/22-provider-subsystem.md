@@ -117,7 +117,7 @@ Installation alone activates nothing: the deployment names entry points, never a
 
 ## Host Composition
 
-A Host builds one `ProviderCatalog` per domain from its native definitions plus the selected manifests, so a plugin type and a native type collide loudly instead of shadowing each other. a13n Service performs this once at startup and fails before readiness on any selection error; the resulting catalogs are immutable process-local snapshots shared by its management and execution roles. [Distribution Composition and Extensions](../a13n-service/02-distribution-composition-and-extensions.md) owns the Service deployment contract, and Harness UI selects the same loader for its local extensions.
+A Host builds one `ProviderCatalog` per domain from its native definitions plus the selected manifests, so a plugin type and a native type collide loudly instead of shadowing each other. a13n Service performs this once at startup and fails before readiness on any selection error; the resulting catalogs are immutable process-local snapshots shared by its management and execution roles. [Distribution Composition and Extensions](../a13n-service/09-runtime.md#assembly) owns the Service deployment contract, and Harness UI selects the same loader for its local extensions.
 
 A Host projects safe metadata for each selected definition: `type`, `display_name`, the configuration and credential JSON Schemas, the `Authentication` declaration, `setup_url`, `setup_label`, and the domain's declared capabilities. The projection contains no credential value, no native client, and no import target.
 

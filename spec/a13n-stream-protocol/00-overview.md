@@ -20,7 +20,7 @@ The package does not define another execution or lifecycle layer. It does not ru
 | HTTP, SSE, WebSocket, or in-process delivery   | Host transport                 | Serializes and carries AG-UI events without becoming their execution authority                           |
 | Display state                                  | Renderer                       | Interprets AG-UI events for one surface                                                                  |
 
-The [Harness event contract](../a13n-harness/12-events-observability-and-usage.md) owns the source stream. [Harness UI local storage and recovery](../a13n-harness-ui/03-local-storage-and-recovery.md) own local retention. [a13n Service](../a13n-service/README.md) owns any hosted durable lifecycle and event history.
+The [Harness event contract](../a13n-harness/12-events-observability-and-usage.md) owns the source stream. [Harness UI local storage and recovery](../a13n-harness-ui/03-local-storage-and-recovery.md) own local retention. [Service facts and delivery](../a13n-service/07-facts-and-delivery.md) owns any hosted durable lifecycle and event history.
 
 ## Dependency Direction
 

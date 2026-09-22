@@ -1,0 +1,12 @@
+"""Hook management error contract."""
+
+from __future__ import annotations
+
+from a13n_service_legacy.application_errors import ApplicationError
+
+
+class HookManagementError(ApplicationError):
+    """A safe Hook management error exposed through the public API."""
+
+
+__all__ = ["HookManagementError"]

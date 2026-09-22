@@ -1,0 +1,329 @@
+"""Fixture-owned infrastructure for storage contract tests."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
+from uuid import uuid4
+
+import anyio
+import pytest
+from a13n_service_legacy.connectivity.runtime import ConnectivityDataRuntime, ConnectivityRuntime
+from a13n_service_legacy.database.migration import DatabaseMigrator
+from a13n_service_legacy.observability import ObservabilityRuntime, TraceContent
+from a13n_service_legacy.process.runtime import ControlRuntime, ProcessRuntime, ProcessStatus, SharedRuntime
+from a13n_service_legacy.settings import Settings
+from a13n_service_legacy.storage.config import PostgreSQLConfig, RedisMemoryConfig, RedisServerConfig
+from a13n_service_legacy.storage.object_store import LocalObjectStore, ObjectStore, S3ObjectStore
+from a13n_service_legacy.storage.redis import open_redis
+from aiobotocore.config import AioConfig
+from aiobotocore.httpxsession import HttpxSession
+from aiobotocore.session import get_session
+from botocore.exceptions import BotoCoreError, ClientError
+from pydantic_ai import prices
+from redis.asyncio import Redis
+from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
+from sqlalchemy.pool import NullPool
+from testcontainers.core.container import DockerContainer
+
+if TYPE_CHECKING:
+    from a13n_service_legacy.connectivity.ingress.admission import IngressEventService
+    from a13n_service_legacy.iam import RequestAuthenticator
+
+MINIO_IMAGE = "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+
+
+@pytest.fixture(autouse=True)
+def no_background_price_downloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prices, "update_in_background", nullcontext)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> Iterator[str]:
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:17-alpine") as container:
+        yield (
+            f"postgresql+psycopg://{container.username}:{container.password}"
+            f"@{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
+        )
+
+
+@pytest.fixture(scope="session")
+def postgres_admin_url(pg_url: str) -> str:
+    return make_url(pg_url).set(database="postgres").render_as_string(hide_password=False)
+
+
+def create_postgres_database(admin_url: str, name: str, *, template: str | None = None) -> None:
+    engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            source = f' TEMPLATE "{template}"' if template else ""
+            connection.exec_driver_sql(f'CREATE DATABASE "{name}"{source}')
+    finally:
+        engine.dispose()
+
+
+def drop_postgres_database(admin_url: str, name: str) -> None:
+    engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    finally:
+        engine.dispose()
+
+
+def postgres_config(pg_url: str, database: str) -> PostgreSQLConfig:
+    url = make_url(pg_url).set(database=database)
+    return PostgreSQLConfig(url=url.render_as_string(hide_password=False))
+
+
+@pytest.fixture
+def postgres_database(pg_url: str, postgres_admin_url: str) -> Iterator[PostgreSQLConfig]:
+    """An empty per-test PostgreSQL database."""
+    name = f"a13n_test_{uuid4().hex}"
+    create_postgres_database(postgres_admin_url, name)
+    try:
+        yield postgres_config(pg_url, name)
+    finally:
+        drop_postgres_database(postgres_admin_url, name)
+
+
+@pytest.fixture(scope="session")
+def service_postgres_template(pg_url: str, postgres_admin_url: str) -> Iterator[str]:
+    """Session-scoped template database holding the migrated service schema."""
+    name = f"a13n_template_{uuid4().hex}"
+    create_postgres_database(postgres_admin_url, name)
+    DatabaseMigrator(postgres_config(pg_url, name)).upgrade()
+    try:
+        yield name
+    finally:
+        drop_postgres_database(postgres_admin_url, name)
+
+
+@pytest.fixture
+def service_database(
+    pg_url: str, postgres_admin_url: str, service_postgres_template: str
+) -> Iterator[PostgreSQLConfig]:
+    """A per-test PostgreSQL database cloned from the migrated template."""
+    name = f"a13n_test_{uuid4().hex}"
+    create_postgres_database(postgres_admin_url, name, template=service_postgres_template)
+    try:
+        yield postgres_config(pg_url, name)
+    finally:
+        drop_postgres_database(postgres_admin_url, name)
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> Iterator[str]:
+    from testcontainers.redis import RedisContainer
+
+    with RedisContainer("redis:8-alpine") as container:
+        yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
+
+
+@dataclass(frozen=True, slots=True)
+class S3Service:
+    endpoint_url: str
+    access_key: str
+    secret_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessRuntimeFactory:
+    """Build real process-runtime dataclasses for isolated router tests."""
+
+    def __call__(
+        self,
+        *,
+        settings: Settings | None = None,
+        request_authenticator: RequestAuthenticator | None = None,
+        agents: object | None = None,
+        sessions: object | None = None,
+        trace_queries: object | None = None,
+        hook_subscriptions: object | None = None,
+        lifecycle_events: object | None = None,
+        gateway: object | None = None,
+        environment_mounts: object | None = None,
+        ingress_events: IngressEventService | None = None,
+    ) -> ProcessRuntime:
+        placeholder = Mock()
+        control = (
+            ControlRuntime(
+                trace_queries=(trace_queries if trace_queries is not None else placeholder),
+                environments=placeholder,
+                environment_mounts=environment_mounts if environment_mounts is not None else placeholder,
+                skill_uploads=placeholder,
+                skill_publication=placeholder,
+                skill_catalog=placeholder,
+                agents=agents if agents is not None else placeholder,
+                models=placeholder,
+                model_providers=placeholder,
+                assets=placeholder,
+                asset_uploads=placeholder,
+                hook_subscriptions=(hook_subscriptions if hook_subscriptions is not None else placeholder),
+                lifecycle_events=(lifecycle_events if lifecycle_events is not None else placeholder),
+                gateway=gateway if gateway is not None else placeholder,
+                subagent_maintenance=placeholder,
+            )
+            if any(
+                value is not None
+                for value in (agents, trace_queries, hook_subscriptions, lifecycle_events, gateway, environment_mounts)
+            )
+            else None
+        )
+        connectivity = (
+            ConnectivityRuntime(
+                control=None,
+                data=ConnectivityDataRuntime(ingress_events=ingress_events),
+            )
+            if ingress_events is not None
+            else None
+        )
+        shared = Mock(spec=SharedRuntime)
+        shared.storage.sessions = sessions
+        return ProcessRuntime(
+            settings=settings or Settings(),
+            status=ProcessStatus(startup_complete=True),
+            request_authenticator=request_authenticator,
+            observability=ObservabilityRuntime(
+                tracer_provider=None, metrics_runtime=None, trace_content=TraceContent.none
+            ),
+            shared=shared,
+            control=control,
+            worker=None,
+            connectivity=connectivity,
+        )
+
+
+@pytest.fixture
+def process_runtime_factory() -> ProcessRuntimeFactory:
+    return ProcessRuntimeFactory()
+
+
+@pytest.fixture(scope="session")
+def s3_service() -> Iterator[S3Service]:
+    access_key = "a13n-test-access"
+    secret_key = "a13n-test-secret"
+    container = (
+        DockerContainer(MINIO_IMAGE)
+        .with_env("MINIO_ROOT_USER", access_key)
+        .with_env("MINIO_ROOT_PASSWORD", secret_key)
+        .with_command("server /data")
+        .with_exposed_ports(9000)
+    )
+    with container:
+        host = container.get_container_host_ip()
+        if host == "localhost":
+            host = "127.0.0.1"
+        endpoint = f"http://{host}:{container.get_exposed_port(9000)}"
+        yield S3Service(endpoint, access_key, secret_key)
+
+
+@asynccontextmanager
+async def _open_redis(config) -> AsyncGenerator[Redis]:
+    async with open_redis(config) as client:
+        await client.flushdb()
+        yield client
+        await client.flushdb()
+
+
+@pytest.fixture
+async def redis_client() -> AsyncIterator[Redis]:
+    """In-memory Redis for logic that is not backend-specific."""
+    async with _open_redis(RedisMemoryConfig()) as client:
+        yield client
+
+
+@pytest.fixture(params=["memory", "redis"])
+async def any_redis_client(request: pytest.FixtureRequest) -> AsyncIterator[Redis]:
+    """Both Redis backends, for the suites that own backend parity."""
+    if request.param == "memory":
+        config = RedisMemoryConfig()
+    else:
+        config = RedisServerConfig(url=request.getfixturevalue("redis_url"))
+    async with _open_redis(config) as client:
+        yield client
+
+
+@pytest.fixture
+async def object_store(tmp_path: Path) -> AsyncIterator[ObjectStore]:
+    """Local object store for logic that is not backend-specific."""
+    yield await LocalObjectStore.create(tmp_path / "objects")
+
+
+@pytest.fixture(params=["local", "s3"])
+async def any_object_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[ObjectStore]:
+    """Both object-store backends, for the suites that own backend parity."""
+    if request.param == "local":
+        yield await LocalObjectStore.create(tmp_path / "objects")
+        return
+
+    service: S3Service = request.getfixturevalue("s3_service")
+    async with _open_s3_store(service) as store:
+        yield store
+
+
+@pytest.fixture
+async def s3_object_store(s3_service: S3Service) -> AsyncIterator[S3ObjectStore]:
+    async with _open_s3_store(s3_service) as store:
+        yield store
+
+
+@asynccontextmanager
+async def _open_s3_store(service: S3Service) -> AsyncGenerator[S3ObjectStore]:
+    bucket = f"a13n-storage-{uuid4().hex}"
+    config = AioConfig(
+        connect_timeout=5,
+        read_timeout=30,
+        proxies={},
+        retries={"total_max_attempts": 1, "mode": "standard"},
+        s3={"addressing_style": "path"},
+        http_session_cls=HttpxSession,
+    )
+    async with AsyncExitStack() as stack:
+        client = await stack.enter_async_context(
+            get_session().create_client(
+                "s3",
+                endpoint_url=service.endpoint_url,
+                region_name="us-east-1",
+                aws_access_key_id=service.access_key,
+                aws_secret_access_key=service.secret_key,
+                config=config,
+            )
+        )
+        await _wait_for_s3(client)
+        await client.create_bucket(Bucket=bucket)
+        store = S3ObjectStore(client, bucket)
+        try:
+            yield store
+        finally:
+            listed = await client.list_objects_v2(Bucket=bucket)
+            for item in listed.get("Contents", []):
+                await client.delete_object(Bucket=bucket, Key=item["Key"])
+            await client.delete_bucket(Bucket=bucket)
+
+
+async def _wait_for_s3(client) -> None:
+    with anyio.fail_after(30):
+        while True:
+            try:
+                await client.list_buckets()
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") != "XMinioServerNotInitialized":
+                    raise
+            except BotoCoreError:
+                pass
+            else:
+                return
+            await anyio.sleep(0.25)

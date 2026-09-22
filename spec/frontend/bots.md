@@ -1,3 +1,5 @@
+> Historical frontend design. Bot and memory capabilities are excluded from the current Service/Console contract; this document is not an implementation requirement. Its Service references address archived contracts.
+
 # Bots Integration
 
 ## Design Position
@@ -156,7 +158,7 @@ AccountTarget does not carry channel-specific instructions. Users edit the selec
 
 ## 5. Messaging Behavior
 
-Reuse the accepted [Messaging Reception](../a13n-service/40-connectivity/02-messaging-ingress.md) semantics. In particular:
+Reuse the accepted [Historical Messaging Reception](../a13n-service-legacy/40-connectivity/02-messaging-ingress.md) semantics. In particular:
 
 - `mention`: each admitted group message requires a mention.
 - `discussion`: a mention activates a discussion; its established continuation can proceed without another mention.
@@ -239,7 +241,7 @@ Bots supplies trusted Account identity, external tenant, exact conversation, con
 
 The Bot Memory contract owns group-local document memory, bounded `_index.md` navigation, semantic/procedural revisions, append-only events, and on-demand section reading. Each group chooses **Only this group** or **All connected groups**. Opening a group grants eligible groups in the same Bot installation read access to its existing and future current documents; it creates no copies and does not open other groups' memory. Shared readers cannot revise or delete another group's content, inspect its history/diffs, or use private source links. Cross-Account and direct-conversation sharing are excluded. Committed revisions remain immutable; derived navigation follows admitted content and current visibility.
 
-Memory follows the exact conversation across target Agent changes, while availability follows its explicit storage binding. Execution uses trusted conversation memory without unioning ordinary Agent/User memories. Account settings select current-Environment filesystem memory by default or an explicit Provider; credentials stay on their owning Environment/Provider resources. [Account-owned selection](bot-memory.md#account-owned-memory-selection) and [Service Memory](../a13n-service/42-memory.md) own root/child/recovery bindings. Backend capability declarations and validation determine available history, metadata, and traversal rather than the presence of a file-looking UI.
+Memory follows the exact conversation across target Agent changes, while availability follows its explicit storage binding. Execution uses trusted conversation memory without unioning ordinary Agent/User memories. Account settings select current-Environment filesystem memory by default or an explicit Provider; credentials stay on their owning Environment/Provider resources. [Account-owned selection](bot-memory.md#account-owned-memory-selection) and [Historical Service Memory](../a13n-service-legacy/42-memory.md) own root/child/recovery bindings. Backend capability declarations and validation determine available history, metadata, and traversal rather than the presence of a file-looking UI.
 
 The Memory management tab and its data are restricted to effective a13n Workspace administrators. Setup explains that administrators can manage retained private-group memory without personal platform membership checks. This does not grant cross-group runtime recall. Service stores the lightweight document directory; document bodies remain in the selected Provider.
 
@@ -266,22 +268,22 @@ Bots remains usable with memory disabled or not installed. Adding Memory does no
 
 Existing Application Accounts remain the identity and credential owner, and creating a Bot never copies their credentials. Existing reception behavior remains unchanged until explicitly configured through a supported operation. New target admission, discovery, verification observations, and conversation-memory integration require corresponding authorized Service operations before their controls become usable. Provider permissions limit setup and discovery; the Console does not manufacture missing capability or evidence.
 
-Memory management is owned by [Bot Memory](bot-memory.md). Backend content and completion semantics remain owned by [Service Long-Term Memory](../a13n-service/42-memory.md). This product contract adds no schema migration, execution principal, message transport, credential lifecycle, or parallel transcript store.
+Memory management is owned by [Bot Memory](bot-memory.md). Backend content and completion semantics remain owned by [Historical Service Long-Term Memory](../a13n-service-legacy/42-memory.md). This product contract adds no schema migration, execution principal, message transport, credential lifecycle, or parallel transcript store.
 
 ## Related Contracts
 
-- [Application Accounts](../a13n-service/40-connectivity/01a-application-accounts.md)
-- [Event Reception and Routing](../a13n-service/40-connectivity/01-ingress-and-routing.md)
-- [Messaging Reception](../a13n-service/40-connectivity/02-messaging-ingress.md)
+- [Historical Application Accounts](../a13n-service-legacy/40-connectivity/01a-application-accounts.md)
+- [Historical Event Reception and Routing](../a13n-service-legacy/40-connectivity/01-ingress-and-routing.md)
+- [Historical Messaging Reception](../a13n-service-legacy/40-connectivity/02-messaging-ingress.md)
 - [Console](console.md)
 - [Bot Memory](bot-memory.md)
 
 ## Memory Settings API Boundary
 
-Console reads and updates the [Bot-owned settings resource](../a13n-service/42-memory.md#bot-memory-configuration), using its `expected_version` independently of Account version. Bot summaries supply separate Account and Memory settings projections. Existing-account selection uses the Bot collection endpoint. Generic Application Account forms neither read nor write memory configuration. This changes API ownership without changing the administrator-only management boundary or document browsing behavior.
+Console reads and updates the [Historical Bot-owned settings resource](../a13n-service-legacy/42-memory.md#bot-memory-configuration), using its `expected_version` independently of Account version. Bot summaries supply separate Account and Memory settings projections. Existing-account selection uses the Bot collection endpoint. Generic Application Account forms neither read nor write memory configuration. This changes API ownership without changing the administrator-only management boundary or document browsing behavior.
 
 ## Images and files
 
-Slack and Feishu setup explains the attachment permissions, input limits and model/Environment prerequisites defined by [built-in adapters](../a13n-service/40-connectivity/07-built-in-ingress-adapters.md#message-attachments-and-file-results). The Slack manifest includes `files:read` and `files:write`, with an explicit reauthorization reminder for existing installations. Feishu setup calls out message-resource/upload permissions and publishing the updated application.
+Slack and Feishu setup explains the attachment permissions, input limits and model/Environment prerequisites defined by [Historical built-in adapters](../a13n-service-legacy/40-connectivity/07-built-in-ingress-adapters.md#message-attachments-and-file-results). The Slack manifest includes `files:read` and `files:write`, with an explicit reauthorization reminder for existing installations. Feishu setup calls out message-resource/upload permissions and publishing the updated application.
 
 Users attach images, PDFs or text files to messages that activate the Bot. Generated files are returned as native attachments in the original conversation/thread, alongside the task progress message. File generation requires an Agent Environment and the explicit Publish asset capability; enabling Bot reception does not implicitly grant code execution or publication. Unknown file-send outcomes must not be presented as confirmed delivery.

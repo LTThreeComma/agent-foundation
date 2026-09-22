@@ -8,6 +8,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "a13n.validate" -}}
+{{- fail "New Service Kubernetes rollout is not implemented; this chart must not target an existing legacy store" -}}
 {{- if not (has .Values.profile (list "local" "distributed")) -}}
 {{- fail "profile must be local or distributed" -}}
 {{- end -}}

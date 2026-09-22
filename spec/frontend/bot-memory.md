@@ -1,8 +1,10 @@
+> Historical frontend design. Bot and memory capabilities are excluded from the current Service/Console contract; this document is not an implementation requirement. Its Service references address archived contracts.
+
 # Bot Memory
 
 ## Design Position
 
-Bot Memory presents authorized memory documents for collaborative conversations, with topic/date navigation, revision-aware knowledge and procedures, event corrections, and group visibility. [Document Memory](../a13n-harness/21-document-memory.md) owns kinds, revisions, extraction/organization, tools, and file-backed storage. [Service Memory](../a13n-service/42-memory.md) owns managed selections, exact storage bindings, directory publication, authorization, APIs, and completion. [Bots Integration](bots.md) owns the Account-backed Bot and platform onboarding.
+Bot Memory presents authorized memory documents for collaborative conversations, with topic/date navigation, revision-aware knowledge and procedures, event corrections, and group visibility. [Document Memory](../a13n-harness/21-document-memory.md) owns kinds, revisions, extraction/organization, tools, and file-backed storage. [Historical Service Memory](../a13n-service-legacy/42-memory.md) owns managed selections, exact storage bindings, directory publication, authorization, APIs, and completion. [Bots Integration](bots.md) owns the Account-backed Bot and platform onboarding.
 
 Controls depend on the selected backend's verified capabilities. A logical Markdown path is not an arbitrary filesystem path, and a file-looking browser does not prove revision, traversal, or durable-storage support. This document owns the product experience rather than duplicating the Service wire schema.
 
@@ -37,7 +39,7 @@ Sharing stays within one Bot and external installation. Cross-Bot, cross-platfor
 
 ### Account-Owned Memory Selection
 
-Bot-owned memory settings select one document entry using the explicit backend configuration in [Service Memory](../a13n-service/42-memory.md#agent-selection). The ordinary Agent multi-entry feature does not implicitly add user/Agent memory to Bot conversation context. Filesystem settings can retain the current Environment default, choose a provider-local root, or reference an explicitly authorized Environment under the Service contract. Group settings inherit that selection and control reading, explicit saving, and automatic organization; there is no per-group Provider override. Disabling memory retains the configured selection and stored content.
+Bot-owned memory settings select one document entry using the explicit backend configuration in [Historical Service Memory](../a13n-service-legacy/42-memory.md#agent-selection). The ordinary Agent multi-entry feature does not implicitly add user/Agent memory to Bot conversation context. Filesystem settings can retain the current Environment default, choose a provider-local root, or reference an explicitly authorized Environment under the Service contract. Group settings inherit that selection and control reading, explicit saving, and automatic organization; there is no per-group Provider override. Disabling memory retains the configured selection and stored content.
 
 The model cannot supply Account/group IDs, storage selectors, ownership metadata, or visibility settings to choose another scope. Accepted Runs retain their exact binding across recovery; later configuration changes do not redirect them. Bot-bound child Agents cannot expand the parent's conversation authority or silently select a child's new sandbox as the parent's memory store.
 
@@ -105,7 +107,7 @@ Unverified and direct conversations cannot select installation visibility. Curre
 
 ## 7. Metadata and Storage Direction
 
-The Service directory stores stable document/version references, storage locators, bounded titles/descriptions, trusted ownership, kind, supported time metadata, creation evidence, and protected source relationships. Bodies, retained revisions, and content-bearing change records stay in the backend. PostgreSQL stores only the query metadata for change lists under [Service change queries](../a13n-service/42-memory.md#change-queries-and-audit); listing changes does not fetch every diff. Generic editable frontmatter cannot change Service authority.
+The Service directory stores stable document/version references, storage locators, bounded titles/descriptions, trusted ownership, kind, supported time metadata, creation evidence, and protected source relationships. Bodies, retained revisions, and content-bearing change records stay in the backend. PostgreSQL stores only the query metadata for change lists under [Historical Service change queries](../a13n-service-legacy/42-memory.md#change-queries-and-audit); listing changes does not fetch every diff. Generic editable frontmatter cannot change Service authority.
 
 Filesystem storage reuses the selected Environment's file operations. Memory exposes no shell tools and does not execute commands to search or write. This does not restrict another shell/file tool already authorized over the same sandbox. UI configuration must describe the actual boundary: a scoped directory is not OS isolation, and a sandbox path is not a durability guarantee.
 
@@ -155,7 +157,7 @@ An explicit committed-but-indexing response shows the confirmed document and off
 
 ## 9. Authority, Completion, and Failures
 
-All Web Bot memory management, including index metadata, history, changes/diffs, sources, revision, deletion, and group visibility settings, requires effective Workspace Admin authority under [IAM](../a13n-service/33-identity-and-access-management.md#bot-memory-management). Administrators can manage connected private-group memory without proving personal platform membership; setup explains that boundary. Runtime audience validation and execution memory authority remain independent.
+All Web Bot memory management, including index metadata, history, changes/diffs, sources, revision, deletion, and group visibility settings, requires effective Workspace Admin authority under [Historical IAM](../a13n-service-legacy/33-identity-and-access-management.md#bot-memory-management). Administrators can manage connected private-group memory without proving personal platform membership; setup explains that boundary. Runtime audience validation and execution memory authority remain independent.
 
 Group/topic visibility cannot widen through a path, source link, editable metadata, shared sandbox, or Agent selection. Bot removal, disabled Accounts/scopes, and unknown audiences block affected runtime reads/writes. Public/private audience changes require current verified eligibility and preserve the configured visibility; they do not independently enable sharing. Optional recall failure can leave the Agent usable but must be represented as unavailable memory.
 
@@ -201,13 +203,13 @@ The three-kind model replaces daily/long-term classification. Legacy records rem
 ## Related Contracts
 
 - [Document Memory](../a13n-harness/21-document-memory.md)
-- [Service Memory](../a13n-service/42-memory.md)
+- [Historical Service Memory](../a13n-service-legacy/42-memory.md)
 - [Bots Integration](bots.md)
-- [Application Accounts](../a13n-service/40-connectivity/01a-application-accounts.md)
-- [Messaging Reception](../a13n-service/40-connectivity/02-messaging-ingress.md)
-- [Identity and Access Management](../a13n-service/33-identity-and-access-management.md)
+- [Historical Application Accounts](../a13n-service-legacy/40-connectivity/01a-application-accounts.md)
+- [Historical Messaging Reception](../a13n-service-legacy/40-connectivity/02-messaging-ingress.md)
+- [Historical Identity and Access Management](../a13n-service-legacy/33-identity-and-access-management.md)
 - [Console](console.md)
 
 ## Memory Settings API Boundary
 
-Console reads and updates the [Bot-owned settings resource](../a13n-service/42-memory.md#bot-memory-configuration), using its `expected_version` independently of Account version. Bot summaries supply separate Account and Memory settings projections. Existing-account selection uses the Bot collection endpoint. Generic Application Account forms neither read nor write memory configuration. This changes API ownership without changing the administrator-only management boundary or document browsing behavior.
+Console reads and updates the [Historical Bot-owned settings resource](../a13n-service-legacy/42-memory.md#bot-memory-configuration), using its `expected_version` independently of Account version. Bot summaries supply separate Account and Memory settings projections. Existing-account selection uses the Bot collection endpoint. Generic Application Account forms neither read nor write memory configuration. This changes API ownership without changing the administrator-only management boundary or document browsing behavior.

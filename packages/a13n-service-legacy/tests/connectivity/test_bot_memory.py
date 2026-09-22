@@ -1,0 +1,669 @@
+"""Bot document behavior through real SQL and the native OSS adapter boundary."""
+
+import json
+from dataclasses import dataclass
+from uuid import uuid4
+
+import httpx2
+import pytest
+from a13n_harness.providers.memory.mem0_oss import Mem0OSSBackend
+from a13n_service_legacy.application_errors import ApplicationError
+from a13n_service_legacy.bots.memory.domain import ConfigureScope, CreateDocument, SearchDocuments
+from a13n_service_legacy.bots.memory.mutations import create, delete
+from a13n_service_legacy.bots.memory.service import BotMemoryService
+from a13n_service_legacy.bots.memory.settings import (
+    AccountSettingsRecord,
+    ReplaceMemorySettings,
+    read_settings,
+    replace_settings,
+)
+from a13n_service_legacy.connectivity.accounts.targets import TargetConfig
+from a13n_service_legacy.storage import transaction
+
+from ..memory.support import memory_service
+from .conftest import ACCOUNT_ID, WORKSPACE_ID, actor
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_uncertain_write_reconciles_without_repeating_add(bot_memory):
+    from a13n_service_legacy.bots.memory.operations import list_operations, reconcile
+
+    lab = bot_memory
+    lab.failures["get"] = True
+    body = CreateDocument(kind="semantic", text="Saved remotely, response lost", title="Unconfirmed")
+    with pytest.raises(ApplicationError) as uncertain:
+        await create(lab.service, actor(), ACCOUNT_ID, lab.scope_id, body, "uncertain")
+    assert uncertain.value.code == "memory_write_unconfirmed"
+    assert len(lab.records) == 1
+    assert not (await lab.service.index(actor(), ACCOUNT_ID, lab.scope_id)).entries
+    operations = await list_operations(lab.service, actor(), ACCOUNT_ID, lab.scope_id)
+    assert len(operations.items) == 1 and operations.items[0].state == "unconfirmed"
+    with pytest.raises(ApplicationError):
+        await create(lab.service, actor(), ACCOUNT_ID, lab.scope_id, body, "uncertain")
+    lab.failures["get"] = False
+    lab.failures["search_empty"] = True
+    still_uncertain = await reconcile(lab.service, actor(), ACCOUNT_ID, lab.scope_id, operations.items[0].id)
+    assert still_uncertain.state == "unconfirmed"
+    lab.failures["search_empty"] = False
+    confirmed = await reconcile(lab.service, actor(), ACCOUNT_ID, lab.scope_id, operations.items[0].id)
+    assert confirmed.state == "active"
+    replay = await create(lab.service, actor(), ACCOUNT_ID, lab.scope_id, body, "uncertain")
+    assert replay.id == confirmed.id
+    assert len([call for call in lab.calls if call == ("POST", "/memories")]) == 1
+
+
+@dataclass
+class MemoryLab:
+    service: BotMemoryService
+    scope_id: str
+    records: dict
+    calls: list
+    failures: dict
+
+
+@pytest.fixture
+async def bot_memory(connectivity_sessions, account_service, target_service):
+    records, calls, failures = {}, [], {}
+
+    def handle(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/memories" and request.method == "POST":
+            key = str(uuid4())
+            records[key] = {
+                "id": key,
+                "memory": body["messages"][0]["content"],
+                "run_id": body["run_id"],
+                "metadata": body["metadata"],
+            }
+            return httpx2.Response(200, json={"results": [{"id": key, "event": "ADD"}]})
+        if request.method == "GET" and failures.get("get"):
+            return httpx2.Response(503, json={"detail": "synthetic readback failure"})
+        if request.url.path == "/search":
+            if failures.get("search_empty"):
+                return httpx2.Response(200, json={"results": []})
+            result = [
+                dict(record, score=0.8)
+                for record in records.values()
+                if record["run_id"] == body["filters"]["run_id"]
+                and record["metadata"]["record_key"] in body["filters"]["record_key"]["in"]
+            ]
+            return httpx2.Response(200, json={"results": result[: body["top_k"]]})
+        key = request.url.path.split("/")[-1]
+        if request.method == "DELETE":
+            records.pop(key, None)
+            return httpx2.Response(200, json={"message": "deleted"})
+        return httpx2.Response(200, content=json.dumps(records.get(key)), headers={"content-type": "application/json"})
+
+    async with httpx2.AsyncClient(base_url="http://mem0/", transport=httpx2.MockTransport(handle)) as client:
+        memory, provider, _ = await memory_service(
+            connectivity_sessions, Mem0OSSBackend(client), principal=actor(), workspace_id=WORKSPACE_ID
+        )
+        async with transaction(connectivity_sessions) as session:
+            session.add(
+                AccountSettingsRecord(
+                    account_id=ACCOUNT_ID,
+                    version=1,
+                    provider_id=provider.id,
+                    use_memory=True,
+                    save_on_request=True,
+                    timezone="UTC",
+                )
+            )
+        await target_service.create(
+            actor=actor(),
+            account_id=ACCOUNT_ID,
+            idempotency_key="memory-target",
+            request=TargetConfig(target_kind="conversation", external_target_id="engineering"),
+        )
+        service = BotMemoryService(memory)
+        scope = await service.configure_scope(
+            actor(), ACCOUNT_ID, ConfigureScope(external_conversation_id="engineering")
+        )
+        yield MemoryLab(service, scope.id, records, calls, failures)
+
+
+async def test_index_is_navigation_only_and_body_is_read_on_demand(bot_memory):
+    lab = bot_memory
+    document = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(
+            kind="semantic",
+            text="# Release\nThe full release procedure.",
+            title="Release",
+            description="Deployment steps",
+        ),
+        "doc-one",
+    )
+    lab.calls.clear()
+    index = await lab.service.index(actor(), ACCOUNT_ID, lab.scope_id)
+    assert document.id in index.text and "Deployment steps" in index.text
+    assert "The full release procedure" not in index.text
+    assert lab.calls == []
+    read = await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    assert read.text == document.text
+    assert len(lab.calls) == 1
+    result = await lab.service.search(actor(), ACCOUNT_ID, lab.scope_id, SearchDocuments(query="release"))
+    assert [entry.id for entry in result.items] == [document.id]
+
+
+async def test_directory_pagination_date_filter_and_request_replay(bot_memory):
+    from datetime import date
+
+    lab = bot_memory
+    for index in range(3):
+        body = CreateDocument(
+            kind="semantic", text=f"Memory {index}", title=f"Topic {index}", activity_date=date(2026, 9, 15)
+        )
+        first = await create(lab.service, actor(), ACCOUNT_ID, lab.scope_id, body, str(index))
+        again = await create(lab.service, actor(), ACCOUNT_ID, lab.scope_id, body, str(index))
+        assert again.id == first.id
+    assert len(lab.records) == 3
+    first = await lab.service.list(actor(), ACCOUNT_ID, lab.scope_id, limit=2, activity_date=date(2026, 9, 15))
+    second = await lab.service.list(
+        actor(), ACCOUNT_ID, lab.scope_id, limit=2, activity_date=date(2026, 9, 15), cursor=first.next_cursor
+    )
+    assert len(first.items) == 2 and len(second.items) == 1 and second.next_cursor is None
+    assert not {entry.id for entry in first.items} & {entry.id for entry in second.items}
+    with pytest.raises(ApplicationError) as mismatch:
+        await lab.service.list(
+            actor(), ACCOUNT_ID, lab.scope_id, limit=2, activity_date=date(2026, 9, 16), cursor=first.next_cursor
+        )
+    assert mismatch.value.code == "invalid_cursor"
+    replay = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind="semantic", text="changed", title="Topic"),
+        "0",
+    )
+    assert replay.title == "Topic 0"
+    assert len(lab.records) == 3
+
+
+async def test_deleted_document_disappears_and_stale_reference_cannot_read(bot_memory):
+    lab = bot_memory
+    document = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind="semantic", text="Old fact", title="Fact"),
+        "old",
+    )
+    await delete(lab.service, actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    assert not lab.records
+    assert (await lab.service.index(actor(), ACCOUNT_ID, lab.scope_id)).entries == ()
+    await delete(lab.service, actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    with pytest.raises(ApplicationError) as missing:
+        await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    assert missing.value.code == "memory_not_found"
+
+
+async def test_provider_body_tampering_is_not_returned_as_saved_memory(bot_memory):
+    lab = bot_memory
+    document = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind="semantic", text="Original", title="Fact"),
+        "one",
+    )
+    next(iter(lab.records.values()))["memory"] = "Rewritten outside Service"
+    with pytest.raises(ApplicationError) as changed:
+        await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    assert changed.value.code == "memory_unavailable"
+
+
+async def sharing_groups(lab, target_service, sessions):
+    from a13n_service_legacy.bots.memory.models import ScopeRecord
+    from a13n_service_legacy.storage import transaction
+    from sqlalchemy import update
+
+    await target_service.create(
+        actor=actor(),
+        account_id=ACCOUNT_ID,
+        idempotency_key="recipient",
+        request=TargetConfig(target_kind="conversation", external_target_id="support"),
+    )
+    recipient = await lab.service.configure_scope(
+        actor(), ACCOUNT_ID, ConfigureScope(external_conversation_id="support")
+    )
+    async with transaction(sessions) as session:
+        await session.execute(
+            update(ScopeRecord).where(ScopeRecord.id.in_((lab.scope_id, recipient.id))).values(audience="private")
+        )
+    return recipient
+
+
+async def test_viewer_cannot_read_index_or_provider_body(bot_memory, connectivity_sessions):
+    from a13n_service_legacy.iam import AuthorizationError
+    from a13n_service_legacy.iam.models import RoleBindingRecord
+    from a13n_service_legacy.storage import transaction
+    from sqlalchemy import update
+
+    from .conftest import USER_ID
+
+    async with transaction(connectivity_sessions) as session:
+        await session.execute(
+            update(RoleBindingRecord)
+            .where(RoleBindingRecord.principal_id == USER_ID, RoleBindingRecord.workspace_id == WORKSPACE_ID)
+            .values(role_key="viewer")
+        )
+    bot_memory.calls.clear()
+    with pytest.raises(AuthorizationError):
+        await bot_memory.service.index(actor(), ACCOUNT_ID, bot_memory.scope_id)
+    assert bot_memory.calls == []
+
+
+async def test_builder_cannot_change_or_remove_bot_memory_settings(bot_memory, account_service, connectivity_sessions):
+    from a13n_service_legacy.connectivity.accounts.models import AccountRecord
+    from a13n_service_legacy.iam import AuthorizationError
+    from a13n_service_legacy.iam.models import RoleBindingRecord
+    from a13n_service_legacy.storage import transaction
+    from sqlalchemy import update
+
+    from .conftest import USER_ID
+
+    async with transaction(connectivity_sessions) as session:
+        row = await session.get(AccountRecord, ACCOUNT_ID)
+        row.provider_key = "slack"
+        settings = await read_settings(session, ACCOUNT_ID)
+    async with transaction(connectivity_sessions) as session:
+        await session.execute(
+            update(RoleBindingRecord)
+            .where(
+                RoleBindingRecord.principal_id == USER_ID,
+                RoleBindingRecord.workspace_id == WORKSPACE_ID,
+            )
+            .values(role_key="builder")
+        )
+    for value in (None, settings.memory.model_copy(update={"use_memory": False})):
+        with pytest.raises(AuthorizationError):
+            await replace_settings(
+                bot_memory.service.memory,
+                actor(),
+                ACCOUNT_ID,
+                ReplaceMemorySettings(expected_version=settings.version, memory=value),
+            )
+    async with transaction(connectivity_sessions) as session:
+        assert await read_settings(session, ACCOUNT_ID) == settings
+
+
+async def test_audit_records_lifecycle_without_document_content(bot_memory, connectivity_sessions):
+    from a13n_service_legacy.iam.models import SecurityAuditRecord
+    from sqlalchemy import select
+
+    document = await create(
+        bot_memory.service,
+        actor(),
+        ACCOUNT_ID,
+        bot_memory.scope_id,
+        CreateDocument(kind="semantic", text="Private audit evidence", title="Private title"),
+        "audit",
+    )
+    await delete(bot_memory.service, actor(), ACCOUNT_ID, bot_memory.scope_id, document.id)
+    async with connectivity_sessions() as session:
+        rows = list(
+            await session.scalars(select(SecurityAuditRecord).where(SecurityAuditRecord.resource_id == document.id))
+        )
+        assert {row.action for row in rows} == {
+            "bot_memory.create",
+            "bot_memory.delete_requested",
+            "bot_memory.delete_confirmed",
+        }
+        assert all(row.actor_id == actor().principal.principal_id for row in rows)
+        assert "Private audit evidence" not in repr([row.details for row in rows])
+        assert "Private title" not in repr([row.details for row in rows])
+
+
+async def test_group_configuration_uses_verified_metadata_and_target_recreation_requires_a_new_check(
+    bot_memory, target_service, connectivity_sessions
+):
+    from a13n_service_legacy.bots.connectivity.domain import BotCheck
+    from a13n_service_legacy.bots.connectivity.models import BotCheckRecord
+    from a13n_service_legacy.bots.memory.models import ScopeRecord
+    from a13n_service_legacy.connectivity.accounts.models import AccountRecord
+    from a13n_service_legacy.connectivity.accounts.target_models import AccountTargetRecord
+    from a13n_service_legacy.connectivity.inspection import ConversationInfo, InstallationInfo
+    from a13n_service_legacy.storage import transaction
+    from a13n_service_legacy.temporal import utc_now
+    from sqlalchemy import select
+
+    lab = bot_memory
+    document = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind="semantic", text="Retained evidence", title="Retained"),
+        "retained",
+    )
+    async with transaction(connectivity_sessions) as session:
+        account = await session.get(AccountRecord, ACCOUNT_ID)
+        current = await session.get(ScopeRecord, lab.scope_id)
+        initial_version = current.version
+        checked = BotCheck(
+            account_id=ACCOUNT_ID,
+            credential_generation=account.credential_generation,
+            checked_at=utc_now(),
+            conversation_id="engineering",
+            installation=InstallationInfo(
+                app_id="A1",
+                organization_id="T1",
+                organization_name="Acme",
+                bot_id="U1",
+                bot_name="Helper",
+                enabled=True,
+            ),
+            conversation=ConversationInfo(
+                id="engineering",
+                name="Engineering team",
+                audience="private",
+                is_member=True,
+                is_active=True,
+                external=False,
+            ),
+        )
+        session.add(
+            BotCheckRecord(
+                account_id=ACCOUNT_ID,
+                conversation_id="engineering",
+                credential_generation=account.credential_generation,
+                started_at=utc_now(),
+                result_json=checked.model_dump(mode="json"),
+            )
+        )
+    configured = await lab.service.configure_scope(
+        actor(), ACCOUNT_ID, ConfigureScope(external_conversation_id="engineering", expected_version=initial_version)
+    )
+    assert configured.name == "Engineering team" and configured.audience == "private"
+    async with transaction(connectivity_sessions) as session:
+        target = await session.scalar(
+            select(AccountTargetRecord).where(
+                AccountTargetRecord.account_id == ACCOUNT_ID, AccountTargetRecord.external_target_id == "engineering"
+            )
+        )
+        target_id, version = target.id, target.version
+    await target_service.delete(actor=actor(), account_id=ACCOUNT_ID, target_id=target_id, expected_version=version)
+    async with transaction(connectivity_sessions) as session:
+        current = await session.get(ScopeRecord, lab.scope_id)
+        assert current.audience == "unknown" and current.version == configured.version + 1
+        assert await session.get(BotCheckRecord, (ACCOUNT_ID, "engineering")) is None
+        invalidated_version = current.version
+    await target_service.create(
+        actor=actor(),
+        account_id=ACCOUNT_ID,
+        idempotency_key="recreated-target",
+        request=TargetConfig(target_kind="conversation", external_target_id="engineering"),
+    )
+    configured = await lab.service.configure_scope(
+        actor(),
+        ACCOUNT_ID,
+        ConfigureScope(external_conversation_id="engineering", expected_version=invalidated_version),
+    )
+    assert configured.audience == "unknown", "An old setup check cannot re-enable a recreated target"
+    assert (await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, document.id)).text == "Retained evidence"
+
+
+async def test_exact_target_scope_lookup_is_bounded_and_uses_no_provider_io(
+    bot_memory, target_service, connectivity_sessions
+):
+    from a13n_service_legacy.bots.memory.models import ScopeRecord
+    from a13n_service_legacy.connectivity.accounts.target_models import AccountTargetRecord
+    from a13n_service_legacy.storage import short_session
+    from sqlalchemy import select
+
+    lab = bot_memory
+    recipient = await sharing_groups(lab, target_service, connectivity_sessions)
+    async with short_session(connectivity_sessions) as session:
+        source = await session.get(ScopeRecord, lab.scope_id)
+        target = await session.scalar(
+            select(AccountTargetRecord).where(
+                AccountTargetRecord.account_id == ACCOUNT_ID, AccountTargetRecord.external_target_id == "support"
+            )
+        )
+        provider_id, target_id = source.provider_id, target.id
+    lab.calls.clear()
+    result = await lab.service.scopes(actor(), ACCOUNT_ID, provider_id, target_id=target_id, limit=1)
+    assert [scope.id for scope in result.items] == [recipient.id] and result.next_cursor is None
+    assert lab.calls == []
+    unfiltered = await lab.service.scopes(actor(), ACCOUNT_ID, provider_id, limit=1)
+    with pytest.raises(ApplicationError):
+        await lab.service.scopes(
+            actor(), ACCOUNT_ID, provider_id, target_id=target_id, limit=1, cursor=unfiltered.next_cursor
+        )
+    unconfigured = await target_service.create(
+        actor=actor(),
+        account_id=ACCOUNT_ID,
+        idempotency_key="no-scope",
+        request=TargetConfig(target_kind="conversation", external_target_id="no-memory"),
+    )
+    assert not (await lab.service.scopes(actor(), ACCOUNT_ID, provider_id, target_id=unconfigured.id)).items
+    await target_service.delete(
+        actor=actor(), account_id=ACCOUNT_ID, target_id=target_id, expected_version=target.version
+    )
+    with pytest.raises(ApplicationError) as missing:
+        await lab.service.scopes(actor(), ACCOUNT_ID, provider_id, target_id=target_id)
+    assert missing.value.code == "target_not_found"
+
+
+async def test_scope_lookup_keeps_admin_and_account_deletion_boundaries(
+    bot_memory, connectivity_sessions, account_service
+):
+    from a13n_service_legacy.bots.memory.models import ScopeRecord
+    from a13n_service_legacy.iam import AuthorizationError
+    from a13n_service_legacy.iam.models import RoleBindingRecord
+    from a13n_service_legacy.storage import transaction
+
+    lab = bot_memory
+    async with transaction(connectivity_sessions) as session:
+        provider_id = (await session.get(ScopeRecord, lab.scope_id)).provider_id
+        (await session.get(RoleBindingRecord, "rb_connectivity_admin")).role_key = "viewer"
+    with pytest.raises(AuthorizationError):
+        await lab.service.scopes(actor(), ACCOUNT_ID, provider_id)
+    async with transaction(connectivity_sessions) as session:
+        (await session.get(RoleBindingRecord, "rb_connectivity_admin")).role_key = "admin"
+    account = await account_service.get_account(actor=actor(), account_id=ACCOUNT_ID)
+    await account_service.delete_account(actor=actor(), account_id=ACCOUNT_ID, expected_version=account.version)
+    with pytest.raises(ApplicationError) as deleted:
+        await lab.service.scopes(actor(), ACCOUNT_ID, provider_id)
+    assert deleted.value.code == "account_not_found"
+
+
+async def test_index_pages_by_encoded_budget_without_skipping_documents(bot_memory):
+    lab = bot_memory
+    created = []
+    for number in range(23):
+        document = await create(
+            lab.service,
+            actor(),
+            ACCOUNT_ID,
+            lab.scope_id,
+            CreateDocument(
+                kind="semantic",
+                text=f"Body {number}",
+                title="<" * 160,
+                description="&" * 320,
+            ),
+            f"encoded-index-{number}",
+        )
+        created.append(document.id)
+    lab.calls.clear()
+    seen, cursors = [], set()
+    cursor = None
+    while True:
+        page = await lab.service.index(actor(), ACCOUNT_ID, lab.scope_id, cursor=cursor)
+        payload = json.dumps({"text": page.text, "next_cursor": page.next_cursor}, ensure_ascii=False)
+        payload = payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        assert len(payload.encode()) < 32 * 1024
+        assert 1 <= len(page.entries) <= 20
+        for entry in page.entries:
+            assert f"memory://{entry.id}" in page.text
+            assert entry.title == "<" * 160 and entry.description == "&" * 320
+            seen.append(entry.id)
+        assert "Body " not in page.text
+        if not page.next_cursor:
+            break
+        assert "partial index" in page.text
+        assert page.next_cursor not in cursors
+        cursors.add(page.next_cursor)
+        cursor = page.next_cursor
+    assert seen == sorted(created)
+    assert len(cursors) >= 2, "Encoded size must paginate before the twenty-entry limit"
+    assert not lab.calls, "Index navigation must not load provider bodies"
+
+
+@pytest.mark.parametrize("operation", ["create", "configure", "account"])
+async def test_unsupported_provider_is_rejected_before_any_document_operation(bot_memory, account_service, operation):
+    from a13n_service_legacy.bots.memory.operations import list_operations
+
+    lab = bot_memory
+    plugin = next(iter(lab.service.memory.catalog.values()))
+    from dataclasses import replace
+
+    from a13n_harness.providers.catalog import ProviderCatalog
+
+    lab.service.memory.catalog = ProviderCatalog((replace(plugin, supports_documents=False),))
+    opened = len(lab.calls)
+    with pytest.raises(ApplicationError) as denied:
+        if operation == "create":
+            await create(
+                lab.service,
+                actor(),
+                ACCOUNT_ID,
+                lab.scope_id,
+                CreateDocument(kind="semantic", title="Unsupported", text="Never dispatched"),
+                "unsupported",
+            )
+        elif operation == "configure":
+            await lab.service.configure_scope(
+                actor(), ACCOUNT_ID, ConfigureScope(external_conversation_id="engineering", expected_version=1)
+            )
+        else:
+            from a13n_service_legacy.connectivity.accounts.models import AccountRecord
+
+            async with transaction(lab.service.sessions) as session:
+                account = await session.get(AccountRecord, ACCOUNT_ID)
+                account.provider_key = "slack"
+                settings = await read_settings(session, ACCOUNT_ID)
+            await replace_settings(
+                lab.service.memory,
+                actor(),
+                ACCOUNT_ID,
+                ReplaceMemorySettings(expected_version=settings.version, memory=settings.memory),
+            )
+    assert denied.value.code == "memory_documents_unsupported"
+    assert len(lab.calls) == opened and not lab.records
+    assert not (await list_operations(lab.service, actor(), ACCOUNT_ID, lab.scope_id)).items
+
+
+@pytest.mark.parametrize("kind", ["semantic", "procedural", "episodic"])
+async def test_document_kind_roundtrip_filter_and_correction(bot_memory, kind):
+    lab = bot_memory
+    original = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind=kind, title="Original", text="Original evidence"),
+        "typed-original",
+    )
+    corrected = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind=kind, title="Correction", text="Corrected evidence", correction_of=original.id),
+        "typed-correction",
+    )
+    assert corrected.kind == kind and corrected.legacy_kind is None
+    assert corrected.correction_of == original.id
+    assert (await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, corrected.id)).kind == kind
+    listing = await lab.service.list(actor(), ACCOUNT_ID, lab.scope_id, kind=kind)
+    assert {entry.id for entry in listing.items} == {original.id, corrected.id}
+    assert {
+        entry.kind
+        for entry in (
+            await lab.service.search(actor(), ACCOUNT_ID, lab.scope_id, SearchDocuments(query="evidence"))
+        ).items
+    } == {kind}
+    assert all(record["metadata"]["kind"] == kind for record in lab.records.values())
+
+
+@pytest.mark.parametrize("payload", [{}, {"kind": "daily"}, {"kind": "long_term"}])
+async def test_new_document_requires_current_kind(payload):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        CreateDocument.model_validate({"title": "New", "text": "Evidence", **payload})
+
+
+@pytest.mark.parametrize("legacy_kind", ["daily", "long_term"])
+async def test_kind_migration_retains_unclassified_legacy_documents(
+    bot_memory, connectivity_sessions, service_database, legacy_kind
+):
+    import anyio
+    from a13n_service_legacy.bots.memory.models import DocumentRecord
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from tests.database.revision_steps import apply_revision_steps
+
+    lab = bot_memory
+    document = await create(
+        lab.service,
+        actor(),
+        ACCOUNT_ID,
+        lab.scope_id,
+        CreateDocument(kind="semantic", title="Historical", text="Original historical evidence"),
+        "historical",
+    )
+    # Reconstruct historical SQL and Provider data together, without using the new-write API.
+    async with transaction(connectivity_sessions) as session:
+        stored = await session.get(DocumentRecord, document.id)
+        stored.kind = legacy_kind
+        stored.metadata_json = {**stored.metadata_json, "kind": legacy_kind}
+        original_metadata = dict(stored.metadata_json)
+    next(iter(lab.records.values()))["metadata"]["kind"] = legacy_kind
+    await anyio.to_thread.run_sync(
+        apply_revision_steps, service_database, (("ba435c2961da", "downgrade"), ("ba435c2961da", "upgrade"))
+    )
+    read = await lab.service.get(actor(), ACCOUNT_ID, lab.scope_id, document.id)
+    assert read.kind is None and read.legacy_kind == legacy_kind
+    assert read.text == "Original historical evidence"
+    assert (await lab.service.index(actor(), ACCOUNT_ID, lab.scope_id)).entries[0].legacy_kind == legacy_kind
+    assert not (await lab.service.list(actor(), ACCOUNT_ID, lab.scope_id, kind="semantic")).items
+    assert (await lab.service.search(actor(), ACCOUNT_ID, lab.scope_id, SearchDocuments(query="historical"))).items[
+        0
+    ].kind is None
+    async with transaction(connectivity_sessions) as session:
+        stored = await session.get(DocumentRecord, document.id)
+        assert stored.kind == legacy_kind and stored.metadata_json == original_metadata
+    # Current kinds must be accepted by the migrated schema, not just ORM-created tables.
+    for kind in ("semantic", "procedural", "episodic"):
+        await create(
+            lab.service,
+            actor(),
+            ACCOUNT_ID,
+            lab.scope_id,
+            CreateDocument(kind=kind, title=kind, text="New classified evidence"),
+            kind,
+        )
+    with pytest.raises(IntegrityError):
+        await anyio.to_thread.run_sync(apply_revision_steps, service_database, (("ba435c2961da", "downgrade"),))
+    async with transaction(connectivity_sessions) as session:
+        constraint = await session.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = 'bot_memory_documents'::regclass AND conname = 'ck_bot_memory_documents_kind_valid'"
+            )
+        )
+        assert "procedural" in constraint
+    assert len((await lab.service.list(actor(), ACCOUNT_ID, lab.scope_id)).items) == 4

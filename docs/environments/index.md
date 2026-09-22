@@ -227,6 +227,6 @@ The [Harness Environment guide](../a13n-harness/environments.md) covers complete
 
 ## Hosted preparation and recovery
 
-Service adds durable Template selection, worker placement, capacity, and retention around these Providers. See [hosted preparation and recovery](../a13n-service/resources.md#hosted-preparation-and-recovery) for target generations and placement, and [Environment capacity](../a13n-service/background-tasks.md#environment-capacity) for limits and idle retention. These are Service policies, not requirements imposed on every embedded Host.
+The accepted [Service Environment design](https://github.com/converge-ai-labs/agent-foundation/blob/main/spec/a13n-service/06-environments.md) defines managed lifecycle operations, frozen run mounts, and connect-only HTTP envd. These hosted capabilities are not implemented in the current Service foundation. The embedded Provider lifecycle described above remains usable independently.
 
 For direct SDK integrations, use [Environment lifecycle and errors](lifecycle.md) and [remote Envd](remote-envd.md).

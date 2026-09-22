@@ -56,7 +56,7 @@ These are component names, not alternative names for the same runtime. In partic
 
 ## Hosted services
 
-**[Service](a13n-service/index.md)** embeds Harness for managed execution, with **[Console](a13n-service/console.md)** for browser resource management and conversations. Follow [Agents, Threads, and Runs](a13n-service/agents-and-runs.md) to submit durable work, or [SDKs](a13n-service/sdks.md) to integrate an application. Client coverage differs by language; these SDKs are not the Harness SDK or an umbrella installation.
+The **[Service foundation](a13n-service/index.md)** currently supports configuration, migrations, bootstrap and role probes. Managed execution and the browser Console are being rewritten; durable submission and application SDK integration are not yet available against this new API.
 
 For an application embedding Harness directly, start with [Embedding in a Host](a13n-harness/hosting.md) instead of deploying the Service unnecessarily.
 

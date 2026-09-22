@@ -119,7 +119,7 @@ The native Provider overrides the image entrypoint, enables Docker init support 
 
 `close()` disconnects local observations without stopping the container or its background processes. A fresh managed adapter reuses the saved container; confirmed absence creates a replacement with an empty private workspace. Transport failures do not prove absence. Docker file paths are native container paths, while Harness adds its aggregate mount prefix; relative tool paths start in `/workspace`.
 
-Use `make image-docker-environment docker-provider-live-test` for a real Engine test, or follow the [Docker lifecycle example](examples.md#docker). The [single-host Compose deployment](../a13n-service/configuration.md) uses the host Docker Engine through its Unix socket.
+Use `make image-docker-environment` to build the image, and follow the [Docker lifecycle example](examples.md#docker) for direct Provider use. The former Service Docker live journey and hosted Compose environment orchestration are not implemented in the new foundation.
 
 ## Cloud providers
 

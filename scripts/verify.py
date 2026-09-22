@@ -108,7 +108,7 @@ class PythonGraph:
         packages = self.root / "packages"
         if packages.is_dir():
             for distribution in sorted(packages.iterdir()):
-                if not distribution.is_dir():
+                if not distribution.is_dir() or distribution.name == "a13n-service-legacy":
                     continue
                 for top in sorted(distribution.iterdir()):
                     if not top.is_dir() or top.name.startswith((".", "_")):
@@ -240,6 +240,8 @@ def plan(files: Iterable[str], graph: PythonGraph | None = None, *, consumers: b
     for relative in files:
         path = REPOSITORY_ROOT / relative
         posix = Path(relative).as_posix()
+        if any(posix.startswith(f"{root}/a13n-service-legacy/") for root in ("packages", "docs", "spec", "proto")):
+            continue
         if posix.endswith(".md") and path.is_file():
             result.markdown_files.add(posix)
         declared = verify_dependencies.tests_for(posix, REPOSITORY_ROOT)
@@ -273,6 +275,8 @@ def plan(files: Iterable[str], graph: PythonGraph | None = None, *, consumers: b
             elif not declared and not posix.endswith(".md"):
                 result.python_tests.add("scripts/tests")
                 result.notes.append(f"{posix}: no declared tooling tests; running scripts/tests")
+        elif posix.startswith("packages/a13n-service-legacy/"):
+            continue
         elif posix.startswith("packages/"):
             tests_dir = _distribution_tests(path)
             if posix.endswith(".py") and path.is_file():
@@ -455,6 +459,8 @@ def steps_for(result: Plan) -> list[Step]:
             command.extend(sorted(result.workflows))
         steps.append(Step("actionlint", command, cwd=REPOSITORY_ROOT))
     python_files = sorted(result.python_files)
+    if any(f.startswith("packages/a13n-service/") for f in python_files):
+        steps.append(Step("Service import boundaries", ["make", "service-boundaries"]))
     if python_files:
         steps.append(Step("ruff check", ["uv", "run", "--locked", "ruff", "check", "--no-fix", *python_files]))
         steps.append(Step("ruff format", ["uv", "run", "--locked", "ruff", "format", "--check", *python_files]))

@@ -75,8 +75,6 @@ jobs:
             runner: ubuntu-latest
           - name: tests
             runner: ubuntu-24.04-8core
-          - name: native
-            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -99,54 +97,16 @@ jobs:
       - name: Synchronize Python workspace
         run: uv sync --locked --all-packages
 
-      - name: Set up Rust for native smoke
-        if: matrix.name == 'native'
-        uses: dtolnay/rust-toolchain@1.96.0
-
-      - name: Cache Cargo
-        if: matrix.name == 'native'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: service-native
-
-      - name: Build required native daemon
-        if: matrix.name == 'native'
-        run: |
-          cargo build --locked --package a13n-envd
-          test -x target/debug/a13n-envd
-
-      - name: Test Service with real envd and Redis
-        if: matrix.name == 'native'
-        env:
-          A13N_ENVD_TEST_BINARY: ${{ github.workspace }}/target/debug/a13n-envd
-          PYTEST_ADDOPTS: -o faulthandler_timeout=60 --timeout=120 --timeout-method=thread
-        run: >-
-          uv run --locked python -m pytest -vv --tb=short --durations=30 -r a
-          --junitxml=test-results/service-native.xml
-          packages/a13n-service/tests/environments/websocket/test_pairing.py::test_native_connect_approve_discover_restart_and_revoke
-          packages/a13n-service/tests/environments/websocket/test_connection_host.py::test_ready_connection_relay_streams_and_closes_only_its_session
-          packages/a13n-service/tests/environments/websocket/test_connection_host.py::test_retired_sessions_release_native_capacity_without_disturbing_sibling
-          packages/a13n-service/tests/interactions/test_device_bindings.py::test_primary_and_mount_same_device_have_independent_sessions
-          packages/a13n-service/tests/interactions/test_device_bindings.py::test_mount_omission_captures_default_once_and_receipt_is_retained
-
-      - name: Require native smoke execution without skips
-        if: matrix.name == 'native'
-        run: |
-          python - <<'PY'
-          import xml.etree.ElementTree as ET
-
-          report = ET.parse("test-results/service-native.xml").getroot()
-          assert report.findall(".//testcase"), "Native smoke did not execute any cases"
-          assert not report.findall(".//skipped"), "Native smoke must not skip required capabilities"
-          PY
-
       - name: Type-check a13n Service Python packages
         if: matrix.name == 'checks'
         run: >-
           uv run --locked pyright
           packages/a13n-logging/a13n_logging
           packages/a13n-service/a13n_service
+
+      - name: Check Service import boundaries
+        if: matrix.name == 'checks'
+        run: make service-boundaries
 
       - name: Check Service contract export
         if: matrix.name == 'checks'
@@ -175,6 +135,17 @@ jobs:
           -o faulthandler_timeout=120
           -o faulthandler_exit_on_timeout=true
           packages/a13n-service/tests
+
+      - name: Require Service execution without skips
+        if: matrix.name == 'tests'
+        run: |
+          python - <<'PYCODE'
+          import xml.etree.ElementTree as ET
+
+          report = ET.parse("test-results/service.xml").getroot()
+          assert report.findall(".//testcase"), "Service tests did not execute any cases"
+          assert not report.findall(".//skipped"), "Service tests must not skip implemented capabilities"
+          PYCODE
 
       - name: Retain Service test reports
         if: always()

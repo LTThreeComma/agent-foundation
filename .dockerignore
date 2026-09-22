@@ -17,3 +17,8 @@ frontend/**/dist
 .wrangler
 local-reference
 discussion
+
+packages/a13n-service-legacy
+spec/a13n-service-legacy
+docs/a13n-service-legacy
+proto/a13n-service-legacy
