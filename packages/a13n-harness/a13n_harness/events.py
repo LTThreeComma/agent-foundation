@@ -34,6 +34,9 @@ type HarnessExtensionKind = Literal[
 ]
 
 
+USAGE_SCHEMA_VERSION = "2"
+
+
 class HarnessExtensionEvent(BaseModel):
     """One small Harness-owned observation absent from Pydantic AI's event vocabulary."""
 
@@ -446,6 +449,7 @@ async def emit_harness_event(
     """Emit one first-party event from a validated typed payload."""
     await emitter.emit(
         HarnessExtensionEvent(
+            schema_version=USAGE_SCHEMA_VERSION if kind == "usage" else "1",
             kind=kind,
             payload=payload.model_dump(mode="json"),
         )

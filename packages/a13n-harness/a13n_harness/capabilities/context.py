@@ -50,6 +50,7 @@ from a13n_harness.events import (
     ContextSnapshotPayload,
     emit_harness_event,
 )
+from a13n_harness.model_calls import ModelCallCheckError
 from a13n_harness.model_context import (
     AbstractModelContextCapability,
     ModelContextBlock,
@@ -767,6 +768,8 @@ class CompactionCapability(AbstractCapability[AgentContext]):
                     status="compacted",
                 )
         except asyncio.CancelledError:
+            raise
+        except ModelCallCheckError:
             raise
         except Exception as exc:
             await emit_harness_event(

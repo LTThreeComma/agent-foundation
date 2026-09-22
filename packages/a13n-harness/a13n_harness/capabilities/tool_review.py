@@ -11,18 +11,20 @@ from functools import cache
 from html import escape
 from importlib.resources import files
 from typing import Literal, Protocol, cast, runtime_checkable
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 from pydantic_ai import Agent, RunContext, ToolOutput, UseEnumMemberDocstrings
-from pydantic_ai.messages import AgentStreamEvent
-from pydantic_ai.models import Model
+from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
+from pydantic_ai.messages import AgentStreamEvent, ModelResponse
+from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from a13n_harness._review_context import ReviewEvidence, render_review_input
 from a13n_harness._tool_selectors import match_selector, validate_selector
 from a13n_harness.context import AgentContext
+from a13n_harness.errors import RunError
+from a13n_harness.model_calls import ModelCallCheckError, _check_model_call
 from a13n_harness.models.structured_output import StructuredOutputAutoToolChoiceModel
 from a13n_harness.observation import _auxiliary_agent_capabilities
 from a13n_harness.tools.policy import InvocationDecisionKind
@@ -201,6 +203,31 @@ def _review_prompt() -> str:
     return files("a13n_harness.toolsets.prompts").joinpath("tool_review.md").read_text(encoding="utf-8")
 
 
+class _ReviewCallCapability(AbstractCapability[ToolReviewRequest]):
+    def __init__(self, owner: AgentContext, request: ToolReviewRequest):
+        self.owner = owner
+        self.request = request
+        self.call_id: str | None = None
+
+    async def wrap_model_request(
+        self,
+        ctx: RunContext[ToolReviewRequest],
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
+        call = await _check_model_call(
+            self.owner,
+            request_context,
+            model_run_id=ctx.run_id,
+            source="tool.review",
+            tool_id=self.request.tool_id,
+            tool_call_id=self.request.tool_call_id,
+        )
+        self.call_id = call.call_id
+        return await handler(request_context)
+
+
 class AgentToolReviewer:
     """One bounded model request, no business tools and no inherited Agent prompt."""
 
@@ -244,7 +271,7 @@ class AgentToolReviewer:
         return "\n\n".join(filter(None, (_review_prompt(), custom))) if self._scored else custom
 
     async def review(self, request: ToolReviewRequest, *, context: AgentContext) -> ToolReviewResult:
-        del context
+        dispatch = _ReviewCallCapability(context, request)
         usage = RunUsage()
         try:
             async with asyncio.timeout(self._config.timeout_seconds):
@@ -253,24 +280,30 @@ class AgentToolReviewer:
                     deps=request,
                     usage=usage,
                     usage_limits=UsageLimits(request_limit=1),
-                    capabilities=_auxiliary_agent_capabilities(),
+                    capabilities=(*_auxiliary_agent_capabilities(), dispatch),
                     event_stream_handler=_drain_review_events,
                 )
         except asyncio.CancelledError:
             raise
-        except ToolReviewError:
+        except (ToolReviewError, ModelCallCheckError):
             raise
         except TimeoutError as exc:
-            raise ToolReviewError("tool_review_timeout", usage=_provider_usage_receipts(self._model, usage)) from exc
+            raise ToolReviewError(
+                "tool_review_timeout", usage=_provider_usage_receipts(self._model, usage, call_id=dispatch.call_id)
+            ) from exc
         except Exception as exc:
-            raise ToolReviewError("tool_review_failed", usage=_provider_usage_receipts(self._model, usage)) from exc
+            raise ToolReviewError(
+                "tool_review_failed", usage=_provider_usage_receipts(self._model, usage, call_id=dispatch.call_id)
+            ) from exc
         output = result.output
         assessment = (
             ToolReviewAssessment(risk=ToolRiskLevel(output.severity.name))
             if isinstance(output, _ScoredToolReview)
             else output
         )
-        return ToolReviewResult(assessment=assessment, usage=_provider_usage_receipts(self._model, result.usage))
+        return ToolReviewResult(
+            assessment=assessment, usage=_provider_usage_receipts(self._model, result.usage, call_id=dispatch.call_id)
+        )
 
 
 async def _drain_review_events(ctx: RunContext[object], events: AsyncIterable[AgentStreamEvent]) -> None:
@@ -279,7 +312,7 @@ async def _drain_review_events(ctx: RunContext[object], events: AsyncIterable[Ag
         pass
 
 
-def _provider_usage_receipts(model: Model, usage: RunUsage) -> tuple[ProviderUsage, ...]:
+def _provider_usage_receipts(model: Model, usage: RunUsage, *, call_id: str | None) -> tuple[ProviderUsage, ...]:
     measures = tuple(
         UsageMeasure(unit=unit, quantity=Decimal(value))
         for unit, value in (
@@ -294,9 +327,11 @@ def _provider_usage_receipts(model: Model, usage: RunUsage) -> tuple[ProviderUsa
     )
     if not measures:
         return ()
+    if call_id is None:
+        raise RunError("Reviewer usage has no dispatch identity.", code="usage_identity_missing")
     return (
         ProviderUsage(
-            usage_id=f"tool-review-{uuid4()}",
+            usage_id=call_id,
             provider=model.system,
             product=model.model_name,
             timestamp=datetime.now(UTC),

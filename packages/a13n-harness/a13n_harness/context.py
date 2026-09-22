@@ -17,6 +17,7 @@ from pydantic_ai.messages import ModelMessage
 
 from a13n_harness.environment._mount_path import parse_mount_path
 from a13n_harness.identity import AgentIdentityRef, AgentInstanceContext
+from a13n_harness.model_calls import ModelCallCheck
 from a13n_harness.observation import HarnessObservationContext
 from a13n_harness.recovery import ModelRecoveryState
 from a13n_harness.state import AgentContextState, HarnessState
@@ -148,6 +149,7 @@ class RunBindings:
     client_toolsets: tuple[ClientToolsetDefinition, ...] | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     model_context: ModelContextMiddleware | None = None
+    model_call_check: ModelCallCheck | None = None
     observation: HarnessObservationContext | None = None
     tool_result_directory: str | None = None
     _inherited_model_cost: AbstractModelCostCapability | None = field(
@@ -157,6 +159,8 @@ class RunBindings:
     )
 
     def __post_init__(self) -> None:
+        if self.model_call_check is not None and not isinstance(self.model_call_check, ModelCallCheck):
+            raise TypeError("RunBindings.model_call_check must implement ModelCallCheck")
         if not isinstance(self.deferred_tools_supported, bool):
             raise TypeError("deferred_tools_supported must be a boolean")
         if self.tool_result_directory is not None:
@@ -206,6 +210,7 @@ class RunBindings:
         toolset_instructions: bool | None = None,
         deferred_tools_supported: bool = True,
         model_context: ModelContextMiddleware | None = None,
+        model_call_check: ModelCallCheck | None = None,
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         web: WebBinding | None = None,
         media_reader: MediaReader | None = None,
@@ -231,6 +236,7 @@ class RunBindings:
             toolset_instructions=toolset_instructions,
             deferred_tools_supported=deferred_tools_supported,
             model_context=model_context,
+            model_call_check=model_call_check,
             capabilities=tuple(capabilities),
             web=web,
             media_reader=media_reader,
@@ -364,6 +370,7 @@ class AgentContext:
     _tool_recovery: ToolRecoveryPlan | None = field(default=None, repr=False, compare=False)
     _model_recovery: ModelRecoveryState = field(default_factory=ModelRecoveryState, repr=False, compare=False)
     model_context: ModelContextMiddleware | None = None
+    model_call_check: ModelCallCheck | None = None
     _inherited_model_cost: AbstractModelCostCapability | None = field(
         default=None,
         repr=False,

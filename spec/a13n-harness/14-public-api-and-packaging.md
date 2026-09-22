@@ -51,6 +51,7 @@ The package root is a closed primary code-first facade. It exports only the valu
 | `a13n_harness.state`                 | Advanced context and Capability state values                                                 |
 | `a13n_harness.tools`                 | Tool recovery declarations, managed tool invocation, and event helpers                       |
 | `a13n_harness.toolsets`              | First-party reusable Toolsets, including the standard async subagent dispatcher              |
+| `a13n_harness.model_calls`           | `ModelCall`, `ModelCallCheck`, `ModelCallCheckError`                                         |
 | `a13n_harness.usage`                 | Usage attribution, ledger, and `intersect_usage_limits`                                      |
 
 `a13n_harness.models.codex` exports `CodexRequestModel`. The Model authentication feature exports `CodexLoginFlow`, `CodexLoginResult`, and the Codex device flow alongside Grok credential/source values, OAuth and refresh primitives, bounded errors, and `build_grok_model()`. Native Codex credential, source, provider, and ordinary browser-flow APIs are imported directly from `pydantic_ai.providers.openai_codex`; there are no compatibility aliases or parallel refresh APIs. Its lifecycle and Host boundary belong to [Model Authentication](16a-model-authentication.md).
@@ -151,6 +152,7 @@ class RunBindings:
     instance: AgentInstanceContext
     environment: EnvironmentRuntime | None = None
     model_resolver: RunModelResolver | None = None
+    model_call_check: ModelCallCheck | None = None
     toolset_instructions: bool | None = None
     deferred_tools_supported: bool = True
     capabilities: tuple[
@@ -175,6 +177,7 @@ class RunBindings:
         identity: AgentIdentityRef | None = None,
         environment: EnvironmentRuntime | None = None,
         model_resolver: RunModelResolver | None = None,
+        model_call_check: ModelCallCheck | None = None,
         toolset_instructions: bool | None = None,
         deferred_tools_supported: bool = True,
         model_context: ModelContextMiddleware | None = None,
@@ -197,6 +200,34 @@ class RunBindings:
 `AgentIdentityRef` accepts fixed `issuer` and `subject` values plus arbitrary non-blank string claims supplied as keyword arguments. Its immutable `claims` view, `get_claim()`, and `require_claim()` are the public generic access surface; `user_id` and `agent_id` are conventional claim keys rather than fixed fields. Claim order does not affect identity equality. Claims contain no credential and are not restored from `HarnessState`.
 
 `RunBindings` values are fresh trusted inputs for one logical Harness Run. `deferred_tools_supported` selects Host support rather than deriving it from lineage. Built-in inline execution explicitly disables deferred tools under the [child execution contract](11-delegation-and-subagents.md#host-owned-deferred-support). Collection and metadata values are copied into immutable views. Thread identity remains State-owned: a trusted Host selects it through `HarnessState.new(thread_id=...)` or derives a distinct branch through `HarnessState.fork(thread_id=...)`, never through fresh bindings. Ordinary callers supply Environment adapters through explicit `run()`/`stream()` arguments. Advanced Hosts can instead supply a fresh runtime through `RunBindings.environment`; Environment Run Extensions enter through that runtime's `extensions` argument, as defined by [Environment Integration](08-environment-integration.md#explicit-host-runtime-construction). Async subagent mode and its stable `SubagentOperator` remain definition-selected by `SubagentCapability`; the operator receives only an immutable authorized plan and detached parent correlation. Run-local shell observations requires no operator and accepts no process collaborator through bindings. `observation` is the optional bounded `HarnessObservationContext` projected only onto the logical-run span under the [Observation contract](19-observation-model.md#attribute-model); it is distinct from arbitrary model-facing or integration metadata. `RunBindings.embedded()` creates an embedded identity and optional advanced integrations; when a Run supplies neither adapter inputs nor an explicit runtime, normalization creates an empty bound facade and exposes no Environment tools. `toolset_instructions` is the optional runtime override for the Harness `AgentSpec.toolset_instructions` default; it controls only Toolset-owned instructions as defined by [Context and Memory](09-context-and-memory.md#toolset-instruction-enablement). `model_resolver` is the explicit run-scoped model-selection seam. It accepts an async callable conforming structurally to `RunModelResolver`; no subclass or registration is required. The callable resolves a logical string to a native Model or raises, and when absent the thin resolver calls Harness `infer_model()` with the builder's optional gateway Provider factory. `model_context` is the optional fresh Host wrapper around this run's model-context projection chain defined by [Context and Memory](09-context-and-memory.md#model-context-projection-contract).
+
+The specialized `a13n_harness.model_calls` module exposes:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ModelCall:
+    call_id: str
+    harness_run_id: str
+    model_run_id: str | None
+    agent_instance_id: str
+    parent_agent_instance_id: str | None
+    delegation_id: str | None
+    model_id: str | None
+    model_name: str
+    provider_name: str
+    source: str
+    tool_id: str | None
+    tool_call_id: str | None
+
+
+@runtime_checkable
+class ModelCallCheck(Protocol):
+    async def check(self, call: ModelCall) -> None: ...
+```
+
+`ModelCallCheckError` is a `RunError` with code `model_call_check_failed` that preserves authoritative refusal across built-in optional auxiliary paths.
+
+`model_call_check` is the optional awaited, content-free Host invocation check defined by [Events and Usage](12-events-observability-and-usage.md#model-invocation-checks-and-identity). It is a fresh process-local collaborator, never serialized State or a substitute for model resolution.
 
 `RunBindings.capabilities` contains invocation-policy and upstream MCP Capabilities and is passed to every internal `ModelAttempt`. Feature-specific providers and overrides instead use the explicit typed fields above, captured on the logical-run `AgentContext` before Capability preparation. `WebBinding` and `TaskStateBinding` are passive frozen values without Capability IDs, ordering, or source provenance. The selected feature Capability consumes its field at the earliest lifecycle phase it requires; a binding never installs that feature. Missing required dependencies, incompatible values, and unsupported orphan bindings fail before dependent behavior. Stateful internal active replacements stay Run-local and are reused across recovery and compaction. Stateless Media, Documents, and Web definitions contribute native dynamic Toolsets that read the current Run's typed dependencies after checking definition provenance and finalized ownership; they do not cache a run-bound Capability or own provider lifetime. `None` means no override; an empty Skill set or client-tool tuple explicitly clears the selection. A stable definition-selected operator cannot be replaced by a run Capability or binding. Provider lifetime is Host-owned, and no live collaborator enters continuation State. The Harness exposes no generic dependency registry or role-name lookup. Environment inputs use the explicit Run arguments or the advanced runtime binding, never `RunBindings.capabilities`; `DynamicEnvironmentCapability` can be omitted without changing adapter entry or trusted Run-local routing.
 

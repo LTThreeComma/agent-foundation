@@ -768,6 +768,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
             ),
             _toolset_instructions_override=bindings.toolset_instructions,
             model_context=bindings.model_context,
+            model_call_check=bindings.model_call_check,
             _inherited_model_cost=bindings._inherited_model_cost,
             plugins=plugin_context,
             subagents=self._executable.subagents,

@@ -259,6 +259,7 @@ name = "a13n-service"
 version = "0.0.0"
 source = { editable = "packages/a13n-service" }
 dependencies = [
+    { name = "a13n-harness" },
     { name = "a13n-logging" },
     { name = "alembic" },
     { name = "anyio" },
@@ -267,12 +268,14 @@ dependencies = [
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic", extra = ["email"] },
+    { name = "pydantic-ai-slim" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "a13n-harness", editable = "packages/a13n-harness" },
     { name = "a13n-logging", editable = "packages/a13n-logging" },
     { name = "alembic", specifier = ">=1.17.1,<2" },
     { name = "anyio", specifier = ">=4,<5" },
@@ -281,6 +284,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.12,<3" },
+    { name = "pydantic-ai-slim", specifier = ">=2.46.0,<3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.41,<3" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
 ]

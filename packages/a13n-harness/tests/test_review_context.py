@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import cast
 from xml.etree import ElementTree
 
 import pytest
@@ -285,7 +284,7 @@ def test_xml_is_escaped_bounded_and_keeps_current_arguments():
         huge.to_prompt()
 
 
-async def test_shell_model_receives_same_xml_task_schema_history_and_approval_context():
+async def test_shell_model_receives_same_xml_task_schema_history_and_approval_context(reviewer_context):
     prompts = []
 
     async def stream(messages, info):
@@ -327,7 +326,7 @@ async def test_shell_model_receives_same_xml_task_schema_history_and_approval_co
         FunctionModel(stream_function=stream), config=ToolReviewConfig(model="test:review")
     ).review(
         request,
-        context=cast(AgentContext, object()),
+        context=reviewer_context,
     )
     assert result.assessment.risk == "low"
     assert prompts == [shared.to_prompt()]

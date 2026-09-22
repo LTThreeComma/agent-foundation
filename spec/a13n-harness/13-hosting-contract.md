@@ -62,6 +62,7 @@ For each logical run the Host can construct `RunBindings` with:
 
 - the trusted `AgentInstanceContext`;
 - an optional fresh `RunModelResolver`;
+- an optional awaited `ModelCallCheck` for current authority and admission before native invocation;
 - optional model-context middleware;
 - fresh run Capabilities required by definition-selected features;
 - bounded non-authoritative metadata.
@@ -77,6 +78,8 @@ Provider input validation, catalog selection, inert adapter construction, re-ent
 A hosted model integration normally supplies an async callable satisfying `RunModelResolver`; it resolves its own trusted configuration, current policy, credentials, and route selection, then returns a native Model or raises. For a supported OAuth-backed Model, it can implement the [`a13n_harness.providers.model.oauth` credential source](16a-model-authentication.md) over its authorized durable store and use the Harness constructor rather than duplicating provider refresh and request behavior. It reads `ModelResolutionContext.deps.thread_id` and derives or restores provider model-session and prompt-cache affinity from that State-owned value and the selected model/provider namespace. A Session or `AgentInstanceRef` routing key may remain broader, but it cannot replace the prompt-cache key for the root and all children because those Agents own different message histories. The Harness applies no special catalog role validation and, if a Host omits the resolver for a string model, uses Harness `infer_model()` with the builder's optional gateway Provider factory. A fail-closed hosted profile therefore requires its worker adapter to supply and test the resolver; this is a Host invariant, not a different Harness API.
 
 The Host passes optional `HarnessState`, native input or an input factory, one `RunUsage` accumulator, and optional native `UsageLimits`. One logical run can contain several inner `ModelAttempt` values while retaining the same durable Host attempt, bindings, context, Environment, plugins, state coordinator, and usage accumulator.
+
+The [model invocation check](12-events-observability-and-usage.md#model-invocation-checks-and-identity) lets the Host bind durable call context to an identity before dispatch, then join committed usage by that identity. The Host owns deadlines, fresh authorization, budgets, fences, price snapshots and persistence. It must not hold a database transaction across the model call. Resolver selection and the content-free check do not qualify a wrapper that can silently use another unauthorized resource; supported model configurations must cover that behavior explicitly. Async child Hosts supply their own fresh checks; inline children inherit the parent's check unchanged.
 
 ## State and Resume Mapping
 

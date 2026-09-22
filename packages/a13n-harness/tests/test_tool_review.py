@@ -29,6 +29,7 @@ from a13n_harness.capabilities import (
     ToolReviewResult,
     ToolRiskLevel,
 )
+from a13n_harness.errors import RunError
 from a13n_harness.tools import (
     HarnessTool,
     HarnessToolMetadata,
@@ -296,6 +297,7 @@ async def test_shell_review_model_uses_builder_gateway_provider_factory(
 @pytest.mark.parametrize("risk", list(ToolRiskLevel))
 @pytest.mark.parametrize("include_reason", [False, True])
 async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_records_one_request_usage(
+    reviewer_context,
     risk: ToolRiskLevel,
     include_reason: bool,
 ) -> None:
@@ -334,7 +336,7 @@ async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_recor
             parameters_schema={},
             arguments={"command": "touch result.txt"},
         ),
-        context=cast(AgentContext, object()),  # The default reviewer intentionally ignores Harness context.
+        context=reviewer_context,
     )
 
     assert result.assessment.risk == risk
@@ -359,7 +361,7 @@ async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_recor
 
 
 @pytest.mark.parametrize("output", ["not a structured assessment", '{"risk":"low","reason":"looks valid"}'])
-async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: str) -> None:
+async def test_default_reviewer_preserves_usage_and_rejects_text_output(reviewer_context, output: str) -> None:
     async def invalid_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         del messages, info
         yield output
@@ -377,7 +379,7 @@ async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: 
                 parameters_schema={},
                 arguments={"command": "touch result.txt"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
 
     assert error.value.usage
@@ -390,11 +392,12 @@ async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: 
     [
         ModelHTTPError(400, "review-model", {"error": "private-provider-body"}),
         ValueError("private-provider-body"),
+        RunError("private-provider-body", code="unrelated_failure"),
     ],
-    ids=["http-400", "invalid-response"],
+    ids=["http-400", "invalid-response", "unrelated-harness-error"],
 )
 async def test_default_reviewer_logs_safe_failure_metadata(
-    failure: Exception, caplog: pytest.LogCaptureFixture
+    reviewer_context, failure: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def failed_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         del messages, info
@@ -414,7 +417,7 @@ async def test_default_reviewer_logs_safe_failure_metadata(
                 parameters_schema={},
                 arguments={"command": "echo private-command-value"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
 
     assert error.value.code == "tool_review_failed"
@@ -748,7 +751,9 @@ async def test_review_cancellation_propagates_without_dispatch() -> None:
     assert executed == []
 
 
-async def test_default_reviewer_timeout_preserves_proven_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_default_reviewer_timeout_preserves_proven_usage(
+    reviewer_context, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original_timeout = asyncio.timeout
     deadline = None
 
@@ -782,7 +787,7 @@ async def test_default_reviewer_timeout_preserves_proven_usage(monkeypatch: pyte
                 parameters_schema={},
                 arguments={"command": "echo safe"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
     assert error.value.code == "tool_review_timeout"
     assert error.value.usage
@@ -857,7 +862,7 @@ async def test_timeout_emits_observable_denial_before_any_authorization() -> Non
         '{"risk":',
     ],
 )
-async def test_default_reviewer_rejects_invalid_output_tool_without_retry(arguments: str) -> None:
+async def test_default_reviewer_rejects_invalid_output_tool_without_retry(reviewer_context, arguments: str) -> None:
     requests = 0
 
     async def invalid_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
@@ -879,7 +884,7 @@ async def test_default_reviewer_rejects_invalid_output_tool_without_retry(argume
                 parameters_schema={},
                 arguments={"command": "echo safe"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
     assert error.value.code == "tool_review_failed"
     assert requests == 1

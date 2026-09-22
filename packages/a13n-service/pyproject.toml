@@ -8,12 +8,14 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
     "a13n-logging",
+    "a13n-harness",
     "alembic>=1.17.1,<2",
     "anyio>=4,<5",
     "argon2-cffi>=25,<26",
     "click>=8.2,<9",
     "fastapi>=0.116,<1",
     "pydantic[email]>=2.12,<3",
+    "pydantic-ai-slim>=2.46.0,<3",
     "psycopg[binary]>=3.2,<4",
     "sqlalchemy[asyncio]>=2.0.41,<3",
     "uvicorn>=0.35,<1",
@@ -35,3 +37,6 @@ DEP002 = ["psycopg"]
 [tool.deptry]
 known_first_party = ["a13n_service"]
 package_module_name_map = { "a13n-logging" = "a13n_logging", "argon2-cffi" = "argon2", "sqlalchemy" = "sqlalchemy" }
+
+[tool.a13n.release-dependencies]
+a13n-harness = ">=0.1.0,<0.2.0"
