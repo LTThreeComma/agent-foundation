@@ -27,10 +27,12 @@ def test_legacy_is_not_a_workspace_or_validation_input():
     assert not plan.python_tests and not plan.python_files
 
 
-def test_unimplemented_live_journeys_fail_explicitly():
-    result = subprocess.run([sys.executable, "-m", "dev.live_tests"], cwd=ROOT, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert "not implemented" in result.stderr
+def test_live_journey_entrypoint_collects_the_public_process_proof():
+    result = subprocess.run(
+        [sys.executable, "-m", "dev.live_tests", "--collect-only", "-vv"], cwd=ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "test_public_process_journey_with_two_workers_and_slow_model" in result.stdout
 
 
 def test_shared_langfuse_reuses_verified_manifest_and_preserves_storage(tmp_path, monkeypatch):

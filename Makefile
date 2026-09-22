@@ -165,9 +165,12 @@ dev-status: ## Print checkout-owned PostgreSQL port and configuration
 dev-env-list: ## Report that environment management is not implemented
 	@$(SERVICE_DEV) env-list
 
-.PHONY: live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test live-test-local live-test-ci live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console live-test-check
-live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test live-test-local live-test-ci live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console: sync ## New Service execution journeys (not yet implemented)
+.PHONY: live-test live-test-local live-test-ci live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console
+live-test live-test-local live-test-ci: sync ## Run disposable public Service execution with control and two workers
 	@uv run --locked python -m dev.live_tests
+
+live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console: sync ## Additional Service journeys remain under implementation
+	@uv run --locked python -c 'raise SystemExit("This Service journey is not implemented yet")'
 
 .PHONY: langfuse-up langfuse-down langfuse-test langfuse-reset
 langfuse-up: ## Start and authenticate machine-shared local Langfuse
@@ -548,7 +551,7 @@ dev-state-check: sync ## Validate local state tools and seed journeys in disposa
 	@uv run --locked ruff check --no-fix dev/service
 	@uv run --locked ruff format --check dev/service
 	@uv run --locked pyright dev/service
-	@uv run --locked pytest packages/a13n-service/tests -q --tb=short
+	@uv run --locked python -m pytest packages/a13n-service/tests -q --tb=short
 
 DOCKER_ENVIRONMENT_IMAGE ?= a13n-docker-environment:local
 .PHONY: image-docker-environment image-check-docker-environment
@@ -561,7 +564,7 @@ image-check-docker-environment: ## Validate native Docker image prerequisites
 
 .PHONY: docker-provider-live-test
 docker-provider-live-test: ## Exercise native Docker against an explicitly selected real Engine
-	@uv run --locked python -m dev.live_tests
+	@uv run --locked python -c 'raise SystemExit("The Docker-provider live journey is not implemented yet")'
 
 .PHONY: service-boundaries
 service-boundaries: sync ## Verify Service import direction

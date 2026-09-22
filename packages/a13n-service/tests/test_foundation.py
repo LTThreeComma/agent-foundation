@@ -79,8 +79,8 @@ async def test_bootstrap_race_password_audit_and_database_guards(database):
 
 
 @pytest.mark.parametrize("role", ["all", "control", "worker"])
-def test_role_startup_and_probes(database, role):
-    settings = Settings(database=database)
+def test_role_startup_and_probes(database, redis_url, role):
+    settings = Settings(database=database, redis={"url": redis_url})
     router = APIRouter()
     router.add_api_route("/api/v1/example", lambda: {"ok": True})
     with TestClient(build_app(replace(OSS, routers=(router,)), role=role, settings=settings)) as client:
@@ -88,20 +88,22 @@ def test_role_startup_and_probes(database, role):
         assert client.get("/readyz").status_code == 200
         assert client.get("/api/v1/runs").status_code == 404
         assert client.get("/docs/oauth2-redirect").status_code == 404
-        for path in ("/api/openapi.json", "/api/docs", "/api/docs/oauth2-redirect", "/api/v1/example"):
+        for path in ("/api/v1/openapi.json", "/api/v1/docs", "/api/v1/docs/oauth2-redirect", "/api/v1/example"):
             assert client.get(path).status_code == (404 if role == "worker" else 200)
         if role != "worker":
-            assert client.get("/api/openapi.json").json()["info"]["version"] == version("a13n-service")
+            assert client.get("/api/v1/openapi.json").json()["info"]["version"] == version("a13n-service")
 
 
-def test_worker_never_migrates_incompatible_schema(database):
+def test_worker_never_migrates_incompatible_schema(database, redis_url):
     with migration_connection(database, OSS) as config:
         command.downgrade(config, "base")
     with pytest.raises(RuntimeError, match="incompatible"):
         with TestClient(build_app(role="worker", settings=Settings(database=database))):
             pytest.fail("worker started against an empty schema")
     # Control is the migration owner and repairs the same disposable database.
-    with TestClient(build_app(role="control", settings=Settings(database=database))) as client:
+    with TestClient(
+        build_app(role="control", settings=Settings(database=database, redis={"url": redis_url}))
+    ) as client:
         assert client.get("/readyz").status_code == 200
 
 

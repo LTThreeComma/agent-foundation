@@ -20,7 +20,7 @@ async def test_source_receipt_precedes_real_compaction_and_survives_history_repl
     checkpoints = []
     calls = []
 
-    async def publish(state, receipts):
+    async def publish(state, receipts, context):
         checkpoints.append((state.model_copy(deep=True), receipts))
         await asyncio.sleep(0)
 
@@ -64,7 +64,7 @@ async def test_pending_unsafe_call_is_checkpointed_before_effect_and_not_replaye
     effects = []
     crashed = asyncio.Event()
 
-    async def publish(state, receipts):
+    async def publish(state, receipts, context):
         checkpoints.append((state.model_copy(deep=True), receipts))
 
     async def unsafe_write():
@@ -123,7 +123,7 @@ async def test_steer_receipt_precedes_compaction_without_observer_processing():
     checkpoints = []
     model_calls = 0
 
-    async def publish(state, receipts):
+    async def publish(state, receipts, context):
         checkpoints.append((state.model_copy(deep=True), receipts))
 
     capability = CheckpointCapability("run_test", publish)

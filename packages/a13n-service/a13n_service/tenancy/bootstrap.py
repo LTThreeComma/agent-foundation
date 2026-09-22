@@ -7,7 +7,7 @@ from argon2 import PasswordHasher
 from pydantic import BaseModel, EmailStr, Field, SecretStr
 from sqlalchemy import select
 
-from a13n_service.infra.audit import AuditEventRow
+from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, advisory_lock, transaction
 from a13n_service.infra.ids import new_object_id
 from a13n_service.tenancy.tables import GrantRow, OrganizationRow, PasswordRow, PrincipalRow, WorkspaceRow
@@ -53,17 +53,13 @@ async def bootstrap(storage: Storage, request: BootstrapInput) -> Bootstrapped:
                 created_by_id=result.principal_id,
             )
         )
-        session.add(
-            AuditEventRow(
-                id=new_object_id("audit"),
-                organization_id=result.organization_id,
-                workspace_id=result.workspace_id,
-                actor_id=result.principal_id,
-                action="organization.bootstrap",
-                target_kind="organization",
-                target_id=result.organization_id,
-                outcome="ok",
-                details={},
-            )
+        record(
+            session,
+            organization_id=result.organization_id,
+            workspace_id=result.workspace_id,
+            actor_id=result.principal_id,
+            action="organization.bootstrap",
+            target_kind="organization",
+            target_id=result.organization_id,
         )
     return result

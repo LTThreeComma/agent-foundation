@@ -17,17 +17,19 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import NullPool
 
 
-def test_competing_auto_migrations_start_on_empty_database(empty_database):
+def test_competing_auto_migrations_start_on_empty_database(empty_database, redis_url):
     start = Barrier(2)
 
     def launch(role):
         start.wait(timeout=10)
-        with TestClient(build_app(role=role, settings=Settings(database=empty_database))) as client:
+        with TestClient(
+            build_app(role=role, settings=Settings(database=empty_database, redis={"url": redis_url}))
+        ) as client:
             return client.get("/readyz").json()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(launch, ("all", "control")))
-    assert all(result["status"] == "ready" for result in results)
+    assert all(result["status"] == "ready" for result in results), results
     runner.check(empty_database, OSS)
     engine = create_engine(empty_database.url.get_secret_value(), poolclass=NullPool)
     try:

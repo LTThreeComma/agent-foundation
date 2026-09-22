@@ -26,6 +26,8 @@ MODEL_PORT = 18080
 MODEL_URL = f"http://127.0.0.1:{MODEL_PORT}/v1"
 app = FastAPI()
 app.include_router(fixture_router)
+app.state.request_count = 0
+app.state.last_message_roles = ()
 
 
 @app.get("/healthz")
@@ -33,10 +35,17 @@ async def health():
     return {"status": "ok", "model": "local-scripted"}
 
 
+@app.get("/fixture/model-state")
+async def model_state():
+    return {"request_count": app.state.request_count, "last_message_roles": app.state.last_message_roles}
+
+
 @app.post("/v1/chat/completions")
 async def completion(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
+    app.state.request_count += 1
+    app.state.last_message_roles = tuple(message.get("role") for message in messages[-256:])
     prompt = "\n".join(str(message.get("content", "")) for message in messages if message.get("role") == "user")
     if "[fail]" in prompt:
         return JSONResponse(

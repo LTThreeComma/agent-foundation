@@ -101,7 +101,7 @@ OSS implements existing run usage/count ceilings and no monetary ledger. The two
 
 ## Settings and operational limits
 
-`A13N_` environment variables use double-underscore sections; optional configuration is named by `A13N_SETTINGS_FILE`. Unknown keys are rejected. Sections: server, database, objects, redis, auth, worker, control, environments, providers, telemetry, plus declared distribution sections. Configuration is validated once and injected as typed values.
+`A13N_` environment variables use double-underscore sections; optional configuration is named by `A13N_SETTINGS_FILE`. Unknown keys are rejected. Sections: server, database, objects, redis, auth, encryption, worker, control, environments, providers, telemetry, plus declared distribution sections. Configuration is validated once and injected as typed values.
 
 Limits must be finite and visible: request/upload size, expanded archives, ordinary outstanding inbox count/bytes and separate control-feedback payload/result bounds as defined in [05](05-runs.md#inbox-capacity), boundary delivery batch size, per-run display and output bytes, stream count/bytes, provider response bytes, worker slots, tool concurrency, attempts/handoffs, child depth/count, subscriptions per workspace, outbox retention and scan batches. No value is justified by “the inbox is small”. Reaching a limit returns a typed error or stops work with retained evidence; it never silently drops accepted input. Defaults follow vertical-slice measurements.
 

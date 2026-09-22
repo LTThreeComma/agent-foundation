@@ -43,6 +43,8 @@ def run(settings: Settings, role: str) -> None:
         port=settings.server.port,
         timeout_graceful_shutdown=settings.server.shutdown_timeout,
         log_config=None,
+        ssl_certfile=str(settings.server.tls_certificate) if settings.server.tls_certificate else None,
+        ssl_keyfile=str(settings.server.tls_key) if settings.server.tls_key else None,
     )
 
 

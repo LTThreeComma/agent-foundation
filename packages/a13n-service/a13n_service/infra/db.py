@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import anyio
-from sqlalchemy import DateTime, MetaData, func, text
+from sqlalchemy import BigInteger, DateTime, MetaData, func, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -23,7 +23,7 @@ class Base(DeclarativeBase):
 
 
 class Stamped:
-    version: Mapped[int] = mapped_column(server_default=text("1"))
+    version: Mapped[int] = mapped_column(BigInteger, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

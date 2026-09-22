@@ -1,0 +1,70 @@
+"""One authenticated credential envelope, bound to its exact tenant and column."""
+
+import base64
+import json
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from a13n_service.infra.errors import ServiceError
+
+
+@dataclass(frozen=True, slots=True)
+class SecretLocation:
+    organization_id: str
+    table: str
+    column: str
+    row_id: str
+
+    def aad(self) -> bytes:
+        return json.dumps([self.organization_id, self.table, self.column, self.row_id], separators=(",", ":")).encode()
+
+
+class Envelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    key_id: str = Field(min_length=1, max_length=128)
+    nonce: str = Field(min_length=16, max_length=16)
+    ciphertext: str = Field(min_length=24, max_length=90000)
+
+
+class KeyRing:
+    def __init__(self, *, active_key_id: str | None, keys: Mapping[str, SecretStr]):
+        self.active_key_id = active_key_id
+        self._keys: dict[str, AESGCM] = {}
+        for key_id, encoded in keys.items():
+            try:
+                key = base64.b64decode(encoded.get_secret_value(), validate=True)
+            except ValueError:
+                raise ValueError("Encryption keys must be base64-encoded 32-byte keys") from None
+            if len(key) != 32 or not 1 <= len(key_id) <= 128:
+                raise ValueError("Encryption keys require a bounded ID and 32 bytes")
+            self._keys[key_id] = AESGCM(key)
+        if active_key_id is not None and active_key_id not in self._keys:
+            raise ValueError("The active encryption key must be in the key ring")
+
+    def protect(self, plaintext: bytes, location: SecretLocation) -> Envelope:
+        if len(plaintext) > 65536:
+            raise ServiceError("invalid_argument", "Credential exceeds its byte limit")
+        if self.active_key_id is None:
+            raise ServiceError("unavailable", "Credential encryption is not configured")
+        nonce = secrets.token_bytes(12)
+        encrypted = self._keys[self.active_key_id].encrypt(nonce, plaintext, location.aad())
+        return Envelope(
+            key_id=self.active_key_id,
+            nonce=base64.b64encode(nonce).decode(),
+            ciphertext=base64.b64encode(encrypted).decode(),
+        )
+
+    def reveal(self, envelope: Envelope, location: SecretLocation) -> bytes:
+        try:
+            return self._keys[envelope.key_id].decrypt(
+                base64.b64decode(envelope.nonce, validate=True),
+                base64.b64decode(envelope.ciphertext, validate=True),
+                location.aad(),
+            )
+        except (KeyError, ValueError, InvalidTag):
+            raise ServiceError("unavailable", "Credential cannot be decrypted") from None

@@ -1,5 +1,61 @@
 {
   "$defs": {
+    "Authentication": {
+      "additionalProperties": false,
+      "properties": {
+        "session_seconds": {
+          "default": 43200,
+          "maximum": 604800,
+          "minimum": 60,
+          "title": "Session Seconds",
+          "type": "integer"
+        },
+        "login_limit": {
+          "default": 10,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Login Limit",
+          "type": "integer"
+        },
+        "login_window_seconds": {
+          "default": 60,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Login Window Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "Authentication",
+      "type": "object"
+    },
+    "Control": {
+      "additionalProperties": false,
+      "properties": {
+        "scan_seconds": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Scan Seconds",
+          "type": "number"
+        },
+        "inbox_count": {
+          "default": 128,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Inbox Count",
+          "type": "integer"
+        },
+        "inbox_bytes": {
+          "default": 1048576,
+          "maximum": 16777216,
+          "minimum": 1024,
+          "title": "Inbox Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "Control",
+      "type": "object"
+    },
     "Database": {
       "additionalProperties": false,
       "properties": {
@@ -68,6 +124,120 @@
       "title": "Database",
       "type": "object"
     },
+    "Encryption": {
+      "additionalProperties": false,
+      "properties": {
+        "active_key_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Key Id"
+        },
+        "keys": {
+          "additionalProperties": {
+            "format": "password",
+            "type": "string",
+            "writeOnly": true
+          },
+          "title": "Keys",
+          "type": "object"
+        }
+      },
+      "title": "Encryption",
+      "type": "object"
+    },
+    "Objects": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "default": "var/service/objects",
+          "format": "path",
+          "title": "Root",
+          "type": "string"
+        },
+        "max_bytes": {
+          "default": 16777216,
+          "maximum": 67108864,
+          "minimum": 65536,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 5,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout",
+          "type": "number"
+        }
+      },
+      "title": "Objects",
+      "type": "object"
+    },
+    "Outbound": {
+      "additionalProperties": false,
+      "properties": {
+        "private_domains": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Private Domains",
+          "type": "array"
+        },
+        "private_cidrs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Private Cidrs",
+          "type": "array"
+        },
+        "http_origins": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Http Origins",
+          "type": "array"
+        },
+        "require_https": {
+          "default": true,
+          "title": "Require Https",
+          "type": "boolean"
+        }
+      },
+      "title": "Outbound",
+      "type": "object"
+    },
+    "RedisSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "default": "**********",
+          "format": "password",
+          "title": "Url",
+          "type": "string",
+          "writeOnly": true
+        },
+        "timeout": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "maximum": 30,
+          "title": "Timeout",
+          "type": "number"
+        }
+      },
+      "title": "RedisSettings",
+      "type": "object"
+    },
     "Server": {
       "additionalProperties": false,
       "properties": {
@@ -83,6 +253,20 @@
           "title": "Port",
           "type": "integer"
         },
+        "request_bytes": {
+          "default": 2097152,
+          "maximum": 33554432,
+          "minimum": 1024,
+          "title": "Request Bytes",
+          "type": "integer"
+        },
+        "request_timeout": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Request Timeout",
+          "type": "number"
+        },
         "readiness_timeout": {
           "default": 2,
           "exclusiveMinimum": 0,
@@ -96,9 +280,126 @@
           "minimum": 1,
           "title": "Shutdown Timeout",
           "type": "integer"
+        },
+        "tls_certificate": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tls Certificate"
+        },
+        "tls_key": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tls Key"
         }
       },
       "title": "Server",
+      "type": "object"
+    },
+    "Worker": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_seconds": {
+          "default": 3600,
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Attempt Seconds",
+          "type": "number"
+        },
+        "stream_count": {
+          "default": 512,
+          "maximum": 4096,
+          "minimum": 1,
+          "title": "Stream Count",
+          "type": "integer"
+        },
+        "stream_bytes": {
+          "default": 1048576,
+          "maximum": 16777216,
+          "minimum": 1024,
+          "title": "Stream Bytes",
+          "type": "integer"
+        },
+        "stream_entry_bytes": {
+          "default": 65536,
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Stream Entry Bytes",
+          "type": "integer"
+        },
+        "stream_ttl": {
+          "default": 600,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Stream Ttl",
+          "type": "integer"
+        },
+        "display_flush_seconds": {
+          "default": 0.5,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Display Flush Seconds",
+          "type": "number"
+        },
+        "max_events": {
+          "default": 10000,
+          "maximum": 100000,
+          "minimum": 100,
+          "title": "Max Events",
+          "type": "integer"
+        },
+        "slots": {
+          "default": 4,
+          "maximum": 128,
+          "minimum": 1,
+          "title": "Slots",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "lease_seconds": {
+          "default": 30,
+          "maximum": 300,
+          "minimum": 3,
+          "title": "Lease Seconds",
+          "type": "integer"
+        },
+        "scan_seconds": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "maximum": 30,
+          "title": "Scan Seconds",
+          "type": "number"
+        },
+        "authority_seconds": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "maximum": 30,
+          "title": "Authority Seconds",
+          "type": "number"
+        }
+      },
+      "title": "Worker",
       "type": "object"
     }
   },
@@ -109,6 +410,27 @@
     },
     "database": {
       "$ref": "#/$defs/Database"
+    },
+    "auth": {
+      "$ref": "#/$defs/Authentication"
+    },
+    "redis": {
+      "$ref": "#/$defs/RedisSettings"
+    },
+    "encryption": {
+      "$ref": "#/$defs/Encryption"
+    },
+    "providers": {
+      "$ref": "#/$defs/Outbound"
+    },
+    "objects": {
+      "$ref": "#/$defs/Objects"
+    },
+    "control": {
+      "$ref": "#/$defs/Control"
+    },
+    "worker": {
+      "$ref": "#/$defs/Worker"
     }
   },
   "title": "Settings",

@@ -185,7 +185,7 @@ def release_dependency_ranges(root: Path, manifest: Path) -> dict[str, str]:
     """Read independently versioned dependencies without constraining local workspace members."""
     expected = {
         HARNESS_MANIFEST: (LOGGING_PACKAGE, A13N_ENVD_CLIENT_PACKAGE),
-        A13N_SERVICE_MANIFEST: (HARNESS_PACKAGE,),
+        A13N_SERVICE_MANIFEST: HARNESS_PACKAGES,
         HARNESS_UI_MANIFEST: (*HARNESS_PACKAGES, LOGGING_PACKAGE, A13N_ENVD_CLIENT_PACKAGE),
     }[manifest]
     label = f"{RELEASE_DEPENDENCIES_TOOL} in {manifest}"
@@ -197,10 +197,11 @@ def release_dependency_ranges(root: Path, manifest: Path) -> dict[str, str]:
     ranges = {
         package: validate_dependency_range(_string(declarations[package], f"{label}.{package}")) for package in expected
     }
-    if manifest == HARNESS_UI_MANIFEST and len({ranges[package] for package in HARNESS_PACKAGES}) != 1:
-        raise ReleaseVersionError(
-            "Harness UI must declare the same compatible range for all Harness-group dependencies"
-        )
+    if (
+        manifest in {HARNESS_UI_MANIFEST, A13N_SERVICE_MANIFEST}
+        and len({ranges[package] for package in HARNESS_PACKAGES}) != 1
+    ):
+        raise ReleaseVersionError("Consumers must declare the same compatible range for all Harness-group dependencies")
     return ranges
 
 

@@ -2,6 +2,8 @@
 
 One namespace, `/api/v1`. Workspace resources use workspace paths. Provider resources with optional workspace confinement use one organization collection and an explicit `workspace_id` field/filter; there are no mirrored provider routes. No action catch-all or per-protocol error envelope.
 
+Workspace audit reads require `admin` and return only events with that actual organization and workspace. Account-wide user/session events are never included through actor or target membership. There is no global-audit API.
+
 ## Layout
 
 ```
@@ -143,9 +145,9 @@ Provider listing authorizes a requested workspace and returns its providers plus
 
 ## Streams
 
-`GET /runs/{run}/items` returns items/attempt segments, `display_version`, execution checkpoint cut, current attempt, outcome, opaque cursor and `complete`. It describes the last durable display plus database lifecycle. A newly accepted run has an empty view.
+`GET /runs/{run}/items` composes a bounded page of canonical run-owned input entries with event-folded attempt segments. It returns `inputs`, `next_input_cursor`, execution segments, `display_version`, execution checkpoint cut, current attempt, outcome, opaque cursor and `complete`. It describes the last durable display plus database lifecycle. A newly accepted run exposes its canonical input with empty execution segments. The input page byte budget is an aggregate pagination target, not a smaller per-message limit: an accepted message larger than that budget occupies a page by itself, with complete content and a cursor for later entries. The supported inbox byte ceiling still bounds any single entry.
 
-Snapshot sequences describe confirmed object writes, not inbox confirmation. Input disposition is returned from PostgreSQL under [05's receipt rules](05-runs.md#assignment-and-incorporation). Completed/waiting views use the exact snapshots selected at seal; failed/cancelled views show retained observations with the database outcome, as defined in [07](07-facts-and-delivery.md#checkpoints-and-display-snapshots).
+Snapshot sequences describe confirmed object writes, not inbox confirmation. The existing inbox read exposes the same typed input payload/status projection, identified by entry ID across attempts. It excludes execution-only options and secrets; row visibility does not imply incorporation. Input disposition is returned from PostgreSQL under [05's receipt rules](05-runs.md#assignment-and-incorporation). Completed/waiting views use the exact snapshots selected at seal; failed/cancelled views show retained observations with the database outcome, as defined in [07](07-facts-and-delivery.md#checkpoints-and-display-snapshots).
 
 `GET /runs/{run}/events?cursor=` returns SSE. Data frames wrap AG-UI events with attempt and event sequence; `Last-Event-ID` is the opaque run/attempt cursor. Protocol control frames are `reset`, `retry_later` and `closed`, with a required view version/retry hint. The client replaces provisional state on reset, preserving the durable interrupted segments returned by `/items`. It never follows a stale producer based solely on its claimed attempt number. Gap/Redis-loss handling is specified in [07](07-facts-and-delivery.md#the-run-stream).
 

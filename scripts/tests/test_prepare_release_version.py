@@ -488,7 +488,6 @@ def test_planned_dispatch_contract_line_is_injected_without_changing_source_vers
     assert result.returncode == 0, result.stderr
     prepared = tomllib.loads(source_path.read_text())
     assert source_requirement + ">=0.1.0,<0.2.0" in prepared["project"]["dependencies"]
-    if component == "a13n-harness-ui":
-        assert "a13n-stream-protocol>=0.1.0,<0.2.0" in prepared["project"]["dependencies"]
+    assert "a13n-stream-protocol>=0.1.0,<0.2.0" in prepared["project"]["dependencies"]
     checked = run_script(CHECKER, tmp_path, component, "0.1.0")
     assert checked.returncode == 0, checked.stderr

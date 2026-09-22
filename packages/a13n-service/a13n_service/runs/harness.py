@@ -2,20 +2,30 @@
 
 from collections.abc import Awaitable, Callable, Sequence
 from functools import cache
+from typing import Any
 
 from a13n_harness import AgentContext, HarnessState
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ValidatedToolArgs
+from pydantic_ai import Agent, AgentRunResult, RunContext
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ValidatedToolArgs, WrapRunHandler
 from pydantic_ai.messages import ModelMessage, ModelRequest, TextContent, ToolCallPart, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
 INPUT_PROVENANCE = "a13n.service.input"
-type PublishCheckpoint = Callable[[HarnessState, tuple[str, ...]], Awaitable[None]]
+type PublishCheckpoint = Callable[[HarnessState, tuple[str, ...], AgentContext], Awaitable[None]]
 
 
 def entry_input(run_id: str, entry_id: str, content: str) -> list[TextContent]:
-    return [TextContent(content, metadata={INPUT_PROVENANCE: {"run_id": run_id, "entry_id": entry_id}})]
+    return [
+        TextContent(
+            content,
+            metadata={
+                "display": False,
+                "source_id": entry_id,
+                INPUT_PROVENANCE: {"run_id": run_id, "entry_id": entry_id},
+            },
+        )
+    ]
 
 
 @cache
@@ -46,10 +56,15 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
         # Native enqueue must drain first; feature hooks (especially compaction) run after us.
         return CapabilityOrdering(position="outermost", wrapped_by=native_infrastructure())
 
-    async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
-        if self._native_run_id is None:
+    async def wrap_run(self, ctx: RunContext[AgentContext], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        primary = self._native_run_id is None
+        if primary:
             self._native_run_id = ctx.run_id
-        return self
+        try:
+            return await handler()
+        finally:
+            if primary:
+                self._native_run_id = None
 
     def _incorporate(self, messages: Sequence[ModelMessage]) -> None:
         for message in messages:
@@ -74,7 +89,7 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
         if ctx.run_id == self._native_run_id:
             self._incorporate(request_context.messages)
             state = await ctx.deps.export_state(request_context.messages)
-            await self._publish(state, tuple(self.receipts))
+            await self._publish(state, tuple(self.receipts), ctx.deps)
         return request_context
 
     async def before_tool_execute(
@@ -88,5 +103,5 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
         if ctx.run_id == self._native_run_id:
             # The response with pending calls is in canonical history before this awaited hook.
             state = await ctx.deps.export_state(ctx.messages)
-            await self._publish(state, tuple(self.receipts))
+            await self._publish(state, tuple(self.receipts), ctx.deps)
         return args

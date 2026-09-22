@@ -51,7 +51,7 @@ invitations
   principal_id NULL  expires_at  accepted_at NULL  revoked_at NULL  version  created_at  updated_at
 
 audit_events
-  id  organization_id  workspace_id NULL  actor_id NULL  action  target_kind  target_id
+  id  organization_id NULL  workspace_id NULL  actor_id NULL  action  target_kind  target_id
   outcome  details  occurred_at
   outcome IN ('ok', 'denied', 'failed')
 ```
@@ -132,7 +132,7 @@ class GrantSource(Protocol):
 
 The default source reads `grants`; distributions may add sources, whose results are unioned subject to credential confinement. Built-in/custom role definitions share one startup registry. Role columns are validated text, not a CHECK hard-coded to four names. Unknown roles fail closed; removal of a role requires an explicit data migration or revocation. Role-name conflicts fail assembly. Grant sources return only validated, tenant-scoped values. External-source refresh occurs outside a database transaction, with bounded cache age and explicit fail-closed behavior when stale/unavailable.
 
-Grants are read once per request/attempt refresh and cached only for that bounded scope. Database grants and resource state are revalidated at the mutation's commit arbitration; external grants use the declared freshness contract, never an unbounded network call under a row lock.
+Observe each Principal, Workspace and credential on first use in one bounded operation and reuse the detached facts while checking every action, target and credential boundary. Do not take IAM read locks or refresh grants again within that operation. Later revocation applies to the next request, poll or independent background item; attempt authorization refresh is a separate operation. Commit arbitration still checks required domain state, versions, source integrity, capacity, leases, generations and idempotency. Credential consumption and mutation retain their own write arbitration. External grants use the declared freshness contract, never an unbounded network call under a row lock.
 
 ## Tenant integrity
 
@@ -163,6 +163,10 @@ Cookie sessions use Secure/HttpOnly cookies and CSRF validation on mutations. Pa
 ## Audit
 
 Every service function that changes tenancy state records one `audit_events` row in the same transaction. Denied authorization attempts on `admin` verbs record `outcome = 'denied'`. Resource packages record their own actions with the same `record()`. Denial records use a separate bounded transaction after the rejected operation rolls back; raising an authorization error must not roll back the only denial evidence.
+
+Account-wide user identity and session/password/reset/email-change actions use `organization_id = NULL` and `workspace_id = NULL`. They produce one event regardless of whether the user has zero, one or multiple organization grants. The canonical recorder explicitly allows each account-wide action/target pair; missing tenant scope on any other action fails. SQL also enforces that a workspace requires an organization. User profile/disable actions retain global user scope, regardless of the actor's organization. Service-account, API-key, grant, invitation and resource mutations retain their actual organization and workspace scope. This storage distinction grants no global API-key or operator authority.
+
+Audit details are bounded and exclude passwords, bearer secrets, token hashes, reset links and CSRF material. Workspace audit reads select the actual organization/workspace and exclude all account-wide events; membership of an actor or target never makes those events tenant-owned.
 
 ## Open points
 

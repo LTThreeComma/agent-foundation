@@ -1,8 +1,210 @@
 # Service HTTP reference
 
-This reference is generated from the current new Service OpenAPI export. It currently covers operational probes only; product resource and execution APIs are not implemented. See [the foundation guide](index.md) for the implemented boundary.
+This reference is generated from the current new Service OpenAPI export. It covers authentication, model and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
 
 Download [the complete OpenAPI JSON](../assets/reference/service-openapi.json). This contract does not advertise legacy API or event schemas.
+
+## agents
+
+### `POST /api/v1/workspaces/{workspace_id}/agents`
+
+Create Agent.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `AgentCreate`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: AgentView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/agents/{agent_id}`
+
+Get Agent.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `agent_id`     | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AgentView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions`
+
+Create Revision.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `agent_id`     | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `RevisionCreate`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: RevisionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}`
+
+Get Revision.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `agent_id`     | path     | true     | string        | —                       |
+| `revision_id`  | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: RevisionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+## auth
+
+### `POST /api/v1/auth/login`
+
+Password Login.
+
+Request body: required.
+
+- `application/json`: `LoginInput`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: LoginOutput`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/auth/logout`
+
+Session Logout.
+
+Responses:
+
+- **200** — Successful Response (`application/json: object`).
+
+### `GET /api/v1/users/me`
+
+Me.
+
+Responses:
+
+- **200** — Successful Response (`application/json: Profile`).
+
+### `POST /api/v1/users/me/keys`
+
+Create Key.
+
+Request body: required.
+
+- `application/json`: `KeyInput`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: KeyOutput`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}`
+
+Get Workspace.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: Workspace`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/audit-events`
+
+Audit Events.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default            |
+| -------------- | -------- | -------- | -------------- | ---------------------------------- |
+| `workspace_id` | path     | true     | string         | —                                  |
+| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
+| `cursor`       | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AuditPage`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+## models
+
+### `POST /api/v1/organizations/{organization_id}/model-providers`
+
+Create Provider.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default |
+| ----------------- | -------- | -------- | ------------- | ----------------------- |
+| `organization_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `ProviderCreate`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: ProviderView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/organizations/{organization_id}/model-providers/{provider_id}`
+
+Get Provider.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default |
+| ----------------- | -------- | -------- | ------------- | ----------------------- |
+| `organization_id` | path     | true     | string        | —                       |
+| `provider_id`     | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ProviderView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/organizations/{organization_id}/models`
+
+Create Model.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default |
+| ----------------- | -------- | -------- | ------------- | ----------------------- |
+| `organization_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `ModelCreate`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: ModelView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/organizations/{organization_id}/models/{model_id}`
+
+Get Model.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default |
+| ----------------- | -------- | -------- | ------------- | ----------------------- |
+| `organization_id` | path     | true     | string        | —                       |
+| `model_id`        | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ModelView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
 
 ## other
 
@@ -21,3 +223,129 @@ Ready.
 Responses:
 
 - **200** — Successful Response (`application/json: schema-defined value`).
+
+## runs
+
+### `GET /api/v1/workspaces/{workspace_id}/runs/{run_id}`
+
+Get Run.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `run_id`       | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: RunView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/runs/{run_id}/events`
+
+Get Events.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default |
+| -------------- | -------- | -------- | -------------- | ----------------------- |
+| `workspace_id` | path     | true     | string         | —                       |
+| `run_id`       | path     | true     | string         | —                       |
+| `cursor`       | query    | false    | string or null | —                       |
+
+Responses:
+
+- **200** — Successful Response.
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/runs/{run_id}/interrupt`
+
+Interrupt Run.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `run_id`       | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: RunView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/runs/{run_id}/items`
+
+Get Items.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default            |
+| -------------- | -------- | -------- | -------------- | ---------------------------------- |
+| `workspace_id` | path     | true     | string         | —                                  |
+| `run_id`       | path     | true     | string         | —                                  |
+| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
+| `input_cursor` | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: RunItems`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/threads`
+
+Create Thread.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `NewThread`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: Submitted`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox`
+
+Get Inbox.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default            |
+| -------------- | -------- | -------- | -------------- | ---------------------------------- |
+| `workspace_id` | path     | true     | string         | —                                  |
+| `thread_id`    | path     | true     | string         | —                                  |
+| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
+| `cursor`       | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: InboxPage`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox`
+
+Append Input.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `thread_id`    | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `Submission`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: Submitted`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/usage`
+
+Get Usage.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `run_id`       | query    | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: UsageView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
