@@ -41,6 +41,20 @@ async def test_public_login_csrf_key_confinement_and_audit_isolation(database, r
             cookie = response.headers["set-cookie"]
             assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie
             csrf = {"x-csrf-token": response.json()["csrf_token"]}
+            # A reload/new tab holds only the HttpOnly cookie, not the login response.
+            restored = await client.get("/api/v1/auth/session")
+            assert restored.status_code == 200, restored.text
+            assert restored.headers["cache-control"] == "no-store"
+            assert restored.json()["user"]["id"] == initialized.principal_id
+            assert restored.json()["csrf_token"] == csrf["x-csrf-token"]
+            assert (await client.get("/api/v1/auth/session")).json() == restored.json()
+            assert (
+                await client.post(
+                    "/api/v1/users/me/keys",
+                    headers={"x-csrf-token": restored.json()["csrf_token"], "origin": "https://attacker.test"},
+                    json={"workspace_id": initialized.workspace_id, "name": "cross-origin"},
+                )
+            ).status_code == 403
             assert (await client.get("/api/v1/users/me")).json()["id"] == initialized.principal_id
             endpoint = "/api/v1/users/me/keys"
             assert (
@@ -80,6 +94,7 @@ async def test_public_login_csrf_key_confinement_and_audit_isolation(database, r
             logout_response = await client.post("/api/v1/auth/logout", headers=csrf)
             assert logout_response.status_code == 200
             assert (await client.get("/api/v1/users/me")).status_code == 401
+            assert (await client.get("/api/v1/auth/session")).status_code == 401
             # Logout revokes only the session, not the separately issued workspace key.
             assert (await client.get("/api/v1/users/me", headers=bearer)).status_code == 200
         async with short_session(storage) as session:

@@ -93,6 +93,8 @@ async def claim_run(storage: Storage, *, worker_id: str, worker_build: str, leas
             lease_token_hash=secret_hash(token),
             lease_expires_at=now + timedelta(seconds=lease_seconds),
             heartbeat_at=now,
+            created_at=now,
+            updated_at=now,
             lifecycle_seq=0,
         )
         session.add(attempt)

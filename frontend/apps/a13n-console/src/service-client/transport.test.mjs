@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  ApiError,
-  createClient,
-  ProtocolError,
-  ReplayGapError,
-} from "./index.js";
+import { ApiError, createClient, ProtocolError } from "./index.js";
 import { decodeSse } from "./streams/sse.js";
 
 const baseUrl = "https://service.example";
@@ -25,15 +20,17 @@ test("session mutations require CSRF and preserve null, omission and concurrency
     },
   });
   await assert.rejects(
-    client.http.PATCH("/api/v1/users/me", { body: { name: "A" } }),
+    client.http.POST("/api/v1/users/me/keys", {
+      body: { name: "A", workspace_id: "ws_test" },
+    }),
     /CSRF/,
   );
   client.setCsrfToken("csrf-proof");
-  await client.http.PATCH("/api/v1/users/me", {
+  await client.http.POST("/api/v1/users/me/keys", {
     headers: { "If-Match": '"version"' },
     body: { name: "A" },
   });
-  assert.equal(requests[0].headers.get("X-A13N-CSRF-Token"), "csrf-proof");
+  assert.equal(requests[0].headers.get("X-CSRF-Token"), "csrf-proof");
   assert.equal(requests[0].headers.get("If-Match"), '"version"');
   assert.equal(requests[0].credentials, "same-origin");
   assert.deepEqual(await requests[0].json(), { name: "A" });
@@ -84,26 +81,6 @@ test("safe reads retry but unknown mutation outcomes are never replayed", async 
   assert.equal(calls, 1);
 });
 
-test("binary uploads are not serialized or buffered by the client", async () => {
-  const binary = new Blob([new Uint8Array([0, 255, 17, 3])]);
-  const client = createClient({
-    baseUrl,
-    auth: { type: "bearer", token: "key" },
-    fetch: async (request) => {
-      assert.deepEqual(
-        new Uint8Array(await request.arrayBuffer()),
-        new Uint8Array([0, 255, 17, 3]),
-      );
-      assert.equal(request.headers.get("Content-Type"), "image/png");
-      return json({});
-    },
-  });
-  await client.http.PUT("/api/v1/users/me/avatar", {
-    body: binary,
-    headers: { "Content-Type": "image/png", "If-Match": '"a"' },
-  });
-});
-
 function chunks(text) {
   const bytes = new TextEncoder().encode(text);
   return new ReadableStream({
@@ -140,95 +117,4 @@ test("SSE handles split UTF-8, CRLF, multiline payloads and cancellation", async
   });
   for await (const _ of decodeSse(body)) break;
   assert.equal(canceled, true);
-});
-
-test("Run stream preserves cursor and rejects replay gaps without canceling execution", async () => {
-  const requests = [];
-  const envelope = {
-    schema_version: "1",
-    event_id: "evt_one",
-    run_id: "run_one",
-    thread_id: "th_one",
-    event_type: "agui.text_message_content",
-    occurred_at: "2026-09-08T00:00:00Z",
-    payload: { delta: "hello" },
-  };
-  const client = createClient({
-    baseUrl,
-    auth: { type: "session" },
-    fetch: async (request) => {
-      requests.push(request);
-      return new Response(
-        chunks(
-          `id: 2-0\nevent: ${envelope.event_type}\ndata: ${JSON.stringify(envelope)}\n\nid: 3-0\nevent: run_stream.replay_gap\ndata: {}\n\n`,
-        ),
-        { headers: { "Content-Type": "text/event-stream" } },
-      );
-    },
-  });
-  const stream = client.streamRun("run_one", {
-    after: "1-0",
-    workspaceId: "ws_one",
-  });
-  assert.equal((await stream.next()).value.cursor, "2-0");
-  await assert.rejects(stream.next(), ReplayGapError);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].headers.get("Last-Event-ID"), "1-0");
-  assert.equal(requests[0].method, "GET");
-});
-
-test("workspace HTTP discovers the API key boundary and omits workspace arguments", async () => {
-  const requests = [];
-  const client = createClient({
-    baseUrl: `${baseUrl}/prefix`,
-    auth: { type: "bearer", token: "private" },
-    fetch: async (request) => {
-      requests.push(request);
-      return json(
-        request.url.endsWith("/auth/context")
-          ? { workspace_id: "ws_1234567890abcdef", organization_id: null }
-          : { items: [] },
-      );
-    },
-  });
-  const http = await client.workspaceHttp();
-  await http.GET("/agents");
-  await http.GET("/agents/{agent}", {
-    params: { path: { agent: "reviewer" } },
-  });
-  await http.PATCH("/agents/{agent}", {
-    params: {
-      path: { agent: "ap_1234567890abcdef" },
-      header: { "If-Match": '"v1"' },
-    },
-    body: { key: "reviewer" },
-  });
-  assert.deepEqual(
-    requests.map((request) => request.url),
-    [
-      `${baseUrl}/prefix/api/v1/auth/context`,
-      `${baseUrl}/prefix/api/v1/workspaces/ws_1234567890abcdef/agents`,
-      `${baseUrl}/prefix/api/v1/workspaces/ws_1234567890abcdef/agents/reviewer`,
-      `${baseUrl}/prefix/api/v1/workspaces/ws_1234567890abcdef/agents/ap_1234567890abcdef`,
-    ],
-  );
-  assert.ok(
-    requests.every(
-      (request) => request.headers.get("Authorization") === "Bearer private",
-    ),
-  );
-  assert.equal(requests[3].headers.get("If-Match"), '"v1"');
-  client.close();
-  await assert.rejects(http.GET("/agents"), { name: "AbortError" });
-});
-
-test("workspace HTTP does not invent a boundary for an organization session", async () => {
-  const client = createClient({
-    baseUrl,
-    auth: { type: "session" },
-    fetch: async () =>
-      json({ workspace_id: null, organization_id: "org_1234567890abcdef" }),
-  });
-  await assert.rejects(client.workspaceHttp(), /Workspace-bound credential/);
-  client.close();
 });

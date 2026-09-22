@@ -8,6 +8,7 @@ Workspace audit reads require `admin` and return only events with that actual or
 
 ```
 /api/v1/auth/login                         POST                    password login -> session
+/api/v1/auth/session                       GET                     authenticated user + session CSRF
 /api/v1/auth/logout                        POST
 /api/v1/auth/password-reset                POST, POST .../confirm
 /api/v1/users/me                           GET, PATCH              profile, email change
@@ -20,6 +21,7 @@ Workspace audit reads require `admin` and return only events with that actual or
 /api/v1/organizations/{org}/model-providers, /models     GET/POST, GET/PATCH .../{id}
 /api/v1/organizations/{org}/environment-providers, /web-providers  same shape
 
+/api/v1/workspaces                         GET                     accessible workspaces + permission hints
 /api/v1/workspaces/{ws}                    GET, PATCH, POST .../archive
 /api/v1/workspaces/{ws}/grants             GET, POST; DELETE .../{grant}
 /api/v1/workspaces/{ws}/invitations        GET, POST; POST .../{inv}/revoke
@@ -61,7 +63,7 @@ Workspace audit reads require `admin` and return only events with that actual or
 Conventions:
 
 - Collections are plural nouns; items are `/{id}`; an operation that is not CRUD is `POST /{id}/{verb}` with a verb in the imperative (`archive`, `interrupt`, `fork`, `set-default`, `test`, `redeliver`). No colon verbs, no `{action}` parameters.
-- Ids in paths are ids. Agents, skills and workspaces also accept their `key` in place of the id, resolved before authorization.
+- Ids in paths are ids. Workspace addressing first resolves an exact ID; otherwise a key must identify exactly one workspace globally before authorization. Zero matches return `not_found`; multiple matches return `conflict` asking for an ID, without exposing candidate metadata or selecting an accessible match. Agent and Skill keys resolve within the resolved workspace. Resolution is bounded and precedes ordinary permission/confinement checks. Accessible-workspace collection rows carry allowed verbs for UI hints; the server still authorizes each operation.
 - Every response body is a JSON object. Collections are `{"items": [...], "next_cursor": "..." | null}`. Cursors are opaque; `?limit=` is 1 to 200, default 50.
 - Timestamps are RFC 3339 in UTC with microseconds. Ids and enum values are lowercase.
 
@@ -69,7 +71,7 @@ External envd registration and use follow [06: envd over HTTP](06-environments.m
 
 ## Authentication
 
-`Authorization: Bearer <api_key>` or the session cookie set by `/auth/login`. Unauthenticated requests to protected routes are `401 unauthenticated`. Login/reset and OAuth callback are narrowly public flows with their own one-use state checks; `/auth/*` is not a blanket exemption. Cookie mutations validate CSRF. Stream authorization completes in a short session before opening the response and is periodically refreshed.
+`Authorization: Bearer <api_key>` or the session cookie set by `/auth/login`. Unauthenticated requests to protected routes are `401 unauthenticated`. Login/reset and OAuth callback are narrowly public flows with their own one-use state checks; `/auth/*` is not a blanket exemption. Cookie mutations validate CSRF. Cookie-only `GET /auth/session` returns the authenticated profile and stable session CSRF token with `Cache-Control: no-store`; API-key authentication, including mixed key/cookie requests, cannot use it. Stream authorization completes in a short session before opening the response and is periodically refreshed.
 
 Every API key is confined to exactly one workspace. `POST /users/me/keys` requires a non-null `workspace_id`; service-account key issuance derives it from the workspace route and checks the account's home workspace. Login sessions support organization management; API keys do not. Key management, shared-resource access and issuance obey [03's workspace confinement rules](03-tenancy.md#flows) and [authorization rules](03-tenancy.md#authorization), including when a route is outside `/workspaces/{ws}`.
 

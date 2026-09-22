@@ -17,10 +17,6 @@ export class ProtocolError extends Error {
   override readonly name = "ProtocolError";
 }
 
-export class ReplayGapError extends ApiError {
-  override readonly name = "ReplayGapError";
-}
-
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -36,8 +32,7 @@ export async function requireSuccess(response: Response): Promise<void> {
   const error =
     isRecord(payload) && isRecord(payload.error) ? payload.error : {};
   const code = typeof error.code === "string" ? error.code : "http_error";
-  const ErrorType = code.includes("replay_gap") ? ReplayGapError : ApiError;
-  throw new ErrorType(
+  throw new ApiError(
     response.status,
     code,
     typeof error.message === "string"

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from pydantic import JsonValue
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from a13n_service.infra.errors import ServiceError
 from a13n_service.runs import attempts
@@ -110,6 +112,8 @@ class ObservationWriter:
         self.stream, self.publisher = stream, publisher
         self.flush_seconds = flush_seconds
         self._next_flush = 0.0
+        self._replay_available = False
+        self._retry_at = 0.0
 
     def durable_sequence(self) -> int:
         if self.publisher.display_object is None:
@@ -126,29 +130,59 @@ class ObservationWriter:
             0,
         )
 
-    async def reset(self) -> None:
-        await attempts.check(self.publisher.storage, self.publisher.claim)
+    def _lost(self) -> None:
+        self._replay_available = False
+        self._retry_at = asyncio.get_running_loop().time() + max(1.0, self.flush_seconds)
+
+    async def _flush(self) -> None:
         await self.publisher.flush_display()
-        await self.stream.create(self.durable_sequence())
         self._next_flush = asyncio.get_running_loop().time() + self.flush_seconds
 
+    async def reset(self) -> None:
+        await attempts.check(self.publisher.storage, self.publisher.claim)
+        await self._flush()
+        try:
+            await self.stream.create(self.durable_sequence())
+        except (RedisConnectionError, RedisTimeoutError, TimeoutError):
+            self._lost()
+        else:
+            self._replay_available = True
+
+    async def _trim(self) -> None:
+        try:
+            present = await self.stream.trim(self.durable_sequence())
+        except (RedisConnectionError, RedisTimeoutError, TimeoutError):
+            self._lost()
+            return
+        if not present:
+            await self.reset()
+
     async def append(self, values: tuple[dict[str, JsonValue], ...]) -> None:
+        if not self._replay_available:
+            now = asyncio.get_running_loop().time()
+            if now >= self._retry_at:
+                await self.reset()  # Covers this batch too; never replay across an uncertain append.
+            elif now >= self._next_flush:
+                await self._flush()
+            return
         last = self.publisher.fold.display.segments[-1].event_sequence
         for sequence, value in enumerate(values, start=last - len(values) + 1):
             metadata = value.get("metadata")
             if isinstance(metadata, dict) and metadata.get("display") is False:
                 continue
-            result = await self.stream.append(sequence, value)
+            try:
+                result = await self.stream.append(sequence, value)
+            except (RedisConnectionError, RedisTimeoutError, TimeoutError):
+                self._lost()
+                await self._flush()
+                return
             if result == -1:
                 await self.reset()
                 return
             if result == -2:
-                await self.publisher.flush_display()
-                if not await self.stream.trim(self.durable_sequence()):
-                    await self.reset()
+                await self._flush()
+                await self._trim()
                 return  # The entire observed batch is now in the snapshot.
         if asyncio.get_running_loop().time() >= self._next_flush:
-            await self.publisher.flush_display()
-            if not await self.stream.trim(self.durable_sequence()):
-                await self.reset()
-            self._next_flush = asyncio.get_running_loop().time() + self.flush_seconds
+            await self._flush()
+            await self._trim()

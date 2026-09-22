@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
+from pydantic import BaseModel, Field, JsonValue
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -15,6 +16,18 @@ from a13n_service.infra.objects.local import LocalObjects
 from a13n_service.runs import views
 from a13n_service.runs.streams import AttemptStream, Bounds
 from a13n_service.tenancy.authorize import Principal
+
+
+class DataPayload(BaseModel):
+    attempt_number: int = Field(ge=1)
+    event_sequence: int = Field(ge=1)
+    event: dict[str, JsonValue]
+
+
+class ControlPayload(BaseModel):
+    display_version: str
+    cursor: str | None
+    retry_after_ms: int = Field(ge=0)
 
 
 def position(cursor: str, run_id: str) -> tuple[int, int]:
@@ -34,11 +47,11 @@ def frame(kind: str, data: dict, *, cursor: str | None = None) -> str:
 def control(kind: Literal["reset", "closed", "retry_later"], view: views.RunItems) -> str:
     return frame(
         kind,
-        {
-            "display_version": view.display_version,
-            "cursor": view.cursor,
-            "retry_after_ms": 1000 if kind == "retry_later" else 0,
-        },
+        ControlPayload(
+            display_version=view.display_version,
+            cursor=view.cursor,
+            retry_after_ms=1000 if kind == "retry_later" else 0,
+        ).model_dump(mode="json"),
     )
 
 
@@ -109,7 +122,9 @@ async def stream(
                     for sequence, event in rows:
                         yield frame(
                             "data",
-                            {"attempt_number": attempt, "event_sequence": sequence, "event": event},
+                            DataPayload(attempt_number=attempt, event_sequence=sequence, event=event).model_dump(
+                                mode="json"
+                            ),
                             cursor=encode("run-stream", view.run_id, attempt, sequence),
                         )
             except TimeoutError:

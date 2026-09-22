@@ -29,7 +29,11 @@ class OrganizationRow(Stamped, Base):
 
 class WorkspaceRow(Stamped, Base):
     __tablename__ = "workspaces"
-    __table_args__ = (UniqueConstraint("organization_id", "key"), UniqueConstraint("organization_id", "id"))
+    __table_args__ = (
+        UniqueConstraint("organization_id", "key"),
+        UniqueConstraint("organization_id", "id"),
+        Index("ix_workspaces_key", "key"),
+    )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
     key: Mapped[str]

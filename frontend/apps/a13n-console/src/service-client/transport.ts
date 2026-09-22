@@ -12,11 +12,7 @@ export interface ClientOptions {
   maxReadRetries?: number;
 }
 
-const publicMutations = new Set([
-  "/api/v1/auth/login",
-  "/api/v1/auth/password-reset",
-  "/api/v1/auth/password-reset/complete",
-]);
+const publicMutations = new Set(["/api/v1/auth/login"]);
 
 export function delay(
   milliseconds: number,
@@ -109,16 +105,12 @@ export class Transport {
         "Authorization",
         `Bearer ${typeof auth.token === "function" ? await auth.token() : auth.token}`,
       );
-    } else if (
-      mutation &&
-      !publicMutations.has(path) &&
-      !/^\/api\/v1\/invitations\/[^/]+\/accept$/.test(path)
-    ) {
+    } else if (mutation && !publicMutations.has(path)) {
       if (!this.csrfToken)
         throw new Error(
           "Restore the browser CSRF token before mutating Service resources.",
         );
-      headers.set("X-A13N-CSRF-Token", this.csrfToken);
+      headers.set("X-CSRF-Token", this.csrfToken);
     }
     const request = new Request(input, {
       headers,

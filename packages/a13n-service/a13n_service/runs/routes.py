@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.http import etag
-from a13n_service.runs import delivery, input_views, usage, views, wakeups
+from a13n_service.runs import collections, delivery, input_views, usage, views, wakeups
 from a13n_service.runs.acceptance import submit
 from a13n_service.runs.interrupt import interrupt
 from a13n_service.runs.schemas import InboxPage, NewThread, RunView, Submission, Submitted
@@ -74,7 +74,9 @@ async def get_run(
     actor: Annotated[Principal, Depends(current_principal)],
 ) -> RunView:
     async with short_session(request.app.state.storage) as session:
-        await workspace_scope(session, actor, workspace_id, "read")
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        assert scope.workspace_id is not None
+        workspace_id = scope.workspace_id
         run = await session.get(RunRow, run_id)
         if run is None or run.workspace_id != workspace_id:
             raise ServiceError("not_found", "Run was not found")
@@ -93,7 +95,9 @@ async def get_inbox(
     cursor: str | None = None,
 ) -> InboxPage:
     async with short_session(request.app.state.storage) as session:
-        await workspace_scope(session, actor, workspace_id, "read")
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        assert scope.workspace_id is not None
+        workspace_id = scope.workspace_id
         thread = await session.get(ThreadRow, thread_id)
         if thread is None or thread.workspace_id != workspace_id:
             raise ServiceError("not_found", "Thread was not found")
@@ -161,7 +165,7 @@ async def get_events(
             request.app.state.objects,
             request.app.state.redis,
             initial,
-            workspace_id=workspace_id,
+            workspace_id=initial.workspace_id,
             cursor=cursor,
             reauthenticate=reauthenticate,
             object_timeout=config.objects.timeout,
@@ -193,3 +197,68 @@ async def get_usage(
     actor: Annotated[Principal, Depends(current_principal)],
 ) -> usage.UsageView:
     return await usage.view(request.app.state.storage, actor, workspace_id, run_id)
+
+
+@router.get("/sessions", response_model=collections.SessionPage)
+async def list_sessions(
+    request: Request,
+    workspace_id: str,
+    actor: Annotated[Principal, Depends(current_principal)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: str | None = None,
+) -> collections.SessionPage:
+    return await collections.list_sessions(request.app.state.storage, actor, workspace_id, limit=limit, cursor=cursor)
+
+
+@router.get("/sessions/{identity}", response_model=collections.SessionView)
+async def get_session(
+    request: Request,
+    response: Response,
+    workspace_id: str,
+    identity: str,
+    actor: Annotated[Principal, Depends(current_principal)],
+) -> collections.SessionView:
+    result = await collections.get_session(request.app.state.storage, actor, workspace_id, identity)
+    response.headers["ETag"] = etag(result.id, result.version)
+    return result
+
+
+@router.get("/threads", response_model=collections.ThreadPage)
+async def list_threads(
+    request: Request,
+    workspace_id: str,
+    actor: Annotated[Principal, Depends(current_principal)],
+    session_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: str | None = None,
+) -> collections.ThreadPage:
+    return await collections.list_threads(
+        request.app.state.storage, actor, workspace_id, session_id=session_id, limit=limit, cursor=cursor
+    )
+
+
+@router.get("/threads/{identity}", response_model=collections.ThreadView)
+async def get_thread(
+    request: Request,
+    response: Response,
+    workspace_id: str,
+    identity: str,
+    actor: Annotated[Principal, Depends(current_principal)],
+) -> collections.ThreadView:
+    result = await collections.get_thread(request.app.state.storage, actor, workspace_id, identity)
+    response.headers["ETag"] = etag(result.id, result.version)
+    return result
+
+
+@router.get("/threads/{thread_id}/runs", response_model=collections.RunPage)
+async def list_runs(
+    request: Request,
+    workspace_id: str,
+    thread_id: str,
+    actor: Annotated[Principal, Depends(current_principal)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: str | None = None,
+) -> collections.RunPage:
+    return await collections.list_runs(
+        request.app.state.storage, actor, workspace_id, thread_id=thread_id, limit=limit, cursor=cursor
+    )

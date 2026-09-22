@@ -15,7 +15,9 @@ from a13n_service.tenancy.grants import workspace_scope
 
 async def interrupt(storage: Storage, actor: Principal, workspace_id: str, run_id: str) -> RunView:
     async with transaction(storage) as session:
-        await workspace_scope(session, actor, workspace_id, "run")
+        scope = await workspace_scope(session, actor, workspace_id, "run")
+        assert scope.workspace_id is not None
+        workspace_id = scope.workspace_id
         thread_id = await session.scalar(
             select(RunRow.thread_id).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
         )

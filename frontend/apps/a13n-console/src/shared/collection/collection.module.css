@@ -236,3 +236,16 @@ tr:focus-within .rowMenu,
     margin-left: 0;
   }
 }
+
+@media (max-width: 600px) {
+  .table {
+    table-layout: fixed;
+  }
+  .cell {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .table th {
+    white-space: normal;
+  }
+}

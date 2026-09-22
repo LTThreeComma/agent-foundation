@@ -134,7 +134,9 @@ class UsageView(BaseModel):
 
 async def view(storage: Storage, actor: Principal, workspace_id: str, run_id: str) -> UsageView:
     async with short_session(storage) as session:
-        await workspace_scope(session, actor, workspace_id, "read")
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        assert scope.workspace_id is not None
+        workspace_id = scope.workspace_id
         run = await session.get(RunRow, run_id)
         if run is None or run.workspace_id != workspace_id:
             raise ServiceError("not_found", "Run was not found")

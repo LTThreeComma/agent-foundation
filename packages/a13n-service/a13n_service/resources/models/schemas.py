@@ -3,6 +3,7 @@
 from typing import Literal
 
 from a13n_harness.pricing import ModelPricingEntry
+from a13n_harness.providers.authentication import Authentication
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from a13n_service.infra.ids import ObjectId
@@ -62,3 +63,28 @@ class ModelView(BaseModel):
     pricing: ModelPricingEntry | None
     enabled: bool
     version: int
+
+
+class ModelPage(BaseModel):
+    items: list[ModelView]
+    next_cursor: str | None
+
+
+class ProviderPage(BaseModel):
+    items: list[ProviderView]
+    next_cursor: str | None
+
+
+class ProviderType(BaseModel):
+    type: str
+    display_name: str
+    configuration_schema: dict[str, JsonValue]
+    credential_schema: dict[str, JsonValue] | None
+    authentication: Authentication
+    supported_model_apis: list[str]
+    setup_url: str | None
+
+
+class ProviderTypePage(BaseModel):
+    items: list[ProviderType]
+    next_cursor: str | None

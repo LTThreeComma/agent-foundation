@@ -572,7 +572,8 @@ def _observe_request_lifecycle(event: HarnessExtensionEvent, state: _ObserverSta
     request_index = payload.get("request_index")
     if isinstance(request_index, int) and request_index >= 0:
         state.request_index = request_index
-        state.parts.clear()
+        # Steering can announce the next request before the previous stream emits PartEnd.
+        # Open parts retain their original identity until their own end or replacement start.
 
 
 def _custom_harness_event(item: HarnessEvent, event: HarnessExtensionEvent) -> CustomEvent:

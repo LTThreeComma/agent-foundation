@@ -1,51 +1,48 @@
 # a13n Console
 
-The private React and TypeScript web application for Agent Foundation Service. Console uses the shared `a13n-ui` design system and its private Service client. English is the default language; Simplified Chinese is available from the account menu.
+The private React and TypeScript application for Agent Foundation Service. It uses shared `a13n-ui` components and one generated HTTP boundary. English is the default; Simplified Chinese and light/dark/system appearance are available in navigation.
 
 ## Local development
 
-From the repository root, prepare local PostgreSQL, Redis and Langfuse, upgrade the schema, prepare frontend dependencies, and run Service and Console together. Configuration comes from `dev/service/local.toml`; no `.env` or manual Langfuse setup is required:
+For a complete browser journey with disposable PostgreSQL, Redis, local objects, Control, Worker and a real scripted HTTP model:
 
 ```bash
-make dev
+make live-test-console CONSOLE_LIVE_DIR=/tmp/a13n-console-review
 ```
 
-Keep the terminal open; Ctrl+C stops both application processes. If either process exits, the launcher stops the other and returns the exited process's status. The local Service configuration selects the Console origin for browser authentication. Use `make dev-reset STATE=seeded` before startup for fictional accounts and content, or `STATE=empty` for the initial administrator flow. See [local Service development](../../../dev/service/README.md).
+The directory must not exist. The launcher prints the Console URL, model endpoint and public workspace identifiers, and records process logs and `state.json` there. Sign in as `console@example.com` or `viewer@example.com` with the fixture-only password `console-fixture-password`. All stores belong to the launcher; Ctrl+C stops its processes and removes its containers. The browser uses localhost's secure-context cookie behavior; session cookies retain Secure, HttpOnly and SameSite flags. No certificate warning or browser security override is needed.
 
-To run only Console against an already running Service:
+Create a provider using the printed model endpoint, choose OpenAI Chat Completions, and use `scripted` as the upstream model ID. The endpoint accepts a fixture-only bearer value or its explicitly configured no-auth mode. Create an Agent, send a message, reload its history and continue. A message containing `[interruptible]` delays the fixture response so the Stop run action can be exercised. See [the reproducible browser journey](../../../dev/live_tests/console-journey.md).
+
+To point Vite at an already running Service:
 
 ```bash
 make frontend-sync
-pnpm --dir frontend --filter a13n-console dev
+A13N_CONSOLE_SERVICE_URL=http://127.0.0.1:8000 pnpm --dir frontend --filter a13n-console dev
 ```
 
-The local launcher assigns a stable Console port per checkout and passes the matching Service upstream. Run `make dev-status` to discover both URLs. A direct Vite invocation still accepts `A13N_CONSOLE_SERVICE_URL`. Configure the Service public origin as the Console origin so invitation, recovery, email confirmation, cookies, and WebSocket origin checks use the same browser boundary. Email flows require the Service SMTP configuration.
+Use `make dev-status` for the ordinary checkout-owned Service port. Vite proxies `/api` without changing its origin and logs method/path/status only. Production ingress must serve Console assets and route `/api` to Service on the same origin. Service does not host browser assets.
 
-## Application surfaces
+## Implemented milestone
 
-- Workspace Agents with configuration, immutable versions, and lifecycle controls.
-- Sessions with threads, runs, retained and live output, attachments, branching, waiting feedback, steering, interruption, and queued messages.
-- Models and providers, Skills and versions, and Environment providers, templates, and instances.
-- Application accounts and targets, Connectors, and remote MCP connections and tool discovery.
-- Run attempt details and Traces, including an explicit unavailable state when no trace query backend is configured.
-- Workspace, organization, and personal settings, membership, invitations, API keys, service accounts, sessions, security activity, and profile images.
+- Cookie login, authenticated session/CSRF restoration, logout and scoped workspace selection.
+- Workspace Model/Provider creation and bounded selection; write-only credentials.
+- Full-page Agent configuration, immutable revision history and default selection with strong ETags.
+- Session and Thread navigation, input submission/replay, pending/assigned/consumed inbox states, continuation and exact-run interruption.
+- Bounded durable history plus attempt-local text updates. Reset/loss reloads durable state before reconnecting; navigation closes observation without interrupting execution.
 
-Usage and Schedules remain clearly marked as coming soon. Plugin, Secret, and Hook editors are outside the Console scope. Existing hidden configuration is preserved when editing supported fields.
+Workspace paths accept exact IDs or globally unique keys. New links use authorized IDs. Ambiguous or forbidden deep links fail explicitly; they never select another workspace. Query caches include user and resolved workspace identity. CSRF and credentials are never stored in browser persistence.
 
-Console uses Service permission hints for navigation and controls; the Service authorizes every request. API keys are workspace-bound, and one-time credentials are displayed only when created. The application has no demo data or embedded credentials.
+The retained broader product contract is [Console](../../../spec/frontend/console.md). Waiting/approval/client-tool flows, fork/children, Connections/MCP, Skills, Environments, broader administration and trace surfaces are not yet implemented. Removed Bot, memory, pairing and configuration-draft integrations are not compatibility inputs.
 
-## Service contract
+## Contracts and validation
 
-Console owns `src/service-client/`; it does not install, build, or release with an external Service SDK. HTTP types are generated from `proto/a13n-service/openapi.json`, not edited by hand. After changing a Service route or model, run `make service-contract-generate`; `make service-contract-check` detects drift without modifying files. Transport, session/CSRF, Run stream, and notification tests run against the internal client.
-
-## Validation and production build
+Run `make service-contract-generate` after changing Service routes or models. It exports OpenAPI and SSE payload schemas/examples and regenerates `src/service-client/schema.ts`. Never edit generated output. `make service-contract-check` detects drift without writes. Independent SDK/remote CLI repositories consume these contracts separately.
 
 ```bash
-pnpm --dir frontend --filter a13n-console check
+pnpm --dir frontend --filter a13n-console typecheck
+pnpm --dir frontend --filter a13n-console test
 pnpm --dir frontend --filter a13n-console build
-make frontend-check-all
 ```
 
-The production build is emitted to `dist/`. Hosting must serve the application shell for browser routes and route `/api` to the Service on the same origin, including WebSocket upgrades. Service deployment and static hosting configuration are managed separately. The design system showcase remains in `frontend/packages/a13n-ui/dev`.
-
-Console tests use Node.js for `*.test.ts` and jsdom for browser/React `*.test.tsx` files. Only the latter load the DOM setup. Both run under `test`; use `--project=unit` or `--project=dom` for an explicit subset. Keep real keyboard interactions where they are under test; paste complete fixture URLs when only the resulting value matters. Timer behavior uses Vitest fake timers rather than waiting for wall-clock delays.
+Node tests cover transport, framing and recovery; jsdom tests exercise keyboard submission, uncertain retries and permissions. Real browser evidence requires the disposable launcher, not a mocked API or a successful build. The production build is emitted to ignored `dist/`.

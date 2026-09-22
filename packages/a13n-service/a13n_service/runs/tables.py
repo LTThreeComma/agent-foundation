@@ -23,6 +23,7 @@ from a13n_service.infra.db import Base, Stamped
 class SessionRow(Stamped, Base):
     __tablename__ = "sessions"
     __table_args__ = (
+        Index("ix_sessions_workspace_created", "workspace_id", "created_at", "id"),
         UniqueConstraint("workspace_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
     )
@@ -36,6 +37,8 @@ class SessionRow(Stamped, Base):
 class ThreadRow(Stamped, Base):
     __tablename__ = "threads"
     __table_args__ = (
+        Index("ix_threads_workspace_created", "workspace_id", "created_at", "id"),
+        Index("ix_threads_session_created", "workspace_id", "session_id", "created_at", "id"),
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("workspace_id", "session_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
@@ -182,6 +185,7 @@ class InboxEntryRow(Base):
 class RunRow(Stamped, Base):
     __tablename__ = "runs"
     __table_args__ = (
+        Index("ix_runs_thread_created", "thread_id", "created_at", "id"),
         UniqueConstraint("thread_id", "id"),
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("workspace_id", "session_id", "id"),

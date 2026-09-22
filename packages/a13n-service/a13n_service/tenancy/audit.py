@@ -12,7 +12,7 @@ from a13n_service.infra.cursors import decode, encode
 from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.tenancy.authorize import Principal, Scope, authorize
-from a13n_service.tenancy.tables import WorkspaceRow
+from a13n_service.tenancy.grants import resolve_workspace
 
 logger = get_logger(__name__)
 
@@ -44,9 +44,8 @@ async def list_events(
     scope = None
     try:
         async with short_session(storage) as session:
-            workspace = await session.get(WorkspaceRow, workspace_id)
-            if workspace is None:
-                raise ServiceError("not_found", "Workspace was not found")
+            workspace = await resolve_workspace(session, workspace_id)
+            workspace_id = workspace.id
             scope = Scope(workspace.organization_id, workspace.id)
             authorize(actor, scope, "admin")
             query = select(AuditEventRow).where(

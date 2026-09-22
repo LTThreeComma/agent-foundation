@@ -577,3 +577,7 @@ live-test-check: sync ## Validate current live-test routing and isolation
 .PHONY: service-config-check
 service-config-check:
 	@test -f "$(SERVICE_CONFIG)" || { echo "Missing Service configuration: $(SERVICE_CONFIG). Run make setup first or set SERVICE_CONFIG to an existing file." >&2; exit 2; }
+
+.PHONY: live-test-console
+live-test-console: sync frontend-sync ## Launch Console with disposable real Service stores and model fixture
+	@uv run --locked python -m dev.live_tests.console --directory "$(CONSOLE_LIVE_DIR)"

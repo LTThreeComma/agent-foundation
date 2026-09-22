@@ -12,6 +12,7 @@ from a13n_service.infra.audit import AuditEventRow
 from a13n_service.infra.db import Base
 from a13n_service.resources.agents.routes import router as agents_router
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.models.routes import catalog_router
 from a13n_service.resources.models.routes import router as models_router
 from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
 from a13n_service.runs.events import EventCursorRow, EventRow
@@ -69,7 +70,7 @@ OSS = Distribution(
         EventRow,
         UsageRow,
     ),
-    routers=(tenancy_router, models_router, agents_router, runs_router),
+    routers=(tenancy_router, models_router, catalog_router, agents_router, runs_router),
     model_providers=(OPENAI,),
     migrations=(Path(__file__).parent / "migrations" / "versions",),
 )

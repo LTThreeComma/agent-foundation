@@ -1,15 +1,9 @@
-import {
-  DesktopIcon,
-  TerminalWindowIcon,
-  GlobeIcon,
-  ArrowsLeftRightIcon,
-} from "@phosphor-icons/react";
+import { DesktopIcon, GlobeIcon } from "@phosphor-icons/react";
 import { BrandIcon } from "a13n-ui";
 
 const localIcons = {
   direct_local: DesktopIcon,
   http_envd: GlobeIcon,
-  websocket_envd: ArrowsLeftRightIcon,
 };
 export function ProviderIcon({ type }: { type: string }) {
   const LocalIcon = localIcons[type as keyof typeof localIcons];

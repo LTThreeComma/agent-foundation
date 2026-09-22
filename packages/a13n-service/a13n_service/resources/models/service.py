@@ -5,18 +5,26 @@ import json
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from a13n_harness.providers.model import ModelProviderDefinition
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from a13n_service.infra import cursors
 from a13n_service.infra.audit import record
 from a13n_service.infra.crypto import KeyRing, SecretLocation
 from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
-from a13n_service.resources.models.schemas import ModelCreate, ModelView, ProviderCreate, ProviderView
+from a13n_service.resources.models.schemas import (
+    ModelCreate,
+    ModelPage,
+    ModelView,
+    ProviderCreate,
+    ProviderPage,
+    ProviderView,
+)
 from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
 from a13n_service.tenancy.authorize import Principal, Scope, Verb, authorize
-from a13n_service.tenancy.grants import workspace_scope
+from a13n_service.tenancy.grants import readable_workspaces, workspace_scope
 from a13n_service.tenancy.tables import OrganizationRow
 
 
@@ -173,3 +181,59 @@ async def get_model(storage: Storage, actor: Principal, organization_id: str, mo
             raise ServiceError("not_found", "Model was not found")
         authorize(actor, Scope(row.organization_id, row.workspace_id), "read")
         return ModelView.model_validate(row)
+
+
+async def list_models(
+    storage: Storage,
+    actor: Principal,
+    organization_id: str,
+    *,
+    workspace_id: str | None,
+    limit: int,
+    cursor: str | None,
+) -> ModelPage:
+    async with short_session(storage) as session:
+        await configuration_scope(session, actor, organization_id, workspace_id, "read")
+        owner = organization_id + ":" + (workspace_id or "*")
+        after = cursors.id_position(cursor, "models", owner)
+        query = select(ModelRow).where(
+            ModelRow.organization_id == organization_id,
+            ModelRow.id > after,
+            or_(ModelRow.workspace_id.is_(None), ModelRow.workspace_id.in_(readable_workspaces(actor))),
+        )
+        if workspace_id is not None:
+            query = query.where(or_(ModelRow.workspace_id.is_(None), ModelRow.workspace_id == workspace_id))
+        rows = (await session.scalars(query.order_by(ModelRow.id).limit(limit + 1))).all()
+        return ModelPage(
+            items=[ModelView.model_validate(row) for row in rows[:limit]],
+            next_cursor=cursors.encode("models", owner, rows[limit - 1].id) if len(rows) > limit else None,
+        )
+
+
+async def list_providers(
+    storage: Storage,
+    actor: Principal,
+    organization_id: str,
+    *,
+    workspace_id: str | None,
+    limit: int,
+    cursor: str | None,
+) -> ProviderPage:
+    async with short_session(storage) as session:
+        await configuration_scope(session, actor, organization_id, workspace_id, "read")
+        owner = organization_id + ":" + (workspace_id or "*")
+        after = cursors.id_position(cursor, "providers", owner)
+        query = select(ModelProviderRow).where(
+            ModelProviderRow.organization_id == organization_id,
+            ModelProviderRow.id > after,
+            or_(ModelProviderRow.workspace_id.is_(None), ModelProviderRow.workspace_id.in_(readable_workspaces(actor))),
+        )
+        if workspace_id is not None:
+            query = query.where(
+                or_(ModelProviderRow.workspace_id.is_(None), ModelProviderRow.workspace_id == workspace_id)
+            )
+        rows = (await session.scalars(query.order_by(ModelProviderRow.id).limit(limit + 1))).all()
+        return ProviderPage(
+            items=[provider_view(row) for row in rows[:limit]],
+            next_cursor=cursors.encode("providers", owner, rows[limit - 1].id) if len(rows) > limit else None,
+        )

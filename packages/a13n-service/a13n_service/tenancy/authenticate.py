@@ -28,6 +28,11 @@ def secret_hash(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def session_csrf(secret: str) -> str:
+    """Stable across tabs, without persisting a recoverable session secret."""
+    return hmac.new(secret.encode(), b"a13n:session:csrf:v1", hashlib.sha256).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class Login:
     principal: Principal
@@ -60,7 +65,8 @@ async def login(storage: Storage, *, email: str, password: str, session_seconds:
         await run_sync(PasswordHasher().verify, password_hash, password)
     except VerificationError:
         raise ServiceError("unauthenticated", "Invalid email or password") from None
-    secret, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    secret = secrets.token_urlsafe(32)
+    csrf = session_csrf(secret)
     async with transaction(storage) as session:
         current = await session.get(PasswordRow, principal_id, with_for_update=True)
         if current is None or current.hash != password_hash:

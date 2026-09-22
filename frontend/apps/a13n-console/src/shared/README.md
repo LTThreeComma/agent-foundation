@@ -36,7 +36,7 @@ Everything that renders many resources.
 
 State that the user has to read.
 
-- `StatePill` — maps a domain state to a semantic `StatusPill` and translates it through `state.<value>`. This is the only status affordance in the console; feature pills such as the bot `SetupPill` delegate to it rather than picking their own hue.
+- `StatePill` — maps a domain state to a semantic `StatusPill` and translates it through `state.<value>`. Feature screens use the shared state mapping rather than choosing their own hue.
 - `ErrorNotice` — inline, beside the form or collection that owns the failure, with an optional retry.
 - `ErrorToast` — for isolated action results; it self-dismisses with its owner.
 - `ErrorPage` — reserved for views that cannot function at all.
@@ -88,7 +88,7 @@ How a resource presents itself.
 
 ## `shared/` root
 
-Infrastructure with no visual surface: `api.ts` (typed request helpers and pagination), `idempotency.ts`, `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `authorization-link.tsx`, `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
+Infrastructure with no visual surface: `idempotency.ts`, `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
 
 ## Page anatomies
 

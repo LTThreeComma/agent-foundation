@@ -18,8 +18,7 @@ from a13n_service.runs.policy import AcceptedIntent, AdmissionPolicy
 from a13n_service.runs.schemas import AgentConfig, NewThread, RunOptions, RunView, Submission, Submitted
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, authorize, execution_authority
-from a13n_service.tenancy.grants import principal_for
-from a13n_service.tenancy.tables import WorkspaceRow
+from a13n_service.tenancy.grants import principal_for, resolve_workspace
 
 
 async def replay(session: AsyncSession, actor: Principal, workspace_id: str, key: str, digest: str) -> Submitted | None:
@@ -210,9 +209,8 @@ async def submit(
     scope: Scope | None = None
     try:
         async with transaction(storage) as session:
-            workspace = await session.get(WorkspaceRow, workspace_id)
-            if workspace is None:
-                raise ServiceError("not_found", "Workspace was not found")
+            workspace = await resolve_workspace(session, workspace_id)
+            workspace_id = workspace.id
             scope = Scope(workspace.organization_id, workspace.id)
             authorize(actor, scope, "run")
             if prior := await replay(session, actor, workspace_id, request_key, digest):

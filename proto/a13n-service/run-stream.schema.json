@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "ControlPayload": {
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cursor"
+        },
+        "display_version": {
+          "title": "Display Version",
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "minimum": 0,
+          "title": "Retry After Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "display_version",
+        "cursor",
+        "retry_after_ms"
+      ],
+      "title": "ControlPayload",
+      "type": "object"
+    },
+    "DataPayload": {
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "event": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Event",
+          "type": "object"
+        },
+        "event_sequence": {
+          "minimum": 1,
+          "title": "Event Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt_number",
+        "event_sequence",
+        "event"
+      ],
+      "title": "DataPayload",
+      "type": "object"
+    },
+    "JsonValue": {}
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/DataPayload"
+    },
+    {
+      "$ref": "#/$defs/ControlPayload"
+    }
+  ]
+}

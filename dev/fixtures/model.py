@@ -70,6 +70,8 @@ async def completion(request: Request):
             "已收到你的消息。这里使用虚构内容，方便检查排版、交互与运行记录。\n\n" + document.split("\n\n", 1)[-1][:220]  # noqa: RUF001
         )
     )
+    if "[steer-proof]" in prompt:
+        text = "Revised answer: amber." if "[steer-update]" in prompt else "Initial answer: cobalt."
     if tool_result is not None:
         text = (
             "## Local tool result\n\nThe local fixture returned:\n\n```json\n" + str(tool_result) + "\n```\n\n" + text
@@ -134,8 +136,9 @@ async def completion(request: Request):
                 yield usage_chunk
             yield "data: [DONE]\n\n"
             return
-        for offset in range(0, len(text), 60):
-            yield await emit({"content": text[offset : offset + 60]})
+        chunk_size = 8 if "[steer-proof]" in prompt else 60
+        for offset in range(0, len(text), chunk_size):
+            yield await emit({"content": text[offset : offset + chunk_size]})
             if "[slow]" in prompt:
                 await anyio.sleep(0.3)
         yield await emit({}, "stop")

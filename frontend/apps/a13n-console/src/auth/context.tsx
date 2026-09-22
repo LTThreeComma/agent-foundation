@@ -1,143 +1,110 @@
-import { createClient, type Client } from "../service-client";
-import {
-  MutationCache,
-  QueryCache,
-  QueryClient,
-  QueryClientProvider,
-  useQuery,
-} from "@tanstack/react-query";
 import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  ApiError,
+  createClient,
   data,
-  isUnauthorized,
-  representation,
-  type Schema,
-} from "../shared/api";
+  type Client,
+  type components,
+} from "../service-client";
 
-export interface IdentityData {
-  user: ReturnType<typeof representation<Schema["User"]>>;
-  organizations: Schema["Organization"][];
-}
+type User = components["schemas"]["Profile"];
+type Identity = {
+  client: Client;
+  user: User | null;
+  pending: boolean;
+  error: unknown;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+  restore: () => Promise<void>;
+};
+const Context = createContext<Identity | null>(null);
 
-const ClientContext = createContext<Client | null>(null);
-const AuthContext = createContext<ReturnType<typeof useIdentity> | null>(null);
-const queryClient = new QueryClient({
-  queryCache: new QueryCache({
-    onError: (error, query) => {
-      if (query.queryKey[0] !== "identity") revalidateSession(error);
-    },
-  }),
-  mutationCache: new MutationCache({ onError: revalidateSession }),
-  defaultOptions: {
-    queries: { retry: false, staleTime: 15_000 },
-    mutations: { retry: false },
-  },
-});
-export function revalidateSession(error: unknown) {
-  if (
-    isUnauthorized(error) &&
-    !isUnauthorized(queryClient.getQueryState(["identity"])?.error)
-  )
-    void queryClient.invalidateQueries({ queryKey: ["identity"] });
-}
-
-function useIdentity(client: Client, renew: () => void) {
-  const query = useQuery<IdentityData>({
-    queryKey: ["identity"],
-    queryFn: async ({ signal }) => {
-      const [user, csrf, organizations] = await Promise.all([
-        client.http.GET("/api/v1/users/me", { signal }).then(representation),
-        client.http.GET("/api/v1/auth/csrf", { signal }).then(data),
-        client.http.GET("/api/v1/organizations", { signal }).then(data),
-      ]);
-      client.setCsrfToken(csrf.csrf_token);
-      return { user, organizations: organizations.items };
-    },
-  });
-  useEffect(() => {
-    if (!isUnauthorized(query.error)) return;
-    client.setCsrfToken(undefined);
-    const otherQueries = {
-      predicate: (query: { queryKey: readonly unknown[] }) =>
-        query.queryKey[0] !== "identity",
-    };
-    void queryClient.cancelQueries(otherQueries);
-    queryClient.removeQueries(otherQueries);
-    queryClient.getMutationCache().clear();
-  }, [client, query.error]);
-  return {
-    ...query,
-    anonymous: isUnauthorized(query.error),
-    refresh: () => queryClient.invalidateQueries({ queryKey: ["identity"] }),
-    authenticated: (csrf: string) => {
-      client.setCsrfToken(csrf);
-      queryClient.clear();
-      void query.refetch();
-    },
-    logout: async () => {
-      try {
-        await client.http.POST("/api/v1/auth/logout");
-      } catch (error) {
-        if (!isUnauthorized(error)) throw error;
-      }
-      client.close();
-      queryClient.clear();
-      renew();
-    },
-  };
-}
-function Identity({
-  children,
-  renew,
-}: {
-  children: ReactNode;
-  renew: () => void;
-}) {
-  const identity = useIdentity(useClient(), renew);
-  return (
-    <AuthContext.Provider value={identity}>{children}</AuthContext.Provider>
-  );
-}
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [client, setClient] = useState(() =>
-    createClient({
-      baseUrl: window.location.origin,
-      auth: { type: "session" },
-    }),
+  const [client] = useState(() =>
+    createClient({ baseUrl: location.origin, auth: { type: "session" } }),
   );
-  useEffect(() => () => client.close(), [client]);
+  const [queries] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 60_000 } },
+      }),
+  );
+  const [user, setUser] = useState<User | null>(null);
+  const currentUser = useRef<string | null>(null);
+  const observation = useRef(0);
+  const [pending, setPending] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+  async function restore(background = false) {
+    const version = ++observation.current;
+    if (!background) setPending(true);
+    setError(null);
+    try {
+      const session = data(await client.http.GET("/api/v1/auth/session"));
+      if (version !== observation.current) return;
+      if (currentUser.current !== session.user.id) queries.clear();
+      currentUser.current = session.user.id;
+      client.setCsrfToken(session.csrf_token);
+      setUser(session.user);
+    } catch (failure) {
+      if (version !== observation.current) return;
+      if (
+        background &&
+        !(failure instanceof ApiError && failure.status === 401)
+      )
+        return;
+      queries.clear();
+      client.setCsrfToken(undefined);
+      currentUser.current = null;
+      setUser(null);
+      if (!(failure instanceof ApiError && failure.status === 401))
+        setError(failure);
+    } finally {
+      if (version === observation.current) setPending(false);
+    }
+  }
+  useEffect(() => {
+    void restore();
+    const onFocus = () => {
+      void restore(true);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      observation.current += 1;
+      window.removeEventListener("focus", onFocus);
+      queries.clear();
+      client.close();
+    };
+  }, [client, queries]);
+  async function login(email: string, password: string) {
+    await client.http.POST("/api/v1/auth/login", { body: { email, password } });
+    queries.clear();
+    await restore();
+  }
+  async function logout() {
+    await client.http.POST("/api/v1/auth/logout");
+    observation.current += 1;
+    await queries.cancelQueries();
+    queries.clear();
+    client.setCsrfToken(undefined);
+    currentUser.current = null;
+    setUser(null);
+  }
   return (
-    <QueryClientProvider client={queryClient}>
-      <ClientContext.Provider value={client}>
-        <Identity
-          renew={() =>
-            setClient(
-              createClient({
-                baseUrl: window.location.origin,
-                auth: { type: "session" },
-              }),
-            )
-          }
-        >
-          {children}
-        </Identity>
-      </ClientContext.Provider>
-    </QueryClientProvider>
+    <Context value={{ client, user, pending, error, login, logout, restore }}>
+      <QueryClientProvider client={queries}>{children}</QueryClientProvider>
+    </Context>
   );
-}
-export function useClient() {
-  const client = useContext(ClientContext);
-  if (!client) throw new Error("Missing client provider");
-  return client;
 }
 export function useAuth() {
-  const auth = useContext(AuthContext);
-  if (!auth) throw new Error("Missing identity provider");
-  return auth;
+  const context = useContext(Context);
+  if (!context) throw new Error("AuthProvider is required");
+  return context;
 }

@@ -313,3 +313,75 @@ async def test_running_authority_changes_cancel_a_real_outstanding_request(live_
         assert storage.engine.pool.checkedout() == 0
     finally:
         await storage.close()
+
+
+@pytest.mark.parametrize("model_url", ["live"], indirect=True)
+async def test_steer_preserves_two_distinct_live_and_durable_responses(live_service):
+    service = live_service
+    client, path = service.client, service.workspace_path
+    submitted = await client.post(
+        path + "/threads",
+        headers={"Idempotency-Key": "steer-display-source"},
+        json={
+            "kind": "message",
+            "agent_id": service.agent_id,
+            "payload": {"content": [{"type": "text", "text": "[slow] [interruptible] [steer-proof] First question"}]},
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    result = submitted.json()
+    run_id, thread_id = result["run"]["id"], result["thread_id"]
+    items_url = f"{path}/runs/{run_id}/items"
+    async with asyncio.timeout(30):
+        while True:
+            initial = (await client.get(items_url)).json()
+            if initial["cursor"] and initial["segments"]:
+                replay = AttemptStream(service.redis, run_id, initial["segments"][-1]["attempt_number"], Bounds())
+                if await service.redis.exists(*replay.keys) == 2:
+                    break
+            await asyncio.sleep(0.02)
+        steered = await client.post(
+            f"{path}/threads/{thread_id}/inbox",
+            headers={"Idempotency-Key": "steer-display-update"},
+            json={
+                "kind": "message",
+                "delivery": "steer",
+                "agent_id": service.agent_id,
+                "payload": {"content": [{"type": "text", "text": "[steer-update] Revise the answer"}]},
+            },
+        )
+        assert steered.status_code == 201, steered.text
+        events = []
+        while True:
+            final = (await client.get(items_url)).json()
+            if final["complete"]:
+                break
+            async with client.stream(
+                "GET", f"{path}/runs/{run_id}/events", params={"cursor": final["cursor"]}
+            ) as stream:
+                assert stream.status_code == 200
+                kind = None
+                async for line in stream.aiter_lines():
+                    if line.startswith("event: "):
+                        kind = line.removeprefix("event: ")
+                    elif line.startswith("data: ") and kind == "data":
+                        events.append(json.loads(line.removeprefix("data: "))["event"])
+            await asyncio.sleep(0.02)
+    assert final["status"] == "completed"
+    texts = [item for segment in final["segments"] for item in segment["items"] if item["type"] == "text"]
+    assert [item["text"] for item in texts] == ["Initial answer: cobalt.", "Revised answer: amber."]
+    assert len({item["id"] for item in texts}) == 2
+    assert all(item["complete"] for item in texts)
+    # A checkpoint may trim frames before the reader polls; reconnects start from
+    # fresh durable boundaries. Every actually delivered text frame must retain
+    # the same request identity and content as its durable message.
+    chunks = [event for event in events if event["type"] == "TEXT_MESSAGE_CONTENT"]
+    assert chunks
+    by_id = {item["id"]: item["text"] for item in texts}
+    assert all(event["messageId"] in by_id and event["delta"] in by_id[event["messageId"]] for event in chunks)
+    starts = [event["messageId"] for event in events if event["type"] == "TEXT_MESSAGE_START"]
+    assert len(starts) == len(set(starts))
+    assert [item["id"] for item in final["inputs"]] == [result["entry"]["id"], steered.json()["entry"]["id"]]
+    assert all(item["status"] == "consumed" for item in final["inputs"])
+    reopened = (await client.get(items_url)).json()
+    assert reopened["segments"] == final["segments"] and reopened["inputs"] == final["inputs"]

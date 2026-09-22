@@ -55,3 +55,13 @@ class RevisionView(BaseModel):
     config: AgentConfig
     digest: str
     note: str | None
+
+
+class AgentPage(BaseModel):
+    items: list[AgentView]
+    next_cursor: str | None
+
+
+class RevisionPage(BaseModel):
+    items: list[RevisionView]
+    next_cursor: str | None

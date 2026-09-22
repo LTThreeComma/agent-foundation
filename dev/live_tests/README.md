@@ -4,4 +4,4 @@ Run `make live-test` with Docker available. The journey owns disposable PostgreS
 
 The command runs `packages/a13n-service/tests/test_live_process.py`. Additional pytest arguments can be passed to `uv run --locked python -m dev.live_tests`. No configured application database, old Service store or shared deployment is used.
 
-This journey covers the implemented execution spine. The Service suite separately exercises exact incorporation/checkpoint crash cuts and public reconstruction. Console recovery, broader resource capabilities and the remaining recovery matrix are still under implementation; this journey alone does not establish full rewrite acceptance.
+This journey covers the implemented execution spine. The Service suite separately exercises exact incorporation/checkpoint crash cuts and public reconstruction. The [Console browser journey](console-journey.md) separately covers browser authentication, authoring, ordinary execution and replay recovery. Broader resource capabilities and the remaining recovery matrix remain open; this journey alone does not establish full rewrite acceptance.

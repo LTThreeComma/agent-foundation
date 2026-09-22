@@ -21,6 +21,7 @@ from a13n_service.tenancy.grants import workspace_scope
 
 
 class RunItems(BaseModel):
+    workspace_id: str
     run_id: str
     status: RunStatus
     current_attempt_id: str | None
@@ -56,7 +57,9 @@ async def items(
 ) -> RunItems:
     for _ in range(3):
         async with short_session(storage) as session:
-            await workspace_scope(session, actor, workspace_id, "read")
+            scope = await workspace_scope(session, actor, workspace_id, "read")
+            assert scope.workspace_id is not None
+            workspace_id = scope.workspace_id
             row = await session.get(RunRow, run_id)
             if row is None or row.workspace_id != workspace_id:
                 raise ServiceError("not_found", "Run was not found")
@@ -138,6 +141,7 @@ async def items(
             (segment.event_sequence for segment in segments if segment.attempt_id == run.current_attempt_id), 0
         )
         return RunItems(
+            workspace_id=workspace_id,
             run_id=run.id,
             status=run.status,
             current_attempt_id=run.current_attempt_id,
