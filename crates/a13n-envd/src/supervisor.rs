@@ -16,6 +16,8 @@ const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LaunchPlan {
+    #[serde(default)]
+    pub(crate) drop_supervisor_capabilities: bool,
     pub(crate) executable: PathBuf,
     pub(crate) arguments: Vec<String>,
     pub(crate) cwd: PathBuf,
@@ -179,6 +181,15 @@ impl StreamClosures {
 }
 
 pub(crate) async fn run_internal() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::egress::namespace::protect_process()?;
+        // Reap orphaned group members ourselves, including sudo's root children.
+        // A sandbox PID 1 need not be a service manager or a reliable reaper.
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     let stdin = tokio::io::stdin();
     let mut requests = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
@@ -223,6 +234,12 @@ async fn run_payload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     configure_command_tree(&mut command);
+    #[cfg(target_os = "linux")]
+    if plan.drop_supervisor_capabilities {
+        unsafe {
+            command.pre_exec(crate::execution::clear_payload_capabilities);
+        }
+    }
 
     let (mut child, tree) = match spawn_command_tree(&mut command).await {
         Ok(started) => started,
@@ -865,6 +882,10 @@ async fn cleanup_tree(tree: &CommandTree, child: &mut Child) -> bool {
     let _ = child.start_kill();
     let deadline = tokio::time::Instant::now() + CLEANUP_GRACE;
     loop {
+        #[cfg(target_os = "linux")]
+        // The initial child has already been awaited. These are now our adopted
+        // descendants, not Tokio-owned direct children or sibling commands.
+        while unsafe { libc::waitpid(group, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
         let result = unsafe { libc::kill(group, 0) };
         if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             return true;
