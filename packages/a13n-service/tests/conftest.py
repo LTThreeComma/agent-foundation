@@ -45,7 +45,7 @@ def model_url(request):
 
 
 @pytest.fixture
-async def public_service(database, redis_url, tmp_path, model_url, agent_configurator):
+async def public_service(database, redis_url, tmp_path, model_url, agent_configurator, request):
     """A configured public agent, using the same resource APIs as an external client."""
     from types import SimpleNamespace
 
@@ -59,7 +59,7 @@ async def public_service(database, redis_url, tmp_path, model_url, agent_configu
         settings=Settings(
             database=database,
             redis={"url": redis_url},
-            control={"inbox_count": 3, "scan_seconds": 60},
+            control={"inbox_count": 3, "scan_seconds": getattr(request, "param", {}).get("scan_seconds", 60)},
             objects={"root": tmp_path / "objects"},
             providers={"private_cidrs": ["127.0.0.0/8"], "http_origins": [model_url.removesuffix("/v1")]},
         ),
@@ -131,3 +131,11 @@ def agent_configurator(model_url):
         return response.json()["id"]
 
     return configure
+
+
+@pytest.fixture
+def mcp_url(tmp_path):
+    from dev.fixtures.process import fixture_process
+
+    with fixture_process("dev.fixtures.mcp", arguments=("--database", str(tmp_path / "mcp.sqlite"))) as url:
+        yield url

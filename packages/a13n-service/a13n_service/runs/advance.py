@@ -3,6 +3,7 @@
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import aliased
 
+from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage, transaction
 from a13n_service.runs import events
 from a13n_service.runs.acceptance import accept
@@ -10,7 +11,7 @@ from a13n_service.runs.policy import AdmissionPolicy
 from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
 
 
-async def advance_one(storage: Storage, *, max_attempts: int, policy: AdmissionPolicy | None) -> bool:
+async def advance_one(storage: Storage, *, max_attempts: int, keys: KeyRing, policy: AdmissionPolicy | None) -> bool:
     latest = aliased(RunRow)
     async with transaction(storage) as session:
         thread = await session.scalar(
@@ -35,7 +36,7 @@ async def advance_one(storage: Storage, *, max_attempts: int, policy: AdmissionP
         )
         if thread is None:
             return False
-        _, facts = await accept(session, thread, None, max_attempts=max_attempts, policy=policy)
+        _, facts = await accept(session, thread, None, max_attempts=max_attempts, keys=keys, policy=policy)
         thread.updated_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         await events.flush(session, facts)
         return True

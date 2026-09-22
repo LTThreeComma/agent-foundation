@@ -15,6 +15,7 @@ from a13n_service.infra.db import Storage
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
 from a13n_service.infra.objects.local import LocalObjects
+from a13n_service.providers.tools import ToolSourceDefinition
 from a13n_service.runs import attempts, seal, selection, wakeups
 from a13n_service.runs.execute import execute
 from a13n_service.runs.policy import AdmissionPolicy, CallCheck
@@ -33,11 +34,13 @@ class Worker:
         *,
         config: Settings,
         catalog: ProviderCatalog[ModelProviderDefinition],
+        tool_catalog: ProviderCatalog[ToolSourceDefinition],
         keys: KeyRing,
         endpoint_policy: EndpointPolicy,
         admission: AdmissionPolicy | None,
     ):
         self.storage, self.objects, self.redis, self.config = storage, objects, redis, config
+        self.tool_catalog = tool_catalog
         self.catalog, self.keys, self.endpoint_policy, self.admission = catalog, keys, endpoint_policy, admission
         self.id = new_object_id("wrk")
         self._active: set[asyncio.Task[None]] = set()
@@ -70,6 +73,7 @@ class Worker:
                 config=self.config,
                 redis=self.redis,
                 catalog=self.catalog,
+                tool_catalog=self.tool_catalog,
                 keys=self.keys,
                 endpoint_policy=self.endpoint_policy,
                 admission=self.admission,

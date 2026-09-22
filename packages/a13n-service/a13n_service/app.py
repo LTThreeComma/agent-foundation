@@ -46,6 +46,7 @@ def build_app(
         raise ValueError(f"Unknown process role: {role}")
     key_ring = KeyRing(active_key_id=config.encryption.active_key_id, keys=config.encryption.keys)
     model_catalog = ProviderCatalog(distribution.model_providers)
+    tool_catalog = ProviderCatalog(distribution.tool_sources)
     endpoint_policy = EndpointPolicy.from_operator_allowlist(**config.providers.model_dump())
     distribution.metadata()
     expected = heads(distribution)
@@ -72,6 +73,7 @@ def build_app(
         app.state.admission = distribution.admission
         app.state.key_ring = key_ring
         app.state.model_catalog = model_catalog
+        app.state.tool_catalog = tool_catalog
         app.state.endpoint_policy = endpoint_policy
         app.state.redis = redis
         app.state.authentication = config.auth
@@ -95,6 +97,7 @@ def build_app(
                     redis,
                     config=config,
                     catalog=model_catalog,
+                    tool_catalog=tool_catalog,
                     keys=key_ring,
                     endpoint_policy=endpoint_policy,
                     admission=distribution.admission,

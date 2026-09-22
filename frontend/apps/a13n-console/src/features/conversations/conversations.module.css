@@ -125,3 +125,17 @@
     flex-wrap: wrap;
   }
 }
+
+.tool {
+  background: var(--a13n-surface);
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.tool summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}

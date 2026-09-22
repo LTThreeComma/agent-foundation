@@ -14,6 +14,7 @@ export type LiveText = { id: string; type: "text" | "reasoning"; text: string };
 export type Observation = {
   snapshot: RunItems;
   live: LiveText[];
+  toolEvents?: Record<string, unknown>[];
   connection: "live" | "recovering" | "complete";
 };
 
@@ -143,6 +144,7 @@ export async function observeRun(
         throw new ProtocolError("The Service returned an empty event stream.");
       let sequence = segment.event_sequence ?? 0;
       let live: LiveText[] = [];
+      const toolEvents: Record<string, unknown>[] = [];
       let characters = 0;
       let count = 0;
       const started = Date.now();
@@ -178,7 +180,21 @@ export async function observeRun(
           received = { attempt: segment.attempt_id, sequence };
         }
         live = appendText(live, value.event);
-        publish({ snapshot: latest, live, connection: "live" });
+        if (
+          typeof value.event.type === "string" &&
+          value.event.type.startsWith("TOOL_CALL_") &&
+          !(
+            isRecord(value.event.metadata) &&
+            value.event.metadata.display === false
+          )
+        )
+          toolEvents.push(value.event);
+        publish({
+          snapshot: latest,
+          live,
+          toolEvents: [...toolEvents],
+          connection: "live",
+        });
         if (Date.now() - started > 1000) break;
       }
     } catch (error) {

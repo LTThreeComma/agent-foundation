@@ -9,6 +9,7 @@ import { Page, SaveBar, Section } from "../../shared/page";
 import { ResourceTable, Pagination, useCursor } from "../../shared/collection";
 import { ErrorNotice, ErrorPage, Loading } from "../../shared/feedback";
 import { ModelSelector } from "../models/selector";
+import { ConnectionSelector } from "../connections/selector";
 import { RevisionHistory } from "./revisions";
 import styles from "./agents.module.css";
 
@@ -319,6 +320,13 @@ function AgentEditor({
               </FormField>
             </div>
           </div>
+        </Section>
+        <Section title={t("Tools")}>
+          <ConnectionSelector
+            value={config.connections ?? []}
+            onChange={(connections) => setConfig({ ...config, connections })}
+            disabled={!editable || pending}
+          />
         </Section>
         <ErrorNotice error={error} />
         {!!error && baseline.head && (

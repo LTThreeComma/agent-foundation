@@ -19,6 +19,7 @@ _ID_RANDOM_BYTES = {
             "ap",
             "cconn",
             "cnr",
+            "conn",
             "envp",
             "envtpl",
             "hsub",

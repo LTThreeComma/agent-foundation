@@ -7,13 +7,16 @@ from sqlalchemy import String, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
 from a13n_service.resources.agents.service import validate_configuration
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.connections.scope import connection_scope, validate_context
 from a13n_service.runs import events
 from a13n_service.runs.input_views import project
+from a13n_service.runs.options import compatible
 from a13n_service.runs.policy import AcceptedIntent, AdmissionPolicy
 from a13n_service.runs.schemas import AgentConfig, NewThread, RunOptions, RunView, Submission, Submitted
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
@@ -55,6 +58,7 @@ async def accept(
     entry: InboxEntryRow | None,
     *,
     max_attempts: int,
+    keys: KeyRing,
     policy: AdmissionPolicy | None = None,
     actor: Principal | None = None,
 ) -> tuple[RunRow | None, list[events.EventRow]]:
@@ -90,7 +94,7 @@ async def accept(
                     )
                     observed[principal.id] = principal
                 return await _accept_entry(
-                    session, thread, candidate, principal, max_attempts=max_attempts, policy=policy
+                    session, thread, candidate, principal, max_attempts=max_attempts, keys=keys, policy=policy
                 )
         except ServiceError as error:
             if error.code not in {
@@ -117,6 +121,7 @@ async def _accept_entry(
     principal: Principal,
     *,
     max_attempts: int,
+    keys: KeyRing,
     policy: AdmissionPolicy | None = None,
 ) -> tuple[RunRow | None, list[events.EventRow]]:
     """Caller owns the thread lock; all creation paths use the same frozen selection."""
@@ -136,6 +141,15 @@ async def _accept_entry(
     config = AgentConfig.model_validate(revision.config)
     await validate_configuration(session, principal, Scope(thread.organization_id, thread.workspace_id), config)
     options = RunOptions.model_validate(entry.options)
+    await validate_context(
+        session,
+        principal,
+        Scope(thread.organization_id, thread.workspace_id),
+        config,
+        options.mcp_headers,
+        keys=keys,
+        authority=authority,
+    )
     parent_id = thread.head_run_id or thread.origin_run_id
     if parent_id is not None:
         parent = await session.get(RunRow, parent_id)
@@ -197,6 +211,7 @@ async def submit(
     max_entries: int,
     max_bytes: int,
     max_attempts: int,
+    keys: KeyRing,
     policy: AdmissionPolicy | None = None,
 ) -> Submitted:
     if not request_key or len(request_key.encode()) > 128 or any(ord(c) < 32 for c in request_key):
@@ -284,6 +299,27 @@ async def submit(
                 revision = await session.get(AgentRevisionRow, body.agent_revision_id)
                 if revision is None or revision.agent_id != agent.id:
                     raise ServiceError("invalid_argument", "Agent revision was not found")
+            revision_id = body.agent_revision_id or agent.default_revision_id
+            if thread.current_run_id and body.delivery == "steer":
+                active = await session.get(RunRow, thread.current_run_id)
+                if (
+                    active is not None
+                    and active.agent_id == body.agent_id
+                    and body.agent_revision_id in {None, active.agent_revision_id}
+                ):
+                    active_revision = await session.get(AgentRevisionRow, active.agent_revision_id)
+                    assert active_revision is not None
+                    active_config = AgentConfig.model_validate(active_revision.config)
+                    if body.options.mcp_headers.keys() <= connection_scope(active_config).keys() and compatible(
+                        active_config, body.options, RunOptions.model_validate(active.options)
+                    ):
+                        revision_id = active.agent_revision_id
+            revision = await session.get(AgentRevisionRow, revision_id) if revision_id else None
+            if revision is None or revision.agent_id != agent.id:
+                raise ServiceError("invalid_argument", "Agent revision was not found")
+            await validate_context(
+                session, actor, scope, AgentConfig.model_validate(revision.config), body.options.mcp_headers, keys=keys
+            )
             entry = InboxEntryRow(
                 id=new_object_id("inb"),
                 organization_id=scope.organization_id,
@@ -306,7 +342,9 @@ async def submit(
             )
             session.add(entry)
             await session.flush()
-            _, facts = await accept(session, thread, entry, max_attempts=max_attempts, policy=policy, actor=actor)
+            _, facts = await accept(
+                session, thread, entry, max_attempts=max_attempts, keys=keys, policy=policy, actor=actor
+            )
             # Every visible append changes the thread version, even when already busy.
             thread.updated_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
             await session.flush()

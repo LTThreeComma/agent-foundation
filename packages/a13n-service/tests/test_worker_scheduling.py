@@ -29,6 +29,7 @@ def worker(service, *, scan):
         app.state.redis,
         config=config,
         catalog=app.state.model_catalog,
+        tool_catalog=app.state.tool_catalog,
         keys=app.state.key_ring,
         endpoint_policy=app.state.endpoint_policy,
         admission=app.state.admission,

@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import Literal
 
 from a13n_harness import HarnessState
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from a13n_service.infra.ids import ObjectId
 from a13n_service.resources.agents.schemas import AgentConfig, Label
+from a13n_service.resources.connections.headers import normalize_headers
 from a13n_service.tenancy.authorize import ExecutionAuthority
 
 type RunStatus = Literal["accepted", "running", "waiting", "completed", "failed", "cancelled"]
@@ -33,6 +34,15 @@ class RunOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     labels: dict[Label, Label] = Field(default_factory=dict, max_length=32)
     max_usage: UsageLimit | None = None
+    mcp_headers: dict[ObjectId, dict[str, str]] = Field(default_factory=dict, max_length=32)
+
+    @field_validator("mcp_headers")
+    @classmethod
+    def normalized_headers(cls, value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        normalized = {connection: normalize_headers(headers) for connection, headers in value.items()}
+        if sum(len(name) + len(item) for headers in normalized.values() for name, item in headers.items()) > 16384:
+            raise ValueError("Caller context exceeds its byte limit")
+        return normalized
 
 
 class Submission(BaseModel):

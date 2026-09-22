@@ -10,8 +10,12 @@ from sqlalchemy import MetaData, Table
 
 from a13n_service.infra.audit import AuditEventRow
 from a13n_service.infra.db import Base
+from a13n_service.providers.mcp import DEFINITION as MCP
+from a13n_service.providers.tools import ToolSourceDefinition
 from a13n_service.resources.agents.routes import router as agents_router
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.connections.routes import router as connections_router
+from a13n_service.resources.connections.tables import ConnectionRow
 from a13n_service.resources.models.routes import catalog_router
 from a13n_service.resources.models.routes import router as models_router
 from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
@@ -32,6 +36,7 @@ class Distribution:
     migrations: tuple[Path, ...]
     routers: tuple[APIRouter, ...] = ()
     model_providers: tuple[ModelProviderDefinition, ...] = ()
+    tool_sources: tuple[ToolSourceDefinition, ...] = ()
     admission: AdmissionPolicy | None = None
 
     def metadata(self) -> MetaData:
@@ -59,6 +64,7 @@ OSS = Distribution(
         TokenRow,
         ModelProviderRow,
         ModelRow,
+        ConnectionRow,
         AgentRow,
         AgentRevisionRow,
         SessionRow,
@@ -70,7 +76,8 @@ OSS = Distribution(
         EventRow,
         UsageRow,
     ),
-    routers=(tenancy_router, models_router, catalog_router, agents_router, runs_router),
+    routers=(tenancy_router, models_router, catalog_router, agents_router, connections_router, runs_router),
     model_providers=(OPENAI,),
+    tool_sources=(MCP,),
     migrations=(Path(__file__).parent / "migrations" / "versions",),
 )

@@ -1,6 +1,6 @@
 # Service HTTP reference
 
-This reference is generated from the current new Service OpenAPI export. It covers authentication, model and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
+This reference is generated from the current new Service OpenAPI export. It covers authentication, model, Connection and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
 
 Download [the complete OpenAPI JSON](../assets/reference/service-openapi.json). This contract does not advertise legacy API or event schemas.
 
@@ -208,6 +208,100 @@ Audit Events.
 Responses:
 
 - **200** — Successful Response (`application/json: AuditPage`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+## connections
+
+### `GET /api/v1/workspaces/{workspace_id}/connections`
+
+List Connections.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default            |
+| -------------- | -------- | -------- | -------------- | ---------------------------------- |
+| `workspace_id` | path     | true     | string         | —                                  |
+| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
+| `cursor`       | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ConnectionPage`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/connections`
+
+Create Connection.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `ConnectionCreate`.
+
+Responses:
+
+- **201** — Successful Response (`application/json: ConnectionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}`
+
+Get Connection.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ConnectionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `PATCH /api/v1/workspaces/{workspace_id}/connections/{connection_id}`
+
+Update Connection.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `ConnectionUpdate`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: ConnectionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/test`
+
+Test Connection.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ConnectionTest`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools`
+
+Connection Tools.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: ConnectionTest`).
 - **422** — Validation Error (`application/json: HTTPValidationError`).
 
 ## models

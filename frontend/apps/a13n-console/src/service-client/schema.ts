@@ -309,6 +309,76 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/workspaces/{workspace_id}/connections": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Connections */
+    get: operations["list_connections_api_v1_workspaces__workspace_id__connections_get"];
+    put?: never;
+    /** Create Connection */
+    post: operations["create_connection_api_v1_workspaces__workspace_id__connections_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Connection */
+    get: operations["get_connection_api_v1_workspaces__workspace_id__connections__connection_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Connection */
+    patch: operations["update_connection_api_v1_workspaces__workspace_id__connections__connection_id__patch"];
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/test": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Test Connection */
+    post: operations["test_connection_api_v1_workspaces__workspace_id__connections__connection_id__test_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Connection Tools */
+    get: operations["connection_tools_api_v1_workspaces__workspace_id__connections__connection_id__tools_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/workspaces/{workspace_id}/runs/{run_id}": {
     parameters: {
       query?: never;
@@ -541,6 +611,11 @@ export interface components {
       /** Compaction Trigger Tokens */
       compaction_trigger_tokens?: number | null;
       /**
+       * Connections
+       * @default []
+       */
+      connections?: components["schemas"]["ConnectionSelection"][];
+      /**
        * Instructions
        * @default
        */
@@ -658,6 +733,87 @@ export interface components {
       field: string;
       mode: components["schemas"]["CredentialMode"];
     };
+    /** BearerCredential */
+    BearerCredential: {
+      /**
+       * Token
+       * Format: password
+       */
+      token: string;
+    };
+    /** @enum {string} */
+    ConnectionAuthentication: "none" | "bearer" | "headers";
+    /** ConnectionCreate */
+    ConnectionCreate: {
+      /** @default none */
+      auth?: components["schemas"]["ConnectionAuthentication"];
+      config: components["schemas"]["MCPConfig"];
+      credential?: components["schemas"]["Credential"] | null;
+      /** Name */
+      name: string;
+      /**
+       * Type
+       * @constant
+       */
+      type: "mcp";
+    };
+    /** ConnectionPage */
+    ConnectionPage: {
+      /** Items */
+      items: components["schemas"]["ConnectionView"][];
+      /** Next Cursor */
+      next_cursor: string | null;
+    };
+    /** ConnectionSelection */
+    ConnectionSelection: {
+      /** Connection Id */
+      connection_id: string;
+      /** Tools */
+      tools: string[];
+    };
+    /** ConnectionTest */
+    ConnectionTest: {
+      /** Connection Id */
+      connection_id: string;
+      /** Tools */
+      tools: components["schemas"]["ToolInfo"][];
+      /** Version */
+      version: number;
+    };
+    /** ConnectionUpdate */
+    ConnectionUpdate: {
+      auth?: components["schemas"]["ConnectionAuthentication"] | null;
+      config?: components["schemas"]["MCPConfig"] | null;
+      credential?: components["schemas"]["Credential"] | null;
+      /** Enabled */
+      enabled?: boolean | null;
+      /** Name */
+      name?: string | null;
+    };
+    /** ConnectionView */
+    ConnectionView: {
+      auth: components["schemas"]["ConnectionAuthentication"];
+      config: components["schemas"]["MCPConfig"];
+      /** Credential Configured */
+      credential_configured: boolean;
+      /** Enabled */
+      enabled: boolean;
+      /** Id */
+      id: string;
+      /** Name */
+      name: string;
+      /** Organization Id */
+      organization_id: string;
+      /** Type */
+      type: string;
+      /** Version */
+      version: number;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    Credential:
+      | components["schemas"]["BearerCredential"]
+      | components["schemas"]["HeadersCredential"];
     /**
      * CredentialMode
      * @enum {string}
@@ -704,6 +860,13 @@ export interface components {
       /** Detail */
       detail?: components["schemas"]["ValidationError"][];
     };
+    /** HeadersCredential */
+    HeadersCredential: {
+      /** Headers */
+      headers: {
+        [key: string]: string;
+      };
+    };
     /** InboxPage */
     InboxPage: {
       /** Items */
@@ -749,6 +912,18 @@ export interface components {
       csrf_token: string;
       /** Principal Id */
       principal_id: string;
+    };
+    /** MCPConfig */
+    MCPConfig: {
+      /**
+       * Recovery Retry Safe Tools
+       * @default []
+       */
+      recovery_retry_safe_tools?: string[];
+      /** Tools */
+      tools?: string[] | null;
+      /** Url */
+      url: string;
     };
     /** MessagePayload */
     MessagePayload: {
@@ -1124,6 +1299,12 @@ export interface components {
         [key: string]: string;
       };
       max_usage?: components["schemas"]["UsageLimit"] | null;
+      /** Mcp Headers */
+      mcp_headers?: {
+        [key: string]: {
+          [key: string]: string;
+        };
+      };
     };
     /** RunPage */
     RunPage: {
@@ -1306,6 +1487,17 @@ export interface components {
       version: number;
       /** Workspace Id */
       workspace_id: string;
+    };
+    /** ToolInfo */
+    ToolInfo: {
+      /** Description */
+      description: string | null;
+      /** Input Schema */
+      input_schema: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /** Name */
+      name: string;
     };
     /** UsageLimit */
     UsageLimit: {
@@ -2057,6 +2249,207 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["AuditPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_connections_api_v1_workspaces__workspace_id__connections_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        cursor?: string | null;
+      };
+      header?: never;
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_connection_api_v1_workspaces__workspace_id__connections_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ConnectionCreate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_connection_api_v1_workspaces__workspace_id__connections__connection_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_connection_api_v1_workspaces__workspace_id__connections__connection_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ConnectionUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  test_connection_api_v1_workspaces__workspace_id__connections__connection_id__test_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionTest"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  connection_tools_api_v1_workspaces__workspace_id__connections__connection_id__tools_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectionTest"];
         };
       };
       /** @description Validation Error */

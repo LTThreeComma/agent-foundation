@@ -35,7 +35,7 @@ async def test_public_inputs_execute_real_model_and_continue_sealed_head(public_
     previous_run, thread_id = None, None
     for index in range(2):
         if index:
-            assert await advance_one(app.state.storage, max_attempts=3, policy=None)
+            assert await advance_one(app.state.storage, max_attempts=3, policy=None, keys=app.state.key_ring)
         target = path + "/threads" if thread_id is None else f"{path}/threads/{thread_id}/inbox"
         submitted = await client.post(
             target,
@@ -61,6 +61,7 @@ async def test_public_inputs_execute_real_model_and_continue_sealed_head(public_
             config=config,
             redis=app.state.redis,
             catalog=app.state.model_catalog,
+            tool_catalog=app.state.tool_catalog,
             keys=app.state.key_ring,
             endpoint_policy=app.state.endpoint_policy,
             admission=app.state.admission,
@@ -148,6 +149,7 @@ async def test_actual_compaction_preserves_durable_input_receipts(public_service
         config=app.state.settings,
         redis=app.state.redis,
         catalog=app.state.model_catalog,
+        tool_catalog=app.state.tool_catalog,
         keys=app.state.key_ring,
         endpoint_policy=app.state.endpoint_policy,
         admission=app.state.admission,

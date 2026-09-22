@@ -1,6 +1,6 @@
 # Service
 
-The Service rewrite supports administrator bootstrap, secure login, workspace API keys, model-provider and model configuration, immutable agent revisions, and durable text-agent execution through the Harness. Public reads combine canonical input content with durable execution observations. Console and additional resource capabilities are still under implementation.
+The Service rewrite supports administrator bootstrap, secure login, workspace API keys, model-provider and model configuration, immutable agent revisions, and durable agent execution with Remote MCP tools through the Harness. Public reads combine canonical input content with durable execution observations. Console supports configuration, conversations and tool observations; additional resource capabilities remain under implementation.
 
 Use a new PostgreSQL database, Redis and a shared local object directory accessible to the control and worker processes. Keep these separate from old Service deployments. With an explicit configuration file, run:
 
@@ -17,6 +17,20 @@ Control serves the API and scans for expired attempts and queued successors. Wor
 
 `/healthz` reports liveness. `/readyz` checks runtime tasks, database/schema and Redis within a deadline. `/api/v1/openapi.json` describes the implemented API. Configure a provider, model and agent, then submit a message to the workspace's thread collection; use the returned run ID to read its status and items. Repeating the same submission with its `Idempotency-Key` returns the original accepted input.
 
-Run `make live-test` for a disposable CLI/bootstrap/HTTPS/control/two-worker journey with a deterministic HTTP model. This proves the implemented path, not the entire planned feature and recovery matrix. Redis observation streams, Console, environments, additional resources and remaining lifecycle operations are under development.
+Run `make live-test` for a disposable CLI/bootstrap/HTTPS/control/two-worker journey with a deterministic HTTP model. This proves the implemented path, not the entire planned feature and recovery matrix. Environments, additional resources and remaining lifecycle operations are under development.
 
 See [configuration](configuration.md), [generated settings](configuration-reference.md) and [HTTP reference](api-reference.md). Independent SDKs and the remote CLI need new-contract updates in their owning repositories.
+
+## Remote MCP tools
+
+Create a workspace Connection from Console's Connections page, or `POST /api/v1/workspaces/{workspace_id}/connections`. The current provider is `mcp`; authentication supports `none`, `bearer` and `headers`. Supply a URL in `config.url` and optionally an exact `config.tools` allowlist. Bearer credentials use `{"token":"..."}`; custom authentication uses `{"headers":{"X-API-Key":"..."}}`. Credentials are encrypted with the configured key ring and never returned by resource reads. Editing requires the resource's current ETag in `If-Match`.
+
+Test the saved Connection to discover its tools. The tools read endpoint caches discovery for30 seconds by Connection version; an explicit test always refreshes it. Execution prepares tools from the live server and refreshes the same non-authoritative cache. Cache loss does not prevent execution. In the Agent editor, select the Connection and the exact tools the Agent may use, then save a revision. Revisions retain these references and selections; they do not copy credentials or endpoint configuration. Worker execution checks current permissions, cancellation and Connection availability before external work. Editing a Connection during an established execution stops its further use; a new attempt opens a fresh client with current configuration. Disabling a Connection also stops active use.
+
+HTTP destinations obey the deployment's endpoint allowlist. MCP initialization and discovery have a 10-second deadline; calls have a 30-second deadline. Responses are bounded to 256 KiB, with no redirects, inherited proxies or compressed responses. Discovery accepts at most 128 tools, and an Agent selects at most 32 Connections. Each attempt owns separate clients and sessions.
+
+Callers can submit `options.mcp_headers`, keyed by Connection ID, for noncredential context such as `X-Conversation`. Header names normalize to lowercase. Entries must belong to the selected Agent; names used by Connection authentication and reserved transport/security headers are rejected. Values must be printable ASCII without control characters. Each Connection accepts at most 32 headers and 8 KiB; the combined header names and values are limited to 16 KiB. This context is retained in run options and checkpoints, so authentication belongs in the encrypted Connection credential. Steers must match the active revision's effective context; irrelevant inherited context does not make them incompatible.
+
+`config.recovery_retry_safe_tools` is an explicit writer assertion, defaults to empty, and must be a subset of explicit `config.tools`. An Agent cannot widen it. Remote tool hints cannot grant replay safety. Endpoint or credential changes clear prior declarations unless the writer explicitly reconfirms them in the same edit. After a worker dies with an unresolved tool call, ordinary tools receive a recorded failure explaining that their effects may have occurred. Only freshly declared retry-safe tools are eligible for automatic replay. A declaration does not guarantee exactly-once effects: a provider must actually enforce any deduplication contract. Service sends stable correlation in MCP request `_meta["a13n.service"]`, including `operation_id`, logical `run_id`, `connection_id` and original `tool_call_id`; the operation identity excludes the replacement attempt.
+
+Console displays tool arguments and results from durable run observations and preserves them across reload. OAuth, Composio and other planned tool providers are not exposed by this implementation.

@@ -26,6 +26,7 @@ import { ErrorNotice, ErrorPage, Loading } from "../shared/feedback";
 import { Pagination, useCursor } from "../shared/collection";
 import { useAppearance } from "./appearance";
 import { useScope } from "./workspace";
+import { ConnectionsPage } from "../features/connections/page";
 import { AgentsPage, AgentPage } from "../features/agents/pages";
 import { ModelsPage } from "../features/models/page";
 import {
@@ -137,6 +138,7 @@ function Navigation({ close }: { close?: () => void }) {
         {[
           ["sessions", "Sessions"],
           ["agents", "Agents"],
+          ["connections", "Connections"],
           ["models", "Models"],
         ].map(([path, label]) => (
           <NavLink
@@ -224,6 +226,7 @@ export function Shell() {
         <Routes>
           <Route index element={<Navigate to="sessions" replace />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="connections" element={<ConnectionsPage />} />
           <Route path="agents/new" element={<AgentPage />} />
           <Route path="agents/:agentRef" element={<AgentPage />} />
           <Route path="models" element={<ModelsPage />} />

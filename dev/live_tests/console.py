@@ -26,6 +26,7 @@ from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
 from dev.fixtures.model import model_process
+from dev.fixtures.process import fixture_process
 
 ROOT = Path(__file__).resolve().parents[2]
 PASSWORD = "console-fixture-password"
@@ -77,7 +78,7 @@ async def initialize(database: Database):
         await storage.close()
 
 
-async def serve(directory: Path, database: Database, redis_url: str, model_url: str) -> None:
+async def serve(directory: Path, database: Database, redis_url: str, model_url: str, mcp_url: str) -> None:
     initialized = await initialize(database)
     control_port, worker_port, console_port = [available_port() for _ in range(3)]
     environment = {name: value for name, value in os.environ.items() if not name.startswith("A13N_")}
@@ -103,7 +104,7 @@ active_key_id = "fixture"
 fixture = {json.dumps(encryption_key)}
 [providers]
 private_cidrs = ["127.0.0.0/8"]
-http_origins = [{json.dumps(model_url.removesuffix("/v1"))}]
+http_origins = [{json.dumps(model_url.removesuffix("/v1"))}, {json.dumps(mcp_url)}]
 [worker]
 slots = 2
 lease_seconds = 5
@@ -172,6 +173,7 @@ scan_seconds = 0.2
             state = {
                 "url": url,
                 "model_url": model_url,
+                "mcp_url": mcp_url,
                 "workspace_id": initialized.workspace_id,
                 "organization_id": initialized.organization_id,
                 "redis_url": redis_url,
@@ -209,6 +211,7 @@ def main() -> None:
         PostgresContainer("postgres:17-alpine", driver="psycopg") as postgres,
         RedisContainer("redis:8-alpine") as redis,
         model_process(port=0) as model_url,
+        fixture_process("dev.fixtures.mcp", arguments=("--database", str(directory / "mcp.sqlite"))) as mcp_url,
     ):
         database = Database(url=SecretStr(postgres.get_connection_url()))
         upgrade(database, OSS)
@@ -218,6 +221,7 @@ def main() -> None:
                 database,
                 f"redis://{redis.get_container_host_ip()}:{redis.get_exposed_port(6379)}/0",
                 model_url,
+                mcp_url,
             )
         )
 

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.anyio
 @pytest.mark.parametrize("fault_at", ["create", "append"])
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
 async def test_worker_survives_real_replay_timeout_and_reestablishes_durable_floor(
-    public_service, redis_url, monkeypatch, fault_at
+    public_service, redis_url, monkeypatch, caplog, fault_at
 ):
     service, app = public_service, public_service.app
     config = app.state.settings.model_copy(
@@ -87,6 +87,7 @@ async def test_worker_survives_real_replay_timeout_and_reestablishes_durable_flo
             app.state.redis,
             config=config,
             catalog=app.state.model_catalog,
+            tool_catalog=app.state.tool_catalog,
             keys=app.state.key_ring,
             endpoint_policy=app.state.endpoint_policy,
             admission=app.state.admission,
@@ -103,7 +104,7 @@ async def test_worker_survives_real_replay_timeout_and_reestablishes_durable_flo
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     assert failures == ["TimeoutError"]
-    assert view["status"] == "completed", view
+    assert view["status"] == "completed", (view, [getattr(record, "error_type", None) for record in caplog.records])
     assert len(view["inputs"]) == 1 and view["inputs"][0]["status"] == "consumed"
     texts = [item for segment in view["segments"] for item in segment["items"] if item["type"] == "text"]
     assert len(texts) == 1 and texts[0]["complete"]

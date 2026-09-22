@@ -7,6 +7,8 @@ import { data } from "../../service-client";
 import { ErrorNotice, StatePill } from "../../shared/feedback";
 import { Pagination, useCursor } from "../../shared/collection";
 import { MarkdownContent } from "../../shared/markdown";
+import { ToolObservations } from "./tools";
+import { isRecord } from "../../service-client/errors";
 import { observeRun, type Observation } from "./observe";
 import styles from "./conversations.module.css";
 
@@ -108,6 +110,19 @@ export function RunConversation({
                 {segment.interrupted && (
                   <p>{t("Interrupted attempt — retained for reference")}</p>
                 )}
+                <ToolObservations
+                  settled={snapshot.complete || segment.interrupted === true}
+                  events={[
+                    ...(segment.items ?? []).flatMap((item) =>
+                      item.type === "event" && isRecord(item.event)
+                        ? [item.event]
+                        : [],
+                    ),
+                    ...(index === snapshot.segments.length - 1
+                      ? (observation.toolEvents ?? [])
+                      : []),
+                  ]}
+                />
                 {segment.items?.map((item, itemIndex) => {
                   if (
                     (item.type !== "text" && item.type !== "reasoning") ||

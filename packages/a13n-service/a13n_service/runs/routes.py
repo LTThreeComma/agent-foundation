@@ -34,6 +34,7 @@ async def submit_request(
         max_entries=config.control.inbox_count,
         max_bytes=config.control.inbox_bytes,
         max_attempts=config.worker.max_attempts,
+        keys=request.app.state.key_ring,
         policy=request.app.state.admission,
     )
     if not result.replayed:

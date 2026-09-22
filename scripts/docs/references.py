@@ -142,7 +142,7 @@ def render_native_api() -> str:
             groups[tag].append((path, method, operation, methods.get("parameters", [])))
     text = """# Service HTTP reference
 
-This reference is generated from the current new Service OpenAPI export. It covers authentication, model and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
+This reference is generated from the current new Service OpenAPI export. It covers authentication, model, Connection and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
 
 Download [the complete OpenAPI JSON](../assets/reference/service-openapi.json). This contract does not advertise legacy API or event schemas.
 

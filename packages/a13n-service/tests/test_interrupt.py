@@ -29,7 +29,7 @@ async def test_accepted_interrupt_is_atomic_idempotent_and_does_not_release_pend
         assert interrupted.status_code == 200, interrupted.text
         assert interrupted.json()["status"] == "cancelled"
         assert interrupted.json()["cancel_requested_at"] is not None
-    assert not await advance_one(storage, max_attempts=3, policy=None)
+    assert not await advance_one(storage, max_attempts=3, policy=None, keys=service.app.state.key_ring)
     assert await claim_run(storage, worker_id="none", worker_build="test", lease_seconds=30) is None
     cancelled = await client.get(f"{path}/runs/{run_id}/items")
     assert cancelled.json()["inputs"][0]["status"] == "failed"

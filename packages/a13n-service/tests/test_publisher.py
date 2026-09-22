@@ -159,6 +159,7 @@ async def test_awaited_checkpoint_flushes_delayed_display_then_confirms_input(pu
                 config=service.app.state.settings,
                 redis=service.app.state.redis,
                 catalog=service.app.state.model_catalog,
+                tool_catalog=service.app.state.tool_catalog,
                 keys=service.app.state.key_ring,
                 endpoint_policy=service.app.state.endpoint_policy,
                 admission=service.app.state.admission,

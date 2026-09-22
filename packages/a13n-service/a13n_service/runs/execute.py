@@ -1,5 +1,7 @@
 """One real Harness attempt, with awaited durability and fresh paid-call authority."""
 
+from contextlib import AsyncExitStack
+
 from a13n_harness import (
     AgentContext,
     AgentDefinition,
@@ -27,6 +29,8 @@ from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.objects.local import LocalObjects
+from a13n_service.providers.tools import ToolSourceDefinition
+from a13n_service.resources.connections.runtime import open_connections
 from a13n_service.resources.models.runtime import open_model
 from a13n_service.runs import attempts, inputs, seal, selection
 from a13n_service.runs.harness import CheckpointCapability, entry_input
@@ -54,6 +58,7 @@ async def execute(
     config: Settings,
     redis: Redis,
     catalog: ProviderCatalog[ModelProviderDefinition],
+    tool_catalog: ProviderCatalog[ToolSourceDefinition],
     keys: KeyRing,
     endpoint_policy: EndpointPolicy,
     admission: AdmissionPolicy | None,
@@ -131,51 +136,66 @@ async def execute(
             ),
             model_call_check=check,
         )
-        async with open_model(
-            model,
-            organization_id=claim.organization_id,
-            catalog=catalog,
-            keys=keys,
-            policy=endpoint_policy,
-            timeout=60,
-            max_bytes=config.objects.max_bytes,
-        ) as native:
-            executable = HarnessBuilder().build(
-                AgentDefinition(
-                    agent=AgentSpec(instructions=selected.agent.config.instructions, model_settings=settings),
-                    output_type=str,
-                    model=native,
-                    capabilities=tuple(capabilities),
-                ),
-                pricing_catalog=pricing,
+        async with AsyncExitStack() as stack:
+            capabilities.extend(
+                await open_connections(
+                    stack,
+                    storage,
+                    claim,
+                    selected.agent.config,
+                    selected.options,
+                    redis=redis,
+                    keys=keys,
+                    policy=endpoint_policy,
+                    catalog=tool_catalog,
+                    check=check,
+                )
             )
-            async with executable.stream(
-                offered or None,
-                previous_state=checkpoint.state,
-                tool_recovery="declared",
-                bindings=bindings,
-                usage_limits=UsageLimits(request_limit=None),
-            ) as stream:
-                await attempts.start(storage, claim, harness_run_id=stream.run_id)
-                async for item in stream:
-                    if (
-                        isinstance(item, HarnessEvent)
-                        and isinstance(item.event, HarnessExtensionEvent)
-                        and isinstance(item.event.payload, dict)
-                        and item.event.payload.get("type") == "usage_report"
-                    ):
-                        report = UsageReportPayload.model_validate(item.event.payload)
-                        for record in report.records:
-                            await check.ingest(ModelUsageRecord.model_validate(record))
-                    await observer.append(publisher.observe(item))
-                result = stream.result
-                if result is None or result.state is None:
-                    raise ServiceError("unavailable", "Harness did not return durable final state")
-                for record in result.usage_records:
-                    if not isinstance(record, ModelUsageRecord):
-                        raise ServiceError("conflict", "Attempt reported usage for an unconfigured paid capability")
-                    await check.ingest(record)
-                await publisher.finalize(result.state, tuple(capability.receipts), output=result.output_or_raise())
+            async with open_model(
+                model,
+                organization_id=claim.organization_id,
+                catalog=catalog,
+                keys=keys,
+                policy=endpoint_policy,
+                timeout=60,
+                max_bytes=config.objects.max_bytes,
+            ) as native:
+                executable = HarnessBuilder().build(
+                    AgentDefinition(
+                        agent=AgentSpec(instructions=selected.agent.config.instructions, model_settings=settings),
+                        output_type=str,
+                        model=native,
+                        capabilities=tuple(capabilities),
+                    ),
+                    pricing_catalog=pricing,
+                )
+                async with executable.stream(
+                    offered or None,
+                    previous_state=checkpoint.state,
+                    tool_recovery="declared",
+                    bindings=bindings,
+                    usage_limits=UsageLimits(request_limit=None),
+                ) as stream:
+                    await attempts.start(storage, claim, harness_run_id=stream.run_id)
+                    async for item in stream:
+                        if (
+                            isinstance(item, HarnessEvent)
+                            and isinstance(item.event, HarnessExtensionEvent)
+                            and isinstance(item.event.payload, dict)
+                            and item.event.payload.get("type") == "usage_report"
+                        ):
+                            report = UsageReportPayload.model_validate(item.event.payload)
+                            for record in report.records:
+                                await check.ingest(ModelUsageRecord.model_validate(record))
+                        await observer.append(publisher.observe(item))
+                    result = stream.result
+                    if result is None or result.state is None:
+                        raise ServiceError("unavailable", "Harness did not return durable final state")
+                    for record in result.usage_records:
+                        if not isinstance(record, ModelUsageRecord):
+                            raise ServiceError("conflict", "Attempt reported usage for an unconfigured paid capability")
+                        await check.ingest(record)
+                    await publisher.finalize(result.state, tuple(capability.receipts), output=result.output_or_raise())
         _, state_ref, display_ref = publisher.selected()
         await seal.completed(storage, objects, claim, state_ref, display_ref, timeout=config.objects.timeout)
     finally:

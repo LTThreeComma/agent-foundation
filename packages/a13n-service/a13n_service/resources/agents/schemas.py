@@ -2,9 +2,10 @@
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from a13n_service.infra.ids import ObjectId
+from a13n_service.resources.connections.schemas import ConnectionSelection
 
 Label = Annotated[str, StringConstraints(max_length=128)]
 
@@ -15,6 +16,14 @@ class AgentConfig(BaseModel):
     instructions: str = Field(default="", max_length=65536)
     max_requests: int = Field(default=100, ge=1, le=1000)
     compaction_trigger_tokens: int | None = Field(default=None, ge=1, le=10000000)
+    connections: tuple[ConnectionSelection, ...] = Field(default=(), max_length=32)
+
+    @field_validator("connections")
+    @classmethod
+    def unique_connections(cls, value: tuple[ConnectionSelection, ...]) -> tuple[ConnectionSelection, ...]:
+        if len({item.connection_id for item in value}) != len(value):
+            raise ValueError("Connection selections must be unique")
+        return value
 
 
 class AgentCreate(BaseModel):

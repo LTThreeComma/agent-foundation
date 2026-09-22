@@ -35,6 +35,7 @@ async def run(service, claim):
         config=app.state.settings,
         redis=app.state.redis,
         catalog=app.state.model_catalog,
+        tool_catalog=app.state.tool_catalog,
         keys=app.state.key_ring,
         endpoint_policy=app.state.endpoint_policy,
         admission=app.state.admission,
@@ -73,7 +74,7 @@ async def test_final_boundary_steer_returns_pending_and_runs_once_as_successor(p
             (late["entry"]["id"], "pending"),
         ]
         assert inbox.json()["items"][1]["assigned_run_id"] is None
-        assert await advance_one(app.state.storage, max_attempts=3, policy=None)
+        assert await advance_one(app.state.storage, max_attempts=3, policy=None, keys=app.state.key_ring)
         second = await claim_run(app.state.storage, worker_id="next", worker_build="test", lease_seconds=30)
         assert second is not None and second.run_id != claim.run_id
         await run(service, second)

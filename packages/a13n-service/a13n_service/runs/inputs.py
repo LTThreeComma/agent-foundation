@@ -7,8 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import Storage, transaction
 from a13n_service.infra.errors import ServiceError
+from a13n_service.resources.agents.schemas import AgentConfig
+from a13n_service.resources.agents.tables import AgentRevisionRow
 from a13n_service.runs.attempts import lock_authority
-from a13n_service.runs.schemas import AttemptClaim, Checkpoint, MessagePayload
+from a13n_service.runs.options import compatible
+from a13n_service.runs.schemas import AttemptClaim, Checkpoint, MessagePayload, RunOptions
 from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
 
 
@@ -104,10 +107,16 @@ async def assign_steers(
                 .with_for_update()
             )
         ).all()
+        revision = await session.get(AgentRevisionRow, run.agent_revision_id)
+        assert revision is not None
+        config = AgentConfig.model_validate(revision.config)
+        options = RunOptions.model_validate(run.options)
         selected: list[tuple[str, MessagePayload]] = []
         size = 0
         for entry in entries:
-            if entry.agent_revision_id not in {None, run.agent_revision_id} or entry.options != run.options:
+            if entry.agent_revision_id not in {None, run.agent_revision_id} or not compatible(
+                config, RunOptions.model_validate(entry.options), options
+            ):
                 continue
             payload = MessagePayload.model_validate(entry.payload)
             size += len(payload.model_dump_json().encode())

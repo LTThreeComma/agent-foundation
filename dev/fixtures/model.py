@@ -6,21 +6,18 @@ import argparse
 import json
 import os
 import re
-import socket
-import subprocess
-import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 import anyio
-import httpx2
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .api import router as fixture_router
+from .process import fixture_process
 
 MODEL_PORT = 18080
 MODEL_URL = f"http://127.0.0.1:{MODEL_PORT}/v1"
@@ -165,6 +162,14 @@ def planned_tool(body: dict, prompt: str) -> dict | None:
         ),
     )
     tools = [item["function"] for item in body.get("tools", [])]
+    match = re.search(r"\[service-mcp:(increment_once|increment|read_count|oversized)\]", prompt)
+    if match:
+        selected = next((item for item in tools if item["name"].startswith(match[1] + "_")), None)
+        if selected:
+            result = call(selected["name"], {"label": "service proof", "hold": "[hold-mcp]" in prompt})
+            if "[fixed-call-id]" in prompt:
+                result["id"] = "call_same_original_id"
+            return result
     if "[publish] " in prompt:
         selected = next((item for item in tools if item["name"].endswith("publish_asset")), None)
         path = prompt.split("[publish] ", 1)[1].splitlines()[0]
@@ -228,50 +233,14 @@ def model_process(port: int = MODEL_PORT):
     try:
         for name in previous:
             os.environ[name] = bypass
-        with _model_process(port) as url:
-            yield url
+        with fixture_process("dev.fixtures.model", port=port) as url:
+            yield url + "/v1"
     finally:
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-
-
-@contextmanager
-def _model_process(port: int):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", port))
-        listener.listen()
-        port = listener.getsockname()[1]
-        process = subprocess.Popen(
-            [sys.executable, "-m", "dev.fixtures.model", "--fd", str(listener.fileno())],
-            pass_fds=(listener.fileno(),),
-            cwd=Path(__file__).resolve().parents[2],
-            stdout=subprocess.DEVNULL,
-        )
-        try:
-            with httpx2.Client(trust_env=False, timeout=1) as client:
-                deadline = time.monotonic() + 30
-                while True:
-                    if process.poll() is not None:
-                        raise RuntimeError("Local model process exited during startup")
-                    try:
-                        response = client.get(f"http://127.0.0.1:{port}/healthz")
-                        response.raise_for_status()
-                        break
-                    except httpx2.HTTPError:
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError("Local model did not become ready") from None
-                        time.sleep(0.1)
-            yield f"http://127.0.0.1:{port}/v1"
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
 
 
 def serve_model(port: int = MODEL_PORT) -> None:

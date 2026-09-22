@@ -1,6 +1,6 @@
 # Console browser journey
 
-Run `make live-test-console CONSOLE_LIVE_DIR=/tmp/a13n-console-review` with Docker available. Use a new directory each time. The command prints the actual localhost URL and model endpoint. It owns its stores and processes; never use shared application storage for these steps.
+Run `make live-test-console CONSOLE_LIVE_DIR=/tmp/a13n-console-review` with Docker available. Use a new directory each time. The command prints the actual localhost URL, model endpoint and counted MCP peer URL. It owns its stores and processes; never use shared application storage for these steps.
 
 1. Sign in as `console@example.com` with `console-fixture-password`. Reload and verify the workspace is restored. The fixture's workspace key intentionally collides with an inaccessible workspace in another organization. Its ID link succeeds; `/workspace/ambiguous/sessions` must show a conflict without switching scopes.
 2. In Models, add the deployment's OpenAI provider. Enter the printed model endpoint and a fixture-only API key, or select no authentication. Save, reopen the creation dialog and check that no credential remains. Add a named model with API Chat Completions, model ID `scripted` and a positive context window.
@@ -12,3 +12,9 @@ Run `make live-test-console CONSOLE_LIVE_DIR=/tmp/a13n-console-review` with Dock
 8. Inspect the actual pages at desktop and 390×844, light and dark themes. Check the narrow navigation drawer, form labels, wrapping, keyboard focus, visible errors and absence of horizontal page overflow. Save screenshots beside the logs.
 
 The launcher records `control.log`, `worker.log`, `console.log` and `state.json`. Console's proxy log records actual API method/path/status without bodies, cookies or credentials. Configuration files contain disposable database/encryption secrets and are mode0600; do not publish them. Close the browser tabs and stop the launcher when finished. This journey proves the ordinary Console milestone only; the retained full validation matrix remains open.
+
+## Remote MCP journey
+
+Create a Connection using the printed `mcp_url` plus `/none/mcp`. Test it, inspect the discovered tools, edit its name, and save an explicit allowlist. For bearer and header authentication use `/bearer/mcp` or `/headers/mcp` with synthetic `fixture-secret`; custom authentication uses `X-API-Key`. Never use real credentials in this fixture. In the Agent editor choose this Connection and `increment`, save, then send `[service-mcp:increment]` in a new conversation. The production Worker must record one external effect, show tool arguments and count1 result, and retain both on reload. The peer's `/fixture/state` reports durable effect/call counts without plaintext credentials.
+
+Automated `test_mcp_execution.py` kills an actual CLI Worker after the peer commits an effect but before returning its result. It verifies a pre-effect pending checkpoint, replacement attempt ownership, ordinary-call nonreplay, actual peer deduplication, declaration revocation, endpoint/credential rotation, disabling and late-result fencing. `test_mcp_transport.py` checks real socket/task cleanup, including cancellation. These fixtures qualify their own explicit deduplication behavior; they do not promise generic MCP exactly-once execution.

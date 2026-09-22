@@ -23,6 +23,8 @@ from a13n_service.resources.agents.schemas import (
     RevisionView,
 )
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.connections.scope import connection_scope, validate_tools
+from a13n_service.resources.connections.service import resolve as resolve_connection
 from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
 from a13n_service.tenancy.authorize import Principal, Scope, authorize
 from a13n_service.tenancy.grants import workspace_scope
@@ -56,6 +58,9 @@ async def validate_configuration(session: AsyncSession, actor: Principal, scope:
         raise ServiceError("disabled", "Agent model or provider is disabled")
     authorize(actor, Scope(model.organization_id, model.workspace_id), "read")
     authorize(actor, Scope(provider.organization_id, provider.workspace_id), "read")
+    for selection in connection_scope(config).values():
+        connection = await resolve_connection(session, actor, scope, selection.connection_id, verb="read")
+        validate_tools(connection, selection)
 
 
 async def add_revision(
