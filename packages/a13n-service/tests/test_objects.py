@@ -176,3 +176,55 @@ async def test_snapshot_writer_reconciles_only_its_exact_uncertain_publication(t
             with pytest.raises(OSError, match="unknown"):
                 await replace(store, "state", b"after", expected=original.version, writer=1, timeout=1)
             assert await store.read("state") == original
+
+
+async def test_uncertain_publication_cannot_adopt_competitor_before_readback(tmp_path, monkeypatch):
+    from a13n_service.runs.snapshots import replace
+
+    store = LocalObjects(tmp_path)
+    old = await store.replace_snapshot("state", b"initial", expected=None, writer=1)
+    actual = store.replace_snapshot
+    competitor = None
+
+    async def lose_ack_then_takeover(key, content, **kwargs):
+        nonlocal competitor
+        published = await actual(key, content, **kwargs)
+        # Exact same semantic bytes, different physical writer/version before the failed caller can read back.
+        competitor = await actual(key, content, expected=published.version, writer=2)
+        raise OSError("acknowledgement lost before competing takeover")
+
+    monkeypatch.setattr(store, "replace_snapshot", lose_ack_then_takeover)
+    with pytest.raises(OSError, match="lost"):
+        await replace(store, "state", b"candidate", expected=old.version, writer=1, timeout=1)
+    assert await store.read("state") == competitor
+    assert competitor.writer == 2
+    with pytest.raises(ObjectConflict):
+        await actual("state", b"candidate", expected=competitor.version, writer=1)
+
+
+async def test_older_dispatched_thread_write_finishes_after_same_content_takeover(tmp_path, monkeypatch):
+    from threading import Event
+
+    old_store, newer_store = LocalObjects(tmp_path), LocalObjects(tmp_path)
+    initial = await old_store.replace_snapshot("state", b"same", expected=None, writer=1)
+    dispatched, release = Event(), Event()
+    original = old_store._write
+
+    def delayed(*args, **kwargs):
+        dispatched.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(old_store, "_write", delayed)
+    older = asyncio.create_task(old_store.replace_snapshot("state", b"same", expected=initial.version, writer=1))
+    try:
+        assert await asyncio.to_thread(dispatched.wait, 3)
+        newer = await newer_store.replace_snapshot("state", b"same", expected=initial.version, writer=2)
+        assert newer.version != initial.version
+        release.set()
+        with pytest.raises(ObjectConflict):
+            await older
+        assert await newer_store.read("state") == newer
+    finally:
+        release.set()
+        await asyncio.gather(older, return_exceptions=True)
