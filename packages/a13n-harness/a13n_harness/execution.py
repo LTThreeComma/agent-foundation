@@ -1235,11 +1235,15 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         if self._attempt_events is not None:
             self._attempt_events.cancel()
 
-    async def steer(self, input: RunInputValue) -> str:
-        """Deliver one user steering value through native Pydantic enqueue."""
+    async def steer(self, input: RunInputValue, *, input_id: str | None = None) -> str:
+        """Deliver one user steering value through native Pydantic enqueue.
+
+        `input_id` is the host's identity for the value; it is recorded on the delivered request, where
+        `steering_input_ids` reads it back from exported state.
+        """
         if not self._entered or self._closed or self._context is None:
             raise RunError("The run is not active.", code="run_not_active")
-        return await self._context._steering.steer(input)
+        return await self._context._steering.steer(input, input_id=input_id)
 
     async def export_state(self) -> HarnessState:
         """Export active state or the detached checkpoint retained before shutdown."""

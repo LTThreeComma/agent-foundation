@@ -111,17 +111,23 @@ class SteeringBridge:
             self._retained_requests = deepcopy(retained)
             self._prepared = True
 
-    async def steer(self, input: RunInputValue) -> str:
-        """Enqueue one user steering value for the active native run."""
+    async def steer(self, input: RunInputValue, *, input_id: str | None = None) -> str:
+        """Enqueue one user steering value for the active native run.
+
+        A host that needs durable evidence passes its own `input_id`; `steering_input_ids` finds it in
+        exported history once the value has been delivered.
+        """
         active = self._active_context
         if active is None:
             raise RunError("The Agent is not accepting steering.", code="run_not_active")
+        if input_id is not None and not 1 <= len(input_id) <= 256:
+            raise RunError("A steering input ID must have 1 to 256 characters.", code="input_invalid")
         normalized = normalize_input(input)
         assert normalized.value is not None
         request = _request_for_input(
             normalized.value,
             source_run_id=self._run_id,
-            input_id=uuid4().hex,
+            input_id=input_id or uuid4().hex,
         )
         enqueue_id = active.enqueue(request, priority="asap")
         if enqueue_id is None:
@@ -162,12 +168,7 @@ class SteeringBridge:
 
     async def resolve_delivered(self, messages: Sequence[ModelMessage]) -> None:
         """Resolve pending public inputs already present in canonical history."""
-        delivered_ids = {
-            input_id
-            for message in messages
-            if isinstance(message, ModelRequest) and message.metadata is not None
-            if isinstance(input_id := message.metadata.get(_INPUT_ID_METADATA_KEY), str)
-        }
+        delivered_ids = set(steering_input_ids(messages))
         if not delivered_ids:
             return
         async with self._lock:
@@ -255,6 +256,16 @@ class SteeringBridge:
         )
 
 
+def steering_input_ids(messages: Sequence[ModelMessage]) -> tuple[str, ...]:
+    """Input IDs of the steering values delivered into `messages`, in history order."""
+    return tuple(
+        input_id
+        for message in messages
+        if isinstance(message, ModelRequest) and message.metadata is not None
+        if isinstance(input_id := message.metadata.get(_INPUT_ID_METADATA_KEY), str)
+    )
+
+
 def _request_for_input(
     input: str | tuple[Any, ...],
     *,
@@ -310,4 +321,4 @@ class SteeringCapability(AbstractCapability["AgentContext"]):
             ctx.deps._steering.unbind(ctx, owned=owned)
 
 
-__all__ = ["STEERING_CAPABILITY_ID", "SteeringBridge", "SteeringCapability"]
+__all__ = ["STEERING_CAPABILITY_ID", "SteeringBridge", "SteeringCapability", "steering_input_ids"]

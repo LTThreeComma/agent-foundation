@@ -1072,3 +1072,36 @@ async def test_binding_failure_during_cancellation_preserves_empty_history_state
     assert terminal.result.state.agent_context_state.entries["test.saved"].data == {"value": 7}
     assert await stream.export_state() == terminal.result.state
     assert calls == []
+
+
+async def test_stream_steer_records_host_input_id_in_exported_history() -> None:
+    from a13n_harness.capabilities.steering import steering_input_ids
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[tuple[ModelMessage, ...]] = []
+
+    async def steering_stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del info
+        calls.append(tuple(messages))
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+            yield "first response"
+        else:
+            yield "done"
+
+    executable = _build(FunctionModel(stream_function=steering_stream))
+    async with executable.stream("initial", bindings=RunBindings.embedded()) as stream:
+        consumer = asyncio.create_task(_consume_stream(stream))
+        await started.wait()
+        assert steering_input_ids((await stream.export_state()).message_history) == ()
+        await stream.steer("host context", input_id="inb_1")
+        release.set()
+        items = await asyncio.wait_for(consumer, timeout=2)
+
+    terminal = items[-1]
+    assert isinstance(terminal, HarnessRunResultEvent)
+    assert terminal.result.state is not None
+    assert steering_input_ids(terminal.result.state.message_history) == ("inb_1",)
+    assert steering_input_ids(calls[1]) == ("inb_1",)
