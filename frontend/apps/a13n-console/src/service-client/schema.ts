@@ -326,6 +326,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/workspaces/{workspace_id}/connection-catalog/composio": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Composio Catalog */
+    post: operations["composio_catalog_api_v1_workspaces__workspace_id__connection_catalog_composio_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/workspaces/{workspace_id}/connections": {
     parameters: {
       query?: never;
@@ -373,6 +390,23 @@ export interface paths {
     get: operations["authorization_status_api_v1_workspaces__workspace_id__connections__connection_id__authorization_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorization/complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Complete Managed Authorization */
+    post: operations["complete_managed_authorization_api_v1_workspaces__workspace_id__connections__connection_id__authorization_complete_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -822,7 +856,8 @@ export interface components {
       /** Id */
       id: string | null;
       /** Operation Kind */
-      operation_kind: ("exchange" | "refresh") | null;
+      operation_kind:
+        ("exchange" | "refresh" | "setup" | "complete" | "revoke") | null;
       /**
        * Status
        * @enum {string}
@@ -847,21 +882,56 @@ export interface components {
        */
       token: string;
     };
+    /** CatalogRequest */
+    CatalogRequest: {
+      /** App */
+      app?: string | null;
+      /** Connection Id */
+      connection_id?: string | null;
+      credential?: components["schemas"]["ManagedCredential"] | null;
+      /** Toolkit Version */
+      toolkit_version?: string | null;
+    };
+    /** CatalogView */
+    CatalogView: {
+      /** Apps */
+      apps: components["schemas"]["DiscoveredConnector"][];
+      /** Toolkit Version */
+      toolkit_version: string | null;
+      /** Tools */
+      tools: components["schemas"]["ToolInfo"][];
+    };
+    /** ComposioConfig */
+    ComposioConfig: {
+      /** Actions */
+      actions: string[];
+      /** App */
+      app: string;
+      /** Auth Config Id */
+      auth_config_id: string;
+      connection_data?: components["schemas"]["JsonObject"];
+      /** Toolkit Version */
+      toolkit_version: string;
+    };
     /** @enum {string} */
-    ConnectionAuthentication: "none" | "bearer" | "headers" | "oauth";
+    ConnectionAuthentication:
+      "none" | "bearer" | "headers" | "oauth" | "managed";
+    ConnectionConfig:
+      | components["schemas"]["MCPConfig"]
+      | components["schemas"]["ComposioConfig"];
     /** ConnectionCreate */
     ConnectionCreate: {
       /** @default none */
       auth?: components["schemas"]["ConnectionAuthentication"];
-      config: components["schemas"]["MCPConfig"];
+      config: components["schemas"]["ConnectionConfig"];
       credential?: components["schemas"]["Credential"] | null;
       /** Name */
       name: string;
       /**
        * Type
-       * @constant
+       * @enum {string}
        */
-      type: "mcp";
+      type: "mcp" | "composio";
     };
     /** ConnectionPage */
     ConnectionPage: {
@@ -889,7 +959,7 @@ export interface components {
     /** ConnectionUpdate */
     ConnectionUpdate: {
       auth?: components["schemas"]["ConnectionAuthentication"] | null;
-      config?: components["schemas"]["MCPConfig"] | null;
+      config?: components["schemas"]["ConnectionConfig"] | null;
       credential?: components["schemas"]["Credential"] | null;
       /** Enabled */
       enabled?: boolean | null;
@@ -899,7 +969,7 @@ export interface components {
     /** ConnectionView */
     ConnectionView: {
       auth: components["schemas"]["ConnectionAuthentication"];
-      config: components["schemas"]["MCPConfig"];
+      config: components["schemas"]["ConnectionConfig"];
       /** Credential Configured */
       credential_configured: boolean;
       /** Enabled */
@@ -920,12 +990,33 @@ export interface components {
     Credential:
       | components["schemas"]["BearerCredential"]
       | components["schemas"]["HeadersCredential"]
-      | components["schemas"]["OAuthClientCredential"];
+      | components["schemas"]["OAuthClientCredential"]
+      | components["schemas"]["ManagedCredential"];
     /**
      * CredentialMode
      * @enum {string}
      */
     CredentialMode: "required" | "optional" | "forbidden";
+    /** DiscoveredConnector */
+    DiscoveredConnector: {
+      /** Authentication Methods */
+      authentication_methods: string[];
+      /** Credential Schemas */
+      credential_schemas?: {
+        [key: string]: components["schemas"]["JsonObject"];
+      };
+      /** Description */
+      description?: string | null;
+      /** Key */
+      key: string;
+      /** Logo Url */
+      logo_url?: string | null;
+      /** Name */
+      name: string;
+      setup_schema: components["schemas"]["JsonObject"];
+      /** Unavailable Reason */
+      unavailable_reason?: string | null;
+    };
     /** DisplayCut */
     DisplayCut: {
       /** Attempt Id */
@@ -981,6 +1072,9 @@ export interface components {
       /** Next Cursor */
       next_cursor: string | null;
     };
+    JsonObject: {
+      [key: string]: components["schemas"]["JsonValue"];
+    };
     JsonValue: unknown;
     /** KeyInput */
     KeyInput: {
@@ -1032,6 +1126,28 @@ export interface components {
       tools?: string[] | null;
       /** Url */
       url: string;
+    };
+    /** ManagedCompleted */
+    ManagedCompleted: {
+      /** Return Url */
+      return_url: string;
+    };
+    /** ManagedCompletion */
+    ManagedCompletion: {
+      /** Authorization Id */
+      authorization_id: string;
+      /** Generation */
+      generation: number;
+      /** Session Uri */
+      session_uri?: string | null;
+    };
+    /** ManagedCredential */
+    ManagedCredential: {
+      /**
+       * Api Key
+       * Format: password
+       */
+      api_key: string;
     };
     /** MessagePayload */
     MessagePayload: {
@@ -2431,6 +2547,41 @@ export interface operations {
       };
     };
   };
+  composio_catalog_api_v1_workspaces__workspace_id__connection_catalog_composio_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CatalogRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CatalogView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_connections_api_v1_workspaces__workspace_id__connections_get: {
     parameters: {
       query?: {
@@ -2587,6 +2738,42 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["AuthorizationView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  complete_managed_authorization_api_v1_workspaces__workspace_id__connections__connection_id__authorization_complete_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ManagedCompletion"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ManagedCompleted"];
         };
       };
       /** @description Validation Error */

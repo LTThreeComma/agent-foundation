@@ -7,6 +7,7 @@ from typing import ClassVar, Protocol
 import httpx2
 from a13n_harness import AgentContext
 from a13n_harness.mcp import MCPHeadersFactory
+from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.definition import ProviderDefinition
 from pydantic import BaseModel, JsonValue
 from pydantic_ai.capabilities import AbstractCapability
@@ -47,3 +48,6 @@ class ToolSourceDefinition[C: BaseModel](ProviderDefinition[C, BaseModel]):
 
     def bind(self, configuration: Mapping[str, JsonValue], *, source_id: str, client: httpx2.AsyncClient) -> ToolSource:
         return self.factory(self.configuration_model.model_validate(configuration), source_id=source_id, client=client)
+
+
+type ConnectionProvider = ToolSourceDefinition | ConnectorProviderDefinition

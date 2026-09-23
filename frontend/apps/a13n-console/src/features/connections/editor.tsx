@@ -11,8 +11,9 @@ import {
   serializeHeaders,
   type HeaderDraft,
 } from "../../shared/forms";
+import { ManagedForm } from "./managed-editor";
 import { ToolSelection } from "./tool-selection";
-import { emptyOAuth, OAuthFields, OAuthAuthorization } from "./oauth";
+import { emptyOAuth, OAuthFields, PersonalAuthorization } from "./oauth";
 import styles from "./connections.module.css";
 
 type Connection = components["schemas"]["ConnectionView"];
@@ -29,6 +30,7 @@ export function ConnectionEditor({
 }) {
   const { client, path, cache } = useScope();
   const { t } = useTranslation();
+  const [kind, setKind] = useState("mcp");
   const query = useQuery({
     queryKey: [...cache, "connection", id],
     enabled: !!id,
@@ -59,14 +61,38 @@ export function ConnectionEditor({
           {!query.error && <Loading />}
         </>
       ) : (
-        <ConnectionForm
-          loaded={{
-            initial: query.data?.value,
-            etag: query.data?.etag ?? null,
-          }}
-          onClose={onClose}
-          onSaved={onSaved}
-        />
+        <>
+          {!id && (
+            <ChoiceField
+              label={t("Connection type")}
+              value={kind}
+              options={[
+                { value: "mcp", label: t("Remote MCP") },
+                { value: "composio", label: "Composio" },
+              ]}
+              onValueChange={setKind}
+            />
+          )}
+          {(query.data?.value.type ?? kind) === "composio" ? (
+            <ManagedForm
+              loaded={{
+                initial: query.data?.value,
+                etag: query.data?.etag ?? null,
+              }}
+              onClose={onClose}
+              onSaved={onSaved}
+            />
+          ) : (
+            <ConnectionForm
+              loaded={{
+                initial: query.data?.value,
+                etag: query.data?.etag ?? null,
+              }}
+              onClose={onClose}
+              onSaved={onSaved}
+            />
+          )}
+        </>
       )}
     </ModalFrame>
   );
@@ -83,20 +109,22 @@ function ConnectionForm({
   const { client, path, cache, workspace } = useScope();
   const queries = useQueryClient();
   const [{ initial, etag }] = useState(loaded);
+  const initialConfig =
+    initial && "url" in initial.config ? initial.config : undefined;
   const { t } = useTranslation();
   const [name, setName] = useState(initial?.name ?? "");
-  const [url, setUrl] = useState(initial?.config.url ?? "");
+  const [url, setUrl] = useState(initialConfig?.url ?? "");
   const [auth, setAuth] = useState<Auth>(initial?.auth ?? "none");
   const [replace, setReplace] = useState(!initial?.credential_configured);
-  const [oauth, setOAuth] = useState(initial?.config.oauth ?? emptyOAuth);
+  const [oauth, setOAuth] = useState(initialConfig?.oauth ?? emptyOAuth);
   const [token, setToken] = useState("");
   const [headers, setHeaders] = useState<HeaderDraft[]>([]);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [tools, setTools] = useState<string[] | null>(
-    initial?.config.tools ?? null,
+    initialConfig?.tools ?? null,
   );
   const [safe, setSafe] = useState<string[]>(
-    initial?.config.recovery_retry_safe_tools ?? [],
+    initialConfig?.recovery_retry_safe_tools ?? [],
   );
   const [discovered, setDiscovered] = useState<Tool[]>();
   const [error, setError] = useState<unknown>(null);
@@ -104,10 +132,10 @@ function ConnectionForm({
   const editable = workspace.permissions.includes("write");
   const identityChanged =
     !!initial &&
-    (url !== initial.config.url ||
+    (url !== initialConfig?.url ||
       auth !== initial.auth ||
       (auth === "oauth" &&
-        JSON.stringify(oauth) !== JSON.stringify(initial.config.oauth)) ||
+        JSON.stringify(oauth) !== JSON.stringify(initialConfig?.oauth)) ||
       (replace &&
         auth !== "none" &&
         !(auth === "oauth" && oauth.token_endpoint_auth_method === "none")));
@@ -116,7 +144,7 @@ function ConnectionForm({
     !!initial &&
     !identityChanged &&
     !pending &&
-    url === initial.config.url &&
+    url === initialConfig?.url &&
     auth === initial.auth &&
     !token &&
     headers.length === 0;
@@ -414,7 +442,7 @@ function ConnectionForm({
         }
       />
       {initial?.auth === "oauth" && (
-        <OAuthAuthorization
+        <PersonalAuthorization
           connectionId={initial.id}
           draftChanged={
             pending ||
@@ -422,9 +450,9 @@ function ConnectionForm({
             name !== initial.name ||
             enabled !== initial.enabled ||
             JSON.stringify(tools) !==
-              JSON.stringify(initial.config.tools ?? null) ||
+              JSON.stringify(initialConfig?.tools ?? null) ||
             JSON.stringify(safe) !==
-              JSON.stringify(initial.config.recovery_retry_safe_tools ?? [])
+              JSON.stringify(initialConfig?.recovery_retry_safe_tools ?? [])
           }
         />
       )}

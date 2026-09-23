@@ -153,9 +153,9 @@ test.each([false, true])(
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
     await screen.findByText("Connection changed; reopen before saving.");
     expect(state.writes[0].etag).toBe('"conn_proof:1"');
-    expect(state.writes[0].body.config?.recovery_retry_safe_tools).toEqual(
-      reconfirm ? ["increment"] : [],
-    );
+    expect(state.writes[0].body.config).toMatchObject({
+      recovery_retry_safe_tools: reconfirm ? ["increment"] : [],
+    });
     expect(state.saved).not.toHaveBeenCalled();
     expect(state.current().name).toBe("Other writer");
     expect(input("Name").value).toBe("My draft");
@@ -177,7 +177,9 @@ test("save clears credentials, updates caches, and reopens with current values a
   fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
   await screen.findByRole("button", { name: "Reopen" });
   expect(state.writes[0].body.credential).toEqual({ token: "new-secret" });
-  expect(state.writes[0].body.config?.recovery_retry_safe_tools).toEqual([]);
+  expect(state.writes[0].body.config).toMatchObject({
+    recovery_retry_safe_tools: [],
+  });
   expect(
     state.queries.getQueryData<{ value: Connection; etag: string }>(key),
   ).toEqual({ value: state.current(), etag: '"conn_proof:2"' });

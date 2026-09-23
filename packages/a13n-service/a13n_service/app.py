@@ -7,6 +7,7 @@ from functools import partial
 from importlib.metadata import version
 
 from a13n_harness.providers.catalog import ProviderCatalog
+from a13n_harness.providers.connector.contracts import ConnectorProviderError
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from anyio.to_thread import run_sync
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from a13n_service.infra.http import service_error_response, validation_error_res
 from a13n_service.infra.ingress import BodyLimit
 from a13n_service.infra.objects.local import LocalObjects
 from a13n_service.migrations.runner import heads, upgrade
+from a13n_service.resources.connections.catalog_routes import provider_error_response
 from a13n_service.resources.connections.oauth_maintenance import maintain_authorizations
 from a13n_service.runs.maintenance import maintain
 from a13n_service.runs.worker import Worker
@@ -134,6 +136,7 @@ def build_app(
 
     app.add_middleware(BodyLimit, max_bytes=config.server.request_bytes, timeout=config.server.request_timeout)
     app.add_exception_handler(ServiceError, service_error_response)
+    app.add_exception_handler(ConnectorProviderError, provider_error_response)
     app.add_exception_handler(RequestValidationError, validation_error_response)
 
     @app.get("/healthz")

@@ -149,28 +149,51 @@ authority_seconds = 0.2
     try:
         first_worker = await start_worker()
         async with httpx2.AsyncClient(trust_env=False) as peer:
-            async with asyncio.timeout(25):
-                while True:
-                    counted = (await peer.get(mcp_url + "/fixture/state")).json()
-                    if counted["barriers"]:
-                        break
-                    assert first_worker.returncode is None, (tmp_path / "worker-0.log").read_text()
-                    view = await client.get(path + f"/runs/{run_id}/items")
-                    if view.json()["status"] in {"completed", "failed", "cancelled"}:
-                        origins = []
-                        for line in (tmp_path / "worker-0.log").read_text().splitlines():
-                            if line.startswith("{"):
-                                item = json.loads(line)
-                                if item.get("run_id") == run_id and item.get("error_type"):
-                                    origins.append(
-                                        {
-                                            key: item[key]
-                                            for key in ("error_type", "exception_details", "harness_failure")
-                                            if key in item
-                                        }
-                                    )
-                        pytest.fail(f"Run became {view.json()['status']} before effect barrier: {origins}")
-                    await asyncio.sleep(0.025)
+            try:
+                async with asyncio.timeout(25):
+                    while True:
+                        counted = (await peer.get(mcp_url + "/fixture/state")).json()
+                        if counted["barriers"]:
+                            break
+                        assert first_worker.returncode is None, (tmp_path / "worker-0.log").read_text()
+                        view = await client.get(path + f"/runs/{run_id}/items")
+                        if view.json()["status"] in {"completed", "failed", "cancelled"}:
+                            origins = []
+                            for line in (tmp_path / "worker-0.log").read_text().splitlines():
+                                if line.startswith("{"):
+                                    item = json.loads(line)
+                                    if item.get("run_id") == run_id and item.get("error_type"):
+                                        origins.append(
+                                            {
+                                                key: item[key]
+                                                for key in ("error_type", "exception_details", "harness_failure")
+                                                if key in item
+                                            }
+                                        )
+                            pytest.fail(f"Run became {view.json()['status']} before effect barrier: {origins}")
+                        await asyncio.sleep(0.025)
+            except (TimeoutError, AssertionError, pytest.fail.Exception):
+                diagnostic = {"worker_returncode": first_worker.returncode}
+                for name, url in (
+                    ("model", model_url.removesuffix("/v1") + "/fixture/model-state"),
+                    ("peer", mcp_url + "/fixture/state"),
+                ):
+                    try:
+                        async with asyncio.timeout(2):
+                            value = (await peer.get(url)).json()
+                        diagnostic[name] = (
+                            value
+                            if name == "model"
+                            else {
+                                "calls": len(value["calls"]),
+                                "effects": value["effects"],
+                                "barriers": len(value["barriers"]),
+                            }
+                        )
+                    except Exception as error:
+                        diagnostic[name] = {"observation_error": type(error).__name__}
+                (tmp_path / "pre-effect-diagnostic.json").write_text(json.dumps(diagnostic, indent=2))
+                raise
             assert counted["effects"] == 0 and counted["calls"] == []
             original = json.loads(counted["barriers"][0]["context"])
             before = await app.state.objects.read(state_key)

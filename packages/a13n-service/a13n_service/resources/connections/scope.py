@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.errors import ServiceError
 from a13n_service.resources.agents.schemas import AgentConfig
-from a13n_service.resources.connections.schemas import ConnectionSelection
+from a13n_service.resources.connections.schemas import ConnectionSelection, selected_tools
 from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope
 
@@ -17,7 +17,8 @@ def connection_scope(config: AgentConfig) -> dict[str, ConnectionSelection]:
 
 
 def validate_tools(selected: ResolvedConnection, selection: ConnectionSelection) -> None:
-    if selected.config.tools is not None and not set(selection.tools) <= set(selected.config.tools):
+    available = selected_tools(selected.config)
+    if available is not None and not set(selection.tools) <= set(available):
         raise ServiceError(
             "disabled", "Agent tools are no longer selected by the Connection", {"connection_id": selected.id}
         )

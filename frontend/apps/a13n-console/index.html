@@ -2,9 +2,34 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="referrer" content="no-referrer" />
+    <script>
+      if (location.pathname === "/managed/verify") {
+        const callback = new URL(location.href);
+        history.replaceState(null, "", "/managed/verify");
+        const values = callback.searchParams.getAll("session_uri");
+        const oauth = callback.searchParams.has("session_uri");
+        const allowed = oauth
+          ? ["session_uri"]
+          : ["status", "connected_account_id"];
+        const status = callback.searchParams.get("status");
+        const invalid =
+          (!oauth && status !== null && status !== "success") ||
+          values.length > 1 ||
+          callback.hash !== "" ||
+          [...callback.searchParams.keys()].some(
+            (key) =>
+              !allowed.includes(key) ||
+              callback.searchParams.getAll(key).length !== 1,
+          );
+        window.__a13nManagedCallback = {
+          sessionUri: invalid ? null : (values[0] ?? null),
+          invalid,
+        };
+      }
+    </script>
     <link id="a13n-favicon" rel="icon" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="referrer" content="no-referrer" />
     <title>a13n Console</title>
   </head>
   <body class="a13n-root">

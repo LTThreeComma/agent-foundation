@@ -228,6 +228,23 @@ Responses:
 - **200** — Successful Response (`application/json: schema-defined value`).
 - **422** — Validation Error (`application/json: HTTPValidationError`).
 
+### `POST /api/v1/workspaces/{workspace_id}/connection-catalog/composio`
+
+Composio Catalog.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `CatalogRequest`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: CatalogView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
 ### `GET /api/v1/workspaces/{workspace_id}/connections`
 
 List Connections.
@@ -304,6 +321,24 @@ Authorization Status.
 Responses:
 
 - **200** — Successful Response (`application/json: AuthorizationView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorization/complete`
+
+Complete Managed Authorization.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `ManagedCompletion`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: ManagedCompleted`).
 - **422** — Validation Error (`application/json: HTTPValidationError`).
 
 ### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize`

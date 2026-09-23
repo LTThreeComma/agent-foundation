@@ -18,7 +18,7 @@ class AuthorizationView(BaseModel):
     status: Literal["not_authorized", "pending", "active", "revoked", "reauthorization_required"]
     expires_at: datetime | None
     generation: int
-    operation_kind: Literal["exchange", "refresh"] | None
+    operation_kind: Literal["exchange", "refresh", "setup", "complete", "revoke"] | None
     failure: dict[str, str] | None
 
 

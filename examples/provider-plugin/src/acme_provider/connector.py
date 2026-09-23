@@ -71,7 +71,9 @@ class Provider:
             key="crm", name="Acme CRM", setup_schema={"type": "object"}, authentication_methods=("oauth2",)
         )
 
-    def tool_catalog(self, connector_key):
+    def tool_catalog(self, connector_key, *, provider_version=None):
+        if provider_version not in {None, "v1"}:
+            raise ValueError("Unsupported tool version")
         if connector_key != "crm":
             raise ValueError("Unknown Connector")
         return self

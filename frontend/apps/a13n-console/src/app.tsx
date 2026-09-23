@@ -5,10 +5,12 @@ import { LoginPage } from "./auth/pages";
 import { AppearanceProvider } from "./layout/appearance";
 import { WorkspaceProvider } from "./layout/workspace";
 import { Shell, WorkspaceLanding } from "./layout/shell";
+import { ManagedVerifier } from "./features/connections/managed-verifier";
 import { Loading } from "./shared/feedback";
 
 function Authenticated() {
   const auth = useAuth();
+  if (location.pathname === "/managed/verify") return <ManagedVerifier />;
   if (auth.pending) return <Loading />;
   if (!auth.user) return <LoginPage />;
   return (

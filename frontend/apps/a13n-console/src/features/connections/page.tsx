@@ -47,18 +47,24 @@ export function ConnectionsPage() {
           onRowActivate={(item) => setEditing(item.id)}
           columns={[
             { label: t("Name"), render: (item) => item.name },
-            { label: t("Endpoint"), render: (item) => item.config.url },
+            {
+              label: t("Endpoint"),
+              render: (item) =>
+                "url" in item.config ? item.config.url : item.config.app,
+            },
             {
               label: t("Authentication"),
               render: (item) =>
                 t(
                   item.auth === "none"
                     ? "None"
-                    : item.auth === "bearer"
-                      ? "Bearer token"
-                      : item.auth === "oauth"
-                        ? "OAuth (personal account)"
-                        : "Headers",
+                    : item.auth === "managed"
+                      ? "Managed (personal account)"
+                      : item.auth === "bearer"
+                        ? "Bearer token"
+                        : item.auth === "oauth"
+                          ? "OAuth (personal account)"
+                          : "Headers",
                 ),
             },
             {
@@ -71,7 +77,7 @@ export function ConnectionsPage() {
       {query.data?.items.length === 0 && (
         <p>
           {t(
-            "No connections yet. Add a remote MCP endpoint to make its tools available.",
+            "No connections yet. Add a Remote MCP server or Composio application to make its tools available.",
           )}
         </p>
       )}

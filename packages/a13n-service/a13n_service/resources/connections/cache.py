@@ -16,7 +16,7 @@ def key(connection: ResolvedConnection) -> str:
 
 
 async def read(redis: Redis, connection: ResolvedConnection) -> ConnectionTest | None:
-    if connection.auth == "oauth":
+    if connection.auth in {"oauth", "managed"}:
         return None
     try:
         async with asyncio.timeout(0.2):
@@ -32,7 +32,7 @@ async def read(redis: Redis, connection: ResolvedConnection) -> ConnectionTest |
 
 
 async def write(redis: Redis, connection: ResolvedConnection, result: ConnectionTest) -> None:
-    if connection.auth == "oauth":
+    if connection.auth in {"oauth", "managed"}:
         return
     content = result.model_dump_json()
     if len(content.encode()) > RESPONSE_BYTES:

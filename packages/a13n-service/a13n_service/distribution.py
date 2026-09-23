@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from a13n_harness.providers.connector.builtins import COMPOSIO
 from a13n_harness.providers.model import ModelProviderDefinition
 from a13n_harness.providers.model.openai import DEFINITION as OPENAI
 from fastapi import APIRouter
@@ -11,9 +12,10 @@ from sqlalchemy import MetaData, Table
 from a13n_service.infra.audit import AuditEventRow
 from a13n_service.infra.db import Base
 from a13n_service.providers.mcp import DEFINITION as MCP
-from a13n_service.providers.tools import ToolSourceDefinition
+from a13n_service.providers.tools import ConnectionProvider
 from a13n_service.resources.agents.routes import router as agents_router
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.connections.catalog_routes import router as connection_catalog_router
 from a13n_service.resources.connections.oauth_routes import router as oauth_router
 from a13n_service.resources.connections.routes import router as connections_router
 from a13n_service.resources.connections.tables import ConnectionAuthorizationRow, ConnectionRow
@@ -37,7 +39,7 @@ class Distribution:
     migrations: tuple[Path, ...]
     routers: tuple[APIRouter, ...] = ()
     model_providers: tuple[ModelProviderDefinition, ...] = ()
-    tool_sources: tuple[ToolSourceDefinition, ...] = ()
+    tool_sources: tuple[ConnectionProvider, ...] = ()
     admission: AdmissionPolicy | None = None
 
     def metadata(self) -> MetaData:
@@ -84,10 +86,11 @@ OSS = Distribution(
         catalog_router,
         agents_router,
         connections_router,
+        connection_catalog_router,
         oauth_router,
         runs_router,
     ),
     model_providers=(OPENAI,),
-    tool_sources=(MCP,),
+    tool_sources=(MCP, COMPOSIO),
     migrations=(Path(__file__).parent / "migrations" / "versions",),
 )

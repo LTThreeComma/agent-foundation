@@ -79,10 +79,14 @@ async def initialize(database: Database):
 
 
 async def serve(
-    directory: Path, database: Database, redis_url: str, model_url: str, mcp_url: str, oauth_url: str
+    directory: Path, database: Database, redis_url: str, model_url: str, mcp_url: str, oauth_url: str, composio_url: str
 ) -> None:
     initialized = await initialize(database)
     control_port, worker_port, console_port = [available_port() for _ in range(3)]
+    async with httpx2.AsyncClient(trust_env=False) as peer:
+        await peer.post(
+            composio_url + "/fixture/control", json={"verifier_url": f"http://localhost:{console_port}/managed/verify"}
+        )
     environment = {name: value for name, value in os.environ.items() if not name.startswith("A13N_")}
     processes = []
     encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
@@ -106,7 +110,7 @@ active_key_id = "fixture"
 fixture = {json.dumps(encryption_key)}
 [providers]
 private_cidrs = ["127.0.0.0/8"]
-http_origins = [{json.dumps(model_url.removesuffix("/v1"))}, {json.dumps(mcp_url)}, {json.dumps(oauth_url)}, "http://localhost:{console_port}"]
+http_origins = [{json.dumps(model_url.removesuffix("/v1"))}, {json.dumps(mcp_url)}, {json.dumps(oauth_url)}, {json.dumps(composio_url)}, "http://localhost:{console_port}"]
 [worker]
 slots = 2
 lease_seconds = 5
@@ -114,6 +118,9 @@ scan_seconds = 0.2
 authority_seconds = 0.2
 [control]
 scan_seconds = 0.2
+[managed]
+verifier_url = "http://localhost:{console_port}/managed/verify"
+return_urls = ["http://localhost:{console_port}/workspace/{initialized.workspace_id}/connections"]
 [oauth]
 callback_url = "http://localhost:{console_port}/api/v1/oauth/callback"
 return_urls = ["http://localhost:{console_port}/workspace/{initialized.workspace_id}/connections"]
@@ -123,11 +130,12 @@ scan_seconds = 0.2
                 log = logs.enter_context((directory / f"{role}.log").open("wb"))
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
-                    "-c",
-                    "from a13n_service.cli import main; main()",
+                    "-m",
+                    "dev.fixtures.composio_service",
+                    "--endpoint",
+                    composio_url,
                     "--config",
                     str(config),
-                    "run",
                     "--role",
                     role,
                     cwd=ROOT,
@@ -181,6 +189,7 @@ scan_seconds = 0.2
                 "model_url": model_url,
                 "mcp_url": mcp_url,
                 "oauth_url": oauth_url,
+                "composio_url": composio_url,
                 "workspace_id": initialized.workspace_id,
                 "organization_id": initialized.organization_id,
                 "redis_url": redis_url,
@@ -219,6 +228,9 @@ def main() -> None:
         RedisContainer("redis:8-alpine") as redis,
         model_process(port=0) as model_url,
         fixture_process("dev.fixtures.oauth", arguments=("--database", str(directory / "oauth.sqlite"))) as oauth_url,
+        fixture_process(
+            "dev.fixtures.composio", arguments=("--database", str(directory / "composio.sqlite"))
+        ) as composio_url,
         fixture_process("dev.fixtures.mcp", arguments=("--database", str(directory / "mcp.sqlite"))) as mcp_url,
     ):
         database = Database(url=SecretStr(postgres.get_connection_url()))
@@ -231,6 +243,7 @@ def main() -> None:
                 model_url,
                 mcp_url,
                 oauth_url,
+                composio_url,
             )
         )
 

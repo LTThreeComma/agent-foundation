@@ -19,6 +19,10 @@ pytestmark = pytest.mark.anyio
 async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_service, monkeypatch, fault, model_url):
     service = public_service
     app = service.app
+    if fault == "takeover_before_checkpoint":
+        # Hold the real object write beyond natural lease expiry to exercise its late-writer fence.
+        objects = type(app.state.settings.objects)(**{**app.state.settings.objects.model_dump(), "timeout": 60})
+        app.state.settings = app.state.settings.model_copy(update={"objects": objects})
     response = await service.client.post(
         service.workspace_path + "/threads",
         headers={"Idempotency-Key": "publication-fault"},
@@ -30,7 +34,8 @@ async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_
     )
     assert response.status_code == 201
     run_id, entry_id = response.json()["run"]["id"], response.json()["entry"]["id"]
-    first = await claim_run(app.state.storage, worker_id="old", worker_build="test", lease_seconds=3)
+    lease_seconds = app.state.settings.worker.lease_seconds
+    first = await claim_run(app.state.storage, worker_id="old", worker_build="test", lease_seconds=lease_seconds)
     assert first is not None
     state_key = object_key(first.organization_id, run_id, "state")
     original = app.state.objects.replace_snapshot
@@ -83,7 +88,7 @@ async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_
             for item in before.json()["segments"][0]["items"]
         )
         assert before.json()["execution_checkpoint_cut"] == checkpoint.display_cut.model_dump(mode="json")
-        async with asyncio.timeout(6):
+        async with asyncio.timeout(lease_seconds + 5):
             while not await seal.expire(app.state.storage, run_id, backoff_seconds=0):
                 await asyncio.sleep(0.03)
         second = await claim_run(app.state.storage, worker_id="new", worker_build="test", lease_seconds=30)

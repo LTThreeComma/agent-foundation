@@ -16,7 +16,7 @@ from a13n_service.infra.db import Storage
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
 from a13n_service.infra.objects.local import LocalObjects
-from a13n_service.providers.tools import ToolSourceDefinition
+from a13n_service.providers.tools import ConnectionProvider
 from a13n_service.runs import attempts, seal, selection, wakeups
 from a13n_service.runs.execute import execute
 from a13n_service.runs.policy import AdmissionPolicy, CallCheck
@@ -35,7 +35,7 @@ class Worker:
         *,
         config: Settings,
         catalog: ProviderCatalog[ModelProviderDefinition],
-        tool_catalog: ProviderCatalog[ToolSourceDefinition],
+        tool_catalog: ProviderCatalog[ConnectionProvider],
         keys: KeyRing,
         endpoint_policy: EndpointPolicy,
         admission: AdmissionPolicy | None,

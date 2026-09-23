@@ -11,6 +11,7 @@ from typing import Any
 import httpx2
 from a13n_harness import AgentContext
 from a13n_harness.providers.catalog import ProviderCatalog, ProviderNotSelected
+from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from a13n_harness.tools.metadata import RECOVERY_RETRY_SAFE_METADATA_KEY
 from pydantic_ai import RunContext
@@ -28,12 +29,13 @@ from a13n_service.providers.tools import (
     INITIALIZATION_SECONDS,
     MAX_TOOLS,
     RESPONSE_BYTES,
+    ConnectionProvider,
     ToolInfo,
     ToolSourceDefinition,
 )
 from a13n_service.resources.agents.schemas import AgentConfig
 from a13n_service.resources.connections import cache, oauth_access
-from a13n_service.resources.connections.schemas import ConnectionSelection, ConnectionTest
+from a13n_service.resources.connections.schemas import ConnectionSelection, ConnectionTest, recovery_tools
 from a13n_service.resources.connections.scope import check_collisions, connection_scope, validate_tools
 from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
 from a13n_service.runs.attempts import lock_authority
@@ -80,7 +82,7 @@ class ConnectionTools(WrapperToolset[AgentContext]):
                     tool.tool_def,
                     metadata={
                         **(tool.tool_def.metadata or {}),
-                        RECOVERY_RETRY_SAFE_METADATA_KEY: name in self.connection.config.recovery_retry_safe_tools,
+                        RECOVERY_RETRY_SAFE_METADATA_KEY: name in recovery_tools(self.connection.config),
                     },
                 ),
             )
@@ -92,7 +94,7 @@ class ConnectionTools(WrapperToolset[AgentContext]):
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentContext], tool: ToolsetTool[AgentContext]
     ) -> Any:
         if ctx.tool_call_id is None:
-            raise ServiceError("conflict", "MCP tool call has no original identity")
+            raise ServiceError("conflict", "Tool call has no original identity")
         await self.check.check_tool(
             self.connection, self.selection, name=name, call_id=ctx.tool_call_id, harness_run_id=ctx.deps.run_id
         )
@@ -103,7 +105,7 @@ class ConnectionTools(WrapperToolset[AgentContext]):
             raise
         except Exception:
             raise ToolFailed(
-                "The MCP call returned no usable result. Its effects may have occurred; check external state before another call."
+                "The tool call returned no usable result. Its effects may have occurred; check external state before another call."
             ) from None
 
 
@@ -123,7 +125,7 @@ async def open_connections(
     redis: Redis,
     keys: KeyRing,
     policy: EndpointPolicy,
-    catalog: ProviderCatalog[ToolSourceDefinition],
+    catalog: ProviderCatalog[ConnectionProvider],
     check: CallCheck,
     oauth_settings: OAuth,
 ) -> list[AbstractCapability[AgentContext]]:
@@ -157,7 +159,7 @@ async def _open_connection(
     redis: Redis,
     keys: KeyRing,
     policy: EndpointPolicy,
-    catalog: ProviderCatalog[ToolSourceDefinition],
+    catalog: ProviderCatalog[ConnectionProvider],
     check: CallCheck,
     oauth_settings: OAuth,
 ) -> AbstractCapability[AgentContext]:
@@ -177,6 +179,28 @@ async def _open_connection(
         return selected, principal, ExecutionAuthority.model_validate(run.authority)
 
     selected, principal, authority = await current()
+
+    def wrapper(tools: AbstractToolset[AgentContext]) -> AbstractToolset[AgentContext]:
+        bound = ConnectionTools(tools, selected, selection, check, redis)
+        return bound.renamed({tool_alias(selected.id, name): name for name in selection.tools})
+
+    if selected.auth == "managed":
+        from a13n_service.resources.connections.managed_runtime import open_actions
+
+        definition = catalog.require(selected.type)
+        assert isinstance(definition, ConnectorProviderDefinition)
+        return await open_actions(
+            stack,
+            storage,
+            selected,
+            principal,
+            definition=definition,
+            keys=keys,
+            policy=policy,
+            current=current,
+            wrapper=wrapper,
+            run_id=claim.run_id,
+        )
     oauth_token = (
         await oauth_access.access(
             storage, principal, selected, keys=keys, policy=policy, settings=oauth_settings, authority=authority
@@ -229,10 +253,7 @@ async def _open_connection(
             after_response=check_response,
         )
     )
+    assert isinstance(definition, ToolSourceDefinition)
     source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
-
-    def wrapper(tools: AbstractToolset[AgentContext]) -> AbstractToolset[AgentContext]:
-        bound = ConnectionTools(tools, selected, selection, check, redis)
-        return bound.renamed({tool_alias(selected.id, name): name for name in selection.tools})
 
     return source.open(lambda context: context_headers, wrapper, run_id=claim.run_id)

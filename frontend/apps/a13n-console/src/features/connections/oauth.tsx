@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useScope } from "../../layout/workspace";
 import { data, type components } from "../../service-client";
 import { ErrorNotice, Loading } from "../../shared/feedback";
+import { saveManagedSelector } from "./managed-flow";
 import styles from "./connections.module.css";
 
 type Config = components["schemas"]["OAuthConfig"];
@@ -87,12 +88,14 @@ export function OAuthFields({
   );
 }
 
-export function OAuthAuthorization({
+export function PersonalAuthorization({
   connectionId,
   draftChanged,
+  managed = false,
 }: {
   connectionId: string;
   draftChanged: boolean;
+  managed?: boolean;
 }) {
   const { client, path, cache, base, workspace } = useScope();
   const { t } = useTranslation();
@@ -132,13 +135,34 @@ export function OAuthAuthorization({
           ? "Authorization pending"
           : "Your account is not connected";
   return (
-    <section className={styles.form} aria-label={t("Your OAuth account")}>
-      <strong>{t("Your OAuth account")}</strong>
+    <section
+      className={styles.form}
+      aria-label={t(managed ? "Your connected account" : "Your OAuth account")}
+    >
+      <strong>
+        {t(managed ? "Your connected account" : "Your OAuth account")}
+      </strong>
       {query.isPending ? <Loading /> : <p>{t(label)}</p>}
       {query.data?.status === "reauthorization_required" && (
         <p className={styles.help}>
           {t(
-            "Authorization is unavailable. Reconnect to continue; an uncertain token request will not be retried automatically.",
+            managed
+              ? "Account setup is unavailable. Reconnect to start a new enrollment; uncertain requests are not retried automatically."
+              : "Authorization is unavailable. Reconnect to continue; an uncertain token request will not be retried automatically.",
+          )}
+        </p>
+      )}
+      {managed && query.data?.status === "revoked" && query.data.failure && (
+        <p className={styles.help}>
+          {t(
+            "Local access is disabled. Remote revocation was not confirmed; review the account in Composio Dashboard.",
+          )}
+        </p>
+      )}
+      {managed && query.data?.status === "pending" && query.data.failure && (
+        <p className={styles.help}>
+          {t(
+            "The provider result is uncertain. Reconnect to start a new enrollment.",
           )}
         </p>
       )}
@@ -184,6 +208,16 @@ export function OAuthAuthorization({
                   },
                 ),
               );
+              if (managed) {
+                if (!started.authorization.id)
+                  throw new Error("The authorization selector is missing.");
+                saveManagedSelector({
+                  workspaceId: path.workspace_id,
+                  connectionId,
+                  authorizationId: started.authorization.id,
+                  generation: started.authorization.generation,
+                });
+              }
               queries.setQueryData(queryKey, started.authorization);
               window.location.assign(started.redirect_url);
             } catch (failure) {

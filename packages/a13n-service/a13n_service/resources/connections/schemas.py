@@ -8,9 +8,11 @@ from pydantic import (
     Field,
     SecretStr,
     field_validator,
+    model_validator,
 )
 
 from a13n_service.infra.ids import ObjectId
+from a13n_service.providers.composio import ComposioConfig
 from a13n_service.providers.mcp import MCPConfig, ToolName
 from a13n_service.providers.tools import MAX_TOOLS, ToolInfo
 from a13n_service.resources.connections.headers import normalize_headers
@@ -45,24 +47,53 @@ class OAuthClientCredential(BaseModel):
     client_secret: SecretStr = Field(min_length=1, max_length=8192)
 
 
-type Credential = BearerCredential | HeadersCredential | OAuthClientCredential
+class ManagedCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key: SecretStr = Field(min_length=1, max_length=8192)
 
-type ConnectionAuthentication = Literal["none", "bearer", "headers", "oauth"]
+
+type Credential = BearerCredential | HeadersCredential | OAuthClientCredential | ManagedCredential
+type ConnectionConfig = MCPConfig | ComposioConfig
+
+
+def parse_config(provider_type: str, value: dict) -> ConnectionConfig:
+    if provider_type == "composio":
+        return ComposioConfig.model_validate(value)
+    return MCPConfig.model_validate(value)
+
+
+def selected_tools(config: ConnectionConfig) -> tuple[str, ...] | None:
+    return config.actions if isinstance(config, ComposioConfig) else config.tools
+
+
+def recovery_tools(config: ConnectionConfig) -> tuple[str, ...]:
+    return () if isinstance(config, ComposioConfig) else config.recovery_retry_safe_tools
+
+
+type ConnectionAuthentication = Literal["none", "bearer", "headers", "oauth", "managed"]
 
 
 class ConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: Literal["mcp"]
+    type: Literal["mcp", "composio"]
     name: str = Field(min_length=1, max_length=128)
-    config: MCPConfig
+    config: ConnectionConfig
     auth: ConnectionAuthentication = "none"
     credential: Credential | None = Field(default=None, repr=False)
+
+    @model_validator(mode="after")
+    def provider_configuration(self) -> "ConnectionCreate":
+        if (self.type == "composio") != isinstance(self.config, ComposioConfig):
+            raise ValueError("Connection configuration must match its provider")
+        if (self.type == "composio") != (self.auth == "managed"):
+            raise ValueError("Composio requires managed authentication")
+        return self
 
 
 class ConnectionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    config: MCPConfig | None = None
+    config: ConnectionConfig | None = None
     auth: ConnectionAuthentication | None = None
     credential: Credential | None = Field(default=None, repr=False)
     enabled: bool | None = None
@@ -74,7 +105,7 @@ class ConnectionView(BaseModel):
     workspace_id: str
     type: str
     name: str
-    config: MCPConfig
+    config: ConnectionConfig
     auth: ConnectionAuthentication
     credential_configured: bool
     enabled: bool

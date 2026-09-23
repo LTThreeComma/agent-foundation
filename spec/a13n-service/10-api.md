@@ -38,6 +38,8 @@ Workspace audit reads require `admin` and return only events with that actual or
 /api/v1/workspaces/{ws}/environment-templates ...          same shape
 /api/v1/workspaces/{ws}/environments                       GET, POST (register external HTTP envd); GET .../{id}
 /api/v1/workspaces/{ws}/connections                        GET, POST, GET/PATCH .../{id}, POST .../{id}/test
+/api/v1/workspaces/{ws}/connection-catalog/composio        POST project-key or saved-Connection app/action catalogue
+/api/v1/workspaces/{ws}/connections/{id}/authorization/complete POST authenticated managed completion
 /api/v1/workspaces/{ws}/connections/{id}/authorize         POST -> redirect url; GET .../authorization; POST .../revoke
 /api/v1/workspaces/{ws}/secrets                            GET, POST; PUT/DELETE .../{id}
 /api/v1/workspaces/{ws}/assets                             GET, POST; GET/DELETE .../{id}; GET .../{id}/content

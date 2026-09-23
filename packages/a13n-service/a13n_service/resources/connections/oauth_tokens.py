@@ -236,12 +236,14 @@ async def recover_deadlines(storage: Storage) -> int:
             await session.scalars(
                 select(ConnectionAuthorizationRow)
                 .where(
-                    ConnectionAuthorizationRow.status.in_(("pending", "active")),
+                    ConnectionAuthorizationRow.status.in_(("pending", "active", "revoked")),
                     or_(
-                        ConnectionAuthorizationRow.operation_deadline <= func.clock_timestamp(),
+                        and_(
+                            ConnectionAuthorizationRow.operation_deadline <= func.clock_timestamp(),
+                            ConnectionAuthorizationRow.failure.is_(None),
+                        ),
                         and_(
                             ConnectionAuthorizationRow.status == "pending",
-                            ConnectionAuthorizationRow.operation_id.is_(None),
                             ConnectionAuthorizationRow.expires_at <= func.clock_timestamp(),
                         ),
                     ),
@@ -251,7 +253,14 @@ async def recover_deadlines(storage: Storage) -> int:
                 .with_for_update(skip_locked=True)
             )
         )
+        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         for row in rows:
+            if row.operation_kind in {"complete", "revoke"} and (
+                row.status == "revoked" or (row.expires_at is not None and row.expires_at > now)
+            ):
+                row.failure = {"reason": "unknown_after_dispatch"}
+                audit(session, row, "expired")
+                continue
             invalidate(
                 row,
                 "reauthorization_required",

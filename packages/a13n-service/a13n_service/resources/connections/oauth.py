@@ -18,6 +18,7 @@ from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
 from a13n_service.infra.outbound import open_http
+from a13n_service.providers.mcp import MCPConfig
 from a13n_service.providers.oauth import discover
 from a13n_service.resources.connections import oauth_tokens
 from a13n_service.resources.connections.oauth_state import identity, invalidate, reveal, seal
@@ -79,7 +80,7 @@ async def start(
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "run")
         selected = await resolve(session, actor, scope, connection_id, verb="run")
-        if selected.auth != "oauth" or selected.config.oauth is None:
+        if selected.auth != "oauth" or not isinstance(selected.config, MCPConfig) or selected.config.oauth is None:
             raise ServiceError("invalid_argument", "Connection does not use OAuth")
         ceiling = execution_authority(actor, scope)
     try:

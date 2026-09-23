@@ -107,6 +107,18 @@ class Worker(Section):
     authority_seconds: float = Field(default=1, gt=0, le=30)
 
 
+class Managed(Section):
+    verifier_url: str | None = Field(default=None, max_length=2048)
+    return_urls: tuple[str, ...] = ()
+    flow_seconds: int = Field(default=600, ge=30, le=600)
+    operation_seconds: float = Field(default=10, ge=2, le=30)
+
+    @field_validator("return_urls", mode="before")
+    @classmethod
+    def parse_urls(cls, value: object) -> object:
+        return json.loads(value) if isinstance(value, str) else value
+
+
 class OAuth(Section):
     callback_url: str | None = Field(default=None, max_length=2048)
     return_urls: tuple[str, ...] = ()
@@ -125,6 +137,7 @@ class Settings(Section):
     database: Database = Field(default_factory=Database)
     auth: Authentication = Field(default_factory=Authentication)
     oauth: OAuth = Field(default_factory=OAuth)
+    managed: Managed = Field(default_factory=Managed)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     encryption: Encryption = Field(default_factory=Encryption)
     providers: Outbound = Field(default_factory=Outbound)

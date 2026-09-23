@@ -154,6 +154,48 @@
       "title": "Encryption",
       "type": "object"
     },
+    "Managed": {
+      "additionalProperties": false,
+      "properties": {
+        "verifier_url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verifier Url"
+        },
+        "return_urls": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Return Urls",
+          "type": "array"
+        },
+        "flow_seconds": {
+          "default": 600,
+          "maximum": 600,
+          "minimum": 30,
+          "title": "Flow Seconds",
+          "type": "integer"
+        },
+        "operation_seconds": {
+          "default": 10,
+          "maximum": 30,
+          "minimum": 2,
+          "title": "Operation Seconds",
+          "type": "number"
+        }
+      },
+      "title": "Managed",
+      "type": "object"
+    },
     "OAuth": {
       "additionalProperties": false,
       "properties": {
@@ -465,6 +507,9 @@
     },
     "oauth": {
       "$ref": "#/$defs/OAuth"
+    },
+    "managed": {
+      "$ref": "#/$defs/Managed"
     },
     "redis": {
       "$ref": "#/$defs/RedisSettings"

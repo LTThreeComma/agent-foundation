@@ -25,6 +25,7 @@ app = FastAPI()
 app.include_router(fixture_router)
 app.state.request_count = 0
 app.state.last_message_roles = ()
+app.state.observations = []
 
 
 @app.get("/healthz")
@@ -34,12 +35,20 @@ async def health():
 
 @app.get("/fixture/model-state")
 async def model_state():
-    return {"request_count": app.state.request_count, "last_message_roles": app.state.last_message_roles}
+    return {
+        "request_count": app.state.request_count,
+        "last_message_roles": app.state.last_message_roles,
+        "observations": app.state.observations,
+    }
 
 
 @app.post("/v1/chat/completions")
 async def completion(request: Request):
+    observation = {"arrived_at": time.time()}
+    app.state.observations.append(observation)
+    del app.state.observations[:-64]
     body = await request.json()
+    observation["body_read_at"] = time.time()
     messages = body.get("messages", [])
     app.state.request_count += 1
     app.state.last_message_roles = tuple(message.get("role") for message in messages[-256:])
@@ -58,6 +67,7 @@ async def completion(request: Request):
         if tool_result is None or any(flag in prompt for flag in ("[structured-invalid]", "[delegate]"))
         else None
     )
+    observation["tool_call_selected"] = tool_call is not None
     document = Path(__file__).with_name("response.md").read_text()
     text = (
         document
@@ -91,6 +101,7 @@ async def completion(request: Request):
     )
     include_usage = body.get("stream_options", {}).get("include_usage", False)
     if not body.get("stream"):
+        observation["response_prepared_at"] = time.time()
         return {
             "id": response_id,
             "object": "chat.completion",
@@ -143,7 +154,16 @@ async def completion(request: Request):
             yield usage_chunk
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(chunks(), media_type="text/event-stream")
+    async def observed_chunks():
+        observation["stream_started_at"] = time.time()
+        try:
+            async for chunk in chunks():
+                yield chunk
+            observation["stream_completed_at"] = time.time()
+        finally:
+            observation["stream_closed_at"] = time.time()
+
+    return StreamingResponse(observed_chunks(), media_type="text/event-stream")
 
 
 def planned_tool(body: dict, prompt: str) -> dict | None:
@@ -162,6 +182,10 @@ def planned_tool(body: dict, prompt: str) -> dict | None:
         ),
     )
     tools = [item["function"] for item in body.get("tools", [])]
+    if "[service-composio]" in prompt:
+        selected = next((item for item in tools if item["name"].startswith("GITHUB_CREATE_ISSUE_")), None)
+        if selected:
+            return call(selected["name"], {"title": "Service managed action proof"})
     match = re.search(r"\[service-mcp:(increment_once|increment|read_count|oversized)\]", prompt)
     if match:
         selected = next((item for item in tools if item["name"].startswith(match[1] + "_")), None)

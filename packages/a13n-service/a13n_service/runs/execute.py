@@ -29,7 +29,7 @@ from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.objects.local import LocalObjects
-from a13n_service.providers.tools import ToolSourceDefinition
+from a13n_service.providers.tools import ConnectionProvider
 from a13n_service.resources.connections.runtime import open_connections
 from a13n_service.resources.models.runtime import open_model
 from a13n_service.runs import attempts, inputs, seal, selection
@@ -58,7 +58,7 @@ async def execute(
     config: Settings,
     redis: Redis,
     catalog: ProviderCatalog[ModelProviderDefinition],
-    tool_catalog: ProviderCatalog[ToolSourceDefinition],
+    tool_catalog: ProviderCatalog[ConnectionProvider],
     keys: KeyRing,
     endpoint_policy: EndpointPolicy,
     admission: AdmissionPolicy | None,

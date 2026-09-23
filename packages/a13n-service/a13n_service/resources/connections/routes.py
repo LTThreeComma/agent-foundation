@@ -82,6 +82,7 @@ async def update_connection(
         if_match=request.headers.get("if-match"),
         keys=request.app.state.key_ring,
         policy=request.app.state.endpoint_policy,
+        catalog=request.app.state.tool_catalog,
     )
     response.headers["ETag"] = etag(result.id, result.version)
     return result

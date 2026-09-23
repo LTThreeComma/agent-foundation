@@ -114,7 +114,7 @@ connections
   id  organization_id  workspace_id  type  name  config  auth  credential NULL  enabled
   version  created_by_id  updated_by_id  created_at  updated_at
   type                                  -- registered tool-source definition
-  auth IN ('none', 'bearer', 'headers', 'oauth')
+  auth IN ('none', 'bearer', 'headers', 'oauth', 'managed')
 
 connection_authorizations
   id  organization_id  workspace_id  connection_id  principal_id  status  credential NULL
@@ -122,7 +122,7 @@ connection_authorizations
   oauth_state_hash NULL  redirect_uri NULL  return_uri NULL  failure NULL  expires_at NULL
   version  created_at  updated_at
   status IN ('pending', 'active', 'revoked', 'reauthorization_required')
-  operation_kind IN ('exchange', 'refresh')
+  operation_kind IN ('exchange', 'refresh', 'setup', 'complete', 'revoke')
   UNIQUE (connection_id, principal_id)
 ```
 
@@ -141,6 +141,16 @@ OAuth orchestration belongs to the owning Connection resource services, includin
 A request that may have been sent but lost its response has no generic exactly-once OAuth retry. Deadline recovery sets `reauthorization_required`, retaining the failed operation identity, and refuses to reuse the old refresh token. Only an adapter with explicit replay/retrieval guarantees can recover it. A late response cannot revive revoked or reauthorized state. Occasional reconnection after a crash is preferable to corrupting credentials. A CAS only **after** two calls cannot prevent refresh-token-family revocation; see [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html#name-refresh-token-protection).
 
 Callback state is random, hashed, one-use and bound to principal/connection/generation, PKCE, expiry and an allowlisted redirect URI. Claim before exchange; duplicate callbacks read/join the operation instead of exchanging again. Public reads expose no tokens or verifiers. Refresh on use and optional keep-alive use exactly this service. Adapters receive plain values and return tokens; they never mutate business tables or blindly retry token POSTs. Operation deadlines are monitored even when keep-alive is disabled. Unused pending flows expire too. A missing refresh token or absent refresh capability does not invalidate an otherwise valid authorization-code result; access-token expiry then requires reauthorization. An omitted expiry remains unknown rather than being invented. Remote 401/403 invalidates the affected current authorization without automatically replaying a tool call. Live native MCP sessions keep their authorization generation and cannot silently switch to another principal, token generation or endpoint. OAuth tool discovery remains principal-specific and cannot use workspace-shared discovery hints.
+
+#### Composio managed accounts
+
+Composio uses `auth=managed`. The Connection holds an encrypted write-only project credential `{api_key}`; public configuration pins `app`, finite `actions`, an existing enabled `auth_config_id`, a dated `toolkit_version`, and catalogue-validated nonsecret `connection_data`. The project key authorizes transport, not personal account use. Service filters synthetic `create:*` configurations from catalogue schemas and rejects them before setup. Operators provision auth configurations in Composio Dashboard. No personal credentials or caller-chosen account/user IDs belong in public configuration.
+
+Each enrollment reuses the principal's authorization row with a new generation and fresh opaque remote user correlation. Its encrypted private bundle binds the exact remote account, principal, Connection identity, auth configuration/scheme, original execution ceiling, browser session when applicable, verifier and allowlisted return target. Setup, completion and remote revoke each claim one bounded operation before HTTP. Every request and publication checks current authority, Connection version/identity and generation; database sessions never cross provider I/O. Dated catalogue pages, sparse details and actions use the saved version even after current app metadata advances. Missing or mismatched versions fail without fallback.
+
+The operator configures a fixed Console `/managed/verify` URL in both Service and the Composio project. OAuth requires its one-use `session_uri` verifier. Before navigation, Console retains only workspace/Connection/authorization/generation in tab-local session storage. An independent Secure HttpOnly SameSite cookie proves browser binding. The verifier document synchronously removes the URI from history before application bootstrap, sets early `no-referrer`, and holds the URI only in memory for an authenticated CSRF-protected completion POST. Current principal, original login session when recorded, cookie, generation, original ceiling and exact account must match. API-key initiation remains confined; browser completion must authenticate the same principal. Signed-out or switched sessions restart enrollment. Missing selectors never select an ambient latest flow. Static servers and proxies must redact verifier query strings.
+
+OAuth cannot activate from an early ACTIVE read alone: a legitimate completion claim must precede redemption. Non-OAuth hosted setup uses an explicit confirmation button after return, followed by authenticated completion with the same binding checks. Its documented `status` and `connected_account_id` query parameters are synchronously stripped and discarded; failed or mixed OAuth callbacks are refused. A returned account ID never replaces the saved binding. Concurrent completion observes the owned operation outside SQL and never redeems twice; stale completed requests are refused. Unknown completion permits only exact saved-account inspection, never resending the URI; known rejection requires reconnect. Lost setup without a returned account ID cannot be searched or replayed. Revoke clears the local binding before a single detached remote attempt, and reports unknown or unsupported remote outcomes honestly. Deadline recovery never revives revoked grants or retries mutations. Managed action recovery is always unsafe after an unknown result; request IDs provide correlation only. Discovery and inspection remain principal-private and uncached.
 
 #### Caller headers
 

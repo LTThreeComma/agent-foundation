@@ -83,6 +83,14 @@ Hosts project this declaration alongside the configuration and credential schema
 
 A definition never stores durable state, chooses retention, or associates a Thread. Acquiring a live resource is a separate explicit call that returns a scoped object owned by the caller.
 
+### Connector Tool Versions
+
+A Connector runtime exposes `tool_catalog(connector_key, *, provider_version=None)`. An explicit version selects that exact upstream tool definition version for every directory page and sparse detail request. Invalid or unavailable versions and mismatched response identities fail without selecting another version. Omitting the argument discovers the current catalogue and holds its selected version across subsequent pages. Runtime implementations, including installed plugins, accept the keyword; this requirement also applies to implementations that support only one version.
+
+Composio versions use the dated `YYYYMMDD_NN` format. Saved setup options may select a supported older version after current application metadata advances. Setup still validates the live application, enabled authentication configuration, and instance fields; an older version requires matching native tool definitions. Account enrollment does not silently change the saved tool version. Execution supplies its selected version explicitly.
+
+Composio account inspection exposes bounded authentication configuration ID and scheme in safe metadata, and maps a disabled authentication configuration to disabled account status. Hosts check these values against their selected configuration before granting account authority. Account state, credentials, and provider parameters are not safe metadata.
+
 ## Catalogs
 
 ```python

@@ -4,6 +4,7 @@ import asyncio
 
 import httpx2
 from a13n_harness.providers.catalog import ProviderCatalog, ProviderNotSelected
+from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from redis.asyncio import Redis
 
@@ -11,8 +12,14 @@ from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage, short_session
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.outbound import open_http
-from a13n_service.providers.tools import INITIALIZATION_SECONDS, MAX_TOOLS, RESPONSE_BYTES, ToolSourceDefinition
-from a13n_service.resources.connections import cache, oauth_access
+from a13n_service.providers.tools import (
+    INITIALIZATION_SECONDS,
+    MAX_TOOLS,
+    RESPONSE_BYTES,
+    ConnectionProvider,
+    ToolSourceDefinition,
+)
+from a13n_service.resources.connections import cache, managed_access, oauth_access
 from a13n_service.resources.connections.schemas import ConnectionTest
 from a13n_service.resources.connections.service import authentication_headers, get_row, resolve
 from a13n_service.settings import OAuth
@@ -30,12 +37,23 @@ async def test_connection(
     refresh: bool,
     keys: KeyRing,
     policy: EndpointPolicy,
-    catalog: ProviderCatalog[ToolSourceDefinition],
+    catalog: ProviderCatalog[ConnectionProvider],
     oauth_settings: OAuth,
 ) -> ConnectionTest:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write" if refresh else "read")
         selected = await resolve(session, actor, scope, connection_id, verb="read")
+    if selected.auth == "managed":
+        definition = catalog.require(selected.type)
+        assert isinstance(definition, ConnectorProviderDefinition)
+        return await managed_access.discover(
+            storage,
+            actor,
+            selected,
+            keys=keys,
+            policy=policy,
+            definition=definition,
+        )
     oauth_token = (
         await oauth_access.access(storage, actor, selected, keys=keys, policy=policy, settings=oauth_settings)
         if selected.auth == "oauth"
@@ -77,6 +95,7 @@ async def test_connection(
                 after_response=check_response,
             ) as client,
         ):
+            assert isinstance(definition, ToolSourceDefinition)
             source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
             tools = await source.discover()
             if len(tools) > MAX_TOOLS:

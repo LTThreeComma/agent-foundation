@@ -16,18 +16,22 @@ from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
-from a13n_service.providers.tools import ToolSourceDefinition
+from a13n_service.providers.tools import ConnectionProvider
 from a13n_service.resources.connections.schemas import (
     BearerCredential,
+    ComposioConfig,
     ConnectionAuthentication,
+    ConnectionConfig,
     ConnectionCreate,
     ConnectionPage,
     ConnectionUpdate,
     ConnectionView,
     Credential,
     HeadersCredential,
+    ManagedCredential,
     MCPConfig,
     OAuthClientCredential,
+    parse_config,
 )
 from a13n_service.resources.connections.tables import ConnectionRow
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, authorize
@@ -41,7 +45,7 @@ class ResolvedConnection:
     workspace_id: str
     type: str
     version: int
-    config: MCPConfig
+    config: ConnectionConfig
     auth: ConnectionAuthentication
     credential: dict | None = field(repr=False)
 
@@ -53,7 +57,7 @@ def view(row: ConnectionRow) -> ConnectionView:
         workspace_id=row.workspace_id,
         type=row.type,
         name=row.name,
-        config=MCPConfig.model_validate(row.config),
+        config=parse_config(row.type, row.config),
         auth=row.auth,
         credential_configured=row.credential is not None,
         enabled=row.enabled,
@@ -86,6 +90,8 @@ def protect(
         value = {"headers": {name: secret.get_secret_value() for name, secret in credential.headers.items()}}
     elif auth == "oauth" and isinstance(credential, OAuthClientCredential):
         value = {"client_secret": credential.client_secret.get_secret_value()}
+    elif auth == "managed" and isinstance(credential, ManagedCredential):
+        value = {"api_key": credential.api_key.get_secret_value()}
     else:
         raise ServiceError("invalid_argument", "Credential does not match Connection authentication")
     return keys.protect(
@@ -94,8 +100,8 @@ def protect(
 
 
 def authentication_headers(selected: ResolvedConnection, keys: KeyRing) -> dict[str, str]:
-    if selected.auth == "oauth":
-        raise ServiceError("conflict", "OAuth requires the executing principal authorization")
+    if selected.auth in {"oauth", "managed"}:
+        raise ServiceError("conflict", "Personal authentication requires the executing principal authorization")
     if selected.auth == "none":
         return {}
     if selected.credential is None:
@@ -131,13 +137,19 @@ async def resolve(
         row.workspace_id,
         row.type,
         row.version,
-        MCPConfig.model_validate(row.config),
+        parse_config(row.type, row.config),
         row.auth,
         row.credential,
     )
 
 
-def validate_auth(config: MCPConfig, auth: ConnectionAuthentication, credential: dict | None) -> None:
+def validate_auth(config: ConnectionConfig, auth: ConnectionAuthentication, credential: dict | None) -> None:
+    if isinstance(config, ComposioConfig):
+        if auth != "managed" or credential is None:
+            raise ServiceError("invalid_argument", "Composio requires a project credential and managed authentication")
+        return
+    if auth == "managed":
+        raise ServiceError("invalid_argument", "Managed authentication requires a managed provider")
     if (auth == "oauth") != (config.oauth is not None):
         raise ServiceError("invalid_argument", "OAuth authentication and configuration must be selected together")
     if auth == "none" and credential is not None:
@@ -154,7 +166,7 @@ async def create(
     workspace_id: str,
     body: ConnectionCreate,
     *,
-    catalog: ProviderCatalog[ToolSourceDefinition],
+    catalog: ProviderCatalog[ConnectionProvider],
     keys: KeyRing,
     policy: EndpointPolicy,
 ) -> ConnectionView:
@@ -165,15 +177,30 @@ async def create(
         catalog.require(body.type)
     except ProviderNotSelected:
         raise ServiceError("invalid_argument", "Connection provider is unavailable") from None
-    try:
-        await policy.validate(body.config.url)
-        if body.config.oauth is not None:
-            await policy.validate(body.config.oauth.issuer)
-    except ValueError:
-        raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None
+    await validate_endpoint(body.config, policy)
     connection_id = new_object_id("conn")
     credential = protect(keys, scope.organization_id, connection_id, body.auth, body.credential)
     validate_auth(body.config, body.auth, credential)
+    if isinstance(body.config, ComposioConfig):
+        from a13n_service.resources.connections.managed_catalog import validate_saved
+
+        await validate_saved(
+            storage,
+            actor,
+            ResolvedConnection(
+                connection_id,
+                scope.organization_id,
+                scope.workspace_id,
+                body.type,
+                0,
+                body.config,
+                body.auth,
+                credential,
+            ),
+            keys=keys,
+            policy=policy,
+            catalog=catalog,
+        )
     async with transaction(storage) as session:
         row = ConnectionRow(
             id=connection_id,
@@ -242,6 +269,7 @@ async def update(
     if_match: str | None,
     keys: KeyRing,
     policy: EndpointPolicy,
+    catalog: ProviderCatalog[ConnectionProvider],
 ) -> ConnectionView:
     fields = body.model_fields_set
     if any(getattr(body, name) is None for name in fields - {"credential"}):
@@ -252,12 +280,37 @@ async def update(
         current = await get_row(session, scope.workspace_id, connection_id)
         require_match(if_match, current.id, current.version)
     if body.config is not None:
-        try:
-            await policy.validate(body.config.url)
-            if body.config.oauth is not None:
-                await policy.validate(body.config.oauth.issuer)
-        except ValueError:
-            raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None
+        if (current.type == "composio") != isinstance(body.config, ComposioConfig):
+            raise ServiceError("invalid_argument", "Connection configuration must match its provider")
+        await validate_endpoint(body.config, policy)
+    candidate = body.config or parse_config(current.type, current.config)
+    if isinstance(candidate, ComposioConfig) and fields & {"config", "auth", "credential"}:
+        from a13n_service.resources.connections.managed_catalog import validate_saved
+
+        auth = body.auth or current.auth
+        credential = (
+            protect(keys, current.organization_id, current.id, auth, body.credential)
+            if "credential" in fields
+            else current.credential
+        )
+        validate_auth(candidate, auth, credential)
+        await validate_saved(
+            storage,
+            actor,
+            ResolvedConnection(
+                current.id,
+                current.organization_id,
+                current.workspace_id,
+                current.type,
+                current.version,
+                candidate,
+                auth,
+                credential,
+            ),
+            keys=keys,
+            policy=policy,
+            catalog=catalog,
+        )
     async with transaction(storage) as session:
         row = await get_row(session, scope.workspace_id, connection_id, lock=True)
         from a13n_service.resources.connections.oauth_state import identity, invalidate_connection
@@ -272,16 +325,18 @@ async def update(
             )
         if "credential" in fields:
             row.credential = protect(keys, row.organization_id, row.id, auth, body.credential)
-        config = body.config or MCPConfig.model_validate(row.config)
+        config = body.config or parse_config(row.type, row.config)
         validate_auth(config, auth, row.credential)
         identity_changed = (
-            config.url != row.config["url"]
+            (isinstance(config, MCPConfig) and config.url != row.config.get("url"))
             or config.model_dump(mode="json").get("oauth") != row.config.get("oauth")
             or auth != row.auth
             or "credential" in fields
         )
-        if identity_changed and (
-            body.config is None or "recovery_retry_safe_tools" not in body.config.model_fields_set
+        if (
+            isinstance(config, MCPConfig)
+            and identity_changed
+            and (body.config is None or "recovery_retry_safe_tools" not in body.config.model_fields_set)
         ):
             config = config.model_copy(update={"recovery_retry_safe_tools": ()})
         row.config = config.model_dump(mode="json")
@@ -305,3 +360,14 @@ async def update(
         await session.flush()
         await session.refresh(row)
         return view(row)
+
+
+async def validate_endpoint(config: ConnectionConfig, policy: EndpointPolicy) -> None:
+    if not isinstance(config, MCPConfig):
+        return
+    try:
+        await policy.validate(config.url)
+        if config.oauth is not None:
+            await policy.validate(config.oauth.issuer)
+    except ValueError:
+        raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None

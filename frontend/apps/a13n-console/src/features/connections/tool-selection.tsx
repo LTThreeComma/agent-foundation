@@ -9,6 +9,7 @@ export function ToolSelection({
   setTools,
   setSafe,
   disabled,
+  allowRecovery = true,
 }: {
   tools: string[] | null;
   safe: string[];
@@ -16,6 +17,7 @@ export function ToolSelection({
   setTools: (tools: string[]) => void;
   setSafe: (tools: string[]) => void;
   disabled: boolean;
+  allowRecovery?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -23,7 +25,9 @@ export function ToolSelection({
       <legend>{t("Available tools")}</legend>
       <p className={styles.help}>
         {t(
-          "Allow tools here; agents choose their own subset. Retry-safe is your assertion that repeating an interrupted call is acceptable.",
+          allowRecovery
+            ? "Allow tools here; agents choose their own subset. Retry-safe is your assertion that repeating an interrupted call is acceptable."
+            : "Choose the actions this connection allows. Each agent selects the actions it needs.",
         )}
       </p>
       {(
@@ -57,21 +61,23 @@ export function ToolSelection({
           {tool.description && (
             <p className={styles.help}>{tool.description}</p>
           )}
-          <label className={styles.help}>
-            <input
-              type="checkbox"
-              checked={safe.includes(tool.name)}
-              disabled={disabled || !tools?.includes(tool.name)}
-              onChange={(event) =>
-                setSafe(
-                  event.target.checked
-                    ? [...safe, tool.name]
-                    : safe.filter((name) => name !== tool.name),
-                )
-              }
-            />{" "}
-            {t("Retry-safe after interruption")}
-          </label>
+          {allowRecovery && (
+            <label className={styles.help}>
+              <input
+                type="checkbox"
+                checked={safe.includes(tool.name)}
+                disabled={disabled || !tools?.includes(tool.name)}
+                onChange={(event) =>
+                  setSafe(
+                    event.target.checked
+                      ? [...safe, tool.name]
+                      : safe.filter((name) => name !== tool.name),
+                  )
+                }
+              />{" "}
+              {t("Retry-safe after interruption")}
+            </label>
+          )}
         </div>
       ))}
     </fieldset>

@@ -15,7 +15,9 @@ def identity(connection: ConnectionRow) -> str:
     return hashlib.sha256(
         json.dumps(
             {
-                "url": connection.config["url"],
+                "type": connection.type,
+                "url": connection.config.get("url"),
+                "managed": connection.config if connection.auth == "managed" else None,
                 "oauth": connection.config.get("oauth"),
                 "auth": connection.auth,
                 "credential": connection.credential,

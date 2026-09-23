@@ -51,6 +51,15 @@ The complete machine-readable validation schema, including named enum/union defi
 | `oauth.operation_seconds` | `A13N_OAUTH__OPERATION_SECONDS` | number          | minimum=2; maximum=30; default=8          |
 | `oauth.scan_seconds`      | `A13N_OAUTH__SCAN_SECONDS`      | number          | maximum=30; exclusiveMinimum=0; default=1 |
 
+## `managed`
+
+| Setting                     | Environment variable              | Type / choices  | Constraints and default              |
+| --------------------------- | --------------------------------- | --------------- | ------------------------------------ |
+| `managed.verifier_url`      | `A13N_MANAGED__VERIFIER_URL`      | string or null  | default=null                         |
+| `managed.return_urls`       | `A13N_MANAGED__RETURN_URLS`       | array of string | default=[]                           |
+| `managed.flow_seconds`      | `A13N_MANAGED__FLOW_SECONDS`      | integer         | minimum=30; maximum=600; default=600 |
+| `managed.operation_seconds` | `A13N_MANAGED__OPERATION_SECONDS` | number          | minimum=2; maximum=30; default=10    |
+
 ## `redis`
 
 | Setting         | Environment variable  | Type / choices | Constraints and default                           |

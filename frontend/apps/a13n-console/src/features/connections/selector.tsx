@@ -38,6 +38,11 @@ export function ConnectionSelector({
       ),
   });
   const selected = query.data?.items.find((item) => item.id === id);
+  const allowedTools = selected
+    ? "actions" in selected.config
+      ? selected.config.actions
+      : selected.config.tools
+    : null;
   const selectedTools =
     value.find((item) => item.connection_id === id)?.tools ?? [];
   const update = (connection_id: string, tools: string[]) =>
@@ -113,11 +118,7 @@ export function ConnectionSelector({
       {discovered?.connection_id === id && (
         <div className={styles.tools}>
           {discovered.tools
-            .filter(
-              (tool) =>
-                !selected?.config.tools ||
-                selected.config.tools.includes(tool.name),
-            )
+            .filter((tool) => !allowedTools || allowedTools.includes(tool.name))
             .map((tool) => (
               <div className={styles.tool} key={tool.name}>
                 <label>
