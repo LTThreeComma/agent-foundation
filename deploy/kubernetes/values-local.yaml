@@ -1,10 +1,9 @@
-profile: local
-replicaCount: 1
+# Local kind cluster: bundled development stores, local objects on the node, Console on 127.0.0.1:8080.
 image:
   repository: a13n-service
   tag: local
   pullPolicy: Never
-publicOrigin: http://127.0.0.1:8080
+publicUrl: http://127.0.0.1:8080
 console:
   image:
     pullPolicy: Never

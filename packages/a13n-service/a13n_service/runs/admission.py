@@ -38,7 +38,8 @@ class CallContext:
     root_run_id: str
     call_id: str
     source: str
-    provider_id: str
+    # None for a call served by no provider resource, such as a tool of a remote MCP server.
+    provider_id: str | None
     model_id: str | None = None
     connection_id: str | None = None
     tool_name: str | None = None

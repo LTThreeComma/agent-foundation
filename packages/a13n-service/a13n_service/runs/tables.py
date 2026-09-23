@@ -5,6 +5,7 @@ selections, immutable facts) and cross-row pointer agreement are the triggers de
 """
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -64,12 +65,22 @@ class SessionRow(Stamped, Base):
         Index("ix_sessions_workspace_updated", "workspace_id", "updated_at", "id"),
         UniqueConstraint("workspace_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
+        ForeignKeyConstraint(
+            ["workspace_id", "id", "last_run_id"],
+            ["runs.workspace_id", "runs.session_id", "runs.id"],
+            name="fk_sessions_last_run",
+            use_alter=True,
+        ),
+        # A run's acceptance updates the session but not its version, so label edits keep their ETag.
+        rules(unversioned=("last_run_id", "updated_at")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
     workspace_id: Mapped[str]
     labels: Mapped[dict] = mapped_column(JSONB)
     created_by_id: Mapped[str] = mapped_column(ForeignKey("principals.id"))
+    # The most recently accepted run of any of its threads: the list preview.
+    last_run_id: Mapped[str | None] = mapped_column(String(72))
 
 
 class ThreadRow(Stamped, Base):
@@ -111,12 +122,21 @@ class ThreadRow(Stamped, Base):
             " AND origin_tool_call_id IS NOT NULL)",
             name="origin_links",
         ),
+        CheckConstraint("(origin = 'child') = (subagent IS NOT NULL)", name="subagent"),
         # A spawn is identified by its tool call, so the parent's recovery finds the same child thread.
         Index(
             "uq_threads_child_origin",
             "origin_run_id",
             "origin_tool_call_id",
             unique=True,
+            postgresql_where=text("origin = 'child'"),
+        ),
+        # A parent's child threads in the order they were spawned, which its subagent tools page through.
+        Index(
+            "ix_threads_children",
+            "origin_thread_id",
+            "created_at",
+            "id",
             postgresql_where=text("origin = 'child'"),
         ),
         # advance_threads evidence: idle threads whose automatic advancement is not paused by a failed run.
@@ -142,6 +162,8 @@ class ThreadRow(Stamped, Base):
     origin_thread_id: Mapped[str | None]
     origin_run_id: Mapped[str | None] = mapped_column(String(72))
     origin_tool_call_id: Mapped[str | None]
+    # The name of the async subagent edge that spawned a child thread, as its parent's graph declared it then.
+    subagent: Mapped[str | None]
     # current: accepted or running. head: latest completed or waiting. last: most recently sealed.
     current_run_id: Mapped[str | None] = mapped_column(String(72))
     head_run_id: Mapped[str | None] = mapped_column(String(72))
@@ -238,7 +260,7 @@ class InboxEntryRow(Base):
                 ) THEN RAISE EXCEPTION 'assigned entries are immutable'; END IF;
                 IF NEW.status <> OLD.status AND NOT (
                     (OLD.status = 'pending' AND NEW.status IN ('assigned', 'failed', 'withdrawn'))
-                    OR (OLD.status = 'assigned' AND NEW.status IN ('pending', 'consumed', 'failed'))
+                    OR (OLD.status = 'assigned' AND NEW.status IN ('pending', 'consumed', 'failed', 'withdrawn'))
                 ) THEN RAISE EXCEPTION 'invalid entry transition % to %', OLD.status, NEW.status; END IF;
                 RETURN NEW;
             END $$
@@ -402,8 +424,13 @@ class RunRow(Stamped, Base):
     revision_selection: Mapped[str]
     principal_id: Mapped[str] = mapped_column(ForeignKey("principals.id"))
     authority: Mapped[dict] = mapped_column(JSONB)
-    # Frozen at acceptance: validated options including the thread's mcp_headers, and the mount set.
+    # `RunOptions` frozen at acceptance: validated, their overrides with pins resolved.
     options: Mapped[dict] = mapped_column(JSONB)
+    # The digest of the options as the source message submitted them, or as the run's history inherited them:
+    # a steer joins the run only when its own options have this digest.
+    options_digest: Mapped[str] = mapped_column(String(64))
+    # The thread's caller headers, frozen at acceptance; no view shows them.
+    mcp_headers: Mapped[dict] = mapped_column(JSONB)
     environment_mounts: Mapped[list] = mapped_column(JSONB)
     source_entry_id: Mapped[str | None] = mapped_column(String(72))
     resume: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
@@ -421,11 +448,11 @@ class RunRow(Stamped, Base):
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     attempts: Mapped[int] = mapped_column(server_default=text("0"))
     max_attempts: Mapped[int]
-    max_usage: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     # Typed pointers to the latest committed state and display objects; only fenced commits move them.
     checkpoint: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     display: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    output: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Any JSON value, bounded by `worker.output_bytes`; large results are assets the output references.
+    output: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
     failure: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     usage_at_seal: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     labels: Mapped[dict] = mapped_column(JSONB)

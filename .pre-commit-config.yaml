@@ -1,4 +1,3 @@
-exclude: ^(packages|spec|docs|proto)/a13n-service-legacy/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

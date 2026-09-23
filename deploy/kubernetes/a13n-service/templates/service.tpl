@@ -1,32 +1,21 @@
-{{- $root := . -}}
-{{- $roles := list "all" -}}
-{{- if eq .Values.profile "distributed" -}}
-{{- $roles = list "control" "worker" "connectivity" -}}
-{{- end -}}
-{{- range $role := $roles }}
-{{- with $root }}
----
+# Control serves the API; workers accept no traffic.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "a13n.name" . }}{{ if ne $role "all" }}-{{ $role }}{{ end }}
-  {{- if ne $role "worker" }}
+  name: {{ include "a13n.name" . }}-control
   {{- with .Values.serviceAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-{{- end }}
 spec:
   type: ClusterIP
   selector:
     {{- include "a13n.selector" . | nindent 4 }}
-    app.kubernetes.io/component: {{ $role }}
+    app.kubernetes.io/component: control
   ports:
     - name: http
       port: 8000
       targetPort: http
-{{- end }}
-{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

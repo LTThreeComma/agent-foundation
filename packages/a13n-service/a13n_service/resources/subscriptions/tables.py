@@ -1,5 +1,7 @@
 """A subscription selects lifecycle kinds; each matching transition copies it into an outbox row."""
 
+from typing import ClassVar
+
 from sqlalchemy import CheckConstraint, ForeignKey, ForeignKeyConstraint, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -9,6 +11,7 @@ from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
 
 class SubscriptionRow(Stamped, Base):
     __tablename__ = "subscriptions"
+    KIND: ClassVar[str] = "subscription"
     __table_args__ = (
         UniqueConstraint("workspace_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),

@@ -1,186 +1,137 @@
-"""Authorized model configuration; endpoint preparation never holds a SQL session."""
+"""Models in the organization collection, and their resolution for execution and for referencing resources.
 
-import json
+A model's scope must be covered by its provider's: a shared provider serves shared and workspace models, a
+workspace provider only models of its own workspace. A model spends its provider's credential, so creating one
+or changing its configuration needs `write` on the provider too: models under an organization-shared provider
+are configured by organization-scope grants, and workspaces use them.
+"""
 
-from a13n_harness.providers.catalog import ProviderCatalog
-from a13n_harness.providers.endpoint_policy import EndpointPolicy
-from a13n_harness.providers.model import ModelProviderDefinition
-from sqlalchemy import or_, select
+from dataclasses import dataclass
+
+from a13n_harness import ModelCapability
+from a13n_harness.pricing import ModelPricingEntry
+from a13n_harness.providers.model.definition import ModelProviderDefinition
+from a13n_harness.toolsets.file_media import NativeInputMediaKind
+from anyio import to_thread
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from a13n_service.infra import cursors
-from a13n_service.infra.audit import record
-from a13n_service.infra.crypto import KeyRing, SecretLocation
-from a13n_service.infra.db import Storage, short_session, transaction
-from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.db import Storage, assign, short_session, transaction, unique_key
+from a13n_service.infra.errors import disabled, invalid
+from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
+from a13n_service.providers.registry import Registry
+from a13n_service.resources.models.catalog import known_model, known_models, serves
 from a13n_service.resources.models.schemas import (
+    CatalogModel,
+    CatalogPage,
+    Model,
+    ModelConfig,
     ModelCreate,
     ModelPage,
-    ModelView,
-    ProviderCreate,
-    ProviderPage,
-    ProviderView,
+    ModelUpdate,
 )
-from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
-from a13n_service.tenancy.authorize import Principal, Scope, Verb, authorize
-from a13n_service.tenancy.grants import readable_workspaces, workspace_scope
-from a13n_service.tenancy.tables import OrganizationRow
+from a13n_service.resources.models.tables import ModelRow
+from a13n_service.resources.providers.scope import list_rows, usable_row, writable_scope
+from a13n_service.resources.providers.service import ResolvedProvider, get_provider, resolve_provider
+from a13n_service.resources.providers.tables import ModelProviderRow
+from a13n_service.resources.rows import audit_row, find_row, given, record_update
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, Verb, WorkspaceScope
 
 
-async def configuration_scope(
-    session: AsyncSession, actor: Principal, organization_id: str, workspace_id: str | None, verb: Verb
-) -> Scope:
-    scope = Scope(organization_id, workspace_id)
-    authorize(actor, scope, verb)
-    if workspace_id is not None:
-        actual = await workspace_scope(session, actor, workspace_id, verb)
-        if actual != scope:
-            raise ServiceError("invalid_argument", "Workspace belongs to another organization")
-    elif await session.get(OrganizationRow, organization_id) is None:
-        raise ServiceError("not_found", "Organization was not found")
-    return scope
+@dataclass(frozen=True, slots=True)
+class ResolvedModel:
+    """A model as execution uses it; its provider's credential stays encrypted until the model is opened."""
+
+    id: str
+    version: int
+    config: ModelConfig
+    pricing: ModelPricingEntry | None
+    provider: ResolvedProvider
 
 
-def provider_view(row: ModelProviderRow) -> ProviderView:
-    return ProviderView(
+async def resolve_model(
+    session: AsyncSession,
+    actor: Principal,
+    scope: WorkspaceScope,
+    model_id: str,
+    *,
+    verb: Verb = "run",
+    authority: ExecutionAuthority | None = None,
+) -> ResolvedModel:
+    """An enabled model of an enabled provider usable in the workspace, read in the caller's short session."""
+    row = await usable_row(session, actor, ModelRow, scope, model_id, verb=verb, authority=authority)
+    provider = await resolve_provider(
+        session, actor, ModelProviderRow, scope, row.provider_id, verb=verb, authority=authority
+    )
+    return ResolvedModel(
         id=row.id,
-        organization_id=row.organization_id,
-        workspace_id=row.workspace_id,
-        type=row.type,
-        name=row.name,
-        config=row.config,
-        credential_configured=row.credential is not None,
-        enabled=row.enabled,
         version=row.version,
+        config=ModelConfig.model_validate(row.config),
+        pricing=_pricing(row),
+        provider=provider,
     )
 
 
-async def create_provider(
-    storage: Storage,
+async def resolve_media_model(
+    session: AsyncSession,
     actor: Principal,
-    organization_id: str,
-    body: ProviderCreate,
+    scope: WorkspaceScope,
+    kind: NativeInputMediaKind,
+    model_id: str,
     *,
-    catalog: ProviderCatalog[ModelProviderDefinition],
-    policy: EndpointPolicy,
-    keys: KeyRing,
-) -> ProviderView:
-    async with short_session(storage) as session:
-        await configuration_scope(session, actor, organization_id, body.workspace_id, "write")
-    try:
-        definition = catalog.require(body.type)
-        connection = definition.bind(body.config, body.credential)
-        if connection.endpoint is not None:
-            await policy.validate(connection.endpoint)
-        configuration = connection.configuration.model_dump(mode="json")
-    except ValueError:
-        raise ServiceError("invalid_argument", "Invalid model provider configuration or credential") from None
-    provider_id = new_object_id("mprov")
-    envelope = None
-    if body.credential is not None:
-        envelope = keys.protect(
-            json.dumps(body.credential, allow_nan=False).encode(),
-            SecretLocation(organization_id, "model_providers", "credential", provider_id),
-        ).model_dump(mode="json")
-    async with transaction(storage) as session:
-        row = ModelProviderRow(
-            id=provider_id,
-            organization_id=organization_id,
-            workspace_id=body.workspace_id,
-            type=body.type,
-            name=body.name,
-            config=configuration,
-            credential=envelope,
-            enabled=True,
-            created_by_id=actor.id,
-            updated_by_id=actor.id,
-        )
-        session.add(row)
-        record(
-            session,
-            organization_id=organization_id,
-            workspace_id=body.workspace_id,
-            actor_id=actor.id,
-            action="model_provider.create",
-            target_kind="model_provider",
-            target_id=row.id,
-        )
-        await session.flush()
-        return provider_view(row)
+    verb: Verb = "run",
+    authority: ExecutionAuthority | None = None,
+) -> ResolvedModel:
+    """`resolve_model` for a model that describes `kind` media, which it must declare it understands."""
+    model = await resolve_model(session, actor, scope, model_id, verb=verb, authority=authority)
+    require_understanding(model, kind)
+    return model
+
+
+def require_understanding(model: ResolvedModel, kind: NativeInputMediaKind) -> None:
+    if ModelCapability(f"{kind}_understanding") not in model.config.characteristics.capabilities:
+        raise invalid("model", f"does not declare {kind}_understanding")
 
 
 async def create_model(
-    storage: Storage,
-    actor: Principal,
-    organization_id: str,
-    body: ModelCreate,
-    *,
-    catalog: ProviderCatalog[ModelProviderDefinition],
-) -> ModelView:
-    async with transaction(storage) as session:
-        await configuration_scope(session, actor, organization_id, body.workspace_id, "write")
-        provider = await session.get(ModelProviderRow, body.provider_id, with_for_update=True)
-        if provider is None or provider.organization_id != organization_id:
-            raise ServiceError("not_found", "Model provider was not found")
-        authorize(actor, Scope(provider.organization_id, provider.workspace_id), "read")
-        if not provider.enabled or (provider.workspace_id is not None and provider.workspace_id != body.workspace_id):
-            raise ServiceError("invalid_argument", "Model provider is disabled or confined to another workspace")
-        definition = catalog.require(provider.type)
-        if body.config.model_api not in definition.supported_model_apis:
-            raise ServiceError("invalid_argument", "Model API is not supported by this provider")
-        if body.pricing is not None and (
-            body.pricing.provider != provider.type or body.pricing.model != body.config.model_name
-        ):
-            raise ServiceError("invalid_argument", "Pricing must describe the selected provider and model")
-        existing = await session.scalar(
-            select(ModelRow.id).where(ModelRow.provider_id == provider.id, ModelRow.key == body.key)
-        )
-        if existing is not None:
-            raise ServiceError("already_exists", "Model key already exists")
-        row = ModelRow(
-            id=new_object_id("mdl"),
-            organization_id=organization_id,
-            workspace_id=body.workspace_id,
-            provider_id=provider.id,
-            key=body.key,
-            name=body.name,
-            config=body.config.model_dump(mode="json"),
-            pricing=body.pricing.model_dump(mode="json") if body.pricing is not None else None,
-            enabled=True,
-            created_by_id=actor.id,
-            updated_by_id=actor.id,
-        )
-        session.add(row)
-        record(
-            session,
-            organization_id=organization_id,
-            workspace_id=body.workspace_id,
-            actor_id=actor.id,
-            action="model.create",
-            target_kind="model",
-            target_id=row.id,
-        )
-        await session.flush()
-        return ModelView.model_validate(row)
+    storage: Storage, actor: Principal, organization_id: str, body: ModelCreate, *, registry: Registry
+) -> Model:
+    known = None if body.catalog_key is None else await to_thread.run_sync(known_model, body.catalog_key)
+    if body.catalog_key is not None and known is None:
+        raise invalid("catalog_key", "not a catalogue model")
+    with unique_key(ModelRow.KIND, "uq_models_provider_id_key", body.key):
+        async with transaction(storage) as session:
+            scope = await writable_scope(session, actor, organization_id, body.workspace_id)
+            provider = await _configured_provider(session, actor, organization_id, body.provider_id)
+            if provider.workspace_id not in {None, scope.workspace_id}:
+                raise invalid("workspace_id", "the provider is confined to another workspace")
+            if not provider.enabled:
+                raise disabled(provider.KIND, provider.id)
+            config, pricing = _source(body, known, registry.get("model", provider.type))
+            _check_pricing(config, pricing)
+            row = ModelRow(
+                id=new_object_id("mdl"),
+                organization_id=scope.organization_id,
+                workspace_id=scope.workspace_id,
+                provider_id=provider.id,
+                key=body.key,
+                name=body.name,
+                description=body.description,
+                config=config.model_dump(mode="json"),
+                pricing=None if pricing is None else pricing.model_dump(mode="json"),
+                enabled=body.enabled,
+                created_by_id=actor.id,
+                updated_by_id=actor.id,
+            )
+            session.add(row)
+            await session.flush()
+            audit_row(session, actor, row, "create")
+            return Model.model_validate(row)
 
 
-async def get_provider(storage: Storage, actor: Principal, organization_id: str, provider_id: str) -> ProviderView:
+async def get_model(storage: Storage, actor: Principal, organization_id: str, model_id: str) -> Model:
     async with short_session(storage) as session:
-        row = await session.get(ModelProviderRow, provider_id)
-        if row is None or row.organization_id != organization_id:
-            raise ServiceError("not_found", "Model provider was not found")
-        authorize(actor, Scope(row.organization_id, row.workspace_id), "read")
-        return provider_view(row)
-
-
-async def get_model(storage: Storage, actor: Principal, organization_id: str, model_id: str) -> ModelView:
-    async with short_session(storage) as session:
-        row = await session.get(ModelRow, model_id)
-        if row is None or row.organization_id != organization_id:
-            raise ServiceError("not_found", "Model was not found")
-        authorize(actor, Scope(row.organization_id, row.workspace_id), "read")
-        return ModelView.model_validate(row)
+        return Model.model_validate(await find_row(session, actor, ModelRow, Scope(organization_id), model_id, "read"))
 
 
 async def list_models(
@@ -193,47 +144,82 @@ async def list_models(
     cursor: str | None,
 ) -> ModelPage:
     async with short_session(storage) as session:
-        await configuration_scope(session, actor, organization_id, workspace_id, "read")
-        owner = organization_id + ":" + (workspace_id or "*")
-        after = cursors.id_position(cursor, "models", owner)
-        query = select(ModelRow).where(
-            ModelRow.organization_id == organization_id,
-            ModelRow.id > after,
-            or_(ModelRow.workspace_id.is_(None), ModelRow.workspace_id.in_(readable_workspaces(actor))),
+        rows, next_cursor = await list_rows(
+            session, actor, ModelRow, organization_id, workspace_id, limit=limit, cursor=cursor
         )
-        if workspace_id is not None:
-            query = query.where(or_(ModelRow.workspace_id.is_(None), ModelRow.workspace_id == workspace_id))
-        rows = (await session.scalars(query.order_by(ModelRow.id).limit(limit + 1))).all()
-        return ModelPage(
-            items=[ModelView.model_validate(row) for row in rows[:limit]],
-            next_cursor=cursors.encode("models", owner, rows[limit - 1].id) if len(rows) > limit else None,
-        )
+    return ModelPage(items=[Model.model_validate(row) for row in rows], next_cursor=next_cursor)
 
 
-async def list_providers(
+async def update_model(
     storage: Storage,
     actor: Principal,
     organization_id: str,
+    model_id: str,
+    body: ModelUpdate,
     *,
-    workspace_id: str | None,
-    limit: int,
-    cursor: str | None,
-) -> ProviderPage:
-    async with short_session(storage) as session:
-        await configuration_scope(session, actor, organization_id, workspace_id, "read")
-        owner = organization_id + ":" + (workspace_id or "*")
-        after = cursors.id_position(cursor, "providers", owner)
-        query = select(ModelProviderRow).where(
-            ModelProviderRow.organization_id == organization_id,
-            ModelProviderRow.id > after,
-            or_(ModelProviderRow.workspace_id.is_(None), ModelProviderRow.workspace_id.in_(readable_workspaces(actor))),
-        )
-        if workspace_id is not None:
-            query = query.where(
-                or_(ModelProviderRow.workspace_id.is_(None), ModelProviderRow.workspace_id == workspace_id)
-            )
-        rows = (await session.scalars(query.order_by(ModelProviderRow.id).limit(limit + 1))).all()
-        return ProviderPage(
-            items=[provider_view(row) for row in rows[:limit]],
-            next_cursor=cursors.encode("providers", owner, rows[limit - 1].id) if len(rows) > limit else None,
-        )
+    if_match: str | None,
+    registry: Registry,
+) -> Model:
+    async with transaction(storage) as session:
+        row = await find_row(session, actor, ModelRow, Scope(organization_id), model_id, "write", lock=True)
+        require_match(if_match, row.id, row.version)
+        values = given(body, "name", "description", "enabled")
+        if body.config is not None and (config := body.config.model_dump(mode="json")) != row.config:
+            provider = await _configured_provider(session, actor, organization_id, row.provider_id)
+            _check_api(registry.get("model", provider.type), body.config)
+            values["config"] = config
+        if "pricing" in body.model_fields_set:
+            values["pricing"] = None if body.pricing is None else body.pricing.model_dump(mode="json")
+        changed = assign(row, values)
+        if {"config", "pricing"} & set(changed):
+            _check_pricing(ModelConfig.model_validate(row.config), _pricing(row))
+        if record_update(session, actor, row, changed):
+            await session.flush()
+        return Model.model_validate(row)
+
+
+async def list_catalog(
+    storage: Storage, actor: Principal, organization_id: str, provider_id: str, *, registry: Registry
+) -> CatalogPage:
+    provider = await get_provider(storage, actor, ModelProviderRow, organization_id, provider_id)
+    definition = registry.get("model", provider.type)
+    return CatalogPage(items=await to_thread.run_sync(known_models, definition), next_cursor=None)
+
+
+def _source(
+    body: ModelCreate, known: CatalogModel | None, definition: ModelProviderDefinition
+) -> tuple[ModelConfig, ModelPricingEntry | None]:
+    """The configuration and pricing a new model starts with: the caller's, or the catalogue's."""
+    if known is not None:
+        if not serves(definition, known):
+            raise invalid("catalog_key", "the provider type does not serve this model")
+        # The definition's first calling API is the Harness default; `PATCH` can select another.
+        api = definition.supported_model_apis[0]
+        config = ModelConfig(model_name=known.model_name, model_api=api, characteristics=known.characteristics)
+        return config, known.pricing
+    if body.config is None:
+        raise invalid("config", "required unless catalog_key is given")
+    _check_api(definition, body.config)
+    return body.config, body.pricing
+
+
+def _check_pricing(config: ModelConfig, pricing: ModelPricingEntry | None) -> None:
+    # Execution looks a price up by the upstream model name, so a price naming another model never applies.
+    if pricing is not None and pricing.model != config.model_name:
+        raise invalid("pricing.model", f"must be the model's model_name {config.model_name}")
+
+
+def _pricing(row: ModelRow) -> ModelPricingEntry | None:
+    return None if row.pricing is None else ModelPricingEntry.model_validate(row.pricing)
+
+
+def _check_api(definition: ModelProviderDefinition, config: ModelConfig) -> None:
+    if config.model_api not in definition.supported_model_apis:
+        raise invalid("config.model_api", f"{definition.type} supports {', '.join(definition.supported_model_apis)}")
+
+
+async def _configured_provider(
+    session: AsyncSession, actor: Principal, organization_id: str, provider_id: str
+) -> ModelProviderRow:
+    """The provider a model is configured under, which the caller may write: the model spends its credential."""
+    return await find_row(session, actor, ModelProviderRow, Scope(organization_id), provider_id, "write")

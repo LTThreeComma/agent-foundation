@@ -1,32 +1,29 @@
-"""Detached grants, credential confinement and the one scope/verb rule."""
+"""Detached grants, the built-in role vocabulary, credential confinement and the one scope/verb rule."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from a13n_service.infra.audit import Scoped
 from a13n_service.infra.errors import ServiceError
 
 type Verb = Literal["read", "run", "write", "admin"]
 
-ROLES: Mapping[str, frozenset[Verb]] = MappingProxyType(
+VERBS: frozenset[Verb] = frozenset({"read", "run", "write", "admin"})
+# What any grant in an organization, or a workspace credential, may do with the organization's shared resources.
+SHARED_USE: frozenset[Verb] = frozenset({"read", "run"})
+
+BUILT_IN_ROLES: Mapping[str, frozenset[Verb]] = MappingProxyType(
     {
         "viewer": frozenset({"read"}),
         "runner": frozenset({"read", "run"}),
         "builder": frozenset({"read", "run", "write"}),
-        "admin": frozenset({"read", "run", "write", "admin"}),
+        "admin": VERBS,
     }
 )
-
-
-class Scoped(Protocol):
-    @property
-    def organization_id(self) -> str: ...
-
-    @property
-    def workspace_id(self) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +34,7 @@ class Scope:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceScope:
-    """A resolved workspace: the scope of every execution and of workspace-owned resources."""
+    """A resolved workspace: the scope of every execution, of workspace-owned resources and of every API key."""
 
     organization_id: str
     workspace_id: str
@@ -45,9 +42,11 @@ class WorkspaceScope:
 
 @dataclass(frozen=True, slots=True)
 class Grant:
+    """The verbs a role gives at an organization or one of its workspaces, resolved when the principal loads."""
+
     organization_id: str
     workspace_id: str | None
-    role: str
+    verbs: frozenset[Verb]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +54,8 @@ class Principal:
     id: str
     kind: Literal["user", "service_account"]
     grants: tuple[Grant, ...]
-    confinement: Scope | None = None
-    active: bool = True
+    # An API key's workspace; a service account is always confined to its home workspace.
+    confinement: WorkspaceScope | None = None
     name: str = ""
     email: str | None = None
 
@@ -72,61 +71,46 @@ class ExecutionAuthority(BaseModel):
     verbs: frozenset[Verb]
 
 
-def allowed_verbs(
-    principal: Principal, resource: Scoped, *, roles: Mapping[str, frozenset[Verb]] = ROLES
-) -> frozenset[Verb]:
-    if not principal.active:
-        return frozenset()
-    if any(grant.role not in roles for grant in principal.grants):
-        raise ServiceError("forbidden", "Principal has an unknown role")
+def allowed_verbs(principal: Principal, resource: Scoped) -> frozenset[Verb]:
     confinement = principal.confinement
     if confinement is not None and (
-        confinement.workspace_id is None
-        or confinement.organization_id != resource.organization_id
-        or (resource.workspace_id is not None and resource.workspace_id != confinement.workspace_id)
+        confinement.organization_id != resource.organization_id
+        or resource.workspace_id not in {None, confinement.workspace_id}
     ):
         return frozenset()
     verbs: set[Verb] = set()
     for grant in principal.grants:
         if grant.organization_id != resource.organization_id:
             continue
-        permitted = roles[grant.role]
         if resource.workspace_id is None:
-            verbs.update(permitted if grant.workspace_id is None else permitted & {"read", "run"})
-        elif grant.workspace_id is None or grant.workspace_id == resource.workspace_id:
-            verbs.update(permitted)
+            verbs.update(grant.verbs if grant.workspace_id is None else grant.verbs & SHARED_USE)
+        elif grant.workspace_id in {None, resource.workspace_id}:
+            verbs.update(grant.verbs)
     if confinement is not None and resource.workspace_id is None:
-        verbs.intersection_update({"read", "run"})
+        verbs.intersection_update(SHARED_USE)
     return frozenset(verbs)
 
 
 def authorize(
-    principal: Principal,
-    resource: Scoped,
-    verb: Verb,
-    *,
-    roles: Mapping[str, frozenset[Verb]] = ROLES,
-    authority: ExecutionAuthority | None = None,
+    principal: Principal, resource: Scoped, verb: Verb, *, authority: ExecutionAuthority | None = None
 ) -> None:
     if authority is not None and (
         authority.principal_id != principal.id
         or authority.organization_id != resource.organization_id
         or resource.workspace_id not in {None, authority.workspace_id}
-        or (resource.workspace_id is None and verb not in {"read", "run"})
+        or (resource.workspace_id is None and verb not in SHARED_USE)
         or verb not in authority.verbs
     ):
         raise ServiceError("forbidden", "Execution delegation does not cover this operation", {"verb": verb})
-    if verb not in allowed_verbs(principal, resource, roles=roles):
+    if verb not in allowed_verbs(principal, resource):
         raise ServiceError("forbidden", "Principal cannot perform this operation", {"verb": verb})
 
 
-def execution_authority(
-    principal: Principal, scope: WorkspaceScope, *, roles: Mapping[str, frozenset[Verb]] = ROLES
-) -> ExecutionAuthority:
-    authorize(principal, scope, "run", roles=roles)
+def execution_authority(principal: Principal, scope: WorkspaceScope) -> ExecutionAuthority:
+    authorize(principal, scope, "run")
     return ExecutionAuthority(
         principal_id=principal.id,
         organization_id=scope.organization_id,
         workspace_id=scope.workspace_id,
-        verbs=allowed_verbs(principal, scope, roles=roles),
+        verbs=allowed_verbs(principal, scope),
     )

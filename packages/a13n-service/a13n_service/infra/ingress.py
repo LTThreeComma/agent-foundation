@@ -4,7 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
-from fastapi.responses import JSONResponse
+from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.http import error_response, request_id
 
 type Message = MutableMapping[str, Any]
 type Receive = Callable[[], Awaitable[Message]]
@@ -29,27 +30,18 @@ class BodyLimit:
                         return
                     chunk = message.get("body", b"")
                     if len(body) + len(chunk) > self.max_bytes:
-                        await JSONResponse(
-                            {
-                                "error": {
-                                    "code": "payload_too_large",
-                                    "message": "Request body exceeds its byte limit",
-                                    "details": {},
-                                }
-                            },
-                            status_code=413,
-                            headers={"Connection": "close"},
+                        limit = {"limit": self.max_bytes}
+                        await error_response(
+                            ServiceError("payload_too_large", "Request body exceeds its byte limit", limit),
+                            request_id(scope),
                         )(scope, receive, send)
                         return
                     body.extend(chunk)
                     if not message.get("more_body", False):
                         break
         except TimeoutError:
-            await JSONResponse(
-                {"error": {"code": "invalid_argument", "message": "Request body timed out", "details": {}}},
-                status_code=408,
-                headers={"Connection": "close"},
-            )(scope, receive, send)
+            timed_out = ServiceError("request_timeout", "Request body timed out")
+            await error_response(timed_out, request_id(scope))(scope, receive, send)
             return
         buffered: bytes | None = bytes(body)
         del body

@@ -124,6 +124,10 @@ jobs:
         if: matrix.name == 'checks'
         run: uv run --locked python -m pytest packages/a13n-logging/tests --junitxml=test-results/logging.xml
 
+      - name: Check local Service development tools
+        if: matrix.name == 'checks'
+        run: make dev-state-check
+
       - name: Test a13n Service
         if: matrix.name == 'tests'
         timeout-minutes: 10

@@ -49,11 +49,7 @@ def map_path(package: str, commit: str) -> Path:
 
 
 def packages_with_tests() -> list[str]:
-    return sorted(
-        path.parent.name
-        for path in (REPOSITORY_ROOT / "packages").glob("*/tests")
-        if path.parent.name != "a13n-service-legacy"
-    )
+    return sorted(path.parent.name for path in (REPOSITORY_ROOT / "packages").glob("*/tests"))
 
 
 # --------------------------------------------------------------------------- selection

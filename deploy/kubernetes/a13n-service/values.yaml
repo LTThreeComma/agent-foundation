@@ -1,23 +1,34 @@
-# Select an environment overlay before installing. Secrets are always external.
-profile: local
-# Used only by the local profile. Distributed replicas are per role below.
-replicaCount: 1
-roles:
-  control:
-    replicaCount: 2
-    resources: {}
-  worker:
-    replicaCount: 2
-    resources: {}
-  connectivity:
-    replicaCount: 2
-    resources: {}
+# One image runs the control and worker Deployments and the per-revision migration Job.
 image:
   repository: a13n-service
   tag: local
   pullPolicy: IfNotPresent
 imagePullSecrets: []
+# Credential settings as A13N_<SECTION>__<FIELD> keys, such as the database URL and encryption key ring.
 existingSecret: a13n-service-secrets
+# The externally reachable Console URL; browsers may change state only from its origin.
+publicUrl: http://127.0.0.1:8000
+# Addresses or CIDRs of the Console Pods and front proxies whose forwarded client addresses are trusted.
+trustedProxies: []
+roles:
+  control:
+    replicaCount: 1
+    resources: {}
+  worker:
+    replicaCount: 1
+    resources: {}
+objects:
+  # local: a claim every Service Pod mounts; s3: an S3-compatible bucket.
+  backend: local
+  bucket: ""
+  prefix: ""
+  region: ""
+  endpointUrl: ""
+# Local objects only. The chart's claim is retained on uninstall.
+persistence:
+  existingClaim: ""
+  storageClassName: null
+  size: 10Gi
 console:
   enabled: true
   replicaCount: 1
@@ -36,18 +47,6 @@ console:
     limits:
       cpu: "1"
       memory: 256Mi
-publicOrigin: http://127.0.0.1:8000
-environmentName: local
-objects:
-  bucket: ""
-  region: ""
-  endpointUrl: ""
-  forcePathStyle: false
-# Mount an existing RWX claim for distributed deployments. Local claims are retained.
-persistence:
-  existingClaim: ""
-  storageClassName: null
-  size: 10Gi
 serviceAccount:
   annotations: {}
 podAnnotations: {}
@@ -69,8 +68,8 @@ resources:
   limits:
     cpu: "2"
     memory: 2Gi
-# Additional non-secret TOML sections, e.g. observability. Do not redefine sections
-# owned by the chart or override backend/profile/role settings through the Secret.
+# Additional non-secret TOML sections, such as [providers] or [telemetry]. The chart writes [server], [database],
+# [objects] and, with bundled Redis, [redis]; set their other fields as A13N_<SECTION>__<FIELD> Secret keys.
 extraConfig: ""
 redis:
   enabled: false

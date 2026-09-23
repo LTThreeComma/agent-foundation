@@ -1,283 +1,156 @@
-"""Attempt-owned Connection transports and host-visible tool dispatch."""
+"""What a worker calls for a run's connections: resolve in its short session, then open outside any session.
 
-import asyncio
-import hashlib
-import json
-import re
-from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
-from typing import Any
+Opening yields one Harness capability per selected connection for the run's agent definition: a
+`ContextualMCP` whose caller headers are the run's frozen copy of its thread's `mcp_headers` for that
+connection, or a toolset over the connector account. Before every tool call the connection must still be
+enabled and ready, and the worker's `DispatchCheck` must pass; otherwise the call is never sent.
+"""
 
-import httpx2
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
+
 from a13n_harness import AgentContext
-from a13n_harness.providers.catalog import ProviderCatalog, ProviderNotSelected
-from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
-from a13n_harness.tools.identity import identify_tool, tool_identity
-from a13n_harness.tools.metadata import RECOVERY_RETRY_SAFE_METADATA_KEY
-from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, Toolset
 from pydantic_ai.exceptions import ToolFailed
-from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 from redis.asyncio import Redis
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.crypto import KeyRing
-from a13n_service.infra.db import Storage, transaction
-from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.outbound import open_http
-from a13n_service.providers.tools import (
-    CALL_SECONDS,
-    INITIALIZATION_SECONDS,
-    MAX_TOOLS,
-    RESPONSE_BYTES,
-    ConnectionProvider,
-    ToolInfo,
-    ToolSourceDefinition,
-)
-from a13n_service.resources.agents.schemas import AgentConfig
-from a13n_service.resources.connections import cache, oauth_access
-from a13n_service.resources.connections.schemas import ConnectionSelection, ConnectionTest, recovery_tools
-from a13n_service.resources.connections.scope import (
-    check_collisions,
-    connection_scope,
-    validate_approval_target,
-    validate_tools,
-)
-from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
-from a13n_service.runs.attempts import lock_authority
-from a13n_service.runs.policy import CallCheck, authorize_execution
-from a13n_service.runs.schemas import AttemptClaim, RunOptions
-from a13n_service.runs.waiting import ToolTarget
-from a13n_service.settings import OAuth
-from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope
+from a13n_service.infra.db import Storage, short_session
+from a13n_service.infra.errors import conflict
+from a13n_service.providers.registry import Registry
+from a13n_service.providers.tools import DispatchCheck, ToolDispatch
+from a13n_service.providers.tools.connectors import connector_toolset, list_connector_tools
+from a13n_service.providers.tools.mcp import mcp_capability
+from a13n_service.resources.connections.access import McpConnection, ResolvedConnection, resolve_connection
+from a13n_service.resources.connections.account import open_account
+from a13n_service.resources.connections.discovery import cache_tools, cached_tools
+from a13n_service.resources.connections.oauth import open_mcp_client
+from a13n_service.resources.connections.schemas import ConnectionSelection, exposed_tools
+from a13n_service.resources.connections.service import check_caller_headers
+from a13n_service.resources.connections.tables import ConnectionRow
+from a13n_service.settings import Providers
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope
 
 
-@dataclass
-class ConnectionTools(WrapperToolset[AgentContext]):
+@dataclass(frozen=True, slots=True)
+class SelectedConnection:
     connection: ResolvedConnection
-    selection: ConnectionSelection
-    check: CallCheck
-    redis: Redis
+    # The agent's tools that the connection still exposes; None is everything an MCP server lists.
+    tools: tuple[str, ...] | None
+    # The run's frozen caller headers for this connection; empty for connectors.
+    caller_headers: Mapping[str, str]
+    # MCP only: the model finds the tools through tool search instead of seeing every definition upfront.
+    defer_loading: bool
 
-    async def get_tools(self, ctx: RunContext[AgentContext]) -> dict[str, ToolsetTool[AgentContext]]:
-        async with asyncio.timeout(INITIALIZATION_SECONDS):
-            tools = await self.wrapped.get_tools(ctx)
-        if len(tools) > MAX_TOOLS:
-            raise ServiceError("payload_too_large", "Connection advertises too many tools")
-        if not set(self.selection.tools) <= tools.keys():
-            raise ServiceError("disabled", "Connection no longer advertises an Agent tool")
-        await cache.write(
-            self.redis,
-            self.connection,
-            ConnectionTest(
-                connection_id=self.connection.id,
-                version=self.connection.version,
-                tools=[
-                    ToolInfo(
-                        name=name,
-                        description=tool.tool_def.description,
-                        input_schema=tool.tool_def.parameters_json_schema,
-                        permission_id=tool_identity(identify_tool(tool).tool_def).tool_id,
-                    )
-                    for name, tool in tools.items()
-                ],
-            ),
+
+async def resolve_connections(
+    session: AsyncSession,
+    actor: Principal,
+    scope: WorkspaceScope,
+    selections: Sequence[ConnectionSelection],
+    mcp_headers: Mapping[str, Mapping[str, str]],
+    *,
+    authority: ExecutionAuthority,
+) -> tuple[SelectedConnection, ...]:
+    """Each selected connection, enabled, ready and usable under the run's authority; no external I/O."""
+    selected: list[SelectedConnection] = []
+    for selection in selections:
+        connection = await resolve_connection(
+            session, actor, scope, selection.connection_id, verb="run", authority=authority
         )
-        return {
-            name: replace(
-                tool,
-                tool_def=replace(
-                    tool.tool_def,
-                    metadata={
-                        **(tool.tool_def.metadata or {}),
-                        RECOVERY_RETRY_SAFE_METADATA_KEY: name in recovery_tools(self.connection.config),
-                    },
-                ),
-            )
-            for name, tool in tools.items()
-            if name in self.selection.tools
-        }
-
-    async def call_tool(
-        self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentContext], tool: ToolsetTool[AgentContext]
-    ) -> Any:
-        if ctx.tool_call_id is None:
-            raise ServiceError("conflict", "Tool call has no original identity")
-        await self.check.check_tool(
-            self.connection, self.selection, name=name, call_id=ctx.tool_call_id, harness_run_id=ctx.deps.run_id
-        )
-        try:
-            async with asyncio.timeout(CALL_SECONDS):
-                return await self.wrapped.call_tool(name, tool_args, ctx, tool)
-        except ServiceError:
-            raise
-        except Exception:
-            raise ToolFailed(
-                "The tool call returned no usable result. Its effects may have occurred; check external state before another call."
-            ) from None
+        if connection.status != "ready":
+            raise conflict("connection", connection.id, connection.status)
+        headers: dict[str, str] = {}
+        if isinstance(connection, McpConnection):
+            headers = dict(mcp_headers.get(connection.id, {}))
+            # Rechecked at use: the connection's headers may have changed since the thread was written.
+            check_caller_headers(connection.id, connection.config, headers)
+        exposed = exposed_tools(connection.config)
+        tools = selection.tools
+        if tools is None:
+            tools = exposed
+        elif exposed is not None:
+            tools = tuple(name for name in tools if name in exposed)
+        selected.append(SelectedConnection(connection, tools, headers, selection.defer_loading))
+    return tuple(selected)
 
 
-def tool_alias(connection_id: str, name: str) -> str:
-    suffix = hashlib.sha256(f"{connection_id}:{name}".encode()).hexdigest()[:16]
-    label = re.sub(r"[^a-zA-Z0-9_-]", "_", name)[:32]
-    return f"{label}_{suffix}"
-
-
+@asynccontextmanager
 async def open_connections(
-    stack: AsyncExitStack,
-    storage: Storage,
-    claim: AttemptClaim,
-    config: AgentConfig,
-    options: RunOptions,
+    connections: Sequence[SelectedConnection],
+    check: DispatchCheck,
     *,
+    storage: Storage,
     redis: Redis,
     keys: KeyRing,
+    registry: Registry,
     policy: EndpointPolicy,
-    catalog: ProviderCatalog[ConnectionProvider],
-    check: CallCheck,
-    oauth_settings: OAuth,
-    expected_targets: dict[str, ToolTarget] | None = None,
-) -> tuple[list[AbstractCapability[AgentContext]], dict[str, ToolTarget]]:
-    capabilities: list[AbstractCapability[AgentContext]] = []
-    targets: dict[str, ToolTarget] = {}
-    for selection in connection_scope(config).values():
-        capability, target = await _open_connection(
-            stack,
-            storage,
-            claim,
-            selection,
-            options,
-            redis=redis,
-            keys=keys,
-            policy=policy,
-            catalog=catalog,
-            check=check,
-            oauth_settings=oauth_settings,
-            expected=tuple(
-                (expected_targets or {})[alias]
-                for name in selection.tools
-                if (alias := tool_alias(selection.connection_id, name)) in (expected_targets or {})
-            ),
-        )
-        capabilities.append(capability)
-        targets.update({tool_alias(selection.connection_id, name): target for name in selection.tools})
-    return capabilities, targets
-
-
-async def _open_connection(
-    stack: AsyncExitStack,
-    storage: Storage,
-    claim: AttemptClaim,
-    selection: ConnectionSelection,
-    options: RunOptions,
-    *,
-    redis: Redis,
-    keys: KeyRing,
-    policy: EndpointPolicy,
-    catalog: ProviderCatalog[ConnectionProvider],
-    check: CallCheck,
-    oauth_settings: OAuth,
-    expected: tuple[ToolTarget, ...],
-) -> tuple[AbstractCapability[AgentContext], ToolTarget]:
-    async def current() -> tuple[ResolvedConnection, Principal, ExecutionAuthority]:
-        async with transaction(storage) as session:
-            run, _, _ = await lock_authority(session, claim)
-            principal = await authorize_execution(session, run)
-            selected = await resolve(
-                session,
-                principal,
-                Scope(run.organization_id, run.workspace_id),
-                selection.connection_id,
-                verb="run",
-                authority=ExecutionAuthority.model_validate(run.authority),
-            )
-            validate_tools(selected, selection)
-        return selected, principal, ExecutionAuthority.model_validate(run.authority)
-
-    selected, principal, authority = await current()
-
-    def wrapper(tools: AbstractToolset[AgentContext]) -> AbstractToolset[AgentContext]:
-        bound = ConnectionTools(tools, selected, selection, check, redis)
-        return bound.renamed({tool_alias(selected.id, name): name for name in selection.tools})
-
-    if selected.auth == "managed":
-        from a13n_service.resources.connections.managed_runtime import open_actions
-
-        definition = catalog.require(selected.type)
-        assert isinstance(definition, ConnectorProviderDefinition)
-        return await open_actions(
-            stack,
-            storage,
-            selected,
-            principal,
-            definition=definition,
-            keys=keys,
-            policy=policy,
-            current=current,
-            wrapper=wrapper,
-            run_id=claim.run_id,
-            expected=expected,
-        )
-    oauth_token = (
-        await oauth_access.access(
-            storage, principal, selected, keys=keys, policy=policy, settings=oauth_settings, authority=authority
-        )
-        if selected.auth == "oauth"
-        else None
-    )
-    target = ToolTarget(
-        connection_id=selected.id,
-        version=selected.version,
-        authorization_id=oauth_token.authorization_id if oauth_token is not None else None,
-        authorization_generation=oauth_token.generation if oauth_token is not None else None,
-    )
-    validate_approval_target(target, expected)
-    context_headers = dict(options.mcp_headers.get(selected.id, {}))
-    check_collisions(selected, context_headers, keys)
-    try:
-        definition = catalog.require(selected.type)
-    except ProviderNotSelected:
-        raise ServiceError("unavailable", "Connection provider is unavailable") from None
-    dispatched: set[str] = set()
-
-    async def before_request(request: httpx2.Request) -> None:
-        # Closing an already-owned remote session needs no new execution authority.
-        active = selected if request.method == "DELETE" else (await current())[0]
-        check_collisions(active, context_headers, keys)
-        if active.version != selected.version:
-            raise ServiceError("disabled", "Connection changed during execution; use a fresh run")
-        if oauth_token is not None:
-            if request.method != "DELETE":
-                await oauth_access.check_session(
-                    storage, oauth_token, principal_id=principal.id, connection_id=selected.id
+    settings: Providers,
+) -> AsyncIterator[tuple[AbstractCapability[AgentContext], ...]]:
+    """The capabilities for the run's definition; transports stay open until the context exits."""
+    async with AsyncExitStack() as stack:
+        capabilities: list[AbstractCapability[AgentContext]] = []
+        for selected in connections:
+            connection = selected.connection
+            checked = _checked(storage, connection.id, check)
+            if isinstance(connection, McpConnection):
+                client = await stack.enter_async_context(
+                    open_mcp_client(connection, storage=storage, keys=keys, policy=policy, settings=settings)
                 )
-            request.headers["authorization"] = "Bearer " + oauth_token.token
-        else:
-            request.headers.update(authentication_headers(active, keys))
-        if request.method == "POST":
-            value = json.loads(await request.aread())
-            if value.get("method") == "tools/call":
-                correlation = value.get("params", {}).get("_meta", {}).get("a13n.service", {})
-                operation = correlation.get("operation_id")
-                if not isinstance(operation, str) or operation in dispatched or len(dispatched) >= 1000:
-                    raise ServiceError("conflict", "MCP transport attempted an untracked or repeated dispatch")
-                dispatched.add(operation)
+                capabilities.append(
+                    mcp_capability(
+                        connection.config.url,
+                        connection.id,
+                        client,
+                        tools=selected.tools,
+                        caller_headers=selected.caller_headers,
+                        defer_loading=selected.defer_loading,
+                        check=checked,
+                        timeout=settings.tool_call_seconds,
+                    )
+                )
+                continue
+            account = await stack.enter_async_context(
+                open_account(
+                    connection,
+                    keys=keys,
+                    registry=registry,
+                    policy=policy,
+                    settings=settings,
+                    timeout=settings.tool_call_seconds,
+                )
+            )
+            tools = await cached_tools(redis, connection)
+            if tools is None:
+                tools = await list_connector_tools(account)
+                await cache_tools(redis, connection, tools, ttl=settings.discovery_ttl)
+            chosen = [tool for tool in tools if selected.tools is None or tool.name in selected.tools]
+            toolset = connector_toolset(
+                connection.id,
+                connection.provider.id,
+                account,
+                chosen,
+                check=checked,
+                timeout=settings.tool_call_seconds,
+            )
+            capabilities.append(Toolset(toolset))
+        yield tuple(capabilities)
 
-    async def check_response(response: httpx2.Response) -> None:
-        if oauth_token is not None and response.status_code in {401, 403}:
-            await oauth_access.rejected(storage, oauth_token)
-            raise oauth_access.required("access_token_rejected")
 
-    client = await stack.enter_async_context(
-        open_http(
-            policy,
-            timeout=CALL_SECONDS,
-            max_bytes=RESPONSE_BYTES,
-            before_request=before_request,
-            after_response=check_response,
-        )
-    )
-    assert isinstance(definition, ToolSourceDefinition)
-    source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
+def _checked(storage: Storage, connection_id: str, check: DispatchCheck) -> DispatchCheck:
+    async def live(dispatch: ToolDispatch) -> None:
+        async with short_session(storage) as session:
+            usable = await session.scalar(
+                select(ConnectionRow.id).where(
+                    ConnectionRow.id == connection_id, ConnectionRow.enabled, ConnectionRow.status == "ready"
+                )
+            )
+        if usable is None:
+            raise ToolFailed("The connection was disabled or needs reauthorization; the call was not sent.")
+        await check(dispatch)
 
-    return source.open(lambda context: context_headers, wrapper, run_id=claim.run_id), target
+    return live

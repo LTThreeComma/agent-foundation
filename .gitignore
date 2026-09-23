@@ -11,11 +11,6 @@ tmp/
 
 # Machine-specific Service configuration, selected with SERVICE_CONFIG
 /dev/service/local.private.toml
-/dev/mem0/local.private.toml
-
-# Live-test credentials and generated artifacts stay local, outside Git merges
-/dev/live_tests/.state/
-/dev/live_tests/providers.local.toml
 
 # Python bytecode and native extensions
 __pycache__/

@@ -1,7 +1,8 @@
 """A thread's queued input: append under capacity, pending-only edits, steer assignment and disposition.
 
 Every function here runs inside the caller's transaction, which already holds the thread lock. Input usage
-is the count and bytes of pending plus assigned entries; `occupancy` is the only place that counts it.
+is the count and bytes of pending plus assigned entries; `_overflow` is the only place that compares it with
+the thread's limits.
 """
 
 import hashlib
@@ -10,25 +11,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from a13n_service.infra.errors import ServiceError, conflict, invalid, not_found
+from a13n_service.infra.errors import ServiceError, conflict, invalid, not_found, rate_limited
 from a13n_service.infra.ids import new_object_id
 from a13n_service.runs.schemas import EntryUpdate, Failure, Message, RunOptions, canonical_json
 from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
+from a13n_service.settings import Control
 from a13n_service.tenancy.authorize import ExecutionAuthority
 
 type RequestKind = Literal["thread", "message", "fork"]
 
 OUTSTANDING = ("pending", "assigned")
-
-
-@dataclass(frozen=True, slots=True)
-class InboxLimits:
-    count: int
-    bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +42,14 @@ class Request:
         return cls(key=key, kind=kind, target=target, digest=digest)
 
 
-async def occupancy(session: AsyncSession, thread_id: str) -> tuple[int, int]:
+def payload_size(payload: dict[str, JsonValue]) -> int:
+    return len(canonical_json(payload))
+
+
+async def _overflow(
+    session: AsyncSession, thread_id: str, control: Control, *, adding: int, growth: int
+) -> dict[str, int] | None:
+    """The thread's input usage when `adding` entries and `growth` bytes would exceed its limits, else None."""
     count, size = (
         await session.execute(
             select(func.count(), func.coalesce(func.sum(InboxEntryRow.size), 0)).where(
@@ -54,19 +57,21 @@ async def occupancy(session: AsyncSession, thread_id: str) -> tuple[int, int]:
             )
         )
     ).one()
-    return int(count), int(size)
+    if count + adding <= control.inbox_count and size + growth <= control.inbox_bytes:
+        return None
+    return {"count": int(count), "bytes": int(size)}
+
+
+async def has_room(session: AsyncSession, thread_id: str, control: Control, *, adding: int, growth: int) -> bool:
+    return await _overflow(session, thread_id, control, adding=adding, growth=growth) is None
 
 
 async def require_capacity(
-    session: AsyncSession, thread_id: str, limits: InboxLimits, *, adding: int, growth: int
+    session: AsyncSession, thread_id: str, control: Control, *, adding: int, growth: int
 ) -> None:
-    count, size = await occupancy(session, thread_id)
-    if count + adding > limits.count or size + growth > limits.bytes:
-        raise ServiceError(
-            "rate_limited",
-            "Thread inbox is full",
-            {"retry_after": 1, "count": count, "bytes": size, "limit_count": limits.count, "limit_bytes": limits.bytes},
-        )
+    if (usage := await _overflow(session, thread_id, control, adding=adding, growth=growth)) is not None:
+        limits = {"limit_count": control.inbox_count, "limit_bytes": control.inbox_bytes}
+        raise rate_limited("Thread inbox is full", 1, {**usage, **limits})
 
 
 async def find_request(session: AsyncSession, workspace_id: str, principal_id: str, key: str) -> InboxEntryRow | None:
@@ -102,11 +107,11 @@ async def append_message(
     principal_id: str,
     authority: ExecutionAuthority,
     request: Request | None,
-    limits: InboxLimits,
+    control: Control,
 ) -> InboxEntryRow:
     payload = message.payload.model_dump(mode="json")
-    size = len(canonical_json(payload))
-    await require_capacity(session, thread.id, limits, adding=1, growth=size)
+    size = payload_size(payload)
+    await require_capacity(session, thread.id, control, adding=1, growth=size)
     entry = InboxEntryRow(
         id=new_object_id("inb"),
         organization_id=thread.organization_id,
@@ -133,20 +138,21 @@ async def append_message(
     return entry
 
 
-async def append_child_result(
-    session: AsyncSession, thread: ThreadRow, child_run: RunRow, origin_run: RunRow, *, limits: InboxLimits
-) -> InboxEntryRow | None:
-    """One result entry per sealed child run; None when the inbox cannot take it now (delivery retries)."""
-    payload = {
+def child_result(child_thread: ThreadRow, child_run: RunRow) -> dict[str, JsonValue]:
+    """What the spawning thread reads about one of its sealed child runs, and the edge that delegated it."""
+    return {
         "child_run_id": child_run.id,
+        "subagent": child_thread.subagent,
         "status": child_run.status,
         "output": child_run.output,
         "failure": child_run.failure,
     }
-    size = len(canonical_json(payload))
-    count, used = await occupancy(session, thread.id)
-    if count + 1 > limits.count or used + size > limits.bytes:
-        return None
+
+
+async def append_child_result(
+    session: AsyncSession, thread: ThreadRow, child_run: RunRow, origin_run: RunRow, payload: dict[str, JsonValue]
+) -> InboxEntryRow:
+    """The one result entry of a sealed child run; the caller found room for `payload` under the thread lock."""
     entry = InboxEntryRow(
         id=new_object_id("inb"),
         organization_id=thread.organization_id,
@@ -158,7 +164,7 @@ async def append_child_result(
         principal_id=origin_run.principal_id,
         authority=origin_run.authority,
         payload=payload,
-        size=size,
+        size=payload_size(payload),
         options={},
         child_run_id=child_run.id,
         origin_run_id=origin_run.id,
@@ -182,26 +188,44 @@ def _require_pending(entry: InboxEntryRow) -> None:
         raise conflict("inbox_entry", entry.id, f"entry_{entry.status}")
 
 
-async def edit_entry(
-    session: AsyncSession, thread: ThreadRow, entry_id: str, update_: EntryUpdate, *, limits: InboxLimits
-) -> InboxEntryRow:
+async def editable_entry(session: AsyncSession, thread: ThreadRow, entry_id: str, *, editor_id: str) -> InboxEntryRow:
+    """The locked pending message, when `editor_id` submitted it.
+
+    An entry runs under its submitter's frozen authority, so only that principal may change what it asks for.
+    """
     entry = await get_entry(session, thread, entry_id, lock=True)
     _require_pending(entry)
     if entry.kind != "message":
         raise conflict("inbox_entry", entry.id, "not_a_message")
-    if update_.payload is not None:
-        payload = update_.payload.model_dump(mode="json")
-        size = len(canonical_json(payload))
-        await require_capacity(session, thread.id, limits, adding=0, growth=size - entry.size)
-        entry.payload, entry.size = payload, size
-    if update_.delivery is not None:
-        entry.delivery = update_.delivery
-    if "agent_revision_id" in update_.model_fields_set:
-        entry.agent_revision_id = update_.agent_revision_id
-    if update_.options is not None:
-        entry.options = update_.options.model_dump(mode="json")
-    await session.flush()
+    if entry.principal_id != editor_id:
+        raise ServiceError("forbidden", "Only the principal that submitted an entry can edit it", {"id": entry.id})
     return entry
+
+
+def edited(entry: InboxEntryRow, change: EntryUpdate) -> Message:
+    """The message a pending entry becomes with `change` applied; an explicit null revision unpins it."""
+    set_revision = "agent_revision_id" in change.model_fields_set
+    return Message.model_validate(
+        {
+            "delivery": change.delivery or entry.delivery,
+            "payload": change.payload or entry.payload,
+            "agent_id": entry.agent_id,
+            "agent_revision_id": change.agent_revision_id if set_revision else entry.agent_revision_id,
+            "options": change.options or entry.options,
+        }
+    )
+
+
+async def edit_entry(
+    session: AsyncSession, thread: ThreadRow, entry: InboxEntryRow, message: Message, *, control: Control
+) -> None:
+    """Replace an editable entry's content with `message`; its payload bytes are rechecked against capacity."""
+    payload = message.payload.model_dump(mode="json")
+    size = payload_size(payload)
+    await require_capacity(session, thread.id, control, adding=0, growth=size - entry.size)
+    entry.payload, entry.size, entry.delivery = payload, size, message.delivery
+    entry.agent_revision_id, entry.options = message.agent_revision_id, message.options.model_dump(mode="json")
+    await session.flush()
 
 
 async def withdraw_entry(session: AsyncSession, thread: ThreadRow, entry_id: str, *, at: datetime) -> InboxEntryRow:
@@ -241,20 +265,31 @@ async def reorder(session: AsyncSession, thread: ThreadRow, entry_ids: Sequence[
     await session.flush()
 
 
-async def pending_entries(session: AsyncSession, thread_id: str, *, limit: int) -> Sequence[InboxEntryRow]:
-    return (
-        await session.scalars(
-            select(InboxEntryRow)
-            .where(InboxEntryRow.thread_id == thread_id, InboxEntryRow.status == "pending")
-            .order_by(InboxEntryRow.position)
-            .limit(limit)
-            .with_for_update()
-        )
-    ).all()
+async def pending_entries(
+    session: AsyncSession, thread_id: str, *, limit: int, messages_only: bool = False
+) -> Sequence[InboxEntryRow]:
+    """The first `limit` pending entries in position order; `messages_only` skips child results in the query."""
+    query = select(InboxEntryRow).where(InboxEntryRow.thread_id == thread_id, InboxEntryRow.status == "pending")
+    if messages_only:
+        query = query.where(InboxEntryRow.kind == "message")
+    return (await session.scalars(query.order_by(InboxEntryRow.position).limit(limit).with_for_update())).all()
 
 
 def fail(entry: InboxEntryRow, failure: Failure, *, at: datetime) -> None:
     entry.status, entry.failure, entry.finished_at = "failed", failure.model_dump(), at
+
+
+async def fail_assigned(session: AsyncSession, run_id: str, entry_id: str, failure: Failure, *, at: datetime) -> None:
+    """Fail one entry assigned to the run; entries its checkpoints consumed are unaffected."""
+    await session.execute(
+        update(InboxEntryRow)
+        .where(
+            InboxEntryRow.id == entry_id,
+            InboxEntryRow.assigned_run_id == run_id,
+            InboxEntryRow.status == "assigned",
+        )
+        .values(status="failed", failure=failure.model_dump(), finished_at=at)
+    )
 
 
 def assign(entry: InboxEntryRow, run: RunRow) -> None:
@@ -262,38 +297,42 @@ def assign(entry: InboxEntryRow, run: RunRow) -> None:
 
 
 def steers_into(entry: InboxEntryRow, run: RunRow, origin: RunRow | None) -> bool:
-    """Compatibility is configuration, not identity: headers and principals take no part."""
+    """Compatibility is configuration, not identity: headers and principals take no part.
+
+    A steer that gives no options (the defaults) joins whatever options the run started with. Options it gives
+    compare as submitted: the run froze its own at acceptance, so it keeps the digest of what its source submitted.
+    """
     if entry.kind == "child_result":
         # The origin must be this run or already in its history; a later failure never revives it.
         return origin is not None and (origin.id == run.id or origin.status in {"completed", "waiting"})
+    options = RunOptions.model_validate(entry.options)
     return (
         entry.delivery == "steer"
         and entry.agent_id == run.agent_id
         and entry.agent_revision_id in {None, run.agent_revision_id}
-        and RunOptions.model_validate(entry.options) == RunOptions.model_validate(run_options(run))
+        and (options == RunOptions() or options.digest() == run.options_digest)
     )
-
-
-def run_options(run: RunRow) -> dict:
-    """The message-chosen part of a run's frozen options, without the thread's headers."""
-    return {key: value for key, value in run.options.items() if key != "mcp_headers"}
 
 
 async def assign_steers(
     session: AsyncSession, thread: ThreadRow, run: RunRow, *, max_count: int, max_bytes: int, scan: int
 ) -> list[InboxEntryRow]:
-    """A bounded FIFO batch of compatible pending entries for the next model request of `run`."""
+    """A bounded FIFO batch of compatible pending entries for the next model request of `run`.
+
+    Incompatible entries stay pending for a later run and take no part in the batch's budget.
+    """
     candidates = await pending_entries(session, thread.id, limit=scan)
     origins = await _origins(session, candidates)
     chosen: list[InboxEntryRow] = []
     size = 0
     for entry in candidates:
+        if not steers_into(entry, run, origins.get(entry.origin_run_id or "")):
+            continue
         if len(chosen) == max_count or size + entry.size > max_bytes:
             break
-        if steers_into(entry, run, origins.get(entry.origin_run_id or "")):
-            assign(entry, run)
-            chosen.append(entry)
-            size += entry.size
+        assign(entry, run)
+        chosen.append(entry)
+        size += entry.size
     await session.flush()
     return chosen
 
@@ -330,13 +369,19 @@ async def consume(
         )
 
 
-async def release_assigned(session: AsyncSession, run: RunRow, *, at: datetime) -> None:
-    """Seal disposition: completed/waiting return unincorporated entries to pending; failure fails them.
+async def release_assigned(session: AsyncSession, thread: ThreadRow, run: RunRow, *, at: datetime) -> None:
+    """Seal disposition of the entries assigned to `run` and not incorporated: completed/waiting return them to
+    pending, or withdraw them like the rest of an archived thread's pending input; failure fails them.
 
     Consumed entries stay consumed either way: they record committed incorporation, not successful work.
     """
+    values: dict[str, object]
     if run.status in {"completed", "waiting"}:
-        values = {"status": "pending", "assigned_run_id": None}
+        values = (
+            {"status": "pending", "assigned_run_id": None}
+            if thread.archived_at is None
+            else {"status": "withdrawn", "finished_at": at}
+        )
     else:
         values = {
             "status": "failed",

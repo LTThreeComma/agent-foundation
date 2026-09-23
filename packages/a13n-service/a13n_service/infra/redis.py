@@ -7,11 +7,15 @@ correctly, only slower, when Redis is unavailable or has lost data.
 import asyncio
 import hashlib
 from dataclasses import dataclass
+from typing import Any
 
+from a13n_logging import get_logger
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.errors import ServiceError, rate_limited
+
+logger = get_logger(__name__)
 
 WAKE_KEY = "a13n:wake"
 
@@ -23,13 +27,15 @@ return {count, redis.call('TTL', KEYS[1])}
 
 
 async def rate_limit(client: Redis, identity: str, *, limit: int, window_seconds: int) -> None:
+    """Refuse `identity` past `limit` calls per window; while Redis cannot count, the call proceeds unlimited."""
     key = "a13n:rate:" + hashlib.sha256(identity.encode()).hexdigest()
     try:
         count, remaining = await client.eval(_RATE_LIMIT, 1, key, window_seconds)
-    except RedisError:
-        raise ServiceError("unavailable", "Request limiter unavailable", {"dependency": "redis"}) from None
+    except RedisError as error:
+        logger.warning("Rate limit not enforced: Redis unavailable", extra={"error_type": type(error).__name__})
+        return
     if count > limit:
-        raise ServiceError("rate_limited", "Too many requests", {"retry_after": max(1, remaining)})
+        raise rate_limited("Too many requests", max(1, remaining))
 
 
 async def wake(client: Redis, *, timeout: float) -> None:
@@ -58,38 +64,60 @@ class StreamEntry:
     fields: dict[str, str]
 
 
-async def append(client: Redis, key: str, fields: dict[str, str], *, max_length: int, ttl: int, timeout: float) -> bool:
-    """Append under an approximate length cap; False means Redis dropped the entry."""
+def _unavailable() -> ServiceError:
+    return ServiceError("unavailable", "Live stream is unavailable", {"dependency": "redis"})
+
+
+def _entries(key: str, raw: Any) -> list[StreamEntry]:
+    # The client decodes responses, so IDs and fields are strings.
+    return [StreamEntry(key=key, id=entry_id, fields=dict(values)) for entry_id, values in raw or ()]
+
+
+async def append(
+    client: Redis, key: str, entries: list[dict[str, str]], *, max_length: int, ttl: int, timeout: float
+) -> bool:
+    """Append in one round trip under an approximate length cap; False means Redis dropped the entries."""
     try:
         async with asyncio.timeout(timeout), client.pipeline(transaction=False) as pipe:
-            await pipe.xadd(key, fields, maxlen=max_length, approximate=True).expire(key, ttl).execute()  # type: ignore[arg-type]
+            for fields in entries:
+                pipe.xadd(key, fields, maxlen=max_length, approximate=True)  # type: ignore[arg-type]
+            pipe.expire(key, ttl)
+            await pipe.execute()
         return True
     except (RedisError, TimeoutError):
         return False
 
 
+async def last_id(client: Redis, key: str) -> str:
+    """The newest entry's ID, or the stream origin when the stream is empty or missing."""
+    try:
+        newest = _entries(key, await client.xrevrange(key, count=1))
+    except RedisError:
+        raise _unavailable() from None
+    return newest[0].id if newest else "0-0"
+
+
+async def read_entry(client: Redis, key: str, entry_id: str) -> StreamEntry | None:
+    """One retained entry by ID; None once trimming or expiry removed it."""
+    try:
+        found = _entries(key, await client.xrange(key, min=entry_id, max=entry_id, count=1))
+    except RedisError:
+        raise _unavailable() from None
+    return found[0] if found else None
+
+
+async def read_range(client: Redis, key: str, *, after: str, until: str, count: int) -> list[StreamEntry]:
+    """Entries after `after` up to and including `until`, oldest first."""
+    try:
+        return _entries(key, await client.xrange(key, min=f"({after}", max=until, count=count))
+    except RedisError:
+        raise _unavailable() from None
+
+
 async def read(client: Redis, cursors: dict[str, str], *, count: int, block_ms: int) -> list[StreamEntry]:
     """One blocking read over many stream keys; `unavailable` when Redis cannot answer."""
     try:
-        # The client decodes responses, so keys, IDs and fields are strings.
-        result: list[tuple[str, list[tuple[str, dict[str, str]]]]] = await client.xread(
-            cursors,  # type: ignore[arg-type]
-            count=count,
-            block=block_ms,
-        )
+        result: Any = await client.xread(cursors, count=count, block=block_ms)  # type: ignore[arg-type]
     except RedisError:
-        raise ServiceError("unavailable", "Live stream is unavailable", {"dependency": "redis"}) from None
-    return [
-        StreamEntry(key=key, id=entry_id, fields=dict(values))
-        for key, entries in result or ()
-        for entry_id, values in entries
-    ]
-
-
-async def first_id(client: Redis, key: str) -> str | None:
-    """The oldest retained entry; a cursor older than it has lost entries to trimming."""
-    try:
-        entries = await client.xrange(key, count=1)
-    except RedisError:
-        raise ServiceError("unavailable", "Live stream is unavailable", {"dependency": "redis"}) from None
-    return str(entries[0][0]) if entries else None
+        raise _unavailable() from None
+    return [entry for key, entries in result or () for entry in _entries(key, entries)]

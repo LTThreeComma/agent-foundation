@@ -1,31 +1,25 @@
-"""An Asset is immutable upload content with independently retained retirement."""
+"""An asset is immutable upload content; retirement stops new use and keeps the content readable."""
 
 from datetime import datetime
+from typing import ClassVar
 
-from sqlalchemy import (
-    BigInteger,
-    CheckConstraint,
-    DateTime,
-    ForeignKey,
-    ForeignKeyConstraint,
-    Index,
-    String,
-    UniqueConstraint,
-)
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped
+from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
 
 
 class AssetRow(Stamped, Base):
     __tablename__ = "assets"
+    KIND: ClassVar[str] = "asset"
     __table_args__ = (
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
         UniqueConstraint("workspace_id", "id"),
+        # One asset per staged upload: creating it again from the same upload reads the existing one back.
         UniqueConstraint("workspace_id", "content_ref"),
-        Index("ix_assets_workspace_created", "workspace_id", "created_at", "id"),
         CheckConstraint("size >= 0", name="size"),
+        rules(identity_guarded("assets")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))

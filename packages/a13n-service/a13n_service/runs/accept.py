@@ -4,27 +4,29 @@
 fork and spawn call it with their own source. Both are SQL-only and run under the caller's thread lock.
 """
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-from sqlalchemy import exists, select
+from a13n_logging import get_logger
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import now, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
-from a13n_service.resources.agents.service import select_revision
+from a13n_service.resources.agents.service import select_revision, validate_override
 from a13n_service.runs import inbox
 from a13n_service.runs.admission import AcceptedIntent
-from a13n_service.runs.environments.mounts import freeze_mounts
+from a13n_service.runs.environments.mounts import freeze_mounts, reserve_primary
 from a13n_service.runs.runtime import Runtime
-from a13n_service.runs.schemas import Failure, Pending, Resume, Trigger
-from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
+from a13n_service.runs.schemas import Failure, Pending, Resume, RunOptions, Trigger
+from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
 from a13n_service.runs.webhooks import notify_subscribers
+from a13n_service.tenancy.access import principal_for, require_active_workspace
 from a13n_service.tenancy.authorize import ExecutionAuthority, WorkspaceScope, authorize
-from a13n_service.tenancy.grants import principal_for
+
+logger = get_logger(__name__)
 
 # Entries examined per acceptance; rejected ones are failed, so a later call makes progress.
 SCAN = 16
@@ -50,18 +52,6 @@ def paused(last: RunRow | None) -> bool:
     return last is not None and last.status in {"failed", "cancelled"}
 
 
-def candidates(
-    kind: Eligible, is_paused: bool, pending: Sequence[InboxEntryRow], explicit: InboxEntryRow | None
-) -> list[InboxEntryRow]:
-    """Sources in selection order: by thread-state eligibility, then position."""
-    if kind is Eligible.NOTHING:
-        return []
-    if is_paused:
-        # An explicit submission may start that new message; unrelated pending entries never replace it.
-        return [explicit] if explicit is not None else []
-    return [entry for entry in pending if kind is Eligible.ANY or entry.kind == "message"]
-
-
 @dataclass(frozen=True, slots=True)
 class Source:
     """What a run starts from: a queued entry, or the answers resuming a waiting run."""
@@ -72,7 +62,10 @@ class Source:
     agent_id: str
     agent_revision_id: str | None
     revision_selection: Literal["pinned", "default", "inherited"]
-    options: dict
+    # A message's options as submitted; inherited options were frozen by the run they come from.
+    options: RunOptions
+    # The digest of the options as submitted, which inherited sources keep from the run they come from.
+    options_digest: str
     entry: InboxEntryRow | None = None
     resume: Resume | None = None
     resumed_by_id: str | None = None
@@ -82,6 +75,7 @@ class Source:
     @classmethod
     def message(cls, entry: InboxEntryRow, trigger: Trigger) -> "Source":
         assert entry.agent_id is not None
+        options = RunOptions.model_validate(entry.options)
         return cls(
             trigger=trigger,
             principal_id=entry.principal_id,
@@ -89,12 +83,23 @@ class Source:
             agent_id=entry.agent_id,
             agent_revision_id=entry.agent_revision_id,
             revision_selection="pinned" if entry.agent_revision_id else "default",
-            options=entry.options,
+            options=options,
+            options_digest=options.digest(),
             entry=entry,
         )
 
     @classmethod
-    def inherited(cls, run: RunRow, trigger: Trigger, **values: object) -> "Source":
+    def inherited(
+        cls,
+        run: RunRow,
+        trigger: Trigger,
+        *,
+        entry: InboxEntryRow | None = None,
+        resume: Resume | None = None,
+        resumed_by_id: str | None = None,
+        request_key: str | None = None,
+        request_digest: str | None = None,
+    ) -> "Source":
         """Resume and child results continue with the identity, revision and options of an earlier run."""
         return cls(
             trigger=trigger,
@@ -103,8 +108,13 @@ class Source:
             agent_id=run.agent_id,
             agent_revision_id=run.agent_revision_id,
             revision_selection="inherited",
-            options=inbox.run_options(run),
-            **values,  # type: ignore[arg-type]
+            options=RunOptions.model_validate(run.options),
+            options_digest=run.options_digest,
+            entry=entry,
+            resume=resume,
+            resumed_by_id=resumed_by_id,
+            request_key=request_key,
+            request_digest=request_digest,
         )
 
 
@@ -126,30 +136,81 @@ async def parent_of(
     return None, "root"
 
 
-async def root_run_id(session: AsyncSession, thread: ThreadRow, run_id: str) -> str:
-    """Children share their delegation root's allowance, so a budget cannot be escaped by spawning."""
+@dataclass(frozen=True, slots=True)
+class Delegation:
+    """Where a run stands in its delegation chain."""
+
+    # The run the chain started from; children share its allowance, so a budget cannot be escaped by spawning.
+    root_run_id: str
+    # How many delegations deep the run's thread is; a thread that is not a child is at depth 0.
+    depth: int
+
+
+async def delegation(session: AsyncSession, thread: ThreadRow, run_id: str) -> Delegation:
+    """Follow run `run_id` of `thread` up through the runs that spawned its child threads."""
+    depth = 0
     while thread.origin == "child" and thread.origin_run_id is not None:
         origin = await session.get(RunRow, thread.origin_run_id)
         parent_thread = await session.get(ThreadRow, origin.thread_id) if origin else None
         if origin is None or parent_thread is None:
             break
-        run_id, thread = origin.id, parent_thread
-    return run_id
+        run_id, thread, depth = origin.id, parent_thread, depth + 1
+    return Delegation(root_run_id=run_id, depth=depth)
 
 
 async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, source: Source) -> RunRow:
-    """Create the accepted run. The caller holds the thread lock and has checked eligibility."""
+    """Create the accepted run. The caller holds the thread lock and has checked eligibility.
+
+    Every check that can refuse the source, admission included, runs before any row the caller loaded changes,
+    so a refusal rolled back by the caller's savepoint leaves its thread and entries as they were.
+    """
     scope = WorkspaceScope(thread.organization_id, thread.workspace_id)
-    principal = await principal_for(session, source.principal_id, confinement=scope)
+    await require_active_workspace(session, thread.workspace_id)
+    principal = await principal_for(session, runtime.access, source.principal_id, confinement=scope)
     authorize(principal, scope, "run", authority=source.authority)
     revision = await select_revision(session, thread.workspace_id, source.agent_id, source.agent_revision_id)
+    options = source.options
+    if source.revision_selection != "inherited" and options.overrides is not None:
+        frozen = await validate_override(
+            session,
+            principal,
+            scope,
+            revision,
+            options.overrides,
+            authority=source.authority,
+            registry=runtime.registry,
+            plugins=runtime.plugins,
+        )
+        options = options.model_copy(update={"overrides": frozen})
     parent, lineage = await parent_of(session, thread)
-    mounts = await freeze_mounts(
-        session, thread, principal_id=source.principal_id, template_id=revision.config.environment_template_id
-    )
+    # A child thread's environments are decided when it is spawned, by the edge that delegates it. An instance
+    # reserved here is a new row that a refusal discards with it; freezing checks the mounts are usable.
+    template_id = revision.config.default_environment_template_id
+    if template_id is not None and thread.origin != "child":
+        await reserve_primary(
+            session, principal, thread, template_id=template_id, limit=runtime.settings.environments.managed_count
+        )
+    mounts = await freeze_mounts(session, thread, principal_id=source.principal_id)
+    run_id = new_object_id("run")
+    if runtime.admission is not None:
+        await runtime.admission.accept(
+            session,
+            AcceptedIntent(
+                organization_id=thread.organization_id,
+                workspace_id=thread.workspace_id,
+                session_id=thread.session_id,
+                thread_id=thread.id,
+                run_id=run_id,
+                principal_id=source.principal_id,
+                agent_id=revision.agent_id,
+                agent_revision_id=revision.revision_id,
+                trigger=source.trigger,
+                root_run_id=(await delegation(session, thread, run_id)).root_run_id,
+            ),
+        )
     current = await now(session)
     run = RunRow(
-        id=new_object_id("run"),
+        id=run_id,
         organization_id=thread.organization_id,
         workspace_id=thread.workspace_id,
         session_id=thread.session_id,
@@ -159,8 +220,10 @@ async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, 
         revision_selection=source.revision_selection,
         principal_id=source.principal_id,
         authority=source.authority.model_dump(mode="json"),
+        options=options.model_dump(mode="json", exclude_none=True),
+        options_digest=source.options_digest,
         # Frozen here: the thread's headers apply to this run even if the thread is edited later.
-        options={**source.options, "mcp_headers": thread.mcp_headers},
+        mcp_headers=thread.mcp_headers,
         environment_mounts=mounts,
         source_entry_id=source.entry.id if source.entry is not None else None,
         resume=source.resume.model_dump(mode="json") if source.resume is not None else None,
@@ -173,34 +236,20 @@ async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, 
         status="accepted",
         available_at=current,
         max_attempts=runtime.settings.worker.max_attempts,
-        max_usage=source.options.get("max_usage"),
-        labels=source.options.get("labels", {}),
+        labels=dict(options.labels),
     )
     session.add(run)
     await session.flush()
     if source.entry is not None:
         inbox.assign(source.entry, run)
     thread.current_run_id = run.id
-    await session.flush()
-    if runtime.admission is not None:
-        await runtime.admission.accept(
-            session,
-            AcceptedIntent(
-                organization_id=run.organization_id,
-                workspace_id=run.workspace_id,
-                session_id=run.session_id,
-                thread_id=run.thread_id,
-                run_id=run.id,
-                principal_id=run.principal_id,
-                agent_id=run.agent_id,
-                agent_revision_id=run.agent_revision_id,
-                trigger=run.trigger,
-                root_run_id=await root_run_id(session, thread, run.id),
-            ),
-        )
-    await notify_subscribers(
-        session, runtime.keys, run, ["run.accepted"], at=current, limit=runtime.settings.control.subscriptions
+    await session.execute(
+        update(SessionRow)
+        .where(SessionRow.id == thread.session_id)
+        .values(last_run_id=run.id, updated_at=func.clock_timestamp())
     )
+    await session.flush()
+    await notify_subscribers(session, runtime, run, ["run.accepted"], at=current)
     runtime.wake_workers(session)
     return run
 
@@ -217,13 +266,21 @@ async def _source(session: AsyncSession, entry: InboxEntryRow, explicit: InboxEn
 async def accept(
     session: AsyncSession, runtime: Runtime, thread: ThreadRow, *, explicit: InboxEntryRow | None = None
 ) -> RunRow | None:
-    """Start the thread's next run from its eligible queued source, if any. Rejected entries fail in place."""
+    """Start the thread's next run from its eligible queued source, if any. Rejected entries fail in place.
+
+    A transient refusal (`unavailable`) is not the entry's fault: it aborts the transaction, so a retry of the
+    caller's operation or the advance sweep can still start the entry.
+    """
     head = await _run(session, thread.head_run_id)
     kind = eligibility(thread, head)
     if kind is Eligible.NOTHING:
         return None
-    pending = await inbox.pending_entries(session, thread.id, limit=SCAN)
-    for entry in candidates(kind, paused(await _run(session, thread.last_run_id)), pending, explicit):
+    if paused(await _run(session, thread.last_run_id)):
+        # An explicit submission may start that new message; unrelated pending entries never replace it.
+        sources = [explicit] if explicit is not None else []
+    else:
+        sources = await inbox.pending_entries(session, thread.id, limit=SCAN, messages_only=kind is Eligible.MESSAGES)
+    for entry in sources:
         source = await _source(session, entry, explicit)
         if isinstance(source, Source):
             try:
@@ -231,7 +288,9 @@ async def accept(
                 async with session.begin_nested():
                     return await start_run(session, runtime, thread, source)
             except ServiceError as error:
-                source = Failure(code=error.code, message=error.message)
+                if error.code == "unavailable":
+                    raise
+                source = Failure.of(error)
         inbox.fail(entry, source, at=await now(session))
         await session.flush()
     return None
@@ -251,7 +310,8 @@ async def advance(runtime: Runtime, thread_id: str, *, skip_locked: bool = False
 class ThreadAdvancer:
     """The advance_threads sweep: idle, unpaused threads with pending input, visited in rotating ID order.
 
-    Rotation keeps threads whose entries stay pending (an approval wait) from starving the rest.
+    Rotation keeps threads whose entries stay pending (an approval wait) from starving the rest, and a thread
+    that fails to advance is logged and retried by a later pass without holding up the others.
     """
 
     def __init__(self, runtime: Runtime, *, batch: int):
@@ -276,4 +336,9 @@ class ThreadAdvancer:
             ).all()
         self.after = ids[-1] if len(ids) == self.batch else ""
         for thread_id in ids:
-            await advance(self.runtime, thread_id, skip_locked=True)
+            try:
+                await advance(self.runtime, thread_id, skip_locked=True)
+            except Exception as error:
+                logger.warning(
+                    "Thread advance failed", extra={"thread_id": thread_id, "error_type": type(error).__name__}
+                )

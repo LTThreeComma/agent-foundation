@@ -1,17 +1,18 @@
-"""Export the Service HTTP contract without opening process resources."""
+"""Export the Service HTTP contract and thread stream frames without opening process resources."""
 
 import argparse
 import json
 from pathlib import Path
 
 from a13n_service.app import build_app
+from a13n_service.runs.stream import frames_schema
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "proto/a13n-service"
 
 
 def documents() -> dict[str, dict]:
-    return {"openapi.json": build_app().openapi()}
+    return {"openapi.json": build_app().openapi(), "thread-stream.schema.json": frames_schema()}
 
 
 def main() -> None:

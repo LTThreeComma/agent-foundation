@@ -87,10 +87,12 @@ def constraints(schema: dict[str, Any]) -> str:
         "format",
         "default",
     )
+    # A nullable field keeps its bounds on the non-null member of its union.
+    bounded = {**next((item for item in schema.get("anyOf", ()) if item.get("type") != "null"), {}), **schema}
     values = []
     for key in keys:
-        if key in schema:
-            value = f"{key}={json.dumps(schema[key], ensure_ascii=False)}"
+        if key in bounded:
+            value = f"{key}={json.dumps(bounded[key], ensure_ascii=False)}"
             # Regex brackets followed by parentheses otherwise become Markdown links.
             values.append(f"`{value}`" if key == "pattern" else value)
     return "; ".join(values) or "—"
@@ -100,22 +102,29 @@ def render_configuration() -> str:
     schema = Settings.model_json_schema()
     definitions = schema.get("$defs", {})
     groups: dict[str, list[str]] = defaultdict(list)
+
+    def nested(field: dict[str, Any]) -> dict[str, Any] | None:
+        """The definition of a field that is itself a section, such as `auth.mail`."""
+        definition = definitions.get(field.get("$ref", "").rsplit("/", 1)[-1], {})
+        return definition if "properties" in definition else None
+
+    def add(section: str, path: str, variable: str, properties: dict[str, Any]) -> None:
+        for name, field in properties.items():
+            inner = nested(field)
+            if inner is not None:
+                # An environment variable carries a whole nested section as JSON.
+                add(section, f"{path}.{name}", f"{variable}__{name.upper()}", inner["properties"])
+                continue
+            is_nested = path.count(".") > 0
+            env = f"`{variable}` (JSON field `{name}`)" if is_nested else f"`{variable}__{name.upper()}`"
+            row = (f"`{path}.{name}`", env, schema_label(field), constraints(field))
+            groups[section].append("| " + " | ".join(cell(value) for value in row) + " |")
+
     for section, definition in schema["properties"].items():
+        if "$ref" not in definition:
+            continue  # `extensions`: sections a distribution declares, documented by that distribution
         section_schema = definitions[definition["$ref"].rsplit("/", 1)[-1]]
-        for name, field in section_schema["properties"].items():
-            groups[section].append(
-                "| "
-                + " | ".join(
-                    cell(value)
-                    for value in (
-                        f"`{section}.{name}`",
-                        f"`A13N_{section.upper()}__{name.upper()}`",
-                        schema_label(field),
-                        constraints(field),
-                    )
-                )
-                + " |"
-            )
+        add(section, section, f"A13N_{section.upper()}", section_schema["properties"])
     text = """# Service configuration reference
 
 This field reference is generated from the same `Settings` definitions used by the Service loader. Run `uv run --locked python scripts/docs/references.py` after changing those definitions. Do not independently edit generated rows.
@@ -142,9 +151,9 @@ def render_native_api() -> str:
             groups[tag].append((path, method, operation, methods.get("parameters", [])))
     text = """# Service HTTP reference
 
-This reference is generated from the current new Service OpenAPI export. It covers authentication, model, Connection and agent configuration, durable run submission and observation, and operational probes. See [the Service guide](index.md) for the implemented boundary.
+This reference is generated from the Service OpenAPI export. [HTTP conventions](http.md) explain authentication, preconditions, request keys, paging and errors, which apply to every operation below.
 
-Download [the complete OpenAPI JSON](../assets/reference/service-openapi.json). This contract does not advertise legacy API or event schemas.
+Download [the complete OpenAPI JSON](../assets/reference/service-openapi.json).
 
 """
     for tag, operations in sorted(groups.items()):

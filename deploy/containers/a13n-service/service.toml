@@ -1,6 +1,7 @@
+# Image defaults for every role. Deployments mount their own file here and supply credentials as
+# A13N_<SECTION>__<FIELD> environment variables.
 [server]
 host = "0.0.0.0"
-port = 8000
 
-[database]
-auto_migrate = true
+[objects]
+root = "/app/var/objects"

@@ -16,7 +16,8 @@ SPEC.loader.exec_module(contract)
 
 def test_export_matches_service_http_and_existing_wire_models() -> None:
     exported = contract.documents()
-    assert set(exported) == {"openapi.json", "run-stream.schema.json", "run-stream.examples.json"}
+    assert set(exported) == {"openapi.json", "thread-stream.schema.json"}
+    assert set(exported["thread-stream.schema.json"]["frames"]) == {"delta", "boundary", "changed", "reset", "gap"}
     paths = exported["openapi.json"]["paths"]
     assert {"/healthz", "/readyz", "/api/v1/auth/login", "/api/v1/users/me"} <= paths.keys()
     assert all(path in {"/healthz", "/readyz"} or path.startswith("/api/v1/") for path in paths)

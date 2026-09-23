@@ -1,1 +1,1 @@
-"""Live, tenant-scoped model connections and selections."""
+"""Models: the upstream models a model provider serves, with their settings, characteristics and pricing."""

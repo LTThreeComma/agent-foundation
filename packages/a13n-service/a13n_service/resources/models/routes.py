@@ -1,152 +1,96 @@
-"""One organization collection for shared and workspace-confined models."""
+"""One organization collection for shared and workspace models, and the catalogue a model provider offers."""
 
-from typing import Annotated
+from fastapi import APIRouter, Response
 
-from fastapi import APIRouter, Depends, Query, Request, Response
-
-from a13n_service.infra.http import etag
-from a13n_service.resources.models import service
+from a13n_service.infra.http import IfMatch, PageLimit, tagged
+from a13n_service.resources.models import media, service
 from a13n_service.resources.models.schemas import (
+    CatalogPage,
+    MediaDefaults,
+    MediaUnderstandingSelection,
+    Model,
     ModelCreate,
     ModelPage,
-    ModelView,
-    ProviderCreate,
-    ProviderPage,
-    ProviderType,
-    ProviderTypePage,
-    ProviderView,
+    ModelUpdate,
 )
-from a13n_service.tenancy.authorize import Principal
-from a13n_service.tenancy.routes import current_principal
+from a13n_service.resources.requests import CurrentRuntime
+from a13n_service.tenancy.requests import Actor
 
 router = APIRouter(prefix="/api/v1/organizations/{organization_id}", tags=["models"])
+# The workspace's media-understanding defaults, which only its models may serve.
+workspace_router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}", tags=["models"])
 
 
-@router.post("/model-providers", response_model=ProviderView, status_code=201)
-async def create_provider(
-    request: Request,
-    response: Response,
-    organization_id: str,
-    body: ProviderCreate,
-    actor: Annotated[Principal, Depends(current_principal)],
-) -> ProviderView:
-    result = await service.create_provider(
-        request.app.state.storage,
-        actor,
-        organization_id,
-        body,
-        catalog=request.app.state.runtime.registry.models,
-        policy=request.app.state.runtime.endpoint_policy,
-        keys=request.app.state.key_ring,
-    )
-    response.headers["ETag"] = etag(result.id, result.version)
-    return result
-
-
-@router.get("/model-providers/{provider_id}", response_model=ProviderView)
-async def get_provider(
-    request: Request,
-    response: Response,
-    organization_id: str,
-    provider_id: str,
-    actor: Annotated[Principal, Depends(current_principal)],
-) -> ProviderView:
-    result = await service.get_provider(request.app.state.storage, actor, organization_id, provider_id)
-    response.headers["ETag"] = etag(result.id, result.version)
-    return result
-
-
-@router.post("/models", response_model=ModelView, status_code=201)
+@router.post("/models", response_model=Model, status_code=201)
 async def create_model(
-    request: Request,
-    response: Response,
-    organization_id: str,
-    body: ModelCreate,
-    actor: Annotated[Principal, Depends(current_principal)],
-) -> ModelView:
-    result = await service.create_model(
-        request.app.state.storage,
-        actor,
-        organization_id,
-        body,
-        catalog=request.app.state.runtime.registry.models,
-    )
-    response.headers["ETag"] = etag(result.id, result.version)
-    return result
-
-
-@router.get("/models/{model_id}", response_model=ModelView)
-async def get_model(
-    request: Request,
-    response: Response,
-    organization_id: str,
-    model_id: str,
-    actor: Annotated[Principal, Depends(current_principal)],
-) -> ModelView:
-    result = await service.get_model(request.app.state.storage, actor, organization_id, model_id)
-    response.headers["ETag"] = etag(result.id, result.version)
-    return result
+    response: Response, organization_id: str, body: ModelCreate, actor: Actor, runtime: CurrentRuntime
+) -> Model:
+    """Needs `write` on the model's scope and on its provider, whose credential the model spends."""
+    result = await service.create_model(runtime.storage, actor, organization_id, body, registry=runtime.registry)
+    return tagged(response, result)
 
 
 @router.get("/models", response_model=ModelPage)
 async def list_models(
-    request: Request,
     organization_id: str,
-    actor: Annotated[Principal, Depends(current_principal)],
+    actor: Actor,
+    runtime: CurrentRuntime,
     workspace_id: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    limit: PageLimit = 50,
     cursor: str | None = None,
 ) -> ModelPage:
     return await service.list_models(
-        request.app.state.storage, actor, organization_id, workspace_id=workspace_id, limit=limit, cursor=cursor
+        runtime.storage, actor, organization_id, workspace_id=workspace_id, limit=limit, cursor=cursor
     )
 
 
-@router.get("/model-providers", response_model=ProviderPage)
-async def list_providers(
-    request: Request,
+@router.get("/models/{model_id}", response_model=Model)
+async def get_model(
+    response: Response, organization_id: str, model_id: str, actor: Actor, runtime: CurrentRuntime
+) -> Model:
+    return tagged(response, await service.get_model(runtime.storage, actor, organization_id, model_id))
+
+
+@router.patch("/models/{model_id}", response_model=Model)
+async def update_model(
+    response: Response,
     organization_id: str,
-    actor: Annotated[Principal, Depends(current_principal)],
-    workspace_id: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: str | None = None,
-) -> ProviderPage:
-    return await service.list_providers(
-        request.app.state.storage, actor, organization_id, workspace_id=workspace_id, limit=limit, cursor=cursor
+    model_id: str,
+    body: ModelUpdate,
+    actor: Actor,
+    runtime: CurrentRuntime,
+    if_match: IfMatch = None,
+) -> Model:
+    """A configuration change also needs `write` on the model's provider."""
+    result = await service.update_model(
+        runtime.storage, actor, organization_id, model_id, body, if_match=if_match, registry=runtime.registry
     )
+    return tagged(response, result)
 
 
-catalog_router = APIRouter(prefix="/api/v1/provider-types", tags=["models"])
+@router.get("/model-providers/{provider_id}/catalog", response_model=CatalogPage)
+async def list_catalog(organization_id: str, provider_id: str, actor: Actor, runtime: CurrentRuntime) -> CatalogPage:
+    return await service.list_catalog(runtime.storage, actor, organization_id, provider_id, registry=runtime.registry)
 
 
-@catalog_router.get("/model", response_model=ProviderTypePage)
-async def provider_types(
-    request: Request,
-    actor: Annotated[Principal, Depends(current_principal)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: str | None = None,
-) -> ProviderTypePage:
-    from a13n_service.infra import cursors
+@workspace_router.get("/media-understanding-defaults", response_model=MediaDefaults)
+async def get_media_defaults(
+    response: Response, workspace_id: str, actor: Actor, runtime: CurrentRuntime
+) -> MediaDefaults:
+    return tagged(response, await media.get_media_defaults(runtime.storage, actor, workspace_id))
 
-    after = cursors.id_position(cursor, "model_provider_types", "deployment")
-    definitions = sorted(
-        (item for item in request.app.state.runtime.registry.models.values() if item.type > after),
-        key=lambda item: item.type,
-    )[: limit + 1]
-    return ProviderTypePage(
-        items=[
-            ProviderType(
-                type=item.type,
-                display_name=item.display_name,
-                configuration_schema=item.configuration_model.model_json_schema(),
-                credential_schema=item.credential_model.model_json_schema() if item.credential_model else None,
-                authentication=item.authentication,
-                supported_model_apis=list(item.supported_model_apis),
-                setup_url=item.setup_url,
-            )
-            for item in definitions[:limit]
-        ],
-        next_cursor=cursors.encode("model_provider_types", "deployment", definitions[limit - 1].type)
-        if len(definitions) > limit
-        else None,
+
+@workspace_router.put("/media-understanding-defaults", response_model=MediaDefaults)
+async def replace_media_defaults(
+    response: Response,
+    workspace_id: str,
+    body: MediaUnderstandingSelection,
+    actor: Actor,
+    runtime: CurrentRuntime,
+    if_match: IfMatch = None,
+) -> MediaDefaults:
+    """Replaces all three kinds; each model must declare it understands its kind. Requires workspace admin."""
+    replaced = await media.replace_media_defaults(
+        runtime.storage, runtime.access, actor, workspace_id, body, if_match=if_match
     )
+    return tagged(response, replaced)

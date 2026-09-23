@@ -9,7 +9,6 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["packages/*"]
-exclude = ["packages/a13n-service-legacy"]
 
 [dependency-groups]
 dev = [
@@ -52,8 +51,6 @@ a13n-stream-protocol = { workspace = true }
 a13n-logging = { workspace = true }
 
 [tool.ruff]
-extend-exclude = ["packages/a13n-service-legacy"]
-force-exclude = true
 target-version = "py313"
 line-length = 120
 fix = true
@@ -92,7 +89,6 @@ typeCheckingMode = "standard"
 reportTypedDictNotRequiredAccess = false
 
 [tool.pytest.ini_options]
-norecursedirs = ["packages/a13n-service-legacy"]
 addopts = ["--import-mode=importlib"]
 junit_logging = "all"
 junit_log_passing_tests = false

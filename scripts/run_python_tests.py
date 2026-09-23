@@ -56,10 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             requested.append(entry)
 
-    roots = [
-        *sorted(p for p in Path("packages").glob("*/tests") if p.parent.name != "a13n-service-legacy"),
-        Path("scripts/tests"),
-    ]
+    roots = [*sorted(Path("packages").glob("*/tests")), Path("scripts/tests")]
     batches: dict[Path, list[str]] = {}
     for selection in requested or [str(root) for root in roots]:
         path = Path(selection.split("::", 1)[0]).resolve()

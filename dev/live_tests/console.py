@@ -78,6 +78,46 @@ async def initialize(database: Database):
         await storage.close()
 
 
+def service_config(
+    directory: Path, database_url: str, redis_url: str, *, console: str, workspace_id: str, origins: tuple[str, ...]
+) -> str:
+    """One configuration for Control and Worker; each process sets its port through the environment.
+
+    Browsers reach Control through the Console's development proxy, so the Console origin is the public URL.
+    """
+    encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
+    return f"""[server]
+public_url = {json.dumps(console)}
+shutdown_timeout = 5
+[database]
+url = {json.dumps(database_url)}
+auto_migrate = false
+[redis]
+url = {json.dumps(redis_url)}
+[objects]
+root = {json.dumps(str(directory / "objects"))}
+timeout = 1
+[encryption]
+active_key_id = "fixture"
+[encryption.keys]
+fixture = {json.dumps(encryption_key)}
+[providers]
+private_cidrs = ["127.0.0.0/8"]
+http_origins = {json.dumps([*origins, console])}
+return_urls = [{json.dumps(f"{console}/workspace/{workspace_id}/connections")}]
+[worker]
+slots = 2
+lease_seconds = 5
+scan_seconds = 0.2
+authority_seconds = 0.2
+drain_seconds = 3
+[control]
+scan_seconds = 0.2
+[environments]
+allow_local = true
+"""
+
+
 async def serve(
     directory: Path, database: Database, redis_url: str, model_url: str, mcp_url: str, oauth_url: str, composio_url: str
 ) -> None:
@@ -89,44 +129,21 @@ async def serve(
         )
     environment = {name: value for name, value in os.environ.items() if not name.startswith("A13N_")}
     processes = []
-    encryption_key = base64.b64encode(secrets.token_bytes(32)).decode()
+    config = directory / "service.toml"
+    config.write_text(
+        service_config(
+            directory,
+            database.url.get_secret_value(),
+            redis_url,
+            console=f"http://localhost:{console_port}",
+            workspace_id=initialized.workspace_id,
+            origins=(model_url.removesuffix("/v1"), mcp_url, oauth_url, composio_url),
+        )
+    )
+    config.chmod(0o600)
     with ExitStack() as logs:
         try:
             for role, port in (("control", control_port), ("worker", worker_port)):
-                config = directory / f"{role}.toml"
-                config.write_text(f"""[server]
-port = {port}
-shutdown_timeout = 5
-[database]
-url = {json.dumps(database.url.get_secret_value())}
-auto_migrate = false
-[redis]
-url = {json.dumps(redis_url)}
-[objects]
-root = {json.dumps(str(directory / "objects"))}
-[encryption]
-active_key_id = "fixture"
-[encryption.keys]
-fixture = {json.dumps(encryption_key)}
-[providers]
-private_cidrs = ["127.0.0.0/8"]
-http_origins = [{json.dumps(model_url.removesuffix("/v1"))}, {json.dumps(mcp_url)}, {json.dumps(oauth_url)}, {json.dumps(composio_url)}, "http://localhost:{console_port}"]
-[worker]
-slots = 2
-lease_seconds = 5
-scan_seconds = 0.2
-authority_seconds = 0.2
-[control]
-scan_seconds = 0.2
-[managed]
-verifier_url = "http://localhost:{console_port}/managed/verify"
-return_urls = ["http://localhost:{console_port}/workspace/{initialized.workspace_id}/connections"]
-[oauth]
-callback_url = "http://localhost:{console_port}/api/v1/oauth/callback"
-return_urls = ["http://localhost:{console_port}/workspace/{initialized.workspace_id}/connections"]
-scan_seconds = 0.2
-""")
-                config.chmod(0o600)
                 log = logs.enter_context((directory / f"{role}.log").open("wb"))
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
@@ -139,7 +156,7 @@ scan_seconds = 0.2
                     "--role",
                     role,
                     cwd=ROOT,
-                    env=environment,
+                    env={**environment, "A13N_SERVER__PORT": str(port)},
                     start_new_session=True,
                     stdout=log,
                     stderr=log,

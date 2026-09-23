@@ -1,15 +1,31 @@
 """What callers submit to threads and read back about sessions, threads, input and runs."""
 
+import hashlib
 import json
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
+from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.http import PageLimit
 from a13n_service.infra.ids import ObjectId
 from a13n_service.infra.labels import Labels
+from a13n_service.resources.agents.schemas import AgentOverride
 from a13n_service.resources.connections.headers import normalize_headers
+from a13n_service.runs.display import Item
+from a13n_service.runs.environments.schemas import MAX_MOUNTS, MountCreate
 
 type RunStatus = Literal["accepted", "running", "waiting", "completed", "failed", "cancelled"]
 type Trigger = Literal["input", "queued", "resume", "child_result", "spawned"]
@@ -18,6 +34,7 @@ type EntryStatus = Literal["pending", "assigned", "consumed", "failed", "withdra
 type Delivery = Literal["steer", "next_run"]
 type PendingKind = Literal["approval", "client_tool", "user_input"]
 type WaitReason = Literal["approval", "client_tool", "user_input", "multiple"]
+type Sealed = Literal["waiting", "completed", "failed", "cancelled"]
 
 MAX_JSON_DEPTH = 32
 MAX_RESUME_BYTES = 262144
@@ -35,6 +52,12 @@ class _Frozen(BaseModel):
 class Failure(_Frozen):
     code: str = Field(min_length=1, max_length=128)
     message: str = Field(max_length=4096)
+
+    @classmethod
+    def of(cls, error: ServiceError) -> "Failure":
+        """A refusal as a failure; a conflict's reason names it more precisely than `conflict`."""
+        reason = error.details.get("reason") if error.code == "conflict" else None
+        return cls(code=reason if isinstance(reason, str) else error.code, message=error.message[:4096])
 
 
 class TextPart(_Frozen):
@@ -93,20 +116,35 @@ class UsageLimit(_Frozen):
 
 
 class RunOptions(_Frozen):
-    """What a message may choose for the run it starts. A steer joins a run only with equal options."""
+    """What a message may choose for the run it starts. A steer joins a run with the defaults or equal options."""
 
     labels: Labels = Field(default_factory=dict)
     max_usage: UsageLimit | None = None
+    # Changes to the revision's configuration for this run only. Submission validates them; acceptance
+    # validates them again and freezes them into the run's options with their pins resolved.
+    overrides: AgentOverride | None = None
+
+    def digest(self) -> str:
+        """What a steer's options must match: the options as submitted, since acceptance freezes the run's."""
+        return hashlib.sha256(canonical_json(self.model_dump(mode="json"))).hexdigest()
 
 
-type McpHeaders = Annotated[dict[ObjectId, dict[str, str]], Field(max_length=32)]
-
-
-def normalize_mcp_headers(value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+def _normalize_mcp_headers(value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
     normalized = {connection: normalize_headers(headers) for connection, headers in value.items()}
     if sum(len(name) + len(item) for headers in normalized.values() for name, item in headers.items()) > 16384:
         raise ValueError("Caller headers exceed their byte limit")
     return normalized
+
+
+# A thread's caller headers by connection, normalized and bounded wherever they are accepted.
+type McpHeaders = Annotated[
+    dict[ObjectId, dict[str, str]], Field(max_length=32), AfterValidator(_normalize_mcp_headers)
+]
+
+
+# A new thread's desired mounts, added with the checks of `POST .../threads/{thread}/environments` before its
+# first run is accepted; a `workspace` mount replaces the primary sandbox the agent's template would reserve.
+type InitialMounts = Annotated[tuple[MountCreate, ...], Field(max_length=MAX_MOUNTS)]
 
 
 class Message(_Frozen):
@@ -121,25 +159,19 @@ class Message(_Frozen):
 class NewThread(Message):
     session_id: ObjectId | None = None
     mcp_headers: McpHeaders = Field(default_factory=dict)
-
-    @field_validator("mcp_headers")
-    @classmethod
-    def normalized(cls, value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-        return normalize_mcp_headers(value)
+    environments: InitialMounts = ()
 
 
 class Fork(Message):
+    # Leave out the origin thread's desired mounts, which a fork otherwise shares.
     fresh_environments: bool = False
+    # Mounted in addition to the shared ones.
+    environments: InitialMounts = ()
 
 
 class ThreadUpdate(_Frozen):
     labels: Labels | None = None
     mcp_headers: McpHeaders | None = None
-
-    @field_validator("mcp_headers")
-    @classmethod
-    def normalized(cls, value: dict[str, dict[str, str]] | None) -> dict[str, dict[str, str]] | None:
-        return None if value is None else normalize_mcp_headers(value)
 
 
 class EntryUpdate(_Frozen):
@@ -229,10 +261,67 @@ class Pending(_Frozen):
         return all(item.kind == "user_input" for item in self.items)
 
 
+class Outcome(_Frozen):
+    """How a run ends. A worker commits a completed or waiting outcome in its final checkpoint before sealing."""
+
+    status: Sealed
+    output: JsonValue = None
+    pending: Pending | None = None
+    failure: Failure | None = None
+
+    @classmethod
+    def failed(cls, code: str, message: str) -> "Outcome":
+        return cls(status="failed", failure=Failure(code=code, message=message[:4096]))
+
+    @classmethod
+    def refused(cls, error: ServiceError) -> "Outcome":
+        return cls(status="failed", failure=Failure.of(error))
+
+    @classmethod
+    def cancelled(cls) -> "Outcome":
+        return cls(status="cancelled", failure=Failure(code="cancelled", message="The run was interrupted"))
+
+
 class EnvironmentMount(_Frozen):
     name: str
     environment_id: str
     working_directory: str | None = None
+
+
+class SessionCreate(_Frozen):
+    labels: Labels = Field(default_factory=dict)
+
+
+class SessionUpdate(_Frozen):
+    labels: Labels
+
+
+class SessionQuery(_Frozen):
+    """One page of the session list and its filters. Agent, status and trigger match the session's latest run,
+    the one its preview shows."""
+
+    q: str | None = Field(default=None, max_length=72, description="A session or thread ID")
+    agent_id: str | None = Field(default=None, max_length=72)
+    status: tuple[RunStatus, ...] = Field(default=(), max_length=6)
+    trigger: tuple[Trigger, ...] = Field(default=(), max_length=5)
+    updated_after: AwareDatetime | None = None
+    updated_before: AwareDatetime | None = None
+    label: tuple[str, ...] = Field(default=(), max_length=8)
+    limit: PageLimit = 50
+    cursor: str | None = None
+
+
+class SessionPreview(BaseModel):
+    """The session's latest run, summarized for a list row."""
+
+    run_id: str
+    thread_id: str
+    agent_id: str
+    agent_name: str
+    status: RunStatus
+    trigger: Trigger
+    input_text: str | None
+    output_text: str | None
 
 
 class SessionView(BaseModel):
@@ -241,9 +330,17 @@ class SessionView(BaseModel):
     workspace_id: str
     labels: dict[str, str]
     created_by_id: str
+    last_run_id: str | None
+    run_count: int = 0
+    preview: SessionPreview | None = None
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class SessionPage(BaseModel):
+    items: list[SessionView]
+    next_cursor: str | None
 
 
 class ThreadView(BaseModel):
@@ -255,6 +352,8 @@ class ThreadView(BaseModel):
     origin_thread_id: str | None
     origin_run_id: str | None
     origin_tool_call_id: str | None
+    # The subagent edge that spawned a child thread; NULL unless `origin` is `child`.
+    subagent: str | None
     current_run_id: str | None
     head_run_id: str | None
     last_run_id: str | None
@@ -264,6 +363,11 @@ class ThreadView(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class ThreadPage(BaseModel):
+    items: list[ThreadView]
+    next_cursor: str | None
 
 
 class EntryView(BaseModel):
@@ -278,7 +382,7 @@ class EntryView(BaseModel):
     payload: dict[str, JsonValue]
     agent_id: str | None
     agent_revision_id: str | None
-    options: dict[str, JsonValue]
+    options: RunOptions
     child_run_id: str | None
     origin_run_id: str | None
     assigned_run_id: str | None
@@ -286,6 +390,11 @@ class EntryView(BaseModel):
     failure: Failure | None
     created_at: datetime
     finished_at: datetime | None
+
+
+class EntryPage(BaseModel):
+    items: list[EntryView]
+    next_cursor: str | None
 
 
 class RunView(BaseModel):
@@ -303,12 +412,18 @@ class RunView(BaseModel):
     lineage: Lineage
     parent_run_id: str | None
     source_entry_id: str | None
+    # The source entry's payload: the request a Console shows for this run. Resumed runs carry `resume` instead.
+    input: dict[str, JsonValue] | None = None
     resume: Resume | None
     resumed_by_id: str | None
     wait_reason: WaitReason | None
     pending: Pending | None
     environment_mounts: list[EnvironmentMount]
+    # The options its message chose, frozen at acceptance; a resume or child result inherits its origin's.
+    options: RunOptions
     current_attempt_id: str | None
+    # Attempts charged to `max_attempts`: the initial one and each recovery. A handoff is not charged, so the
+    # attempt list can hold more.
     attempts: int
     max_attempts: int
     output: JsonValue | None
@@ -321,6 +436,32 @@ class RunView(BaseModel):
     started_at: datetime | None
     sealed_at: datetime | None
     updated_at: datetime
+
+
+class RunPage(BaseModel):
+    items: list[RunView]
+    next_cursor: str | None
+
+
+class RunLabels(_Frozen):
+    labels: Labels
+
+
+class RunItems(BaseModel):
+    """A run's committed display with the run it describes. Live output continues after `position`."""
+
+    run: RunView
+    items: list[Item]
+    # The "{attempt}-{sequence}" stream position the items cover; None until the first checkpoint.
+    position: str | None
+    # Earlier items the display dropped over its item limit.
+    dropped: int
+    # Execution sealed: the items are final and live output no longer applies.
+    complete: bool
+
+
+class Attempts(BaseModel):
+    items: list["AttemptView"]
 
 
 class AttemptView(BaseModel):
@@ -346,3 +487,27 @@ class Submitted(BaseModel):
     thread: ThreadView
     entry: EntryView
     run: RunView | None
+
+
+class UsageFilter(_Frozen):
+    run_id: ObjectId | None = None
+    thread_id: ObjectId | None = None
+    session_id: ObjectId | None = None
+    ingested_after: AwareDatetime | None = None
+    ingested_before: AwareDatetime | None = None
+
+
+class ModelUsage(BaseModel):
+    # None for records of a model since deleted.
+    model_id: str | None
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    # The sum of the costs priced at dispatch; None when no record of the model was priced.
+    cost: Decimal | None
+
+
+class UsageSummary(BaseModel):
+    models: list[ModelUsage]

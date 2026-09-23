@@ -1,7 +1,12 @@
 # a13n Service
 
-The new Service currently implements strict TOML/environment configuration, composed migrations, initial administrator bootstrap, and role startup with liveness/readiness probes. Run execution, resource APIs, authentication endpoints and Console integration are not implemented yet. A ready foundation process is not an execution worker.
+The hosted a13n Service: a managed-agent runtime with tenancy, configured resources, durable run execution on the Harness, and the HTTP API the Console and SDKs use. It is a workspace package with one executable, `a13n-service`.
 
-Use `a13n-service migrate`, `a13n-service bootstrap --email admin@example.com`, and `a13n-service run --role control`. Configuration uses `A13N_SETTINGS_FILE` and nested overrides such as `A13N_DATABASE__URL`. See [the development guide](../../dev/service/README.md) and [current contract](../../spec/a13n-service/README.md).
+```sh
+a13n-service --config service.toml migrate
+a13n-service --config service.toml bootstrap --email admin@example.com
+a13n-service --config service.toml run --role all   # or: control, worker
+a13n-service --config service.toml user disable --email someone@example.com
+```
 
-Legacy is neither installed nor imported. Use separate PostgreSQL, Redis and object namespaces from any old deployment.
+Configuration is a TOML file (`--config` or `A13N_SETTINGS_FILE`) with `A13N_<SECTION>__<FIELD>` environment overrides; see the [configuration guide](../../docs/a13n-service/configuration.md). The package layout, import rules and behavior are specified in the [Service contract](../../spec/a13n-service/README.md); local development uses [`make dev`](../../dev/service/README.md).

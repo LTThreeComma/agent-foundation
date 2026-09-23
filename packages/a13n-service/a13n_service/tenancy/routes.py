@@ -1,250 +1,219 @@
-"""Public identity routes; dependencies return values and never yield SQL sessions."""
+"""The public account flows and the caller's own account over HTTP."""
 
-from typing import Annotated
-from urllib.parse import urlsplit
+from fastapi import APIRouter, Request, Response
 
-from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
-from sqlalchemy import select
-
-from a13n_service.infra import cursors
-from a13n_service.infra.db import short_session
-from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.ids import ObjectId
-from a13n_service.infra.redis import rate_limit
-from a13n_service.tenancy.audit import AuditPage, list_events
-from a13n_service.tenancy.authenticate import (
-    COOKIE_NAME,
-    Authenticated,
-    authenticate,
-    issue_user_key,
-    login,
-    logout,
-    session_csrf,
+from a13n_service.infra import images
+from a13n_service.infra.http import IfMatch, PageLimit, tagged
+from a13n_service.tenancy import api_keys, users
+from a13n_service.tenancy.access import Authenticated, login_session_required
+from a13n_service.tenancy.audit import list_account_events
+from a13n_service.tenancy.authenticate import COOKIE_NAME, check_origin, login, session_csrf, set_session_cookie
+from a13n_service.tenancy.invitations import accept_invitation
+from a13n_service.tenancy.requests import Actor, Credential, CurrentRuntime, ImageBody, limit_guessing
+from a13n_service.tenancy.schemas import (
+    AccountDisable,
+    ApiKey,
+    ApiKeyPage,
+    AuditPage,
+    AuthConfiguration,
+    EmailChangeConfirm,
+    InvitationAccept,
+    IssuedKey,
+    LoginInput,
+    LoginOutput,
+    LoginSessionPage,
+    PasswordChange,
+    PasswordReset,
+    PasswordResetConfirm,
+    Profile,
+    ProfileUpdate,
+    SessionProfile,
+    UserKeyCreate,
 )
-from a13n_service.tenancy.authorize import Principal, Scope, Verb, allowed_verbs, authorize
-from a13n_service.tenancy.grants import readable_workspaces, resolve_workspace
-from a13n_service.tenancy.tables import WorkspaceRow
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 
-class LoginInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    email: EmailStr
-    password: SecretStr = Field(min_length=1, max_length=1024)
+async def _limit_password_check(request: Request, actor_id: str) -> None:
+    """Every route that verifies the caller's current password shares one budget."""
+    await limit_guessing(request, "current_password", f"principal:{actor_id}")
 
 
-class Profile(BaseModel):
-    id: str
-    kind: str
-    name: str
-    email: str | None
-
-
-class LoginOutput(BaseModel):
-    principal_id: str
-    csrf_token: str
-
-
-class SessionProfile(BaseModel):
-    user: Profile
-    csrf_token: str
-
-
-class KeyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    workspace_id: ObjectId
-    name: str = Field(min_length=1, max_length=128)
-
-
-class KeyOutput(BaseModel):
-    id: str
-    workspace_id: str
-    name: str
-    secret: str
-
-
-class Workspace(BaseModel):
-    id: str
-    organization_id: str
-    key: str
-    name: str
-    version: int
-    permissions: list[Verb]
-
-
-class WorkspacePage(BaseModel):
-    items: list[Workspace]
-    next_cursor: str | None
-
-
-def check_origin(request: Request) -> None:
-    origin = request.headers.get("origin")
-    if origin is None:
-        return
-    parsed = urlsplit(origin)
-    if parsed.scheme not in {"http", "https"} or origin != f"{request.url.scheme}://{request.url.netloc}":
-        raise ServiceError("forbidden", "Request origin is not allowed")
-
-
-async def current_credential(request: Request, response: Response) -> Authenticated:
-    authorization = request.headers.get("authorization")
-    if authorization:
-        scheme, _, secret = authorization.partition(" ")
-        if scheme.lower() != "bearer":
-            raise ServiceError("unauthenticated", "Authentication is required")
-        kind = "key"
-    else:
-        secret = request.cookies.get(COOKIE_NAME, "")
-        kind = "session"
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            check_origin(request)
-    credential = await authenticate(
-        request.app.state.storage,
-        secret=secret,
-        kind=kind,
-        csrf_token=request.headers.get("x-csrf-token"),
-        mutation=request.method not in {"GET", "HEAD", "OPTIONS"},
-        session_seconds=request.app.state.settings.auth.session_seconds,
-    )
-
-    response.headers["Cache-Control"] = "no-store"
-    if kind == "session":
-        response.set_cookie(
-            COOKIE_NAME,
-            secret,
-            max_age=request.app.state.settings.auth.session_seconds,
-            secure=True,
-            httponly=True,
-            samesite="strict",
-            path="/",
-        )
-    return credential
-
-
-async def current_principal(credential: Annotated[Authenticated, Depends(current_credential)]) -> Principal:
-    return credential.principal
+def _session_id(credential: Authenticated) -> str | None:
+    return credential.credential_id if credential.kind == "session" else None
 
 
 @router.post("/auth/login", response_model=LoginOutput)
-async def password_login(request: Request, body: LoginInput, response: Response) -> LoginOutput:
-    check_origin(request)
-    config = request.app.state.settings.auth
-    peer = request.client.host if request.client else "unknown"
-    for identity in ("login:peer:" + peer, "login:email:" + str(body.email)):
-        await rate_limit(
-            request.app.state.redis, identity, limit=config.login_limit, window_seconds=config.login_window_seconds
-        )
+async def password_login(
+    request: Request, response: Response, body: LoginInput, runtime: CurrentRuntime
+) -> LoginOutput:
+    check_origin(request, runtime.settings)
+    await limit_guessing(request, "login", f"email:{body.email}")
     result = await login(
-        request.app.state.storage,
-        email=str(body.email),
+        runtime.storage,
+        runtime.access,
+        email=body.email,
         password=body.password.get_secret_value(),
-        session_seconds=config.session_seconds,
+        session_seconds=runtime.settings.auth.session_seconds,
     )
-    response.set_cookie(
-        COOKIE_NAME,
-        result.secret,
-        max_age=config.session_seconds,
-        secure=True,
-        httponly=True,
-        samesite="strict",
-        path="/",
-    )
+    set_session_cookie(response, result.secret, runtime.settings)
     response.headers["Cache-Control"] = "no-store"
     return LoginOutput(principal_id=result.principal.id, csrf_token=result.csrf_token)
 
 
-@router.post("/auth/logout")
-async def session_logout(
-    request: Request, response: Response, credential: Annotated[Authenticated, Depends(current_credential)]
-) -> dict[str, bool]:
-    await logout(request.app.state.storage, credential)
-    response.delete_cookie(COOKIE_NAME, secure=True, httponly=True, samesite="strict", path="/")
-    return {"logged_out": True}
+@router.post("/auth/logout", status_code=204)
+async def logout(request: Request, response: Response, credential: Credential, runtime: CurrentRuntime) -> None:
+    await runtime.access.authenticator.logout(request, response, credential)
 
 
 @router.get("/auth/session", response_model=SessionProfile)
-async def session_profile(
-    request: Request, credential: Annotated[Authenticated, Depends(current_credential)]
-) -> SessionProfile:
-    if credential.kind != "session":
-        raise ServiceError("invalid_argument", "Session bootstrap requires a login session")
-    actor = credential.principal
-    return SessionProfile(
-        user=Profile(id=actor.id, kind=actor.kind, name=actor.name, email=actor.email),
-        csrf_token=session_csrf(request.cookies[COOKIE_NAME]),
-    )
+async def session_profile(request: Request, credential: Credential, runtime: CurrentRuntime) -> SessionProfile:
+    """Restores a browser session; the CSRF token is stable for the session's lifetime."""
+    secret = request.cookies.get(COOKIE_NAME)
+    if credential.kind != "session" or secret is None:
+        raise login_session_required()
+    user = await users.get_profile(runtime.storage, credential.principal)
+    return SessionProfile(user=user, csrf_token=session_csrf(secret))
+
+
+@router.get("/auth/configuration", response_model=AuthConfiguration)
+async def auth_configuration(runtime: CurrentRuntime) -> AuthConfiguration:
+    return AuthConfiguration(email_delivery=runtime.settings.auth.mail.smtp_host is not None)
+
+
+@router.post("/auth/password-reset", status_code=204)
+async def request_password_reset(request: Request, body: PasswordReset, runtime: CurrentRuntime) -> None:
+    check_origin(request, runtime.settings)
+    await limit_guessing(request, "password_reset", f"email:{body.email}")
+    await users.request_password_reset(runtime.storage, runtime.keys, runtime.settings, body.email)
+
+
+@router.post("/auth/password-reset/confirm", status_code=204)
+async def confirm_password_reset(request: Request, body: PasswordResetConfirm, runtime: CurrentRuntime) -> None:
+    check_origin(request, runtime.settings)
+    await limit_guessing(request, "password_reset_confirm")
+    await users.confirm_password_reset(runtime.storage, body)
+
+
+@router.post("/auth/email-change/confirm", status_code=204)
+async def confirm_email_change(request: Request, body: EmailChangeConfirm, runtime: CurrentRuntime) -> None:
+    check_origin(request, runtime.settings)
+    await limit_guessing(request, "email_change_confirm")
+    await users.confirm_email_change(runtime.storage, body.token)
+
+
+@router.post("/invitations/{invitation_id}/accept", response_model=LoginOutput)
+async def accept(
+    request: Request, response: Response, invitation_id: str, body: InvitationAccept, runtime: CurrentRuntime
+) -> LoginOutput:
+    """Public by token: creates or joins the invited account and starts a login session."""
+    check_origin(request, runtime.settings)
+    await limit_guessing(request, "invitation_accept", f"invitation:{invitation_id}")
+    result = await accept_invitation(runtime.storage, runtime.access, runtime.settings, invitation_id, body)
+    set_session_cookie(response, result.secret, runtime.settings)
+    response.headers["Cache-Control"] = "no-store"
+    return LoginOutput(principal_id=result.principal.id, csrf_token=result.csrf_token)
 
 
 @router.get("/users/me", response_model=Profile, tags=["tenancy"])
-async def me(request: Request, actor: Annotated[Principal, Depends(current_principal)]) -> Profile:
-    return Profile(id=actor.id, kind=actor.kind, name=actor.name, email=actor.email)
+async def get_profile(response: Response, actor: Actor, runtime: CurrentRuntime) -> Profile:
+    return tagged(response, await users.get_profile(runtime.storage, actor))
 
 
-@router.post("/users/me/keys", response_model=KeyOutput, status_code=201, tags=["tenancy"])
-async def create_key(
-    request: Request, body: KeyInput, actor: Annotated[Principal, Depends(current_principal)]
-) -> KeyOutput:
-    key_id, secret = await issue_user_key(
-        request.app.state.storage, actor, workspace_id=body.workspace_id, name=body.name
-    )
-    return KeyOutput(id=key_id, workspace_id=body.workspace_id, name=body.name, secret=secret)
-
-
-@router.get("/workspaces/{workspace_id}", response_model=Workspace, tags=["tenancy"])
-async def get_workspace(
-    request: Request, workspace_id: str, actor: Annotated[Principal, Depends(current_principal)]
-) -> Workspace:
-    async with short_session(request.app.state.storage) as session:
-        row = await resolve_workspace(session, workspace_id)
-        authorize(actor, Scope(row.organization_id, row.id), "read")
-        return workspace_view(row, actor)
-
-
-@router.get("/workspaces/{workspace_id}/audit-events", response_model=AuditPage, tags=["tenancy"])
-async def audit_events(
+@router.patch("/users/me", response_model=Profile, tags=["tenancy"])
+async def update_profile(
     request: Request,
-    workspace_id: str,
-    actor: Annotated[Principal, Depends(current_principal)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: str | None = None,
+    response: Response,
+    body: ProfileUpdate,
+    actor: Actor,
+    runtime: CurrentRuntime,
+    if_match: IfMatch = None,
+) -> Profile:
+    if body.email is not None:
+        await _limit_password_check(request, actor.id)
+    return tagged(
+        response,
+        await users.update_profile(runtime.storage, runtime.keys, runtime.settings, actor, body, if_match=if_match),
+    )
+
+
+@router.put("/users/me/avatar", response_model=Profile, tags=["tenancy"], openapi_extra=images.UPLOAD)
+async def put_avatar(
+    response: Response, data: ImageBody, actor: Actor, runtime: CurrentRuntime, if_match: IfMatch = None
+) -> Profile:
+    return tagged(response, await users.change_avatar(runtime.storage, runtime.objects, actor, data, if_match=if_match))
+
+
+@router.delete("/users/me/avatar", response_model=Profile, tags=["tenancy"])
+async def delete_avatar(response: Response, actor: Actor, runtime: CurrentRuntime, if_match: IfMatch = None) -> Profile:
+    return tagged(response, await users.change_avatar(runtime.storage, runtime.objects, actor, None, if_match=if_match))
+
+
+@router.get("/users/{user_id}/avatar", response_class=Response, responses=images.CONTENT, tags=["tenancy"])
+async def get_avatar(user_id: str, actor: Actor, runtime: CurrentRuntime) -> Response:
+    return await images.serve(runtime.objects, user_id, await users.get_avatar(runtime.storage, actor, user_id))
+
+
+@router.get("/users/me/audit-events", response_model=AuditPage, tags=["tenancy"])
+async def list_account_audit_events(
+    actor: Actor, runtime: CurrentRuntime, limit: PageLimit = 50, cursor: str | None = None
 ) -> AuditPage:
-    return await list_events(request.app.state.storage, actor, workspace_id=workspace_id, limit=limit, cursor=cursor)
+    """The caller's own trail, account-wide events included; requires a login session."""
+    return await list_account_events(runtime.storage, actor, limit=limit, cursor=cursor)
 
 
-def workspace_view(row: WorkspaceRow, actor: Principal) -> Workspace:
-    permissions = allowed_verbs(actor, Scope(row.organization_id, row.id))
-    if row.archived_at is not None:
-        permissions &= {"read"}
-    return Workspace(
-        id=row.id,
-        organization_id=row.organization_id,
-        key=row.key,
-        name=row.name,
-        version=row.version,
-        permissions=sorted(permissions),
+@router.post("/users/me/password", status_code=204, tags=["tenancy"])
+async def change_password(
+    request: Request, body: PasswordChange, credential: Credential, runtime: CurrentRuntime
+) -> None:
+    await _limit_password_check(request, credential.principal.id)
+    await users.change_password(runtime.storage, credential.principal, body, current_session_id=_session_id(credential))
+
+
+@router.post("/users/me/disable", status_code=204, tags=["tenancy"])
+async def disable_account(request: Request, body: AccountDisable, actor: Actor, runtime: CurrentRuntime) -> None:
+    """Disable the caller's own account, proven by the current password; no route enables it again."""
+    await _limit_password_check(request, actor.id)
+    await users.disable_account(runtime.storage, runtime.access, actor, body)
+
+
+@router.get("/users/me/login-sessions", response_model=LoginSessionPage, tags=["tenancy"])
+async def list_login_sessions(
+    credential: Credential, runtime: CurrentRuntime, limit: PageLimit = 50, cursor: str | None = None
+) -> LoginSessionPage:
+    return await users.list_login_sessions(
+        runtime.storage,
+        credential.principal,
+        current_session_id=_session_id(credential),
+        limit=limit,
+        cursor=cursor,
     )
 
 
-@router.get("/workspaces", response_model=WorkspacePage, tags=["tenancy"])
-async def list_workspaces(
-    request: Request,
-    actor: Annotated[Principal, Depends(current_principal)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+@router.delete("/users/me/login-sessions/{session_id}", status_code=204, tags=["tenancy"])
+async def revoke_login_session(session_id: str, actor: Actor, runtime: CurrentRuntime) -> None:
+    await users.revoke_login_session(runtime.storage, actor, session_id)
+
+
+@router.get("/users/me/keys", response_model=ApiKeyPage, tags=["tenancy"])
+async def list_user_keys(
+    actor: Actor,
+    runtime: CurrentRuntime,
+    workspace_id: str | None = None,
+    limit: PageLimit = 50,
     cursor: str | None = None,
-) -> WorkspacePage:
-    after = cursors.id_position(cursor, "workspaces", actor.id)
-    async with short_session(request.app.state.storage) as session:
-        rows = (
-            await session.scalars(
-                select(WorkspaceRow)
-                .where(WorkspaceRow.id.in_(readable_workspaces(actor)), WorkspaceRow.id > after)
-                .order_by(WorkspaceRow.id)
-                .limit(limit + 1)
-            )
-        ).all()
-        return WorkspacePage(
-            items=[workspace_view(row, actor) for row in rows[:limit]],
-            next_cursor=cursors.encode("workspaces", actor.id, rows[limit - 1].id) if len(rows) > limit else None,
-        )
+) -> ApiKeyPage:
+    return await api_keys.list_user_keys(runtime.storage, actor, workspace_id=workspace_id, limit=limit, cursor=cursor)
+
+
+@router.post("/users/me/keys", response_model=IssuedKey, status_code=201, tags=["tenancy"])
+async def create_user_key(body: UserKeyCreate, actor: Actor, runtime: CurrentRuntime) -> IssuedKey:
+    """Needs a login session: an API key never issues keys, so a leaked key cannot outlive its revocation."""
+    return await api_keys.create_user_key(runtime.storage, runtime.access, actor, body)
+
+
+@router.delete("/users/me/keys/{key_id}", response_model=ApiKey, tags=["tenancy"])
+async def revoke_user_key(
+    response: Response, key_id: str, actor: Actor, runtime: CurrentRuntime, if_match: IfMatch = None
+) -> ApiKey:
+    return tagged(response, await api_keys.revoke_user_key(runtime.storage, actor, key_id, if_match=if_match))

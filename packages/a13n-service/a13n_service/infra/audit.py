@@ -2,18 +2,29 @@
 
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import JsonValue
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base
+from a13n_service.infra.db import Base, immutable, rules
 from a13n_service.infra.ids import new_object_id
 
-_GLOBAL_ACTIONS = frozenset({("session.create", "session"), ("session.revoke", "session")})
+# User accounts and their login sessions are global; every other target belongs to an organization.
+_ACCOUNT_TARGETS = frozenset({"user", "login_session"})
+
+
+class Scoped(Protocol):
+    """The tenant an audited target belongs to: a `Scope`, a `WorkspaceScope` or a view carrying both IDs."""
+
+    @property
+    def organization_id(self) -> str: ...
+
+    @property
+    def workspace_id(self) -> str | None: ...
 
 
 class AuditEventRow(Base):
@@ -22,6 +33,12 @@ class AuditEventRow(Base):
         CheckConstraint("outcome IN ('ok', 'denied', 'failed')", name="outcome"),
         CheckConstraint("organization_id IS NOT NULL OR workspace_id IS NULL", name="global_scope"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
+        Index("ix_audit_events_organization", "organization_id", "occurred_at", "id"),
+        Index("ix_audit_events_workspace", "workspace_id", "occurred_at", "id"),
+        # A user's own trail: what they did anywhere, and what was done to their account.
+        Index("ix_audit_events_actor", "actor_id", "occurred_at", "id"),
+        Index("ix_audit_events_target", "target_id", "occurred_at", "id"),
+        rules(immutable("audit_events")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"))
@@ -37,9 +54,8 @@ class AuditEventRow(Base):
 
 def record(
     session: AsyncSession,
+    scope: Scoped | None,
     *,
-    organization_id: str | None,
-    workspace_id: str | None,
     actor_id: str | None,
     action: str,
     target_kind: str,
@@ -47,19 +63,17 @@ def record(
     outcome: Literal["ok", "denied", "failed"] = "ok",
     details: dict[str, JsonValue] | None = None,
 ) -> None:
-    """Append to the caller's mutation transaction with explicit actual scope."""
-    if organization_id is None and (workspace_id is not None or (action, target_kind) not in _GLOBAL_ACTIONS):
-        raise ValueError("Only declared account-wide audit actions may omit organization scope")
-    if organization_id is not None and (action, target_kind) in _GLOBAL_ACTIONS:
-        raise ValueError("Account-wide audit actions cannot be assigned to a tenant")
+    """Append to the caller's mutation transaction in the target's actual scope; account-wide targets have none."""
+    if (scope is None) != (target_kind in _ACCOUNT_TARGETS):
+        raise ValueError("Exactly the account-wide audit targets omit tenant scope")
     payload = dict(details or {})
     if len(json.dumps(payload, allow_nan=False).encode()) > 8192:
         raise ValueError("Audit details exceed their byte limit")
     session.add(
         AuditEventRow(
             id=new_object_id("audit"),
-            organization_id=organization_id,
-            workspace_id=workspace_id,
+            organization_id=scope.organization_id if scope is not None else None,
+            workspace_id=scope.workspace_id if scope is not None else None,
             actor_id=actor_id,
             action=action,
             target_kind=target_kind,

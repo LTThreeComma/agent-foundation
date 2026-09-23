@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.errors import ServiceError, conflict
 
 MAX_KEY_LENGTH = 1024
 _KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]*(/[a-z0-9][a-z0-9_.-]*)*$")
@@ -59,4 +59,4 @@ async def read(store: ObjectStore, ref: ObjectRef) -> bytes:
 
 
 def refuse_different(key: str) -> ServiceError:
-    return ServiceError("conflict", "Object key already holds different bytes", {"kind": "object", "id": key})
+    return conflict("object", key, "different_bytes")

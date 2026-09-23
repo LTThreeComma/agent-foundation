@@ -7,35 +7,60 @@ including a tentative thread or session, then replays the winner.
 
 from collections.abc import Awaitable, Callable
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import transaction, violated_constraint
-from a13n_service.infra.errors import conflict, not_found
-from a13n_service.resources.agents.service import select_revision
+from a13n_service.infra.errors import conflict
+from a13n_service.resources.agents.service import select_revision, validate_override
 from a13n_service.resources.assets.service import require_usable
 from a13n_service.resources.connections.service import validate_caller_headers
 from a13n_service.runs import checkpoints
 from a13n_service.runs.accept import accept
-from a13n_service.runs.environments.mounts import copy_desired
-from a13n_service.runs.inbox import InboxLimits, Request, append_message, check_replay, find_request
+from a13n_service.runs.environments.mounts import mount_environments, shared_mounts
+from a13n_service.runs.inbox import Request, append_message, check_replay, find_request
+from a13n_service.runs.runs import run_view
 from a13n_service.runs.runtime import Runtime
-from a13n_service.runs.schemas import AssetPart, EntryView, Fork, Message, NewThread, RunView, Submitted, ThreadView
+from a13n_service.runs.schemas import AssetPart, EntryView, Fork, Message, NewThread, Submitted, ThreadView
+from a13n_service.runs.sessions import find_session, new_session
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
-from a13n_service.runs.threads import get_run, get_thread, new_session, new_thread, refresh_version, require_open
-from a13n_service.tenancy.authorize import Principal, WorkspaceScope, execution_authority
-from a13n_service.tenancy.grants import workspace_scope
+from a13n_service.runs.threads import get_run, get_thread, new_thread, refresh_version, require_open
+from a13n_service.tenancy.access import workspace_scope
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope, execution_authority
 
-type Create = Callable[[AsyncSession, WorkspaceScope], Awaitable[tuple[ThreadRow, InboxEntryRow]]]
+# The request as the resolved workspace names it, so a replay matches however the path spelled the workspace.
+type Requested = Callable[[WorkspaceScope], Request]
+type Create = Callable[[AsyncSession, WorkspaceScope, Request], Awaitable[tuple[ThreadRow, InboxEntryRow]]]
 
 
-async def validate_message(session: AsyncSession, workspace_id: str, message: Message) -> None:
-    """Malformed or unauthorized input fails before anything is appended."""
-    await select_revision(session, workspace_id, message.agent_id, message.agent_revision_id)
+async def validate_message(
+    session: AsyncSession,
+    runtime: Runtime,
+    principal: Principal,
+    scope: WorkspaceScope,
+    message: Message,
+    *,
+    authority: ExecutionAuthority,
+) -> None:
+    """Malformed or unauthorized input fails before anything is appended, and a pending edit before it applies.
+
+    Acceptance validates the overrides again when it freezes them, under the authority current then.
+    """
+    revision = await select_revision(session, scope.workspace_id, message.agent_id, message.agent_revision_id)
     await require_usable(
-        session, workspace_id, {part.asset_id for part in message.payload.content if isinstance(part, AssetPart)}
+        session, scope.workspace_id, {part.asset_id for part in message.payload.content if isinstance(part, AssetPart)}
     )
+    if message.options.overrides is not None:
+        await validate_override(
+            session,
+            principal,
+            scope,
+            revision,
+            message.options.overrides,
+            authority=authority,
+            registry=runtime.registry,
+            plugins=runtime.plugins,
+        )
 
 
 async def receipt(session: AsyncSession, thread: ThreadRow, entry: InboxEntryRow) -> Submitted:
@@ -45,7 +70,7 @@ async def receipt(session: AsyncSession, thread: ThreadRow, entry: InboxEntryRow
     return Submitted(
         thread=ThreadView.model_validate(thread),
         entry=EntryView.model_validate(entry),
-        run=RunView.model_validate(run) if run is not None else None,
+        run=await run_view(session, run) if run is not None else None,
     )
 
 
@@ -57,15 +82,15 @@ async def _replay(session: AsyncSession, entry: InboxEntryRow, request: Request)
 
 
 async def _submit(
-    runtime: Runtime, actor: Principal, workspace_id: str, request: Request, create: Create
+    runtime: Runtime, actor: Principal, workspace_id: str, requested: Requested, create: Create
 ) -> tuple[Submitted, bool]:
     """Returns the receipt and whether this call created it (201) rather than replayed it (200)."""
     try:
         async with transaction(runtime.storage) as session:
-            scope, found = await _lookup(session, actor, workspace_id, request)
+            scope, request, found = await _lookup(session, actor, workspace_id, requested)
             if found is not None:
                 return await _replay(session, found, request), False
-            thread, entry = await create(session, scope)
+            thread, entry = await create(session, scope, request)
             await accept(session, runtime, thread, explicit=entry)
             return await receipt(session, thread, entry), True
     except IntegrityError as error:
@@ -73,96 +98,90 @@ async def _submit(
             raise
     # A concurrent request with the same key committed first; its entry is the evidence.
     async with transaction(runtime.storage) as session:
-        _, found = await _lookup(session, actor, workspace_id, request)
+        _, request, found = await _lookup(session, actor, workspace_id, requested)
         assert found is not None
         return await _replay(session, found, request), False
 
 
 async def _lookup(
-    session: AsyncSession, actor: Principal, workspace_id: str, request: Request
-) -> tuple[WorkspaceScope, InboxEntryRow | None]:
+    session: AsyncSession, actor: Principal, workspace_id: str, requested: Requested
+) -> tuple[WorkspaceScope, Request, InboxEntryRow | None]:
     """Authentication and current permission precede replay lookup; lookup precedes state validation."""
     scope = await workspace_scope(session, actor, workspace_id, "run")
-    return scope, await find_request(session, scope.workspace_id, actor.id, request.key)
-
-
-def _limits(runtime: Runtime) -> InboxLimits:
-    return InboxLimits(runtime.settings.control.inbox_count, runtime.settings.control.inbox_bytes)
+    request = requested(scope)
+    return scope, request, await find_request(session, scope.workspace_id, actor.id, request.key)
 
 
 async def submit_message(
     runtime: Runtime, actor: Principal, workspace_id: str, thread_id: str, message: Message, *, request_key: str
 ) -> tuple[Submitted, bool]:
-    request = Request.of(request_key, "message", thread_id, message)
-
-    async def create(session: AsyncSession, scope: WorkspaceScope) -> tuple[ThreadRow, InboxEntryRow]:
+    async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, InboxEntryRow]:
         thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
         require_open(thread)
-        await validate_message(session, scope.workspace_id, message)
+        authority = execution_authority(actor, scope)
+        await validate_message(session, runtime, actor, scope, message, authority=authority)
         entry = await append_message(
             session,
             thread,
             message,
             principal_id=actor.id,
-            authority=execution_authority(actor, scope),
+            authority=authority,
             request=request,
-            limits=_limits(runtime),
+            control=runtime.settings.control,
         )
         return thread, entry
 
-    return await _submit(runtime, actor, workspace_id, request, create)
+    return await _submit(
+        runtime, actor, workspace_id, lambda _: Request.of(request_key, "message", thread_id, message), create
+    )
 
 
 async def create_thread(
     runtime: Runtime, actor: Principal, workspace_id: str, body: NewThread, *, request_key: str
 ) -> tuple[Submitted, bool]:
-    request = Request.of(request_key, "thread", workspace_id, body)
-
-    async def create(session: AsyncSession, scope: WorkspaceScope) -> tuple[ThreadRow, InboxEntryRow]:
-        await validate_message(session, scope.workspace_id, body)
+    async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, InboxEntryRow]:
+        authority = execution_authority(actor, scope)
+        await validate_message(session, runtime, actor, scope, body, authority=authority)
         await validate_caller_headers(session, scope.workspace_id, body.mcp_headers)
         if body.session_id is not None:
-            owner = await session.scalar(
-                select(SessionRow).where(
-                    SessionRow.workspace_id == scope.workspace_id, SessionRow.id == body.session_id
-                )
-            )
-            if owner is None:
-                raise not_found("session", body.session_id)
+            owner = await find_session(session, scope.workspace_id, body.session_id)
         else:
             owner = new_session(scope.organization_id, scope.workspace_id, actor.id)
             session.add(owner)
         thread = new_thread(owner, mcp_headers=body.mcp_headers)
         session.add(thread)
         await session.flush()
+        await mount_environments(session, thread, body.environments, principal_id=actor.id)
         entry = await append_message(
             session,
             thread,
             body,
             principal_id=actor.id,
-            authority=execution_authority(actor, scope),
+            authority=authority,
             request=request,
-            limits=_limits(runtime),
+            control=runtime.settings.control,
         )
         return thread, entry
 
-    return await _submit(runtime, actor, workspace_id, request, create)
+    return await _submit(
+        runtime, actor, workspace_id, lambda scope: Request.of(request_key, "thread", scope.workspace_id, body), create
+    )
 
 
 async def fork(
     runtime: Runtime, actor: Principal, workspace_id: str, run_id: str, body: Fork, *, request_key: str
 ) -> tuple[Submitted, bool]:
     """A new thread in the origin's session whose first run continues the origin's committed history."""
-    request = Request.of(request_key, "fork", run_id, body)
 
-    async def create(session: AsyncSession, scope: WorkspaceScope) -> tuple[ThreadRow, InboxEntryRow]:
+    async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, InboxEntryRow]:
         origin = await get_run(session, scope.workspace_id, run_id)
         origin_thread = await get_thread(session, scope.workspace_id, origin.thread_id, lock=True)
         # Failed and cancelled runs never became history; fork their parent and resubmit instead.
         if origin.status not in {"completed", "waiting"}:
             raise conflict("run", origin.id, f"run_{origin.status}")
         checkpoints.require_compatible(origin)
-        await validate_message(session, scope.workspace_id, body)
+        authority = execution_authority(actor, scope)
+        await validate_message(session, runtime, actor, scope, body, authority=authority)
         owner = await session.get(SessionRow, origin.session_id)
         assert owner is not None
         thread = new_thread(
@@ -174,17 +193,17 @@ async def fork(
         )
         session.add(thread)
         await session.flush()
-        if not body.fresh_environments:
-            await copy_desired(session, origin_thread, thread)
+        shared = [] if body.fresh_environments else await shared_mounts(session, origin_thread)
+        await mount_environments(session, thread, [*shared, *body.environments], principal_id=actor.id)
         entry = await append_message(
             session,
             thread,
             body,
             principal_id=actor.id,
-            authority=execution_authority(actor, scope),
+            authority=authority,
             request=request,
-            limits=_limits(runtime),
+            control=runtime.settings.control,
         )
         return thread, entry
 
-    return await _submit(runtime, actor, workspace_id, request, create)
+    return await _submit(runtime, actor, workspace_id, lambda _: Request.of(request_key, "fork", run_id, body), create)

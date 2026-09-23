@@ -1,7 +1,8 @@
 """One engine/session owner, short SQL transaction scopes and the database rules tables declare."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from contextlib import asynccontextmanager
+import hashlib
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -11,6 +12,8 @@ from sqlalchemy import BigInteger, DateTime, FetchedValue, MetaData, Table, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from a13n_service.infra.errors import ServiceError
 
 logger = get_logger(__name__)
 
@@ -30,7 +33,8 @@ class Base(DeclarativeBase):
 
 
 class Stamped:
-    """Mutable rows; the `stamp_resource` trigger advances `version` and `updated_at` on every update.
+    """Mutable rows; the `stamp_resource` trigger advances `version` and `updated_at` on every update, except
+    one confined to columns the table declares `unversioned`.
 
     ORM flushes read both back, so a row's ETag is current after its own update. A trigger that touches the
     row from elsewhere (an inbox change bumping its thread) leaves loaded copies stale until refreshed.
@@ -78,8 +82,9 @@ END $$
 FUNCTIONS = (_STAMP_RESOURCE, _REFUSE_MUTATION, _GUARD_IDENTITY)
 
 
-def trigger(table: str, function: str, *, on: str = "BEFORE UPDATE") -> str:
-    return f"CREATE TRIGGER {function} {on} ON {table} FOR EACH ROW EXECUTE FUNCTION {function}()"
+def trigger(table: str, function: str, *, on: str = "BEFORE UPDATE", when: str | None = None) -> str:
+    condition = f" WHEN ({when})" if when else ""
+    return f"CREATE TRIGGER {function} {on} ON {table} FOR EACH ROW{condition} EXECUTE FUNCTION {function}()"
 
 
 def immutable(table: str) -> str:
@@ -91,16 +96,24 @@ def identity_guarded(table: str) -> str:
     return trigger(table, "guard_identity")
 
 
-def rules(*statements: str) -> dict[str, Any]:
-    """The `__table_args__` entry carrying a table's rules, in execution order (functions before triggers)."""
-    return {"info": {"rules": statements}}
+def rules(*statements: str, unversioned: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The `__table_args__` entry carrying a table's rules, in execution order (functions before triggers).
+
+    Changes confined to `unversioned` columns of a `Stamped` table keep its version, and so its ETag.
+    """
+    return {"info": {"rules": statements, "unversioned": unversioned}}
 
 
 def table_rules(row: type[Base]) -> list[str]:
     """One table's rules: the version stamp of a `Stamped` row, then what the table declares."""
     table = row.__table__
     assert isinstance(table, Table)
-    stamp = [trigger(table.name, "stamp_resource")] if issubclass(row, Stamped) else []
+    stamp: list[str] = []
+    if issubclass(row, Stamped):
+        unversioned = table.info.get("unversioned", ())
+        ignored = "'{" + ",".join(unversioned) + "}'::text[]"
+        when = f"(to_jsonb(OLD) - {ignored}) IS DISTINCT FROM (to_jsonb(NEW) - {ignored})" if unversioned else None
+        stamp = [trigger(table.name, "stamp_resource", when=when)]
     return [*stamp, *table.info.get("rules", ())]
 
 
@@ -151,7 +164,7 @@ async def transaction(storage: Storage) -> AsyncIterator[AsyncSession]:
                 logger.warning("After-commit callback failed", extra={"error_type": type(error).__name__})
 
 
-def after_commit(session: AsyncSession, callback: Callable[[], Awaitable[None]]) -> None:
+def after_commit(session: AsyncSession, callback: Callable[[], Awaitable[object]]) -> None:
     session.info.setdefault(_AFTER_COMMIT, []).append(callback)
 
 
@@ -160,17 +173,39 @@ async def lock[R: Base](session: AsyncSession, row_type: type[R], row_id: str) -
     return await session.get(row_type, row_id, with_for_update=True, populate_existing=True)
 
 
+def assign(row: object, changes: Mapping[str, object]) -> list[str]:
+    """Set each field of `changes` on `row`; the names of those whose value differed, in order."""
+    changed = [name for name, value in changes.items() if getattr(row, name) != value]
+    for name in changed:
+        setattr(row, name, changes[name])
+    return changed
+
+
 async def now(session: AsyncSession) -> datetime:
     """Fresh database time; `now()` is frozen at transaction start and is wrong after waiting for locks."""
     return (await session.execute(select(func.clock_timestamp()))).scalar_one()
 
 
-async def advisory_lock(session: AsyncSession, key: int) -> None:
-    """Transaction-only lock for bounded SQL work, never external I/O."""
-    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+async def advisory_lock(session: AsyncSession, *key: str) -> None:
+    """Transaction-only lock on a namespaced key, such as ("environments", workspace_id), for bounded SQL work,
+    never external I/O."""
+    digest = hashlib.sha256("\0".join(key).encode()).digest()
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": int.from_bytes(digest[:8], signed=True)})
 
 
 def violated_constraint(error: IntegrityError) -> str | None:
     """The constraint a unique/check/foreign-key violation names, for callers that arbitrate by index."""
     diag = getattr(error.orig, "diag", None)
     return getattr(diag, "constraint_name", None)
+
+
+@contextmanager
+def unique_key(kind: str, constraint: str, key: str) -> Iterator[None]:
+    """A write the database refuses under the unique `constraint` is `already_exists`: another `kind` holds
+    `key`."""
+    try:
+        yield
+    except IntegrityError as error:
+        if violated_constraint(error) != constraint:
+            raise
+        raise ServiceError("already_exists", f"{kind} key {key} already exists", {"kind": kind, "key": key}) from None

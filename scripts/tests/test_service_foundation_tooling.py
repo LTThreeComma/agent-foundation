@@ -1,38 +1,110 @@
-"""Archive routing and shared tracing infrastructure remain independent."""
+"""Live-journey support without Docker, and shared tracing infrastructure."""
 
-import importlib.util
+import base64
 import json
+import os
 import subprocess
 import sys
-import tomllib
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
+import httpx2
 import pytest
+from a13n_service.settings import load_settings
 
+from dev.fixtures.process import fixture_process
+from dev.live_tests.console import service_config
+from dev.live_tests.stack import LEASE_SECONDS, Stores, write_config
 from dev.observability import langfuse
-from dev.service import __main__ as service_dev
-from scripts import impact, verify
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_legacy_is_not_a_workspace_or_validation_input():
-    manifest = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert "packages/a13n-service-legacy" in manifest["tool"]["uv"]["workspace"]["exclude"]
-    assert importlib.util.find_spec("a13n_service_legacy") is None
-    assert "a13n-service-legacy" not in impact.packages_with_tests()
-    graph = verify.PythonGraph(ROOT)
-    assert not any("a13n-service-legacy" in str(path) for path in graph.modules)
-    plan = verify.plan(["packages/a13n-service-legacy/a13n_service_legacy/cli.py"], graph)
-    assert not plan.python_tests and not plan.python_files
-
-
-def test_live_journey_entrypoint_collects_the_public_process_proof():
+def test_the_live_suite_collects_every_journey_module():
     result = subprocess.run(
-        [sys.executable, "-m", "dev.live_tests", "--collect-only", "-vv"], cwd=ROOT, capture_output=True, text=True
+        [sys.executable, "-m", "dev.live_tests", "--collect-only", "-qq"], cwd=ROOT, capture_output=True, text=True
     )
-    assert result.returncode == 0, result.stderr
-    assert "test_public_process_journey_with_two_workers_and_slow_model" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    collected = {line.split("::")[0] for line in result.stdout.splitlines() if "::" in line}
+    assert collected == {path.relative_to(ROOT).as_posix() for path in (ROOT / "dev/live_tests").glob("test_*.py")}
+
+
+def test_the_live_service_configurations_are_valid(tmp_path, monkeypatch):
+    for name in [name for name in os.environ if name.startswith("A13N_")]:
+        monkeypatch.delenv(name)
+    stores = Stores(
+        postgres_url="postgresql+psycopg://live:fixture@127.0.0.1:5432/postgres",
+        template="live_template",
+        redis_url="redis://127.0.0.1:6379/0",
+        certificate=tmp_path / "certificate.pem",
+        key=tmp_path / "key.pem",
+        encryption_key=base64.b64encode(bytes(32)).decode(),
+        tenant={},
+    )
+    journey = load_settings(write_config(tmp_path / "journey.toml", stores, "live_journey", tmp_path / "objects"))
+    assert journey.worker.lease_seconds == LEASE_SECONDS and journey.server.tls_certificate == stores.certificate
+    console = tmp_path / "console.toml"
+    console.write_text(
+        service_config(
+            tmp_path,
+            "postgresql+psycopg://live:fixture@127.0.0.1:5432/console",
+            stores.redis_url,
+            console="http://localhost:5173",
+            workspace_id="ws_console",
+            origins=("http://127.0.0.1:18080",),
+        )
+    )
+    assert load_settings(console).server.public_url == "http://localhost:5173"
+
+
+def wait_until(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        assert time.monotonic() < deadline, "condition not reached"
+        time.sleep(0.05)
+
+
+def test_the_scripted_model_answers_holds_and_records_requests():
+    with fixture_process("dev.fixtures.scripted_model") as url, httpx2.Client(base_url=url, trust_env=False) as client:
+
+        def script(**turn: object) -> None:
+            client.post("/fixture/turns", json=turn).raise_for_status()
+
+        def ask(text: str, **options: float) -> list[dict]:
+            """The streamed deltas that carry content or tool calls."""
+            body = {"model": "scripted", "stream": True, "messages": [{"role": "user", "content": text}]}
+            response = client.post("/v1/chat/completions", json=body, **options)
+            chunks = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+            deltas = [chunk["choices"][0]["delta"] for chunk in chunks if chunk["choices"]]
+            return [delta for delta in deltas if delta.get("content") or delta.get("tool_calls")]
+
+        def statuses(marker: str) -> list[str]:
+            items = client.get("/fixture/requests", params={"marker": marker}).json()["items"]
+            return [item["status"] for item in items]
+
+        script(to="[text]", text="Hello there", chunks=3)
+        script(to="[again]", text="Again", repeat=True)
+        script(to="[tool]", tool_calls=[{"id": "call_1", "name": "lookup", "arguments": {"q": 1}}], hold="tool")
+        script(to="[never]", text="Never", hold="never")
+        assert [delta["content"] for delta in ask("[text] Hi")] == ["Hell", "o th", "ere"]
+        assert [delta["content"] for delta in ask("[again] One") + ask("[again] Two")] == ["Again", "Again"]
+
+        # A held turn answers once its gate opens.
+        answers: list[list[dict]] = []
+        waiting = threading.Thread(target=lambda: answers.append(ask("[tool] Look")))
+        waiting.start()
+        wait_until(lambda: statuses("[tool]") == ["held"])
+        client.post("/fixture/gates/tool").raise_for_status()
+        waiting.join(5)
+        assert answers[0][0]["tool_calls"][0]["id"] == "call_1" and statuses("[tool]") == ["answered"]
+
+        # A client that leaves while its turn is held is recorded as abandoned.
+        with pytest.raises(httpx2.ReadTimeout):
+            ask("[never] Wait", timeout=0.5)
+        wait_until(lambda: statuses("[never]") == ["abandoned"])
+        assert statuses("[text]") == ["answered"] and statuses("[again]") == ["answered", "answered"]
 
 
 def test_shared_langfuse_reuses_verified_manifest_and_preserves_storage(tmp_path, monkeypatch):
@@ -68,24 +140,3 @@ def test_shared_langfuse_uses_public_fixture_configuration(monkeypatch, tmp_path
     assert seen["env"]["LANGFUSE_LOCAL_SECRET_KEY"] == langfuse.SECRET_KEY
     assert "--env-file" in seen["command"]
     assert seen["env"]["LANGFUSE_LOCAL_PORT"] == "3000"
-
-
-def test_local_status_exposes_listener_and_database_without_credentials(tmp_path, monkeypatch, capsys):
-    config = tmp_path / "var/service-rewrite/local.toml"
-    config.parent.mkdir(parents=True)
-    config.write_text(
-        '[server]\nhost="127.0.0.1"\nport=8123\n[database]\nurl="postgresql+psycopg://user:fixture-secret-value@127.0.0.1:6543/foundation"\n'
-    )
-    monkeypatch.setattr(service_dev, "ROOT", tmp_path)
-    monkeypatch.setattr(sys, "argv", ["service", "status"])
-    monkeypatch.setattr(
-        service_dev.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="127.0.0.1:6543\n"),
-    )
-    service_dev.main()
-    output = capsys.readouterr().out
-    status = json.loads(output)
-    assert status["service"] == "http://127.0.0.1:8123"
-    assert status["database"] == {"host": "127.0.0.1", "port": 6543, "name": "foundation"}
-    assert "fixture-secret-value" not in output and "user:" not in output

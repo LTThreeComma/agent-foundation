@@ -1,18 +1,22 @@
-"""Run the disposable public Service journey through its installed CLI and HTTPS API."""
+"""Run the Service live journeys: `python -m dev.live_tests [pytest arguments]`.
 
-import subprocess
+The report lists every journey with its outcome and names each skipped journey with its reason. Pass
+`--require-all` to fail, instead of skip, a journey whose external dependency is unavailable.
+"""
+
 import sys
 from pathlib import Path
 
+import pytest
+
+SUITE = Path(__file__).resolve().parent
+# Testcontainers 4.13 deprecates its own readiness decorator on import; the notice says nothing about the suite.
+TESTCONTAINERS_NOTICE = "The @wait_container_is_ready decorator is deprecated"
+
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[2]
-    raise SystemExit(
-        subprocess.call(
-            [sys.executable, "-m", "pytest", "packages/a13n-service/tests/test_live_process.py", "-q", *sys.argv[1:]],
-            cwd=root,
-        )
-    )
+    arguments = [str(SUITE), "-v", "-rfEs", "--durations=0", "-W", f"ignore:{TESTCONTAINERS_NOTICE}:DeprecationWarning"]
+    raise SystemExit(pytest.main([*arguments, *sys.argv[1:]]))
 
 
 if __name__ == "__main__":

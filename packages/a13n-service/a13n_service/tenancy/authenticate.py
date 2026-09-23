@@ -1,33 +1,153 @@
-"""Password verification outside SQL and bounded, detached credential authentication."""
+"""The local authenticator: password login, login-session cookies and API keys.
+
+Only credential lookup lives here. Membership, key, service-account and profile management are separate
+tenancy functions taking a `Principal`, so they keep working when a distribution replaces authentication.
+"""
 
 import hashlib
 import hmac
-import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
-from anyio.to_thread import run_sync
-from argon2 import PasswordHasher
-from argon2.exceptions import VerificationError
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+from starlette.responses import Response
 
 from a13n_service.infra.audit import record
 from a13n_service.infra.crypto import secret_hash
-from a13n_service.infra.db import Storage, short_session, transaction
+from a13n_service.infra.db import Storage, lock, now, short_session, transaction
 from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.ids import new_object_id
-from a13n_service.tenancy.authorize import Principal, Scope
-from a13n_service.tenancy.credentials import ApiKeyRow, TokenRow
-from a13n_service.tenancy.grants import principal_for, workspace_scope
-from a13n_service.tenancy.tables import PasswordRow, PrincipalRow
+from a13n_service.settings import Settings
+from a13n_service.tenancy.access import Access, Authenticated, login_session_required, principal_for, unauthenticated
+from a13n_service.tenancy.authorize import Principal, WorkspaceScope
+from a13n_service.tenancy.credentials import issue_token, verify_password
+from a13n_service.tenancy.requests import current_runtime
+from a13n_service.tenancy.tables import ApiKeyRow, PasswordRow, PrincipalRow, TokenRow
+from a13n_service.tenancy.users import revoke_login_session
 
 COOKIE_NAME = "__Host-a13n_session"
+# Every unsafe request authenticated by the login-session cookie also sends the session's CSRF token.
+CSRF_HEADER = "X-CSRF-Token"
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Rolling expiry and key usage are written at most this often, not on every request.
+_TOUCH_INTERVAL = timedelta(minutes=1)
+
+type LocalKind = Literal["session", "key"]
 
 
 def session_csrf(secret: str) -> str:
-    """Stable across tabs, without persisting a recoverable session secret."""
+    """Stable per login session and derivable from its cookie, so nothing recoverable is stored."""
     return hmac.new(secret.encode(), b"a13n:session:csrf:v1", hashlib.sha256).hexdigest()
+
+
+def check_origin(request: Request, settings: Settings) -> None:
+    """A browser may change state only from the service's own public origin."""
+    origin = request.headers.get("origin")
+    if origin is not None and origin != settings.server.public_origin:
+        raise ServiceError("forbidden", "Request origin is not allowed")
+
+
+def set_session_cookie(response: Response, secret: str, settings: Settings) -> None:
+    response.set_cookie(
+        COOKIE_NAME,
+        secret,
+        max_age=settings.auth.session_seconds,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+
+
+async def _live_credential(
+    session: AsyncSession, kind: str, *, digest: str | None = None, credential_id: str | None = None
+) -> TokenRow | ApiKeyRow:
+    """One definition of a usable local credential, shared by authentication and re-checks."""
+    credential: TokenRow | ApiKeyRow | None = None
+    if kind == "session":
+        credential = await session.scalar(
+            select(TokenRow).where(
+                TokenRow.secret_hash == digest if digest is not None else TokenRow.id == credential_id,
+                TokenRow.kind == "session",
+                TokenRow.revoked_at.is_(None),
+                TokenRow.expires_at > func.clock_timestamp(),
+            )
+        )
+    elif kind == "key":
+        credential = await session.scalar(
+            select(ApiKeyRow).where(
+                ApiKeyRow.secret_hash == digest if digest is not None else ApiKeyRow.id == credential_id,
+                ApiKeyRow.revoked_at.is_(None),
+                or_(ApiKeyRow.expires_at.is_(None), ApiKeyRow.expires_at > func.clock_timestamp()),
+            )
+        )
+    if credential is None:
+        raise unauthenticated()
+    return credential
+
+
+async def authenticate_secret(
+    storage: Storage, access: Access, secret: str, kind: LocalKind, *, session_seconds: int
+) -> Authenticated:
+    if not secret or len(secret) > 512:
+        raise unauthenticated()
+    async with transaction(storage) as session:
+        credential = await _live_credential(session, kind, digest=secret_hash(secret))
+        confinement = (
+            WorkspaceScope(credential.organization_id, credential.workspace_id)
+            if isinstance(credential, ApiKeyRow)
+            else None
+        )
+        principal = await principal_for(session, access, credential.principal_id, confinement=confinement)
+        current = await now(session)
+        if isinstance(credential, TokenRow):
+            if credential.expires_at < current + timedelta(seconds=session_seconds) - _TOUCH_INTERVAL:
+                credential.expires_at = current + timedelta(seconds=session_seconds)
+        elif credential.last_used_at is None or credential.last_used_at <= current - _TOUCH_INTERVAL:
+            credential.last_used_at = current
+        return Authenticated(principal, credential.id, kind)
+
+
+class LocalAuthenticator:
+    """`Authorization: Bearer <api key>` or the login-session cookie; cookie mutations prove Origin and CSRF."""
+
+    async def authenticate(self, request: Request, response: Response) -> Authenticated | None:
+        runtime = await current_runtime(request)
+        seconds = runtime.settings.auth.session_seconds
+        authorization = request.headers.get("authorization")
+        if authorization is not None:
+            scheme, _, secret = authorization.partition(" ")
+            if scheme.lower() != "bearer":
+                raise unauthenticated()
+            return await authenticate_secret(
+                runtime.storage, runtime.access, secret.strip(), "key", session_seconds=seconds
+            )
+        secret = request.cookies.get(COOKIE_NAME)
+        if secret is None:
+            return None
+        if request.method not in SAFE_METHODS:
+            check_origin(request, runtime.settings)
+            presented = request.headers.get(CSRF_HEADER, "")
+            if not hmac.compare_digest(session_csrf(secret).encode(), presented.encode()):
+                raise ServiceError("forbidden", "CSRF validation failed")
+        credential = await authenticate_secret(
+            runtime.storage, runtime.access, secret, "session", session_seconds=seconds
+        )
+        # Rolling expiry: the server extends the session, the browser keeps the cookie as long.
+        set_session_cookie(response, secret, runtime.settings)
+        return credential
+
+    async def recheck(self, session: AsyncSession, credential: Authenticated) -> None:
+        await _live_credential(session, credential.kind, credential_id=credential.credential_id)
+
+    async def logout(self, request: Request, response: Response, credential: Authenticated) -> None:
+        if credential.kind != "session":
+            raise login_session_required()
+        runtime = await current_runtime(request)
+        await revoke_login_session(runtime.storage, credential.principal, credential.credential_id)
+        response.delete_cookie(COOKIE_NAME, secure=True, httponly=True, samesite="strict", path="/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,14 +157,21 @@ class Login:
     csrf_token: str
 
 
-@dataclass(frozen=True, slots=True)
-class Authenticated:
-    principal: Principal
-    credential_id: str
-    kind: Literal["session", "key"]
+async def open_session(session: AsyncSession, principal_id: str, *, seconds: int) -> str:
+    """Issue a login-session token in the caller's transaction and return its cookie secret."""
+    token, secret = await issue_token(session, principal_id, "session", seconds=seconds)
+    record(
+        session,
+        None,
+        actor_id=principal_id,
+        action="login_session.create",
+        target_kind="login_session",
+        target_id=token.id,
+    )
+    return secret
 
 
-async def login(storage: Storage, *, email: str, password: str, session_seconds: int) -> Login:
+async def login(storage: Storage, access: Access, *, email: str, password: str, session_seconds: int) -> Login:
     async with short_session(storage) as session:
         stored = (
             await session.execute(
@@ -53,147 +180,15 @@ async def login(storage: Storage, *, email: str, password: str, session_seconds:
                 .where(PrincipalRow.email == email, PrincipalRow.status == "active")
             )
         ).one_or_none()
-    # Missing identities still perform the expensive password operation.
-    if stored is None:
-        await run_sync(PasswordHasher().hash, password)
+    principal_id, password_hash = stored if stored is not None else (None, None)
+    verified = await verify_password(password_hash, password)
+    if principal_id is None or not verified:
         raise ServiceError("unauthenticated", "Invalid email or password")
-    principal_id, password_hash = stored
-    try:
-        await run_sync(PasswordHasher().verify, password_hash, password)
-    except VerificationError:
-        raise ServiceError("unauthenticated", "Invalid email or password") from None
-    secret = secrets.token_urlsafe(32)
-    csrf = session_csrf(secret)
     async with transaction(storage) as session:
-        current = await session.get(PasswordRow, principal_id, with_for_update=True)
+        # The password may have changed while it was verified outside the transaction.
+        current = await lock(session, PasswordRow, principal_id)
         if current is None or current.hash != password_hash:
             raise ServiceError("unauthenticated", "Invalid email or password")
-        principal = await principal_for(session, principal_id)
-        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-        token_id = new_object_id("token")
-        session.add(
-            TokenRow(
-                id=token_id,
-                principal_id=principal_id,
-                kind="session",
-                secret_hash=secret_hash(secret),
-                data={"csrf_hash": secret_hash(csrf)},
-                expires_at=now + timedelta(seconds=session_seconds),
-            )
-        )
-        record(
-            session,
-            organization_id=None,
-            workspace_id=None,
-            actor_id=principal_id,
-            action="session.create",
-            target_kind="session",
-            target_id=token_id,
-        )
-    return Login(principal, secret, csrf)
-
-
-async def authenticate(
-    storage: Storage,
-    *,
-    secret: str,
-    kind: Literal["session", "key"],
-    csrf_token: str | None,
-    mutation: bool,
-    session_seconds: int,
-) -> Authenticated:
-    if not secret or len(secret) > 512:
-        raise ServiceError("unauthenticated", "Authentication is required")
-    async with transaction(storage) as session:
-        if kind == "session":
-            token = await session.scalar(
-                select(TokenRow)
-                .where(
-                    TokenRow.secret_hash == secret_hash(secret),
-                    TokenRow.kind == "session",
-                    TokenRow.revoked_at.is_(None),
-                    TokenRow.expires_at > func.clock_timestamp(),
-                )
-                .with_for_update()
-            )
-            now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-            if token is None or token.expires_at <= now:
-                raise ServiceError("unauthenticated", "Authentication is required")
-            expected = (token.data or {}).get("csrf_hash")
-            if mutation and (
-                not isinstance(expected, str)
-                or not csrf_token
-                or not hmac.compare_digest(expected, secret_hash(csrf_token))
-            ):
-                raise ServiceError("forbidden", "CSRF validation failed")
-            principal = await principal_for(session, token.principal_id)
-            now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-            token.expires_at = now + timedelta(seconds=session_seconds)
-            return Authenticated(principal, token.id, "session")
-        key = await session.scalar(
-            select(ApiKeyRow)
-            .where(
-                ApiKeyRow.secret_hash == secret_hash(secret),
-                ApiKeyRow.revoked_at.is_(None),
-                or_(ApiKeyRow.expires_at.is_(None), ApiKeyRow.expires_at > func.clock_timestamp()),
-            )
-            .with_for_update()
-        )
-        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-        if key is None or (key.expires_at is not None and key.expires_at <= now):
-            raise ServiceError("unauthenticated", "Authentication is required")
-        principal = await principal_for(
-            session, key.principal_id, confinement=Scope(key.organization_id, key.workspace_id)
-        )
-        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-        if key.last_used_at is None or key.last_used_at <= now - timedelta(minutes=1):
-            key.last_used_at = now
-        return Authenticated(principal, key.id, "key")
-
-
-async def issue_user_key(storage: Storage, actor: Principal, *, workspace_id: str, name: str) -> tuple[str, str]:
-    if actor.kind != "user":
-        raise ServiceError("forbidden", "User keys require a user identity")
-    secret = "a13n_" + secrets.token_urlsafe(32)
-    key_id = new_object_id("key")
-    async with transaction(storage) as session:
-        scope = await workspace_scope(session, actor, workspace_id, "read")
-        session.add(
-            ApiKeyRow(
-                id=key_id,
-                organization_id=scope.organization_id,
-                workspace_id=workspace_id,
-                principal_id=actor.id,
-                name=name,
-                secret_hash=secret_hash(secret),
-                created_by_id=actor.id,
-            )
-        )
-        record(
-            session,
-            organization_id=scope.organization_id,
-            workspace_id=workspace_id,
-            actor_id=actor.id,
-            action="credential.create",
-            target_kind="api_key",
-            target_id=key_id,
-        )
-    return key_id, secret
-
-
-async def logout(storage: Storage, credential: Authenticated) -> None:
-    if credential.kind != "session":
-        raise ServiceError("invalid_argument", "Logout requires a login session")
-    async with transaction(storage) as session:
-        token = await session.get(TokenRow, credential.credential_id, with_for_update=True)
-        if token is not None and token.revoked_at is None:
-            token.revoked_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-            record(
-                session,
-                organization_id=None,
-                workspace_id=None,
-                actor_id=credential.principal.id,
-                action="session.revoke",
-                target_kind="session",
-                target_id=token.id,
-            )
+        principal = await principal_for(session, access, principal_id)
+        secret = await open_session(session, principal_id, seconds=session_seconds)
+    return Login(principal, secret, session_csrf(secret))

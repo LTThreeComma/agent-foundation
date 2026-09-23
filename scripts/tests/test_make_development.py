@@ -317,7 +317,7 @@ def test_database_targets_require_setup_configuration(workspace: Path, target: s
 def test_database_targets_use_generated_config_or_explicit_override(
     workspace: Path, target: str, override: bool
 ) -> None:
-    config = "custom config.toml" if override else "var/service-rewrite/local.toml"
+    config = "custom config.toml" if override else "var/dev/service.toml"
     path = workspace / config
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("[database]\n")

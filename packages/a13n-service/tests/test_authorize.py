@@ -4,15 +4,21 @@ from dataclasses import replace
 
 import pytest
 from a13n_service.infra.errors import ServiceError
+from a13n_service.tenancy.access import Access, RoleGrant
+from a13n_service.tenancy.authenticate import LocalAuthenticator
 from a13n_service.tenancy.authorize import (
+    BUILT_IN_ROLES,
     ExecutionAuthority,
     Grant,
     Principal,
     Scope,
+    WorkspaceScope,
     allowed_verbs,
     authorize,
     execution_authority,
 )
+
+ADMIN, RUNNER, BUILDER = BUILT_IN_ROLES["admin"], BUILT_IN_ROLES["runner"], BUILT_IN_ROLES["builder"]
 
 
 @pytest.mark.parametrize(
@@ -27,7 +33,7 @@ from a13n_service.tenancy.authorize import (
     ],
 )
 def test_grant_scope_rule(grant_scope, resource, expected):
-    principal = Principal("usr_a", "user", (Grant("org_a", grant_scope, "admin"),))
+    principal = Principal("usr_a", "user", (Grant("org_a", grant_scope, ADMIN),))
     assert allowed_verbs(principal, resource) == expected
 
 
@@ -35,14 +41,15 @@ def test_grant_scope_rule(grant_scope, resource, expected):
     "role,expected", [("viewer", {"read"}), ("runner", {"read", "run"}), ("builder", {"read", "run", "write"})]
 )
 def test_roles_union_without_changing_scope(role, expected):
-    principal = Principal("usr_a", "user", (Grant("org_a", "ws_a", role), Grant("org_b", None, "admin")))
+    grants = (Grant("org_a", "ws_a", BUILT_IN_ROLES[role]), Grant("org_b", None, ADMIN))
+    principal = Principal("usr_a", "user", grants)
     assert allowed_verbs(principal, Scope("org_a", "ws_a")) == expected
     assert allowed_verbs(principal, Scope("org_a")) == expected & {"read", "run"}
 
 
 def test_workspace_key_never_inherits_cross_workspace_or_shared_mutation_authority():
     principal = Principal(
-        "usr_a", "user", (Grant("org_a", None, "admin"), Grant("org_b", None, "admin")), Scope("org_a", "ws_a")
+        "usr_a", "user", (Grant("org_a", None, ADMIN), Grant("org_b", None, ADMIN)), WorkspaceScope("org_a", "ws_a")
     )
     assert allowed_verbs(principal, Scope("org_a", "ws_a")) == {"read", "run", "write", "admin"}
     assert allowed_verbs(principal, Scope("org_a", "ws_b")) == set()
@@ -50,31 +57,32 @@ def test_workspace_key_never_inherits_cross_workspace_or_shared_mutation_authori
     assert allowed_verbs(principal, Scope("org_a")) == {"read", "run"}
     with pytest.raises(ServiceError, match="cannot perform"):
         authorize(principal, Scope("org_a"), "admin")
-    # A malformed global confinement can never turn a key into an organization credential.
-    assert allowed_verbs(replace(principal, confinement=Scope("org_a")), Scope("org_a")) == set()
 
 
-def test_unknown_roles_fail_closed_even_if_another_grant_would_allow():
-    principal = Principal("usr_a", "user", (Grant("org_a", None, "admin"), Grant("org_a", "ws_a", "removed_role")))
+def test_role_vocabulary_is_validated_and_unknown_roles_fail_closed():
+    access = Access(LocalAuthenticator(), BUILT_IN_ROLES)
+    assert access.resolve(RoleGrant("org_a", "ws_a", "runner")) == Grant("org_a", "ws_a", RUNNER)
     with pytest.raises(ServiceError, match="unknown role"):
-        authorize(principal, Scope("org_a", "ws_a"), "run")
+        access.resolve(RoleGrant("org_a", "ws_a", "removed_role"))
+    for invalid in ({"Bad Name": frozenset({"read"})}, {"empty": frozenset()}, {"owner": frozenset({"own"})}):
+        with pytest.raises(ValueError, match="Invalid role"):
+            Access(LocalAuthenticator(), invalid)  # type: ignore[arg-type]
 
 
-def test_disabled_principal_and_removed_grants_stop_accepted_authority():
-    scope = Scope("org_a", "ws_a")
-    principal = Principal("usr_a", "user", (Grant("org_a", None, "builder"),))
+def test_removed_grants_stop_accepted_authority():
+    scope = WorkspaceScope("org_a", "ws_a")
+    principal = Principal("usr_a", "user", (Grant("org_a", None, BUILDER),))
     authority = execution_authority(principal, scope)
-    for current in (replace(principal, active=False), replace(principal, grants=())):
-        with pytest.raises(ServiceError):
-            authorize(current, scope, "run", authority=authority)
+    with pytest.raises(ServiceError):
+        authorize(replace(principal, grants=()), scope, "run", authority=authority)
 
 
 def test_persisted_ceiling_cannot_widen_when_current_grants_increase():
-    scope = Scope("org_a", "ws_a")
-    principal = Principal("usr_a", "user", (Grant("org_a", "ws_a", "runner"),))
+    scope = WorkspaceScope("org_a", "ws_a")
+    principal = Principal("usr_a", "user", (Grant("org_a", "ws_a", RUNNER),))
     accepted = execution_authority(principal, scope)
     restored = ExecutionAuthority.model_validate_json(accepted.model_dump_json())
-    upgraded = replace(principal, grants=(Grant("org_a", None, "admin"),))
+    upgraded = replace(principal, grants=(Grant("org_a", None, ADMIN),))
     authorize(upgraded, scope, "run", authority=restored)
     authorize(upgraded, Scope("org_a"), "run", authority=restored)
     for target, verb in [(scope, "write"), (Scope("org_a", "ws_b"), "run"), (Scope("org_a"), "admin")]:

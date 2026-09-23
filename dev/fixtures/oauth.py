@@ -1,4 +1,4 @@
-"""Counted authorization codes and rotating refresh tokens with durable fault barriers."""
+"""Counted authorization codes, rotating refresh tokens and client-credentials tokens with durable fault barriers."""
 
 import argparse
 import asyncio
@@ -62,7 +62,7 @@ def create_app(database: Path) -> FastAPI:
             "authorization_endpoint": origin + "/authorize",
             "token_endpoint": origin + "/token",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
             "authorization_response_iss_parameter_supported": True,
@@ -126,6 +126,8 @@ def create_app(database: Path) -> FastAPI:
         presented = values.get("code" if kind == "authorization_code" else "refresh_token", "")
         client_id = values.get("client_id")
         auth = request.headers.get("authorization", "")
+        # A client that presented the fixture secret; only such a client may use `client_credentials`.
+        confidential = auth.startswith("Basic ") or values.get("client_secret") is not None
         if auth.startswith("Basic "):
             from urllib.parse import unquote
 
@@ -158,6 +160,9 @@ def create_app(database: Path) -> FastAPI:
                 ).fetchone()
                 if row and not row[3]:
                     family, principal, generation = row[:3]
+            elif kind == "client_credentials" and confidential:
+                # The machine account is the client itself.
+                family, principal = secrets.token_hex(12), client_id
             if family is None:
                 if kind == "refresh_token":
                     reused = connection.execute(
@@ -200,7 +205,7 @@ def create_app(database: Path) -> FastAPI:
             "expires_in": expires,
             "scope": "tools",
         }
-        if faults.get("no_refresh_token"):
+        if faults.get("no_refresh_token") or kind == "client_credentials":
             result.pop("refresh_token")
         if faults.get("no_expiry"):
             result.pop("expires_in")

@@ -1,6 +1,8 @@
 """The one worker predicate: every execution-dependent write proves it holds the current, unexpired lease."""
 
+import asyncio
 import hmac
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -9,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from a13n_service.infra.crypto import secret_hash
 from a13n_service.infra.db import Storage, lock, now, transaction
 from a13n_service.infra.errors import ServiceError
+from a13n_service.runs.schemas import Outcome
 from a13n_service.runs.tables import AttemptRow, RunRow, ThreadRow
+from a13n_service.tenancy.access import Access, principal_for, require_active_workspace
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope, authorize
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,9 +31,65 @@ class Lease:
     token: str = field(repr=False)
 
 
-class LeaseLost(ServiceError):
+@dataclass
+class AttemptControl:
+    """Signals from the attempt's supervisor to its execution, checked at safe boundaries and before dispatch."""
+
+    # Set when the run must stop dispatching and seal `outcome`: it was interrupted, or its principal lost the
+    # authority to run it.
+    stopped: asyncio.Event = field(default_factory=asyncio.Event)
+    outcome: Outcome = field(default_factory=Outcome.cancelled)
+    # The worker is draining: yield the run at the next safe boundary.
+    handoff: asyncio.Event = field(default_factory=asyncio.Event)
+    # Event-loop time when the lease runs out unless renewed, measured before the claim or renewal was sent.
+    deadline: float = math.inf
+    # Renewal is due every third of a lease; a lease with less left has missed a confirmed renewal.
+    renewal_margin: float = 0.0
+
+    def stop(self, outcome: Outcome) -> None:
+        if not self.stopped.is_set():
+            self.outcome = outcome
+            self.stopped.set()
+
+    def expiring(self, margin: float) -> bool:
+        """Whether the lease runs out within `margin` seconds unless a renewal is confirmed first."""
+        return asyncio.get_running_loop().time() + margin >= self.deadline
+
+    def renewal_missed(self) -> bool:
+        """The lease can run out before another renewal is confirmed, so no new work may start under it."""
+        return self.expiring(self.renewal_margin)
+
+
+class LeaseLost(Exception):
+    """The attempt no longer holds its lease, so nothing it does may be written. Deliberately not a
+    `ServiceError`: no handler of refusals may turn it into an outcome, and it never reaches an API caller."""
+
     def __init__(self) -> None:
-        super().__init__("conflict", "Worker lease is no longer current", {"reason": "lease_lost"})
+        super().__init__("Worker lease is no longer current")
+
+
+class AuthorityRevoked(Exception):
+    """The run's principal may no longer run it, so the run fails with `outcome`. Like `LeaseLost`, deliberately
+    not a `ServiceError`, so no handler of refusals turns it into another outcome."""
+
+    def __init__(self) -> None:
+        super().__init__("The run's principal can no longer run it")
+        self.outcome = Outcome.failed("authority_revoked", str(self))
+
+
+async def authorize_execution(session: AsyncSession, access: Access, run: RunRow) -> Principal:
+    """The run's principal, while its current status and grants still allow the frozen authority to run the run
+    in a workspace that is not archived. Any refusal but `unavailable` is `AuthorityRevoked`."""
+    scope = WorkspaceScope(run.organization_id, run.workspace_id)
+    try:
+        await require_active_workspace(session, run.workspace_id)
+        principal = await principal_for(session, access, run.principal_id, confinement=scope)
+        authorize(principal, scope, "run", authority=ExecutionAuthority.model_validate(run.authority))
+    except ServiceError as error:
+        if error.code == "unavailable":
+            raise
+        raise AuthorityRevoked() from error
+    return principal
 
 
 def holds(lease: Lease, run: RunRow, attempt: AttemptRow, current: datetime) -> bool:
@@ -64,17 +125,27 @@ async def lock_thread_lease(session: AsyncSession, lease: Lease) -> tuple[Thread
     return thread, run, attempt, current
 
 
-async def renew(storage: Storage, lease: Lease, *, seconds: float) -> datetime:
-    """Extend from database time. An expired lease is never revived, even before the sweep closes it."""
+async def prove(storage: Storage, lease: Lease) -> None:
+    """Raise `LeaseLost` unless the lease is still current, for work that must not continue without it."""
     async with transaction(storage) as session:
-        _, attempt, current = await lock_lease(session, lease)
-        attempt.heartbeat_at = current
-        attempt.lease_expires_at = current + timedelta(seconds=seconds)
-        return attempt.lease_expires_at
+        await lock_lease(session, lease)
 
 
-async def check(storage: Storage, lease: Lease) -> RunRow:
-    """A read-only proof used by polling tasks; the returned row carries cancellation state."""
+async def renew(storage: Storage, access: Access, lease: Lease, *, seconds: float | None) -> Outcome | None:
+    """Prove the lease and, with `seconds`, extend it from database time. Returns the outcome the run must stop
+    with: cancelled once an interrupt was requested, failed once its principal lost the authority to run it.
+
+    An expired lease is never revived, even before the sweep closes it.
+    """
     async with transaction(storage) as session:
-        run, _, _ = await lock_lease(session, lease)
-        return run
+        run, attempt, current = await lock_lease(session, lease)
+        if seconds is not None:
+            attempt.heartbeat_at = current
+            attempt.lease_expires_at = current + timedelta(seconds=seconds)
+        if run.cancel_requested_at is not None:
+            return Outcome.cancelled()
+        try:
+            await authorize_execution(session, access, run)
+        except AuthorityRevoked as revoked:
+            return revoked.outcome
+        return None

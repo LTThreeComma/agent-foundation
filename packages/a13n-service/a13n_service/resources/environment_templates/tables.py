@@ -1,14 +1,18 @@
-"""Environment templates are live rows without revisions; environments read the current one per operation."""
+"""Environment templates are live rows without revisions; an instance keeps the recipe of its first dispatch."""
+
+from typing import ClassVar
 
 from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.resources.providers.tables import provider_in_scope
 
 
 class EnvironmentTemplateRow(Stamped, Base):
     __tablename__ = "environment_templates"
+    KIND: ClassVar[str] = "environment_template"
     __table_args__ = (
         UniqueConstraint("workspace_id", "key"),
         UniqueConstraint("workspace_id", "id"),
@@ -16,7 +20,10 @@ class EnvironmentTemplateRow(Stamped, Base):
         ForeignKeyConstraint(
             ["organization_id", "provider_id"], ["environment_providers.organization_id", "environment_providers.id"]
         ),
-        rules(identity_guarded("environment_templates")),
+        rules(
+            identity_guarded("environment_templates"),
+            *provider_in_scope("environment_templates", "provider_id", "environment_providers"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))

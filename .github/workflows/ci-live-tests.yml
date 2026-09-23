@@ -7,7 +7,10 @@ on:
       - ".github/workflows/ci-live-tests.yml"
       - "Makefile"
       - "conftest.py"
+      - "dev/fixtures/**"
       - "dev/live_tests/**"
+      - "deploy/containers/docker-environment/**"
+      - "scripts/tests/test_service_foundation_tooling.py"
       - "packages/a13n-service/**"
       - "packages/a13n-harness/**"
       - "packages/a13n-envd-client/**"
@@ -21,7 +24,10 @@ on:
       - ".github/workflows/ci-live-tests.yml"
       - "Makefile"
       - "conftest.py"
+      - "dev/fixtures/**"
       - "dev/live_tests/**"
+      - "deploy/containers/docker-environment/**"
+      - "scripts/tests/test_service_foundation_tooling.py"
       - "packages/a13n-service/**"
       - "packages/a13n-harness/**"
       - "packages/a13n-envd-client/**"
@@ -61,11 +67,11 @@ jobs:
       - name: Validate fixtures and reviewed selections
         run: make live-test-check
 
-  smoke:
-    name: New Service execution journeys
+  journeys:
+    name: Service live journeys
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -74,5 +80,30 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v6
-      - name: Require new execution journeys
-        run: make live-test
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Build the native Docker execution image
+        run: make image-docker-environment
+      - name: Run every journey; an unavailable dependency fails it
+        run: make live-test LIVE_TEST_ARGS="--require-all --junitxml=test-results/live.xml"
+      - name: Report collected, executed and skipped journeys
+        if: always()
+        run: |
+          python - <<'PYCODE' | tee -a "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse("test-results/live.xml").getroot().findall(".//testcase")
+          skipped = [case for case in cases if case.find("skipped") is not None]
+          failed = [case for case in cases if case.find("failure") is not None or case.find("error") is not None]
+          print(f"Live journeys: {len(cases)} collected, {len(cases) - len(skipped)} executed, "
+                f"{len(skipped)} skipped, {len(failed)} failed")
+          assert cases and not skipped, "Every live journey must execute"
+          PYCODE
+      - name: Retain live journey reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-journeys-${{ github.run_attempt }}
+          path: test-results/
+          retention-days: 7

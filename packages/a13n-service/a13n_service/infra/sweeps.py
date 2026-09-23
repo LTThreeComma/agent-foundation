@@ -37,10 +37,14 @@ async def _loop(sweep: Sweep) -> None:
         await asyncio.sleep(sweep.every)
 
 
-async def run_sweeps(sweeps: Sequence[Sweep]) -> None:
+def require_unique(sweeps: Sequence[Sweep]) -> None:
+    """Called before scheduling, so a duplicate fails startup instead of a background task."""
     names = [sweep.name for sweep in sweeps]
-    if len(names) != len(set(names)):
-        raise ValueError("Sweep names must be unique")
+    if duplicates := sorted({name for name in names if names.count(name) > 1}):
+        raise ValueError(f"Duplicate sweeps: {duplicates}")
+
+
+async def run_sweeps(sweeps: Sequence[Sweep]) -> None:
     async with asyncio.TaskGroup() as group:
         for sweep in sweeps:
             group.create_task(_loop(sweep), name=f"sweep-{sweep.name}")

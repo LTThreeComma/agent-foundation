@@ -1,1 +1,1 @@
-"""Immutable uploads and tenant-owned assets."""
+"""Immutable content and its retirement."""

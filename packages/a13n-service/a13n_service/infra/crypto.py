@@ -21,7 +21,8 @@ def secret_hash(secret: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class SecretLocation:
-    organization_id: str
+    # None only for account-wide values, such as account mail, that belong to no organization.
+    organization_id: str | None
     table: str
     column: str
     row_id: str
@@ -54,9 +55,13 @@ class KeyRing:
 
     def protect(self, plaintext: bytes, location: SecretLocation) -> Envelope:
         if len(plaintext) > 65536:
-            raise ServiceError("invalid_argument", "Credential exceeds its byte limit")
+            raise ServiceError(
+                "invalid_argument",
+                "Credential exceeds its byte limit",
+                {"field": location.column, "reason": "too_long", "limit": 65536},
+            )
         if self.active_key_id is None:
-            raise ServiceError("unavailable", "Credential encryption is not configured")
+            raise ServiceError("unavailable", "Credential encryption is not configured", {"dependency": "encryption"})
         nonce = secrets.token_bytes(12)
         encrypted = self._keys[self.active_key_id].encrypt(nonce, plaintext, location.aad())
         return Envelope(
@@ -73,4 +78,4 @@ class KeyRing:
                 location.aad(),
             )
         except (KeyError, ValueError, InvalidTag):
-            raise ServiceError("unavailable", "Credential cannot be decrypted") from None
+            raise ServiceError("unavailable", "Credential cannot be decrypted", {"dependency": "encryption"}) from None

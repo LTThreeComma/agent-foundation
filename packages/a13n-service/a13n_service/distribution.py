@@ -1,47 +1,91 @@
 """What a build contributes, listed explicitly: no package scanning, no import-time registration.
 
-A distribution extends the core by `OSS.extend(Distribution(...))`; duplicate tables, routes, sweeps and
-delivery kinds fail at assembly, so an extension can never silently shadow a core operation.
+A distribution extends the core by `OSS.extend(Distribution(...))`; duplicate tables, routes, settings
+sections and roles fail at assembly, so an extension can never silently shadow a core operation. Background
+work, the outbox deliveries included, is wired here from settings.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 
+from a13n_harness.providers.connector.builtins import BUILT_IN_CONNECTOR_PROVIDERS
 from a13n_harness.providers.definition import ProviderDefinition
 from a13n_harness.providers.model.builtins import BUILT_IN_MODEL_PROVIDERS
+from a13n_harness.providers.web.builtins import built_in_web_providers
 from fastapi import APIRouter
 from sqlalchemy import MetaData, Table
 
 from a13n_service.infra.audit import AuditEventRow
 from a13n_service.infra.db import Base, schema_rules, table_rules
-from a13n_service.infra.outbox import Claim, OutboxKind, OutboxRow
+from a13n_service.infra.ids import new_object_id
+from a13n_service.infra.outbox import Delivery, OutboxRow, purge_settled
 from a13n_service.infra.sweeps import Sweep
+from a13n_service.providers.environments import BUILT_IN_ENVIRONMENT_PROVIDERS
 from a13n_service.resources.agents.routes import router as agents_router
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
 from a13n_service.resources.assets.routes import router as assets_router
 from a13n_service.resources.assets.tables import AssetRow
-from a13n_service.resources.connections.tables import ConnectionAuthorizationRow, ConnectionRow
-from a13n_service.resources.environment_providers.tables import EnvironmentProviderRow
+from a13n_service.resources.connections.operations import recover_operations
+from a13n_service.resources.connections.routes import router as connections_router
+from a13n_service.resources.connections.tables import ConnectionRow
+from a13n_service.resources.connector_providers.routes import router as connector_providers_router
+from a13n_service.resources.environment_templates.routes import router as environment_templates_router
 from a13n_service.resources.environment_templates.tables import EnvironmentTemplateRow
-from a13n_service.resources.models.routes import catalog_router
 from a13n_service.resources.models.routes import router as models_router
-from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
+from a13n_service.resources.models.routes import workspace_router as media_router
+from a13n_service.resources.models.tables import ModelRow
+from a13n_service.resources.providers.routes import router as providers_router
+from a13n_service.resources.providers.tables import (
+    ConnectorProviderRow,
+    EnvironmentProviderRow,
+    ModelProviderRow,
+    WebProviderRow,
+)
+from a13n_service.resources.secrets.routes import router as secrets_router
+from a13n_service.resources.secrets.tables import SecretRow
+from a13n_service.resources.skills.routes import router as skills_router
+from a13n_service.resources.skills.tables import SkillRevisionRow, SkillRow
+from a13n_service.resources.subscriptions.delivery import WebhookSender
+from a13n_service.resources.subscriptions.routes import router as subscriptions_router
 from a13n_service.resources.subscriptions.tables import SubscriptionRow
+from a13n_service.resources.uploads.routes import router as uploads_router
 from a13n_service.runs.accept import ThreadAdvancer
 from a13n_service.runs.admission import AdmissionPolicy
+from a13n_service.runs.children import child_results
+from a13n_service.runs.environments.maintenance import maintenance_sweep
+from a13n_service.runs.environments.routes import router as environments_router
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
+from a13n_service.runs.routes import router as runs_router
 from a13n_service.runs.runtime import Runtime
+from a13n_service.runs.seal import expire_leases
 from a13n_service.runs.tables import AttemptRow, InboxEntryRow, RunRow, SessionRow, ThreadRow, UsageRecordRow
+from a13n_service.runs.trace_routes import router as traces_router
 from a13n_service.settings import Section
-from a13n_service.tenancy.credentials import ApiKeyRow, TokenRow
+from a13n_service.tenancy.access import Access, Authenticator, GrantSource
+from a13n_service.tenancy.authenticate import LocalAuthenticator
+from a13n_service.tenancy.authorize import BUILT_IN_ROLES, Verb
+from a13n_service.tenancy.expiry import expire_credentials
+from a13n_service.tenancy.mail import SmtpMailer, deliver_mail
+from a13n_service.tenancy.member_routes import router as member_router
+from a13n_service.tenancy.organization_routes import router as organization_router
 from a13n_service.tenancy.routes import router as tenancy_router
-from a13n_service.tenancy.tables import GrantRow, OrganizationRow, PasswordRow, PrincipalRow, WorkspaceRow
+from a13n_service.tenancy.tables import (
+    ApiKeyRow,
+    GrantRow,
+    InvitationRow,
+    OrganizationRow,
+    PasswordRow,
+    PrincipalRow,
+    TokenRow,
+    WorkspaceRow,
+)
 
-# Background work and outbox handlers need the assembled runtime, so a distribution lists factories.
+# Background work needs the assembled runtime, so a distribution lists factories.
 type SweepFactory = Callable[[Runtime], Sweep]
-type DeliveryFactory = Callable[[Runtime], Callable[[Claim], Awaitable[None]]]
 
 
 @dataclass(frozen=True)
@@ -52,19 +96,25 @@ class Distribution:
     migrations: tuple[Path, ...] = ()
     settings: Mapping[str, type[Section]] = field(default_factory=dict)
     sweeps: tuple[SweepFactory, ...] = ()
-    deliveries: Mapping[OutboxKind, DeliveryFactory] = field(default_factory=dict)
     providers: tuple[ProviderDefinition, ...] = ()
     admission: AdmissionPolicy | None = None
+    # None keeps the local password/session/API-key authenticator.
+    authenticator: Authenticator | None = None
+    grant_sources: tuple[GrantSource, ...] = ()
+    # Role name to the verbs it grants; stored and sourced grants naming any other role fail closed.
+    roles: Mapping[str, frozenset[Verb]] = field(default_factory=dict)
 
     def extend(self, extension: "Distribution") -> "Distribution":
         for name, mine, theirs in (
             ("settings section", self.settings, extension.settings),
-            ("delivery kind", self.deliveries, extension.deliveries),
+            ("role", self.roles, extension.roles),
         ):
             if duplicate := set(mine) & set(theirs):
                 raise ValueError(f"Duplicate {name}: {sorted(duplicate)}")
         if self.admission is not None and extension.admission is not None:
             raise ValueError("Only one admission policy may be installed")
+        if self.authenticator is not None and extension.authenticator is not None:
+            raise ValueError("Only one authenticator may be installed")
         return Distribution(
             name=extension.name,
             routers=self.routers + extension.routers,
@@ -72,10 +122,16 @@ class Distribution:
             migrations=self.migrations + extension.migrations,
             settings=MappingProxyType({**self.settings, **extension.settings}),
             sweeps=self.sweeps + extension.sweeps,
-            deliveries=MappingProxyType({**self.deliveries, **extension.deliveries}),
             providers=self.providers + extension.providers,
             admission=extension.admission or self.admission,
+            authenticator=extension.authenticator or self.authenticator,
+            grant_sources=self.grant_sources + extension.grant_sources,
+            roles=MappingProxyType({**self.roles, **extension.roles}),
         )
+
+    def access(self) -> Access:
+        """Who may call and what their grants mean; invalid role definitions fail here, at assembly."""
+        return Access(self.authenticator or LocalAuthenticator(), self.roles, self.grant_sources)
 
     def metadata(self) -> MetaData:
         """The composed schema: table definitions and the rules each table declares in `info`."""
@@ -108,6 +164,69 @@ def _advance_threads(runtime: Runtime) -> Sweep:
     )
 
 
+def _expire_leases(runtime: Runtime) -> Sweep:
+    worker = runtime.settings.worker
+    return Sweep(
+        name="expire_leases",
+        every=worker.authority_seconds,
+        run=partial(expire_leases, runtime, batch=runtime.settings.control.sweep_batch),
+        timeout=max(30, worker.lease_seconds),
+    )
+
+
+def _expire_credentials(runtime: Runtime) -> Sweep:
+    return Sweep(
+        name="expire_credentials",
+        every=runtime.settings.auth.expiry_scan_seconds,
+        run=partial(expire_credentials, runtime.storage, limit=runtime.settings.control.sweep_batch),
+        timeout=60,
+    )
+
+
+def _recover_connection_operations(runtime: Runtime) -> Sweep:
+    return Sweep(
+        name="recover_connection_operations",
+        every=runtime.settings.providers.operation_scan_seconds,
+        run=partial(recover_operations, runtime.storage, limit=runtime.settings.control.sweep_batch),
+        timeout=60,
+    )
+
+
+def _deliver_outbox(runtime: Runtime) -> Sweep:
+    settings = runtime.settings
+    control = settings.control
+    webhooks = WebhookSender(runtime.storage, runtime.keys, runtime.endpoint_policy, timeout=control.webhook_timeout)
+    mail = partial(deliver_mail, runtime.storage, runtime.keys, SmtpMailer(settings.auth.mail))
+    return Sweep(
+        name="deliver_outbox",
+        every=control.scan_seconds,
+        run=Delivery(
+            runtime.storage,
+            {"webhook": webhooks, "child_result": child_results(runtime), "email": mail},
+            owner=new_object_id("ctl"),
+            limit=control.outbox_batch,
+            lease_seconds=control.outbox_lease_seconds,
+            max_attempts=control.outbox_attempts,
+        ),
+        timeout=2 * control.outbox_lease_seconds,
+    )
+
+
+def _purge_outbox(runtime: Runtime) -> Sweep:
+    control = runtime.settings.control
+    return Sweep(
+        name="purge_outbox",
+        every=3600,
+        run=partial(
+            purge_settled,
+            runtime.storage,
+            older_than=timedelta(days=control.outbox_retention_days),
+            limit=control.sweep_batch,
+        ),
+        timeout=60,
+    )
+
+
 OSS = Distribution(
     name="oss",
     tables=(
@@ -116,18 +235,23 @@ OSS = Distribution(
         PrincipalRow,
         PasswordRow,
         GrantRow,
+        InvitationRow,
         ApiKeyRow,
         TokenRow,
         AuditEventRow,
         OutboxRow,
         ModelProviderRow,
         ModelRow,
+        WebProviderRow,
+        ConnectorProviderRow,
         EnvironmentProviderRow,
         EnvironmentTemplateRow,
         ConnectionRow,
-        ConnectionAuthorizationRow,
         SubscriptionRow,
+        SecretRow,
         AssetRow,
+        SkillRow,
+        SkillRevisionRow,
         AgentRow,
         AgentRevisionRow,
         SessionRow,
@@ -139,8 +263,41 @@ OSS = Distribution(
         AttemptRow,
         UsageRecordRow,
     ),
-    routers=(tenancy_router, models_router, catalog_router, agents_router, assets_router),
+    routers=(
+        tenancy_router,
+        organization_router,
+        member_router,
+        providers_router,
+        models_router,
+        media_router,
+        agents_router,
+        uploads_router,
+        assets_router,
+        skills_router,
+        secrets_router,
+        subscriptions_router,
+        runs_router,
+        traces_router,
+        environment_templates_router,
+        environments_router,
+        connections_router,
+        connector_providers_router,
+    ),
     migrations=(Path(__file__).parent / "migrations" / "versions",),
-    sweeps=(_advance_threads,),
-    providers=BUILT_IN_MODEL_PROVIDERS,
+    sweeps=(
+        _advance_threads,
+        _expire_leases,
+        _expire_credentials,
+        maintenance_sweep,
+        _recover_connection_operations,
+        _deliver_outbox,
+        _purge_outbox,
+    ),
+    providers=(
+        *BUILT_IN_MODEL_PROVIDERS,
+        *built_in_web_providers(),
+        *BUILT_IN_CONNECTOR_PROVIDERS,
+        *BUILT_IN_ENVIRONMENT_PROVIDERS,
+    ),
+    roles=BUILT_IN_ROLES,
 )

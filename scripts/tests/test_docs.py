@@ -139,11 +139,7 @@ def test_every_document_has_exactly_one_navigation_entry() -> None:
                     documented.append(value)
 
     visit(configuration["nav"])
-    expected = {
-        str(path.relative_to(ROOT / "docs"))
-        for path in (ROOT / "docs").rglob("*.md")
-        if "a13n-service-legacy" not in path.parts
-    }
+    expected = {str(path.relative_to(ROOT / "docs")) for path in (ROOT / "docs").rglob("*.md")}
     assert set(documented) == expected
     assert len(documented) == len(set(documented))
 

@@ -1,17 +1,18 @@
 .DEFAULT_GOAL := help
 
 A13N_SERVICE_IMAGE ?= a13n-service:local
+A13N_CONSOLE_IMAGE ?= a13n-console:local
 SANDBOX_IMAGE ?= a13n-sandbox:local
 A13N_HARNESS_UI_IMAGE ?= a13n-harness-ui:local
 EXAMPLE_DIRS := examples/agent-app examples/environment-provider examples/plugins examples/provider-plugin
 PYTHON_TEST_DIRS ?=
 PYTHON_TEST_WORKERS ?=
-SERVICE_CONFIG ?= var/service-rewrite/local.toml
+SERVICE_CONFIG ?= var/dev/service.toml
 HARNESS_ENV ?= dev/harness/.env
 HARNESS_UI_ENV ?= dev/harness-ui/.env
 STATE ?=
-MEM0_CONFIG ?= dev/mem0/local.toml
-SERVICE_DEV = python3 -m dev.service
+TRACES ?= auto
+SERVICE_DEV = python3 -m dev.service --traces "$(TRACES)"
 CHECK_JOBS ?= 4
 CHECK_TARGETS := \
 	lint \
@@ -87,29 +88,26 @@ examples-check: examples-lock-check examples-format-check examples-typecheck ## 
 examples-check-all: examples-check examples-test examples-smoke examples-build ## Run the complete examples gate
 
 .PHONY: setup
-setup: ## Prepare this checkout's stores, shared Langfuse and Service schema
+setup: ## Prepare this checkout's stores, schema and local administrator without starting applications
 	@$(SERVICE_DEV) setup
 
-.PHONY: k8s-up k8s-admin-link k8s-check
-k8s-up: ## Build and start local kind Kubernetes, preserving credentials and printing initial admin link
+.PHONY: k8s-up k8s-check
+k8s-up: ## Build and start local kind Kubernetes, preserving credentials and creating the first administrator
 	@python3 scripts/k8s_local.py up
 
-k8s-admin-link: ## Replace a lost pending administrator invitation in local kind Kubernetes
-	@python3 scripts/k8s_local.py admin-link
-
-k8s-check: ## Test local Kubernetes launcher without building images or changing a cluster
+k8s-check: ## Test the chart and local Kubernetes launcher without building images or changing a cluster
 	@uv run --locked python -m pytest scripts/tests/test_k8s_local.py
 	@helm lint deploy/kubernetes/a13n-service -f deploy/kubernetes/values-local.yaml --strict
 
 .PHONY: dev
-dev: ## Prepare fresh checkout storage and run the Service foundation in the foreground
+dev: ## Prepare and start this checkout's scripted model, Service and Console in the background (TRACES=auto|langfuse|none)
 	@$(SERVICE_DEV) dev
 
 .PHONY: dev-foreground dev-stop
-dev-foreground: ## Run the Service foundation attached to this terminal
-	@$(SERVICE_DEV) dev
+dev-foreground: ## Prepare and run the scripted model, Service and Console attached to this terminal
+	@$(SERVICE_DEV) dev --foreground
 
-dev-stop: ## Report that background Service startup is not implemented
+dev-stop: ## Stop this checkout's running applications
 	@$(SERVICE_DEV) stop
 
 # Initialize only missing files; templates changing must never replace private settings.
@@ -156,21 +154,18 @@ harness-ui-smoke: harness-ui-env ## Exercise HarnessUiApp with a scripted model;
 	@uv run --locked --env-file "$(HARNESS_UI_ENV)" python -m dev.harness-ui.smoke
 
 .PHONY: dev-down dev-status dev-env-list
-dev-down: ## Stop checkout-owned PostgreSQL while preserving its data
+dev-down: ## Stop this checkout's PostgreSQL and Redis, preserving their data
 	@$(SERVICE_DEV) down
 
-dev-status: ## Print checkout-owned PostgreSQL port and configuration
+dev-status: ## Print this checkout's instance, URLs and listeners as JSON without changing anything
 	@$(SERVICE_DEV) status
 
-dev-env-list: ## Report that environment management is not implemented
-	@$(SERVICE_DEV) env-list
+dev-env-list: ## List this machine's checkouts and their local instances
+	@python3 -m dev.service.envs list
 
-.PHONY: live-test live-test-local live-test-ci live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console
-live-test live-test-local live-test-ci: sync ## Run disposable public Service execution with control and two workers
-	@uv run --locked python -m dev.live_tests
-
-live-test-auth-control live-test-init live-test-control live-test-worker live-test-setup live-test-ci-environment-build live-test-round-two live-test-performance live-test-session live-test-contention live-test-s3 live-test-report live-test-management live-test-plugin-image live-test-providers live-test-openai live-test-zhipu live-test-models live-test-model-console: sync ## Additional Service journeys remain under implementation
-	@uv run --locked python -c 'raise SystemExit("This Service journey is not implemented yet")'
+.PHONY: live-test
+live-test: sync ## Run the Service live journeys: Control and two Workers over HTTPS with disposable stores (Docker)
+	@uv run --locked python -m dev.live_tests $(LIVE_TEST_ARGS)
 
 .PHONY: langfuse-up langfuse-down langfuse-test langfuse-reset
 langfuse-up: ## Start and authenticate machine-shared local Langfuse
@@ -431,24 +426,12 @@ db-migrate: sync ## Generate a migration (usage: make db-migrate msg="descriptio
 	@bash dev/service/db-migrate.sh "$(msg)"
 
 .PHONY: db-upgrade
-db-upgrade: service-config-check sync ## Upgrade the local a13n-service database to all heads
+db-upgrade: service-config-check sync ## Upgrade this checkout's a13n-service database to all heads
 	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" migrate
 
-.PHONY: db-downgrade
-db-downgrade: sync ## Downgrade the local database by one reviewed revision
-	@echo "db downgrade is not implemented for the new Service foundation"; exit 2
-
-.PHONY: db-current
-db-current: sync ## Show the current a13n-service database revision
-	@echo "db current is not implemented for the new Service foundation"; exit 2
-
 .PHONY: db-check
-db-check: service-config-check sync ## Fail unless the a13n-service database is at all heads
+db-check: service-config-check sync ## Fail unless this checkout's a13n-service database is at all heads
 	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" migrate --check
-
-.PHONY: db-history
-db-history: sync ## Show a13n-service migration history
-	@echo "db history is not implemented for the new Service foundation"; exit 2
 
 .PHONY: release-check
 release-check: ## Validate a component version (component=a13n-harness|a13n-harness-ui|a13n-logging|a13n-service|a13n-envd version=X.Y.Z or X.Y.Z-rc.N)
@@ -459,6 +442,10 @@ release-check: ## Validate a component version (component=a13n-harness|a13n-harn
 .PHONY: image-a13n-service
 image-a13n-service: ## Build the local a13n-service container image
 	@docker build -f deploy/containers/a13n-service/Dockerfile -t "$(A13N_SERVICE_IMAGE)" .
+
+.PHONY: image-a13n-console
+image-a13n-console: ## Build the local Console image (static app and Service proxy)
+	@docker build -f deploy/containers/a13n-console/Dockerfile -t "$(A13N_CONSOLE_IMAGE)" .
 
 .PHONY: image-sandbox
 image-sandbox: ## Build the local sandbox image with a13n-envd
@@ -473,7 +460,7 @@ image-a13n-harness-ui: a13n-harness-ui-image-context ## Build the local packaged
 	@docker build -f deploy/containers/a13n-harness-ui/Dockerfile -t "$(A13N_HARNESS_UI_IMAGE)" dist/a13n-harness-ui-image
 
 .PHONY: images
-images: image-a13n-service image-sandbox image-docker-environment image-a13n-harness-ui ## Build all local container images
+images: image-a13n-service image-a13n-console image-sandbox image-docker-environment image-a13n-harness-ui ## Build all local container images
 
 .PHONY: image-check-a13n-harness-ui
 image-check-a13n-harness-ui: ## Check an existing UI image locally; not a CI or release prerequisite
@@ -483,6 +470,12 @@ image-check-a13n-harness-ui: ## Check an existing UI image locally; not a CI or 
 image-check-a13n-service: ## Smoke-check the existing a13n-service container image
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(A13N_SERVICE_IMAGE)")" = "app"
 	@docker run --rm --entrypoint sh "$(A13N_SERVICE_IMAGE)" -c '! command -v node'
+	@docker run --rm "$(A13N_SERVICE_IMAGE)" a13n-service --config /app/service.toml run --help >/dev/null
+
+.PHONY: image-check-a13n-console
+image-check-a13n-console: ## Smoke-check the existing Console image and its proxy configuration
+	@test "$$(docker image inspect --format '{{.Config.User}}' "$(A13N_CONSOLE_IMAGE)")" = "101:101"
+	@docker run --rm "$(A13N_CONSOLE_IMAGE)" "envsubst '\$${A13N_SERVICE_UPSTREAM}' < /etc/a13n/nginx.conf.template > /tmp/nginx.conf; nginx -t -q -c /tmp/nginx.conf"
 
 .PHONY: image-check-sandbox
 image-check-sandbox: ## Smoke-check sandbox defaults, development account, sudo and daemon startup
@@ -498,7 +491,7 @@ image-check-sandbox: ## Smoke-check sandbox defaults, development account, sudo 
 
 .PHONY: image-check
 image-check: images ## Build and smoke-check all container images
-	@$(MAKE) --no-print-directory image-check-a13n-service image-check-sandbox image-check-a13n-harness-ui image-check-docker-environment
+	@$(MAKE) --no-print-directory image-check-a13n-service image-check-a13n-console image-check-sandbox image-check-a13n-harness-ui image-check-docker-environment
 
 .PHONY: python-check
 python-check: lint typecheck ## Run Python workspace lint and type checks
@@ -531,8 +524,9 @@ help: ## Show available commands
 	@printf '  make webui WEBUI_ARGS="--port 9000" Forward WebUI server options\n'
 	@printf '  make cli CLI_ARGS="--help"         Forward options or subcommands to Harness UI\n'
 	@printf '  make env-init                      Prepare both development .env files only\n'
-	@printf '  make dev                           Start the Service foundation with fresh local PostgreSQL\n'
-	@printf '  make dev-down                      Stop infrastructure, preserving data\n'
+	@printf '  make dev                           Start the local Service and Console in the background\n'
+	@printf '  make dev-status                    Show the local URLs, ports and listeners\n'
+	@printf '  make dev-stop                      Stop the applications; make dev-down also stops the stores\n'
 	@printf '  make test PYTHON_TEST_DIRS=scripts/tests PYTHON_TEST_WORKERS=0\n'
 	@printf '  make check CHECK_JOBS=4             Format, then run fast checks\n\n'
 	@printf 'Environment overrides: HARNESS_UI_ENV=path, HARNESS_ENV=path, SERVICE_CONFIG=path\n'
@@ -541,17 +535,17 @@ help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-38s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: service-dev dev-reset dev-state-check
-service-dev: ## Prepare and run only this checkout's Service foundation
+service-dev: ## Prepare and run only this checkout's scripted model and Service in the foreground
 	@$(SERVICE_DEV) service-dev
 
-dev-reset: ## Reset this checkout's Service stores (STATE=empty or STATE=seeded)
+dev-reset: ## Delete this checkout's state and rebuild it (STATE=empty or STATE=seeded)
 	@$(SERVICE_DEV) reset "$(STATE)"
 
-dev-state-check: sync ## Validate local state tools and seed journeys in disposable storage
+dev-state-check: sync ## Check the local development tools, including seeding a disposable Service
 	@uv run --locked ruff check --no-fix dev/service
 	@uv run --locked ruff format --check dev/service
 	@uv run --locked pyright dev/service
-	@uv run --locked python -m pytest packages/a13n-service/tests -q --tb=short
+	@uv run --locked python -m pytest dev/service/tests -q --tb=short
 
 DOCKER_ENVIRONMENT_IMAGE ?= a13n-docker-environment:local
 .PHONY: image-docker-environment image-check-docker-environment
@@ -563,20 +557,20 @@ image-check-docker-environment: ## Validate native Docker image prerequisites
 	@docker run --rm --entrypoint sh "$(DOCKER_ENVIRONMENT_IMAGE)" -c 'python3 --version && git --version && bash --version && node --version && npm --version && test -w /workspace && test -w /tmp/a13n && ! command -v a13n-envd'
 
 .PHONY: docker-provider-live-test
-docker-provider-live-test: ## Exercise native Docker against an explicitly selected real Engine
-	@uv run --locked python -c 'raise SystemExit("The Docker-provider live journey is not implemented yet")'
+docker-provider-live-test: sync image-docker-environment ## Run the environment journey on the native Docker provider
+	@DOCKER_ENVIRONMENT_IMAGE="$(DOCKER_ENVIRONMENT_IMAGE)" uv run --locked python -m dev.live_tests -k docker --require-all
 
 .PHONY: service-boundaries
 service-boundaries: sync ## Verify Service import direction
 	@uv run --locked lint-imports --config packages/a13n-service/.importlinter
 
 .PHONY: live-test-check
-live-test-check: sync ## Validate current live-test routing and isolation
+live-test-check: sync ## Check live-test fixtures, configuration and journey selection without Docker
 	@uv run --locked python -m pytest scripts/tests/test_service_foundation_tooling.py -q
 
 .PHONY: service-config-check
 service-config-check:
-	@test -f "$(SERVICE_CONFIG)" || { echo "Missing Service configuration: $(SERVICE_CONFIG). Run make setup first or set SERVICE_CONFIG to an existing file." >&2; exit 2; }
+	@test -f "$(SERVICE_CONFIG)" || { echo "Missing Service settings: $(SERVICE_CONFIG). Run make setup first or set SERVICE_CONFIG to an existing file." >&2; exit 2; }
 
 .PHONY: live-test-console
 live-test-console: sync frontend-sync ## Launch Console with disposable real Service stores and model fixture

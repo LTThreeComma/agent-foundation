@@ -1,4 +1,6 @@
-# Single-host Service shares the host Docker Engine and its authority.
+# Single-host Service: every role in one process, PostgreSQL, Redis and the Console.
+# The Service shares the host Docker Engine and its authority.
+name: a13n-service
 services:
   postgres:
     image: postgres:17-alpine
@@ -24,19 +26,14 @@ services:
       timeout: 3s
       retries: 30
   service:
-    image: ${A13N_SERVICE_IMAGE:-ghcr.io/converge-ai-labs/a13n-service:dev}
+    image: ${A13N_SERVICE_IMAGE:-a13n-service:local}
     user: "10001:10001"
     group_add:
       - "${A13N_DOCKER_SOCKET_GID:?Set A13N_DOCKER_SOCKET_GID to the host Docker socket group ID}"
     environment:
-      A13N_SERVICE_SECRET_MASTER_KEY_BASE64: ${A13N_SERVICE_SECRET_MASTER_KEY_BASE64:?Generate and retain a deployment master key}
-      A13N_SERVICE_SECRET_ENCRYPTION_KEY_ID: ${A13N_SERVICE_SECRET_ENCRYPTION_KEY_ID:-local-1}
-      A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL: ${A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL:?Set the initial administrator email}
-      A13N_SERVICE_IAM_PUBLIC_ORIGIN: http://127.0.0.1:${A13N_SERVICE_PORT:-8000}
-      A13N_SERVICE_CONNECTIVITY_PUBLIC_ORIGIN: http://127.0.0.1:${A13N_SERVICE_PORT:-8000}
-      A13N_SERVICE_CONNECTIVITY_HTTP_ORIGINS: '["http://127.0.0.1:${A13N_SERVICE_PORT:-8000}"]'
-    ports:
-      - "127.0.0.1:${A13N_SERVICE_PORT:-8000}:8000"
+      A13N_SERVER__PUBLIC_URL: http://127.0.0.1:${A13N_CONSOLE_PORT:-8080}
+      A13N_ENCRYPTION__ACTIVE_KEY_ID: primary
+      A13N_ENCRYPTION__KEYS: '{"primary": "${A13N_ENCRYPTION_KEY:?Generate and retain an encryption key}"}'
     volumes:
       - ./a13n-service-single-host.toml:/app/service.toml:ro
       - service-data:/app/var
@@ -47,6 +44,20 @@ services:
       redis:
         condition: service_healthy
     stop_grace_period: 30s
+  console:
+    image: ${A13N_CONSOLE_IMAGE:-a13n-console:local}
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      A13N_SERVICE_UPSTREAM: http://service:8000
+    ports:
+      - "127.0.0.1:${A13N_CONSOLE_PORT:-8080}:8080"
+    depends_on:
+      service:
+        condition: service_healthy
+        # Nginx resolves the Service address once; follow a recreated Service container.
+        restart: true
 volumes:
   postgres:
   redis:

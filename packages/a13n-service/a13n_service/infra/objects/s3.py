@@ -103,6 +103,7 @@ async def open_s3(
     prefix: str,
     region: str | None,
     endpoint_url: str | None,
+    path_style: bool,
     access_key_id: str | None,
     secret_access_key: str | None,
     max_bytes: int,
@@ -117,7 +118,12 @@ async def open_s3(
                 endpoint_url=endpoint_url,
                 aws_access_key_id=access_key_id,
                 aws_secret_access_key=secret_access_key,
-                config=AioConfig(connect_timeout=timeout, read_timeout=timeout, retries={"max_attempts": 2}),
+                config=AioConfig(
+                    connect_timeout=timeout,
+                    read_timeout=timeout,
+                    retries={"max_attempts": 2},
+                    s3={"addressing_style": "path" if path_style else "auto"},
+                ),
             )
         )
         yield S3Objects(cast("S3Client", client), bucket, prefix=prefix, max_bytes=max_bytes, timeout=timeout)

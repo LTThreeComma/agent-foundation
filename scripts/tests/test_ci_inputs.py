@@ -77,6 +77,7 @@ def test_service_foundation_ci_selects_only_current_tests() -> None:
     assert "packages/a13n-service/tests" in test["run"]
     assert "legacy" not in test["run"]
     assert any(step.get("run") == "make service-boundaries" for step in steps)
+    assert any(step.get("run") == "make dev-state-check" for step in steps)
     assert jobs["python"]["needs"] == "validation"
 
 

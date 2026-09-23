@@ -2,6 +2,8 @@
 
 The frozen `runs.environment_mounts` of accepted and running runs is the durable active-use evidence that
 stop and destroy check under the environment lock; acceptance takes the same locks before installing it.
+Desired mount edits are thread operations under the thread `If-Match`, and affect later acceptance only; a
+new thread or fork takes its initial mounts through the same checks before its first acceptance.
 """
 
 from collections.abc import Sequence
@@ -9,14 +11,20 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from a13n_service.infra.db import now
+from a13n_service.infra.audit import record
+from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError, conflict, not_found
-from a13n_service.infra.ids import new_object_id
-from a13n_service.resources.environment_templates.service import usable_template
+from a13n_service.infra.http import require_match
+from a13n_service.runs.environments.lifecycle import lock_reservations, reserve
+from a13n_service.runs.environments.schemas import MAX_MOUNTS, MountCreate, MountPage, MountView
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
 from a13n_service.runs.schemas import EnvironmentMount
 from a13n_service.runs.tables import ThreadRow
+from a13n_service.runs.threads import get_thread, refresh_version, require_open
+from a13n_service.tenancy.access import workspace_scope
+from a13n_service.tenancy.authorize import Principal, WorkspaceScope
 
+# The primary sandbox's mount name: an agent with an environment template gets one reserved at acceptance.
 PRIMARY = "workspace"
 
 
@@ -43,9 +51,17 @@ def _mount(thread: ThreadRow, environment_id: str, name: str, working_directory:
     )
 
 
-async def copy_desired(session: AsyncSession, origin: ThreadRow, thread: ThreadRow) -> None:
-    """Fork and child threads share their origin's environments; the caller holds the origin thread lock."""
-    for mount in await desired_mounts(session, origin.id):
+async def shared_mounts(session: AsyncSession, origin: ThreadRow) -> list[MountCreate]:
+    """The origin's desired mounts, which a fork shares unless it asks for fresh environments; the caller holds
+    the origin thread lock."""
+    return [
+        MountCreate.model_validate(mount, from_attributes=True) for mount in await desired_mounts(session, origin.id)
+    ]
+
+
+async def adopt_mounts(session: AsyncSession, thread: ThreadRow, mounts: Sequence[EnvironmentMount]) -> None:
+    """A child thread mounts what its parent run froze; the run that starts it locks and checks them."""
+    for mount in mounts:
         session.add(_mount(thread, mount.environment_id, mount.name, mount.working_directory))
     await session.flush()
 
@@ -56,60 +72,23 @@ def require_usable(environment: EnvironmentRow, principal_id: str) -> None:
         raise ServiceError("forbidden", "Private environments are usable only by their owner", {"id": environment.id})
     if environment.status in {"deleting", "deleted"}:
         raise conflict("environment", environment.id, f"environment_{environment.status}")
-    if environment.failure is not None and environment.failure.get("permanent"):
-        raise conflict("environment", environment.id, "environment_failed")
-
-
-async def _reserve_primary(session: AsyncSession, thread: ThreadRow, template_id: str, principal_id: str) -> None:
-    """Reserve a creating instance and its mount; the create operation reads the template when it runs."""
-    template = await usable_template(session, thread.workspace_id, template_id)
-    environment = EnvironmentRow(
-        id=new_object_id("env"),
-        organization_id=thread.organization_id,
-        workspace_id=thread.workspace_id,
-        provider_id=template.provider_id,
-        provider_identity={"type": template.provider_type},
-        template_id=template.id,
-        name=f"{thread.id}/{PRIMARY}",
-        status="creating",
-        generation=1,
-        operation_id=new_object_id("envop"),
-        operation_started_at=await now(session),
-        created_by_id=principal_id,
-    )
-    session.add(environment)
-    await session.flush()
-    session.add(_mount(thread, environment.id, PRIMARY, None))
-    await session.flush()
-
-
-async def freeze_mounts(
-    session: AsyncSession, thread: ThreadRow, *, principal_id: str, template_id: str | None
-) -> list[dict]:
-    """The mount set a new run uses. The caller holds the thread lock; environments lock in ID order."""
-    mounts = await desired_mounts(session, thread.id)
-    if template_id is not None and all(mount.name != PRIMARY for mount in mounts):
-        await _reserve_primary(session, thread, template_id, principal_id)
-        mounts = await desired_mounts(session, thread.id)
-    await lock_environments(session, [mount.environment_id for mount in mounts], principal_id=principal_id)
-    return [
-        EnvironmentMount(
-            name=mount.name, environment_id=mount.environment_id, working_directory=mount.working_directory
-        ).model_dump(mode="json")
-        for mount in mounts
-    ]
+    if environment.failure is not None and environment.failure["permanent"]:
+        raise conflict("environment", environment.id, environment.failure["code"])
 
 
 async def lock_environments(
-    session: AsyncSession, environment_ids: Sequence[str], *, principal_id: str
+    session: AsyncSession, workspace_id: str, environment_ids: Sequence[str], *, principal_id: str
 ) -> list[EnvironmentRow]:
+    """Lock the workspace's instances in ID order, the order every multi-environment writer uses, and check each
+    is usable. The reservation lock comes first, so acceptance may still reserve a primary sandbox afterwards."""
     ids = sorted(set(environment_ids))
     if not ids:
         return []
+    await lock_reservations(session, workspace_id)
     rows = (
         await session.scalars(
             select(EnvironmentRow)
-            .where(EnvironmentRow.id.in_(ids))
+            .where(EnvironmentRow.workspace_id == workspace_id, EnvironmentRow.id.in_(ids))
             .order_by(EnvironmentRow.id)
             .with_for_update()
             .execution_options(populate_existing=True)
@@ -122,3 +101,120 @@ async def lock_environments(
     for row in rows:
         require_usable(row, principal_id)
     return list(rows)
+
+
+async def mount_environments(
+    session: AsyncSession, thread: ThreadRow, mounts: Sequence[MountCreate], *, principal_id: str
+) -> list[ThreadEnvironmentRow]:
+    """Add desired mounts under the caller's thread lock: each name and instance new to the thread, at most
+    `MAX_MOUNTS` in all, and each instance, locked in ID order, usable by the principal."""
+    if not mounts:
+        return []
+    taken = await desired_mounts(session, thread.id)
+    if len(taken) + len(mounts) > MAX_MOUNTS:
+        raise conflict("thread", thread.id, "mount_limit", limit=MAX_MOUNTS)
+    names, environment_ids = {mount.name for mount in taken}, {mount.environment_id for mount in taken}
+    for mount in mounts:
+        if mount.name in names:
+            raise ServiceError(
+                "already_exists", "The thread already has this mount", {"kind": "mount", "key": mount.name}
+            )
+        if mount.environment_id in environment_ids:
+            raise conflict("environment", mount.environment_id, "already_mounted")
+        names.add(mount.name)
+        environment_ids.add(mount.environment_id)
+    await lock_environments(
+        session, thread.workspace_id, [mount.environment_id for mount in mounts], principal_id=principal_id
+    )
+    rows = [_mount(thread, mount.environment_id, mount.name, mount.working_directory) for mount in mounts]
+    session.add_all(rows)
+    await session.flush()
+    return rows
+
+
+async def reserve_primary(
+    session: AsyncSession, principal: Principal, thread: ThreadRow, *, template_id: str, limit: int
+) -> None:
+    """Mount a new `creating` instance of the template as the thread's primary sandbox, unless the thread has one.
+
+    The caller holds the thread lock. The instance is created later, from the template current at that time.
+    """
+    if await session.get(ThreadEnvironmentRow, (thread.id, PRIMARY)) is not None:
+        return
+    scope = WorkspaceScope(thread.organization_id, thread.workspace_id)
+    environment = await reserve(session, principal, scope, template_id, limit=limit)
+    session.add(_mount(thread, environment.id, PRIMARY, None))
+    await session.flush()
+
+
+async def freeze_mounts(session: AsyncSession, thread: ThreadRow, *, principal_id: str) -> list[dict]:
+    """The mount set a new run uses: the thread's desired mounts, each usable by the run's principal. The caller
+    holds the thread lock; environments lock in ID order."""
+    mounts = await desired_mounts(session, thread.id)
+    await lock_environments(
+        session, thread.workspace_id, [mount.environment_id for mount in mounts], principal_id=principal_id
+    )
+    return [
+        EnvironmentMount(
+            name=mount.name, environment_id=mount.environment_id, working_directory=mount.working_directory
+        ).model_dump(mode="json")
+        for mount in mounts
+    ]
+
+
+async def list_mounts(storage: Storage, actor: Principal, workspace_id: str, thread_id: str) -> tuple[MountPage, int]:
+    """The thread's desired mounts, and the thread version their edits must name."""
+    async with short_session(storage) as session:
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        thread = await get_thread(session, scope.workspace_id, thread_id)
+        rows = await desired_mounts(session, thread.id)
+        return MountPage(items=[MountView.model_validate(row) for row in rows]), thread.version
+
+
+def _audit(
+    session: AsyncSession, actor: Principal, thread: ThreadRow, verb: str, name: str, environment_id: str
+) -> None:
+    record(
+        session,
+        WorkspaceScope(thread.organization_id, thread.workspace_id),
+        actor_id=actor.id,
+        action=f"thread_environment.{verb}",
+        target_kind="thread",
+        target_id=thread.id,
+        details={"name": name, "environment_id": environment_id},
+    )
+
+
+async def add_mount(
+    storage: Storage, actor: Principal, workspace_id: str, thread_id: str, body: MountCreate, *, if_match: str | None
+) -> tuple[MountView, int]:
+    """Mount an environment for the thread's later runs; returns the mount and the new thread version.
+
+    Replacing a mount is explicit: remove the name, then add it again.
+    """
+    async with transaction(storage) as session:
+        scope = await workspace_scope(session, actor, workspace_id, "run")
+        thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
+        require_match(if_match, thread.id, thread.version)
+        require_open(thread)
+        [mount] = await mount_environments(session, thread, [body], principal_id=actor.id)
+        _audit(session, actor, thread, "create", mount.name, mount.environment_id)
+        await refresh_version(session, thread)
+        return MountView.model_validate(mount), thread.version
+
+
+async def remove_mount(
+    storage: Storage, actor: Principal, workspace_id: str, thread_id: str, name: str, *, if_match: str | None
+) -> int:
+    """Unmount for later runs; an active run keeps its frozen use. Returns the new thread version."""
+    async with transaction(storage) as session:
+        scope = await workspace_scope(session, actor, workspace_id, "run")
+        thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
+        require_match(if_match, thread.id, thread.version)
+        mount = await session.get(ThreadEnvironmentRow, (thread.id, name))
+        if mount is None:
+            raise not_found("mount", name)
+        await session.delete(mount)
+        _audit(session, actor, thread, "delete", name, mount.environment_id)
+        await refresh_version(session, thread)
+        return thread.version

@@ -41,9 +41,12 @@ def _deferred_foreign_keys(upgrade: ops.UpgradeOps) -> list[ops.CreateForeignKey
 
 def _complete_revision(migration: Any, revision: Any, directives: list[Any]) -> None:
     script = directives[0]
-    created = [op.table_name for op in script.upgrade_ops.ops if isinstance(op, ops.CreateTableOp)]
-    if not created:
+    tables = [op for op in script.upgrade_ops.ops if isinstance(op, ops.CreateTableOp)]
+    if not tables:
         return
+    for op in tables:
+        op.info = {}  # The rules carried in table info render below as SQL; the info itself is dead weight.
+    created = [op.table_name for op in tables]
     script.upgrade_ops.ops.extend(_deferred_foreign_keys(script.upgrade_ops))
     rules: dict[str, list[str]] = context.config.attributes["rules"]
     statements = list(FUNCTIONS) if migration.get_current_revision() is None else []

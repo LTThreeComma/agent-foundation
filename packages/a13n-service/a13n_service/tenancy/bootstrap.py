@@ -2,20 +2,25 @@
 
 from dataclasses import dataclass
 
-from anyio.to_thread import run_sync
-from argon2 import PasswordHasher
-from pydantic import BaseModel, EmailStr, Field, SecretStr
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, advisory_lock, transaction
 from a13n_service.infra.ids import new_object_id
+from a13n_service.tenancy.authorize import Scope
+from a13n_service.tenancy.credentials import hash_password
+from a13n_service.tenancy.schemas import Email, NewPassword
 from a13n_service.tenancy.tables import GrantRow, OrganizationRow, PasswordRow, PrincipalRow, WorkspaceRow
 
 
 class BootstrapInput(BaseModel):
-    email: EmailStr
-    password: SecretStr = Field(min_length=12, max_length=1024)
+    email: Email
+    password: NewPassword
+
+
+class AlreadyBootstrapped(Exception):
+    """The Service already has an organization; bootstrap changes nothing."""
 
 
 @dataclass(frozen=True)
@@ -26,12 +31,12 @@ class Bootstrapped:
 
 
 async def bootstrap(storage: Storage, request: BootstrapInput) -> Bootstrapped:
-    password_hash = await run_sync(PasswordHasher().hash, request.password.get_secret_value())
+    password_hash = await hash_password(request.password.get_secret_value())
     result = Bootstrapped(new_object_id("org"), new_object_id("ws"), new_object_id("usr"))
     async with transaction(storage) as session:
-        await advisory_lock(session, 0xA13B007)
+        await advisory_lock(session, "bootstrap")
         if await session.scalar(select(OrganizationRow.id).limit(1)):
-            raise ValueError("Service is already bootstrapped")
+            raise AlreadyBootstrapped()
         session.add(OrganizationRow(id=result.organization_id, key="default", name="Default organization"))
         await session.flush()
         session.add(
@@ -39,9 +44,7 @@ async def bootstrap(storage: Storage, request: BootstrapInput) -> Bootstrapped:
                 id=result.workspace_id, organization_id=result.organization_id, key="default", name="Default workspace"
             )
         )
-        session.add(
-            PrincipalRow(id=result.principal_id, kind="user", name=str(request.email), email=str(request.email))
-        )
+        session.add(PrincipalRow(id=result.principal_id, kind="user", name=request.email, email=request.email))
         await session.flush()
         session.add(PasswordRow(principal_id=result.principal_id, hash=password_hash))
         session.add(
@@ -55,8 +58,7 @@ async def bootstrap(storage: Storage, request: BootstrapInput) -> Bootstrapped:
         )
         record(
             session,
-            organization_id=result.organization_id,
-            workspace_id=result.workspace_id,
+            Scope(result.organization_id, result.workspace_id),
             actor_id=result.principal_id,
             action="organization.bootstrap",
             target_kind="organization",
