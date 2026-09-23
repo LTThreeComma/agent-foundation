@@ -4,8 +4,8 @@ import { PlusIcon } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
-import { useAuth } from "../../auth/context";
-import { useScope } from "../../layout/workspace";
+import { useClient } from "../../auth/context";
+import { useWorkspace } from "../../layout/workspace";
 import {
   CollectionFooter,
   Empty,
@@ -27,9 +27,15 @@ import { conversationQueries, type SessionFilters } from "./api";
 import { SessionFilterBar, readSessionFilters } from "./filters";
 import styles from "./conversations.module.css";
 
-export function SessionList() {
+export function SessionList({
+  notificationError,
+  reconnect,
+}: {
+  notificationError: unknown;
+  reconnect: () => void;
+}) {
   const { t } = useTranslation();
-  const { workspace, base: basePath } = useScope();
+  const { can, basePath } = useWorkspace();
   const [search, setSearch] = useSearchParams();
   const filters = readSessionFilters(search);
   return (
@@ -37,7 +43,7 @@ export function SessionList() {
       title={t("Sessions")}
       description={t("Every conversation your workspace has run, and why.")}
       actions={
-        workspace.permissions.includes("run") && (
+        can("agent.invoke") && (
           <Button render={<Link to={`${basePath}/sessions/new`} />}>
             <PlusIcon size={14} aria-hidden="true" />
             {t("New session")}
@@ -46,6 +52,7 @@ export function SessionList() {
       }
       toolbar={<SessionFilterBar search={search} setSearch={setSearch} />}
     >
+      <ErrorNotice error={notificationError} retry={reconnect} />
       <SessionResults filters={filters} />
     </Page>
   );
@@ -53,14 +60,13 @@ export function SessionList() {
 
 function SessionResults({ filters }: { filters: SessionFilters }) {
   const { t } = useTranslation(),
-    { workspace, base: basePath } = useScope(),
+    { workspace, basePath } = useWorkspace(),
     navigate = useNavigate(),
-    { client } = useAuth(),
+    client = useClient(),
     page = useCursor();
   const sessions = useQuery({
     ...conversationQueries(client, workspace.id).sessions(page.cursor, filters),
     placeholderData: keepPreviousData,
-    refetchInterval: 5000,
   });
   // A changed query starts a new result set, so its pagination starts over.
   const signature = JSON.stringify(filters);
@@ -89,9 +95,7 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
           // The collection opens a session to inspect it: that is the Debug level.
           onRowActivate={(session) =>
             navigate(
-              session.selected_thread_id
-                ? `${basePath}/sessions/${session.id}/threads/${session.selected_thread_id}?view=debug`
-                : `${basePath}/sessions/${session.id}?view=debug`,
+              `${basePath}/sessions/${session.id}${filters.q && filters.q !== session.id ? `/threads/${encodeURIComponent(filters.q)}` : ""}?view=debug`,
             )
           }
           columns={[
@@ -135,8 +139,8 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
               tone: "muted",
               render: (session) =>
                 session.preview
-                  ? t(`trigger.${session.preview.trigger}`, {
-                      defaultValue: session.preview.trigger,
+                  ? t(`trigger.${session.preview.trigger_type}`, {
+                      defaultValue: session.preview.trigger_type,
                     })
                   : UNKNOWN,
             },

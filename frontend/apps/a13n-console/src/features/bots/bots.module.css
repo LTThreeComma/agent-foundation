@@ -1,0 +1,344 @@
+/* Shared text tones ------------------------------------------------------ */
+.hint {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.hint code {
+  font-size: 12px;
+}
+.unset {
+  color: var(--a13n-secondary);
+}
+.listNote {
+  margin: 0;
+  padding: 8px 4px;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.countLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.notice {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--a13n-radius-row);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.notice[data-tone="warning"] {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.notice[data-tone="danger"] {
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+}
+
+/* Fact lists ------------------------------------------------------------- */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 4px 24px;
+  margin: 0;
+  padding: 10px 16px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+}
+.facts > div {
+  display: grid;
+  gap: 3px;
+  padding: 10px 0;
+  min-width: 0;
+}
+.facts dt {
+  color: var(--a13n-secondary);
+  font-size: 11.5px;
+}
+.facts dd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
+}
+.facts dd strong {
+  font-weight: 500;
+}
+.facts[data-dense="true"] {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  padding: 6px 12px;
+}
+.checkResult {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Copy field ------------------------------------------------------------- */
+.copyField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.copyField > [data-slot="input"],
+.copyField input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+/* Reply observations panel ----------------------------------------------- */
+.replyPanel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.replyPanelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.replyList {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.replyList > li {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+  min-width: 0;
+}
+
+/* Memory browser --------------------------------------------------------- */
+.memoryToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.memorySearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.searchInput {
+  width: 260px;
+  max-width: 100%;
+}
+.attention {
+  padding: 0;
+  height: auto;
+}
+.memoryBrowser {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  min-width: 0;
+}
+.documentPane {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  max-height: 640px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+}
+.documentItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--a13n-radius-row);
+  text-align: left;
+  color: var(--a13n-text);
+  cursor: pointer;
+}
+.documentItem:hover {
+  background: var(--a13n-hover);
+}
+.documentItem[aria-pressed="true"] {
+  background: var(--a13n-selected);
+}
+.documentItem svg {
+  margin-top: 2px;
+  flex: none;
+  color: var(--a13n-secondary);
+}
+.documentItem strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.documentItem small {
+  display: block;
+  margin-top: 1px;
+  color: var(--a13n-secondary);
+  font-size: 11.5px;
+}
+.documentFilters {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+.contentPane {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-width: 0;
+  padding: 16px 20px 24px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+}
+.contentHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.contentHead h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.contentHead small {
+  display: block;
+  margin-top: 3px;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.metadata {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.index {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.index h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.index > p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+}
+.index > div {
+  display: grid;
+  gap: 2px;
+}
+.index button {
+  justify-self: start;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.index button:hover {
+  text-decoration: underline;
+}
+.index > div p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* Memory provenance and operations --------------------------------------- */
+.provenance {
+  display: grid;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: var(--a13n-radius-row);
+  background: var(--a13n-elevated);
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.memoryActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.publications {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.operationRow {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: var(--a13n-radius-row);
+  background: var(--a13n-surface);
+  font-size: 13px;
+}
+.memoryNote {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.memoryAction {
+  justify-self: start;
+}
+
+@media (max-width: 900px) {
+  .memoryBrowser {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .documentPane {
+    max-height: 320px;
+  }
+}
+
+/* Settings tab: groups on a surface, separated by whitespace. */
+.settings {
+  display: grid;
+  gap: 32px;
+  min-width: 0;
+}
+
+/* File-backed conversation memory: its settings, then the browser. */
+.fileMemory {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.fileMemoryActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

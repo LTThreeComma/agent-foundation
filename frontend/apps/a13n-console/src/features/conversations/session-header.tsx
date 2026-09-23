@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import {
   Button,
   Menu,
@@ -18,14 +17,19 @@ import {
 } from "@phosphor-icons/react";
 import { Link, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
-import { useScope } from "../../layout/workspace";
-import { data, type Schema } from "../../shared/api";
+import { useWorkspace } from "../../layout/workspace";
+import type { Schema } from "../../shared/api";
 import { StatePill } from "../../shared/feedback";
 import { CopyButton } from "../../shared/identity";
 import { AgentAvatar } from "../agents/avatar";
-import { conversationQueries, isActiveRun } from "./api";
+import { useAgent } from "../agents/queries";
+import { memoriesPath } from "../memory/api";
+import { useMemoryProviders } from "../memory/availability";
+import { isActiveRun } from "./api";
+import { useRun } from "./queries";
 import { useAnchoredLevel } from "./transcript/debug/view";
 import { useRunCollapseAll } from "./transcript/debug/collapse";
+import { useThreadRuns } from "./transcript/thread-runs";
 import styles from "./conversations.module.css";
 
 /**
@@ -35,53 +39,26 @@ import styles from "./conversations.module.css";
 export function SessionHeader({
   threads,
 }: {
-  threads: readonly Schema["ThreadView"][];
+  threads: readonly Schema["ThreadResource"][];
 }) {
   const { t } = useTranslation();
   const { sessionId = "", threadId = "", runId } = useParams();
-  const { base: basePath, client, workspace } = useScope();
-  const queries = conversationQueries(client, workspace.id);
+  const { basePath, can } = useWorkspace();
   const thread = threads.find((entry) => entry.id === threadId);
   const root = threads.find(
-    (entry) => entry.origin === "new" && entry.session_id === sessionId,
+    (entry) => entry.role === "root" && entry.session_id === sessionId,
   );
   const { level, switchLevel } = useAnchoredLevel(thread);
-  const selected =
-    runId ??
-    thread?.current_run_id ??
-    thread?.last_run_id ??
-    thread?.head_run_id;
-  const run = useQuery({
-    ...queries.run(selected ?? ""),
-    enabled: !!selected,
-    refetchInterval: 2000,
-  });
+  const { visible: memoryVisible } = useMemoryProviders();
+  const run = useRun(runId);
   const valid = run.data?.session_id === sessionId;
-  const agent = useQuery({
-    queryKey: ["agent", workspace.id, run.data?.agent_id],
-    enabled: valid && !!run.data?.agent_id,
-    queryFn: async ({ signal }) =>
-      data(
-        await client.http.GET(
-          "/api/v1/workspaces/{workspace_id}/agents/{agent_id}",
-          {
-            params: {
-              path: {
-                workspace_id: workspace.id,
-                agent_id: run.data!.agent_id,
-              },
-            },
-            signal,
-          },
-        ),
-      ),
-  });
-  const summary = useQuery({
-    ...queries.session(sessionId),
-    refetchInterval: 5000,
-  });
+  const agent = useAgent(
+    valid && !run.data?.configuration_draft_id ? run.data?.agent_id : undefined,
+  );
+  const { runs } = useThreadRuns(threadId);
   const collapse = useRunCollapseAll();
-  const child = thread?.origin === "child";
+  const debugPurpose = thread?.session_purpose === "debug";
+  const child = thread?.role === "child";
   const active =
     valid &&
     !!run.data &&
@@ -102,6 +79,7 @@ export function SessionHeader({
             <AgentAvatar
               name={agent.data.name}
               id={run.data?.agent_id}
+              url={agent.data.image_url}
               className={styles.headerAvatar}
             />
             {agent.data.name}
@@ -118,20 +96,22 @@ export function SessionHeader({
           />
         </span>
         <span className={styles.subNote}>
-          {[
-            summary.data
-              ? t("{{count}} runs", { count: summary.data.run_count })
-              : null,
-            run.data
+          {debugPurpose
+            ? [
+                t("Debug session"),
+                runs.length
+                  ? t("{{count}} runs", { count: runs.length })
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : run.data
               ? t("Started by {{trigger}}", {
-                  trigger: t(`trigger.${run.data.trigger}`, {
-                    defaultValue: run.data.trigger,
+                  trigger: t(`trigger.${run.data.trigger_type}`, {
+                    defaultValue: run.data.trigger_type,
                   }),
                 })
-              : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
+              : ""}
         </span>
       </div>
       <div className={styles.sessionControls}>
@@ -185,7 +165,22 @@ export function SessionHeader({
                   : t("Collapse all runs")}
               </MenuItem>
             )}
-            {workspace.permissions.includes("read") && (
+            {memoryVisible && thread && (
+              <MenuItem
+                render={
+                  <a
+                    href={memoriesPath(basePath, {
+                      scope: "thread",
+                      subject_id: thread.id,
+                    })}
+                  />
+                }
+              >
+                <ArrowSquareOutIcon size={14} aria-hidden="true" />
+                {t("Thread memories")}
+              </MenuItem>
+            )}
+            {can("trace.read") && (
               <MenuItem
                 render={
                   <Link to={`${basePath}/traces?session_id=${sessionId}`} />

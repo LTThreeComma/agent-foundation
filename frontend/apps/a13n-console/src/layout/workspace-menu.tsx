@@ -9,15 +9,17 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "a13n-ui";
-import { CaretUpDownIcon, CheckIcon, GearSixIcon } from "@phosphor-icons/react";
+import {
+  CaretUpDownIcon,
+  CheckIcon,
+  GearSixIcon,
+  PlusIcon,
+} from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { UserAvatar } from "./avatar";
 import { workspacePath } from "../shared/paths";
-import { useScope } from "./workspace";
-import { useWorkspaces } from "./landing";
-import { ErrorNotice } from "../shared/feedback";
-import { Pagination } from "../shared/collection";
+import { useWorkspace } from "./workspace";
 import styles from "./layout.module.css";
 
 export function WorkspaceMenu({
@@ -28,14 +30,9 @@ export function WorkspaceMenu({
   compact?: boolean;
 }) {
   const { t } = useTranslation(),
-    context = useScope(),
+    context = useWorkspace(),
     navigate = useNavigate(),
     cache = useQueryClient();
-  const { query, page } = useWorkspaces();
-  const workspaces = query.data?.items ?? [];
-  const choices = workspaces.some((item) => item.id === context.workspace.id)
-    ? workspaces
-    : [context.workspace, ...workspaces];
   const open = (path: string) => {
     onNavigate();
     navigate(path);
@@ -57,7 +54,7 @@ export function WorkspaceMenu({
       >
         <UserAvatar
           name={context.workspace.name}
-          id={context.workspace.id}
+          url={context.workspace.image_url}
           className="size-5 rounded-md text-[10px]"
         />
         {compact ? (
@@ -77,8 +74,8 @@ export function WorkspaceMenu({
         className={compact ? "min-w-56" : "w-(--anchor-width) min-w-56"}
       >
         <MenuGroup>
-          <MenuGroupLabel>{t("Workspaces")}</MenuGroupLabel>
-          {choices.map((item) => {
+          <MenuGroupLabel>{context.organization.name}</MenuGroupLabel>
+          {context.workspaces.map((item) => {
             const current = item.id === context.workspace.id;
             return (
               <MenuItem
@@ -99,7 +96,7 @@ export function WorkspaceMenu({
                 <span aria-hidden="true">
                   <UserAvatar
                     name={item.name}
-                    id={item.id}
+                    url={item.image_url}
                     className="size-5 rounded-md text-[10px]"
                   />
                 </span>
@@ -111,14 +108,18 @@ export function WorkspaceMenu({
             );
           })}
         </MenuGroup>
-        <Pagination page={page} next={query.data?.next_cursor} />
-        <ErrorNotice error={query.error} />
         <MenuSeparator />
         <MenuGroup>
-          <MenuItem onClick={() => open(`${context.base}/settings`)}>
+          <MenuItem onClick={() => open(`${context.basePath}/settings`)}>
             <GearSixIcon aria-hidden="true" />
             {t("Workspace settings")}
           </MenuItem>
+          {context.organizationAdmin && (
+            <MenuItem onClick={() => open("/organization/settings/workspaces")}>
+              <PlusIcon aria-hidden="true" />
+              {t("Create workspace")}
+            </MenuItem>
+          )}
         </MenuGroup>
       </MenuPopup>
     </Menu>

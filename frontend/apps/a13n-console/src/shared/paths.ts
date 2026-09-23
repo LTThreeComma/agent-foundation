@@ -5,6 +5,6 @@ export function isResourceKey(value: string): boolean {
   );
 }
 
-export function workspacePath(workspace: { id: string }): string {
-  return `/workspace/${workspace.id}`;
+export function workspacePath(workspace: { key: string }): string {
+  return `/workspace/${workspace.key}`;
 }

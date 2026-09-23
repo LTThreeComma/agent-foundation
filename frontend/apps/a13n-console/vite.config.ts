@@ -14,13 +14,15 @@ export default defineConfig({
       "/api": {
         target: serviceUrl,
         changeOrigin: false,
-        configure(proxy) {
-          proxy.on("proxyRes", (response, request) => {
-            console.info(
-              `[Service] ${request.method} ${request.url?.split("?")[0]} ${response.statusCode}`,
-            );
-          });
-        },
+        ws: true,
+      },
+      "/connectivity": {
+        target: serviceUrl,
+        changeOrigin: false,
+      },
+      "/connection-authorizations": {
+        target: serviceUrl,
+        changeOrigin: false,
       },
     },
   },

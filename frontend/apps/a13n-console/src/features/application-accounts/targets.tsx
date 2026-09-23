@@ -1,0 +1,527 @@
+import {
+  ChatCircleDotsIcon,
+  GitBranchIcon,
+  PencilSimpleIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import {
+  Button,
+  ChoiceField,
+  DisclosureSection,
+  FormField,
+  Input,
+  Label,
+  MenuItem,
+  ModalFrame,
+  Switch,
+} from "a13n-ui";
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, type ReactElement } from "react";
+import { MessagingFields } from "./messaging-fields";
+
+import { useTranslation } from "react-i18next";
+import { useClient } from "../../auth/context";
+import { useWorkspace } from "../../layout/workspace";
+import { commandHeaders, data, type Schema } from "../../shared/api";
+import {
+  CollectionFooter,
+  Empty,
+  Pagination,
+  ResourceIdentity,
+  ResourceTable,
+  useCursor,
+} from "../../shared/collection";
+import { ErrorNotice, Loading, Timestamp } from "../../shared/feedback";
+import { Confirm } from "../../shared/dialogs";
+import { Section } from "../../shared/page";
+import { FormActions, TextAreaField } from "../../shared/forms";
+import { useIdempotency } from "../../shared/idempotency";
+import { SchemaFields } from "../../shared/forms";
+import styles from "../../shared/shared.module.css";
+import {
+  inputOverride,
+  jsonObject,
+  validateSettings,
+} from "../../shared/forms";
+import { AgentLink } from "../agents/link";
+import { ReceptionPill } from "../integrations/platform";
+import { useAccountProviders, useReceptionOptions } from "./data";
+import { BatchingFields } from "./form";
+
+export function AccountTargets({
+  account,
+  bot = false,
+}: {
+  account: Schema["Account"];
+  bot?: boolean;
+}) {
+  const client = useClient(),
+    { can } = useWorkspace(),
+    { t } = useTranslation(),
+    page = useCursor();
+  const query = useQuery({
+    queryKey: [
+      "account-targets",
+      account.workspace_id,
+      account.id,
+      page.cursor,
+    ],
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/application-accounts/{account_id}/targets", {
+          params: {
+            path: { account_id: account.id },
+            query: { cursor: page.cursor },
+          },
+          signal,
+        })
+        .then(data),
+  });
+  const add = can("account_target.manage") && (
+    <TargetEditor account={account} bot={bot} />
+  );
+  const items = query.data?.items ?? [];
+  return (
+    <Section
+      title={t("Targets")}
+      description={t(
+        "Override routing for one exact conversation or repository.",
+      )}
+      actions={add}
+    >
+      <ErrorNotice error={query.error} retry={() => void query.refetch()} />
+      {query.isPending ? (
+        <Loading variant="table" columns={4} rows={5} />
+      ) : items.length ? (
+        <>
+          <ResourceTable
+            items={items}
+            caption={t("Targets")}
+            rowMenuLabel={t("Target actions")}
+            rowMenu={(item) =>
+              can("account_target.manage") ? (
+                <>
+                  <TargetEditor
+                    account={account}
+                    target={item}
+                    bot={bot}
+                    triggerElement={
+                      <MenuItem closeOnClick={false}>
+                        <PencilSimpleIcon size={14} />
+                        {t("Edit")}
+                      </MenuItem>
+                    }
+                  />
+                  <Confirm
+                    subject={item.external_target_id}
+                    title={t("Delete target override")}
+                    description={t(
+                      account.reception_scope === "configured_targets"
+                        ? "This conversation will no longer be admitted. Existing accepted work is not cancelled."
+                        : "The account's default routing will apply to future events for this target.",
+                    )}
+                    triggerElement={
+                      <MenuItem closeOnClick={false} variant="destructive">
+                        <TrashIcon size={14} />
+                        {t("Delete")}
+                      </MenuItem>
+                    }
+                    danger
+                    action={() =>
+                      client.http.DELETE(
+                        "/api/v1/application-accounts/{account_id}/targets/{target_id}",
+                        {
+                          params: {
+                            path: {
+                              account_id: account.id,
+                              target_id: item.id,
+                            },
+                            query: { expected_version: item.version },
+                          },
+                        },
+                      )
+                    }
+                  />
+                </>
+              ) : null
+            }
+            columns={[
+              {
+                label: t("Target"),
+                tone: "primary",
+                render: (item) => (
+                  <ResourceIdentity
+                    name={item.external_target_id}
+                    description={t(
+                      item.target_kind === "repository"
+                        ? "Repository"
+                        : "Conversation",
+                    )}
+                    resourceId={item.id}
+                    icon={
+                      item.target_kind === "repository" ? (
+                        <GitBranchIcon aria-hidden="true" size={16} />
+                      ) : (
+                        <ChatCircleDotsIcon aria-hidden="true" size={16} />
+                      )
+                    }
+                  />
+                ),
+              },
+              {
+                label: t("Agent"),
+                render: (item) =>
+                  item.agent_id ? (
+                    <AgentLink agentId={item.agent_id} />
+                  ) : (
+                    t("Account default")
+                  ),
+              },
+              {
+                label: t("Reception"),
+                render: (item) => (
+                  <ReceptionPill enabled={!!item.receive_enabled} />
+                ),
+              },
+              {
+                label: t("Updated"),
+                tone: "muted",
+                render: (item) => (
+                  <Timestamp value={item.updated_at} relative />
+                ),
+              },
+            ]}
+          />
+          <CollectionFooter
+            count={t("{{count}} targets on this page", { count: items.length })}
+          >
+            <Pagination page={page} next={query.data?.next_cursor} />
+          </CollectionFooter>
+        </>
+      ) : (
+        !query.error && (
+          <Empty
+            icon={<ChatCircleDotsIcon aria-hidden="true" />}
+            title={t("No target overrides")}
+            description={t(
+              account.reception_scope === "configured_targets"
+                ? "Add a conversation before enabling reception. Unconfigured conversations cannot trigger this bot."
+                : "Incoming events use the account defaults unless an exact target overrides them.",
+            )}
+            action={add}
+          />
+        )
+      )}
+    </Section>
+  );
+}
+export function TargetEditor({
+  account,
+  target,
+  bot = false,
+  triggerElement,
+}: {
+  account: Schema["Account"];
+  target?: Schema["AccountTarget"];
+  bot?: boolean;
+  /** Lets a row menu present the editor without a second button. */
+  triggerElement?: ReactElement;
+}) {
+  const { t } = useTranslation(),
+    [open, setOpen] = useState(false);
+  return (
+    <ModalFrame
+      onOpenChange={setOpen}
+      trigger={
+        triggerElement ?? (
+          <Button
+            size="sm"
+            variant={target ? "outline" : "default"}
+            type="button"
+          >
+            {t(
+              target
+                ? "Edit"
+                : account.provider_key === "github"
+                  ? "Add repository"
+                  : bot
+                    ? "Add conversation"
+                    : "Add target",
+            )}
+          </Button>
+        )
+      }
+      size={"md"}
+      title={t(
+        account.provider_key === "github"
+          ? "Repository settings"
+          : bot
+            ? "Conversation settings"
+            : target
+              ? "Edit target override"
+              : "Add target override",
+      )}
+      description={t(
+        account.provider_key === "github"
+          ? "Configure this repository. Agent and capability overrides are optional."
+          : bot
+            ? "Configure this conversation. Agent and capability overrides are optional."
+            : "Override the account defaults for one external target, such as a conversation or repository.",
+      )}
+      closeLabel={t("Close")}
+      open={open}
+    >
+      {open && (
+        <TargetForm
+          account={account}
+          bot={bot}
+          initial={target}
+          close={() => setOpen(false)}
+        />
+      )}
+    </ModalFrame>
+  );
+}
+function TargetForm({
+  account,
+  initial,
+  close,
+  bot = false,
+}: {
+  account: Schema["Account"];
+  initial?: Schema["AccountTarget"];
+  bot?: boolean;
+  close: () => void;
+}) {
+  const client = useClient(),
+    cache = useQueryClient(),
+    { workspace } = useWorkspace(),
+    { t } = useTranslation(),
+    key = useIdempotency(),
+    options = useReceptionOptions(false),
+    definitions = useAccountProviders();
+  const [basis, setBasis] = useState(initial),
+    [kind, setKind] = useState<"conversation" | "repository">(
+      initial?.target_kind ??
+        (account.provider_key === "github" ? "repository" : "conversation"),
+    ),
+    [targetId, setTargetId] = useState(initial?.external_target_id ?? ""),
+    [agentId, setAgentId] = useState(initial?.agent_id ?? ""),
+    [receive, setReceive] = useState(initial?.receive_enabled ?? true),
+    [batching, setBatching] = useState<Schema["InputBatchingPolicy"] | null>(
+      initial?.input_batching ?? null,
+    ),
+    [policy, setPolicy] = useState<Record<string, unknown>>(
+      initial?.provider_policy ?? {},
+    ),
+    [override, setOverride] = useState(
+      initial?.config_override
+        ? JSON.stringify(initial.config_override, null, 2)
+        : "",
+    );
+  const definition = definitions.data?.items.find(
+    (item) =>
+      item.provider_key === account.provider_key &&
+      item.config_version === account.provider_config_version,
+  );
+  const reload = useMutation({
+    mutationFn: async () => {
+      if (!basis) return;
+      const latest = data(
+        await client.http.GET(
+          "/api/v1/application-accounts/{account_id}/targets/{target_id}",
+          { params: { path: { account_id: account.id, target_id: basis.id } } },
+        ),
+      );
+      setBasis(latest);
+      setKind(latest.target_kind);
+      setTargetId(latest.external_target_id);
+      setAgentId(latest.agent_id ?? "");
+      setReceive(latest.receive_enabled ?? true);
+      setBatching(latest.input_batching ?? null);
+      setPolicy(latest.provider_policy ?? {});
+      setOverride(
+        latest.config_override
+          ? JSON.stringify(latest.config_override, null, 2)
+          : "",
+      );
+    },
+  });
+  const save = useMutation({
+    mutationFn: () => {
+      if (definition && Object.keys(policy).length)
+        validateSettings(definition.reception_policy_schema, policy);
+      const body: Schema["TargetConfig"] = {
+        target_kind: kind,
+        external_target_id: targetId,
+        agent_id: agentId || null,
+        receive_enabled: receive,
+        input_batching: batching,
+        provider_policy: Object.keys(policy).length
+          ? jsonObject(JSON.stringify(policy))
+          : null,
+        config_override: inputOverride(override),
+      };
+      return basis
+        ? client.http
+            .PUT(
+              "/api/v1/application-accounts/{account_id}/targets/{target_id}",
+              {
+                params: {
+                  path: { account_id: account.id, target_id: basis.id },
+                },
+                body: { ...body, expected_version: basis.version },
+              },
+            )
+            .then(data)
+        : client.http
+            .POST("/api/v1/application-accounts/{account_id}/targets", {
+              params: {
+                path: { account_id: account.id },
+                header: commandHeaders(workspace.id, key.forBody(body)),
+              },
+              body,
+            })
+            .then(data);
+    },
+    onSuccess: () => {
+      void cache.invalidateQueries({ queryKey: ["account-targets"] });
+      close();
+    },
+  });
+  const agentField = (
+    <ChoiceField
+      placeholder={t("Select agent")}
+      value={agentId || "default"}
+      className="min-w-0"
+      onValueChange={(value) => setAgentId(value === "default" ? "" : value)}
+      label={t("Agent")}
+      options={[
+        { value: "default", label: t("Account default") },
+        ...(agentId && !options.agents.data?.some((item) => item.id === agentId)
+          ? [
+              {
+                value: agentId,
+                label: `${agentId} · ${t("Unavailable")}`,
+                disabled: true,
+              },
+            ]
+          : []),
+        ...(options.agents.data?.map((item) => ({
+          value: item.id,
+          label: item.name,
+        })) ?? []),
+      ]}
+    />
+  );
+  return (
+    <form
+      className={styles.form}
+      onSubmit={(event) => {
+        event.preventDefault();
+        save.mutate();
+      }}
+    >
+      <ErrorNotice
+        error={definitions.error ?? options.agents.error ?? reload.error}
+      />
+      {(!bot || !basis) && (
+        <>
+          <ChoiceField
+            placeholder={t("Select target kind")}
+            value={kind}
+            className="min-w-0"
+            readOnly={!!basis}
+            onValueChange={(value) =>
+              setKind(value === "repository" ? "repository" : "conversation")
+            }
+            label={t("Target kind")}
+            options={
+              definition?.target_kinds.map((value) => ({
+                value,
+                label: t(
+                  value === "repository" ? "Repository" : "Conversation",
+                ),
+              })) ?? []
+            }
+          />
+          <FormField
+            className="min-w-0 w-full"
+            label={t("External target ID")}
+            description={t(
+              "Use the identifier from the external service, not its display name.",
+            )}
+            readOnly={!!basis}
+          >
+            <Input
+              required={true}
+              value={targetId}
+              onChange={(event) => setTargetId(event.target.value)}
+              maxLength={2048}
+            />
+          </FormField>
+        </>
+      )}
+      {bot ? (
+        <DisclosureSection title={<>{t("Agent override")}</>}>
+          {agentField}
+        </DisclosureSection>
+      ) : (
+        agentField
+      )}
+      <Label className="flex items-center gap-2">
+        <Switch checked={receive} onCheckedChange={setReceive} />
+        {t(bot ? "Receive messages" : "Receive events")}
+      </Label>
+      {bot && account.provider_key !== "github" ? (
+        <>
+          <MessagingFields
+            value={policy}
+            defaults={account.provider_policy}
+            onChange={setPolicy}
+          />
+          <DisclosureSection title={<>{t("Input batching")}</>}>
+            <BatchingFields value={batching} onChange={setBatching} />
+          </DisclosureSection>
+        </>
+      ) : (
+        <BatchingFields value={batching} onChange={setBatching} />
+      )}
+      {definition && (!bot || account.provider_key === "github") && (
+        <DisclosureSection title={<>{t("Provider reception policy")}</>}>
+          <SchemaFields
+            schema={definition.reception_policy_schema}
+            value={policy}
+            onChange={setPolicy}
+          />
+        </DisclosureSection>
+      )}
+      <DisclosureSection
+        defaultOpen={!!save.error}
+        title={<>{t("Advanced overrides")}</>}
+      >
+        <TextAreaField
+          label={t("Capability overrides (JSON)")}
+          hint={t(
+            "Optional model, skill, MCP, and connector selections. Leave empty to inherit.",
+          )}
+          value={override}
+          onChange={setOverride}
+          code
+        />
+      </DisclosureSection>
+      <ErrorNotice
+        error={save.error}
+        retry={basis ? () => reload.mutate() : undefined}
+      />
+      <FormActions
+        pending={save.isPending}
+        onCancel={close}
+        label={t(
+          basis ? "Save changes" : bot ? "Add conversation" : "Add target",
+        )}
+      />
+    </form>
+  );
+}

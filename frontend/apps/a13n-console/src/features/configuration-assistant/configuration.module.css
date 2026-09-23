@@ -1,0 +1,563 @@
+/* Start page ------------------------------------------------------------- */
+.start {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  display: grid;
+  gap: 32px;
+  padding: 48px 24px 72px;
+}
+.intro {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+.assistantIcon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: var(--a13n-surface);
+  color: var(--a13n-text);
+}
+.intro h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.4px;
+  line-height: 1.25;
+}
+.intro p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.steps li {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+.steps svg {
+  margin-bottom: 4px;
+  color: var(--a13n-secondary);
+}
+.steps h2 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.steps p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.sourceRevision {
+  margin: -8px 0 0;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.sourceRevision code {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.startActions {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+.startComposer {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.startHint {
+  margin: 0;
+  padding-inline: 4px;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Prerequisite steps ------------------------------------------------------ */
+.setupFlow {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--a13n-radius-group, 12px);
+}
+.step {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px;
+  background: var(--a13n-surface);
+}
+.step[data-state="locked"] {
+  color: var(--a13n-secondary);
+}
+.stepNumber {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--a13n-elevated);
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+.step[data-state="required"] .stepNumber {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning-foreground);
+}
+.stepBody {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  justify-items: start;
+}
+.stepHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.stepHeading h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--a13n-text);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.step[data-state="locked"] .stepHeading h3 {
+  color: var(--a13n-secondary);
+}
+.stepBody p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Conversation history ---------------------------------------------------- */
+.history {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.history h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.sessionRow {
+  display: block;
+  min-width: 0;
+  border-radius: var(--a13n-radius-row, 10px);
+  color: inherit;
+  text-decoration: none;
+}
+.sessionRow:hover > * {
+  background: var(--a13n-hover);
+}
+.sessionRow:focus-visible {
+  outline: 2px solid var(--a13n-focus);
+  outline-offset: 2px;
+}
+
+/* Thread page ------------------------------------------------------------- */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  flex: none;
+  padding: 14px 24px 12px;
+}
+.header h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.conversationNav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.conversationNav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  color: var(--a13n-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.conversationNav a:hover {
+  background: var(--a13n-hover);
+  color: var(--a13n-text);
+}
+.conversationNav a:focus-visible {
+  outline: 2px solid var(--a13n-focus);
+  outline-offset: -2px;
+}
+.historyLink {
+  flex: none;
+}
+.threadLinks {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  max-width: 360px;
+  padding: 3px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: var(--a13n-surface);
+}
+.threadLinks a {
+  flex: none;
+}
+.threadLinks a[aria-current="page"] {
+  background: var(--a13n-elevated);
+  color: var(--a13n-text);
+  font-weight: 500;
+}
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.threadNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: none;
+  margin: 0 24px 4px;
+  padding: 9px 12px;
+  border-radius: var(--a13n-radius-row, 10px);
+  background: var(--a13n-surface);
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.threadNotice svg {
+  flex: none;
+  margin-top: 1px;
+}
+.panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 34%);
+  flex: 1;
+  min-height: 0;
+}
+.chatPane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.conversation {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px;
+}
+.composerDock {
+  flex: none;
+  padding: 8px 24px 20px;
+}
+.composerInner {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+}
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  max-width: 480px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 32px 0;
+  text-align: center;
+}
+.empty h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.2px;
+}
+.empty p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--a13n-radius-row, 10px);
+  background: var(--a13n-surface);
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.notice svg {
+  flex: none;
+  margin-top: 2px;
+}
+.notice a {
+  color: var(--a13n-text);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Draft rail -------------------------------------------------------------- */
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 24px 40px;
+  font-size: 13px;
+}
+.reviewHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.reviewHeader h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.reviewNote {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.actions {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.instructions {
+  max-height: 18rem;
+  margin: 0;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.draftEmpty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 32px 20px;
+  border-radius: var(--a13n-radius-group, 12px);
+  background: var(--a13n-surface);
+  text-align: center;
+}
+.draftEmpty > svg {
+  color: var(--a13n-secondary);
+}
+.draftEmpty h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.draftEmpty p {
+  max-width: 32ch;
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* Draft dialogs ----------------------------------------------------------- */
+.applyForm,
+.editorForm {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.editorActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Summaries --------------------------------------------------------------- */
+.summaryCard {
+  container-type: inline-size;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: var(--a13n-radius-group, 12px);
+  background: var(--a13n-surface);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.summaryCard h3,
+.summaryCard h4 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.summaryCard .summaryFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  margin: 0;
+}
+.summaryFields > div {
+  display: grid;
+  grid-template-columns: minmax(96px, 35%) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+.summaryFields dt {
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+}
+.summaryFields dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--a13n-text);
+  overflow-wrap: anywhere;
+}
+.summaryFields a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.technicalValue {
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.summaryCard ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+@container (max-width: 320px) {
+  .summaryFields > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+}
+
+/* Narrow ------------------------------------------------------------------ */
+@media (max-width: 1100px) {
+  .conversationNav {
+    order: 3;
+    flex-basis: 100%;
+  }
+}
+@media (max-width: 1000px) {
+  .panes {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+  }
+  .chatPane {
+    min-height: 65dvh;
+  }
+  .conversation {
+    min-height: 200px;
+  }
+  .review {
+    overflow: visible;
+    border-top: 1px solid var(--a13n-border-soft);
+  }
+  .composerDock {
+    position: sticky;
+    bottom: 0;
+    background: var(--a13n-canvas);
+  }
+}
+@media (max-width: 640px) {
+  .start {
+    padding: 28px 18px 48px;
+    gap: 26px;
+  }
+  .steps {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .steps li {
+    grid-template-columns: 20px minmax(0, 1fr);
+    column-gap: 10px;
+  }
+  .steps svg {
+    grid-row: span 2;
+    margin-top: 2px;
+  }
+  .steps p {
+    grid-column: 2;
+  }
+  .header {
+    padding: 12px 16px;
+    gap: 10px;
+  }
+  .threadNotice {
+    margin-inline: 16px;
+  }
+  .conversation,
+  .review {
+    padding-inline: 16px;
+  }
+  .composerDock {
+    padding: 8px 16px 16px;
+  }
+}

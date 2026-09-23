@@ -1,0 +1,310 @@
+/*
+ * Skills: layout only. Surfaces group content; the package browser is the one
+ * place that needs its own two-column anatomy.
+ */
+
+/* Shared bits ------------------------------------------------------------ */
+.sourceChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--a13n-surface);
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.sourceChip svg {
+  flex: none;
+}
+.version {
+  font-variant-numeric: tabular-nums;
+}
+.listTable th:first-child {
+  width: 40%;
+}
+.listTable td:first-child strong,
+.listTable td:first-child small {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.listTable td {
+  height: 60px;
+}
+.listTable tbody tr:hover,
+.listTable tbody tr:focus-within {
+  background: var(--a13n-hover);
+}
+
+/* Detail: retained version notice --------------------------------------- */
+.retained {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border-radius: var(--a13n-radius-row);
+  background: var(--a13n-surface);
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.retained > a {
+  margin-left: auto;
+  color: var(--a13n-text);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Detail: package browser ------------------------------------------------ */
+.browser {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  min-width: 0;
+}
+.tree {
+  min-width: 0;
+  max-height: min(640px, calc(100dvh - 300px));
+  overflow: auto;
+  padding: 10px 8px 12px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+}
+.treeHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 8px 8px;
+  color: var(--a13n-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+.treeHeading span {
+  font-variant-numeric: tabular-nums;
+}
+.tree ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.tree ul ul {
+  padding-left: 12px;
+}
+.tree details > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tree details > summary::-webkit-details-marker {
+  display: none;
+}
+.tree details > summary:hover {
+  color: var(--a13n-text);
+}
+.tree details > summary:focus-visible {
+  outline: 2px solid var(--a13n-focus);
+  outline-offset: -2px;
+}
+.tree details[open] > summary > svg:first-child {
+  transform: rotate(90deg);
+}
+.tree svg {
+  flex: none;
+}
+.fileButton {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--a13n-text-supporting);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.fileButton > span,
+.tree details > summary > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fileButton:hover {
+  background: var(--a13n-hover);
+  color: var(--a13n-text);
+}
+.fileButton[aria-current="true"] {
+  background: var(--a13n-selected);
+  color: var(--a13n-text);
+  font-weight: 500;
+}
+.fileButton:focus-visible {
+  outline: 2px solid var(--a13n-focus);
+  outline-offset: -2px;
+}
+.document {
+  min-width: 0;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+  overflow: hidden;
+}
+.documentHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  padding: 8px 12px 8px 18px;
+  border-bottom: 1px solid var(--a13n-border-soft);
+}
+.documentPath {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.documentPath > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.documentPath > small {
+  flex: none;
+  color: var(--a13n-secondary);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.markdown {
+  padding: 20px 28px 32px;
+}
+.source {
+  max-height: min(640px, calc(100dvh - 350px));
+  margin: 0;
+  padding: 18px 20px;
+  overflow: auto;
+  font-family: var(--a13n-mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.notice {
+  margin: 0;
+  padding: 24px 20px;
+  color: var(--a13n-secondary);
+  font-size: 13px;
+}
+.documentBody > [data-slot="alert"] {
+  margin: 16px;
+}
+
+/* Import dialog ---------------------------------------------------------- */
+.dropZone {
+  padding: 6px;
+  border-radius: var(--a13n-radius-group);
+  background: var(--a13n-surface);
+}
+.dropZoneInner {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 26px 20px;
+  border: 1px dashed var(--a13n-border);
+  border-radius: var(--a13n-radius-row);
+  text-align: center;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+.dropZone[data-dragging="true"] .dropZoneInner {
+  border-color: var(--a13n-focus);
+  background: var(--a13n-hover);
+}
+.dropZoneInner > p {
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12.5px;
+}
+.dropZoneFile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.receipt {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--a13n-radius-row);
+  background: var(--a13n-surface);
+}
+.receiptHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.receiptHead .version {
+  flex: none;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.receiptHead strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.receiptFacts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  color: var(--a13n-secondary);
+  font-size: 12px;
+}
+.dot {
+  color: var(--a13n-border);
+}
+.sourceField {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.sourceField > span {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  .browser {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tree {
+    max-height: 220px;
+  }
+  .markdown {
+    padding: 16px 18px 24px;
+  }
+}

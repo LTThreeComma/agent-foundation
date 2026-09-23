@@ -18,6 +18,8 @@ import {
   UsersIcon,
   type Icon,
 } from "@phosphor-icons/react";
+import { workspacePath } from "../../shared/paths";
+import { useAccess } from "../../layout/workspace";
 
 export type SettingsScope = "personal" | "workspace" | "organization";
 
@@ -211,6 +213,17 @@ export const settingsSectionLabels: Record<
   ),
 };
 
+/** `?section=` values that shipped before sections became addressable pages. */
+const legacy: Record<string, string> = {
+  profile: "general",
+  "personal-keys": "api-keys",
+  accounts: "service-accounts",
+};
+
+/**
+ * Resolves a `?section=` value, or an unknown path segment, to a section this
+ * scope actually renders. Personal settings keep `profile` as their own page.
+ */
 export function resolveSection(
   scope: SettingsScope,
   value: string | null | undefined,
@@ -218,5 +231,44 @@ export function resolveSection(
   if (!value) return undefined;
   const available = sections[scope];
   if (available.some((item) => item.value === value)) return value;
-  return undefined;
+  if (scope === "personal") return undefined;
+  const mapped = legacy[value];
+  return available.some((item) => item.value === mapped) ? mapped : undefined;
+}
+
+export function useSettingsNavigation() {
+  const { workspace, organization, can, organizationAdmin } = useAccess();
+  return [
+    {
+      scope: "personal" as const,
+      label: "Personal",
+      name: undefined,
+      path: "/settings",
+      sections: sections.personal,
+    },
+    ...(workspace
+      ? [
+          {
+            scope: "workspace" as const,
+            label: "Workspace",
+            name: workspace.name,
+            path: `${workspacePath(workspace)}/settings`,
+            sections: sections.workspace.filter(
+              (item) => !item.permission || can(item.permission),
+            ),
+          },
+        ]
+      : []),
+    ...(organizationAdmin
+      ? [
+          {
+            scope: "organization" as const,
+            label: "Organization",
+            name: organization.name,
+            path: "/organization/settings",
+            sections: sections.organization,
+          },
+        ]
+      : []),
+  ];
 }

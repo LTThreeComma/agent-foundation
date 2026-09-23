@@ -31,7 +31,7 @@ export function AccountMenu({
   const { t } = useTranslation(),
     auth = useAuth(),
     navigate = useNavigate();
-  const user = auth.user!;
+  const user = auth.data!.user.value;
   const logout = useMutation({
     mutationFn: auth.logout,
     onSuccess: () => navigate("/login", { replace: true }),
@@ -60,7 +60,7 @@ export function AccountMenu({
         >
           <UserAvatar
             name={user.name}
-            id={user.id}
+            url={user.image_url}
             className={compact ? "size-6" : undefined}
           />
           {compact ? (
@@ -80,10 +80,10 @@ export function AccountMenu({
           className={compact ? "min-w-56" : "w-(--anchor-width) min-w-56"}
         >
           <div className={styles.account}>
-            <UserAvatar name={user.name} id={user.id} />
+            <UserAvatar name={user.name} url={user.image_url} />
             <span className={styles.accountCopy}>
               <strong title={user.name}>{user.name}</strong>
-              <small title={user.email ?? undefined}>{user.email}</small>
+              <small title={user.email}>{user.email}</small>
             </span>
           </div>
           <MenuGroup>

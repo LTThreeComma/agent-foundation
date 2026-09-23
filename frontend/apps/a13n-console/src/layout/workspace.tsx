@@ -1,63 +1,318 @@
-import { createContext, useContext, useEffect, type ReactNode } from "react";
-import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router";
-import { useAuth } from "../auth/context";
-import { data, type components } from "../service-client";
-import { ErrorPage, Loading } from "../shared/feedback";
+import { Button } from "a13n-ui";
 
-type Workspace = components["schemas"]["Workspace"];
-const Context = createContext<Workspace | null>(null);
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
+import { Link, Navigate, Outlet, useLocation, useParams } from "react-router";
+
+import { useTranslation } from "react-i18next";
+import { useAuth, useClient } from "../auth/context";
+import { CreateWorkspace } from "../features/settings/create-workspace";
+import { pairingSearch } from "../features/environments/pairing-link";
+import { workspacePath } from "../shared/paths";
+import { allPages, data, type Schema } from "../shared/api";
+import { Empty } from "../shared/collection";
+import {
+  ErrorNotice,
+  ErrorPage,
+  ErrorToast,
+  Loading,
+} from "../shared/feedback";
+import { Page } from "../shared/page";
+
+interface WorkspaceContextValue {
+  workspace?: Schema["Workspace"];
+  organization: Schema["Organization"];
+  workspaces: Schema["Workspace"][];
+  can: (action: string) => boolean;
+  organizationAdmin: boolean;
+}
+const Context = createContext<WorkspaceContextValue | null>(null);
+/** Personal settings render without a workspace, whichever section is open. */
+const isPersonalSettings = (pathname: string) =>
+  pathname === "/settings" || pathname.startsWith("/settings/");
+
+const lastWorkspaceByUser = new Map<string, string>();
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const { t } = useTranslation();
-  const { workspaceRef = "" } = useParams();
-  const { client, user } = useAuth();
-  const query = useQuery({
-    queryKey: [user?.id, "workspace", workspaceRef],
-    queryFn: async ({ signal }) =>
-      data(
-        await client.http.GET("/api/v1/workspaces/{workspace_id}", {
-          params: { path: { workspace_id: workspaceRef } },
-          signal,
-        }),
+  const auth = useAuth(),
+    client = useClient(),
+    { t } = useTranslation();
+  const route = useParams();
+  const location = useLocation();
+  const workspaceKey = route.workspaceKey;
+  const organization = auth.data?.organizations[0];
+  const userId = auth.data?.user.value.id;
+  const workspaces = useQuery({
+    queryKey: ["workspaces", organization?.id],
+    enabled: !!organization,
+    queryFn: async ({ signal }) => ({
+      items: await allPages((cursor) =>
+        client.http
+          .GET("/api/v1/organizations/{organization}/workspaces", {
+            params: {
+              path: { organization: organization!.id },
+              query: { limit: 100, cursor },
+            },
+            signal,
+          })
+          .then(data),
       ),
+    }),
+  });
+  const items = workspaces.data?.items ?? [];
+  const remembered = userId ? lastWorkspaceByUser.get(userId) : undefined;
+  const workspace = workspaceKey
+    ? items.find((item) => item.key === workspaceKey)
+    : (items.find((item) => item.id === remembered) ?? items[0]);
+  const selected = workspace?.id;
+  const permissions = useQuery({
+    queryKey: ["permissions", selected],
+    enabled: !!selected,
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/workspaces/{workspace}/permissions", {
+          params: { path: { workspace: selected! } },
+          signal,
+        })
+        .then(data),
   });
   useEffect(() => {
-    if (query.data && user) {
-      try {
-        localStorage.setItem(`a13n-workspace:${user.id}`, query.data.id);
-      } catch {
-        /* This visit still works without storage. */
-      }
-    }
-  }, [query.data, user]);
-  if (query.error)
+    if (userId && selected) lastWorkspaceByUser.set(userId, selected);
+  }, [userId, selected]);
+  if (!auth.isPending && !organization) return <NoOrganization />;
+  if (
+    auth.isPending ||
+    workspaces.isPending ||
+    (selected && permissions.isPending)
+  )
+    return <Loading page />;
+  if (workspaceKey && workspaces.isSuccess && !selected)
     return (
       <ErrorPage
-        error={query.error}
-        actions={<Link to="/">{t("Choose a workspace")}</Link>}
+        title={t("Not found")}
+        error={new Error(t("Resource not found"))}
+        actions={<WorkspaceRecoveryActions workspaces={items} />}
       />
     );
-  if (!query.data) return <Loading />;
+  if (organization && workspaces.data?.items.length === 0)
+    return <NoWorkspace organization={organization} />;
+  const error = auth.error ?? workspaces.error ?? permissions.error;
+  if (error && isPersonalSettings(location.pathname)) return <Outlet />;
+  if (error)
+    return (
+      <ErrorPage
+        title={t("Workspace unavailable")}
+        error={error}
+        actions={
+          <WorkspaceRecoveryActions
+            workspaces={items}
+            currentWorkspaceId={selected}
+            retry={() => {
+              void workspaces.refetch();
+              if (selected) void permissions.refetch();
+            }}
+          />
+        }
+      />
+    );
+  if (!organization || !workspace || !permissions.data)
+    return (
+      <ErrorPage
+        title={t("Workspace unavailable")}
+        error={new Error(t("Workspace unavailable"))}
+        actions={<WorkspaceRecoveryActions workspaces={items} />}
+      />
+    );
+  if (!workspaceKey && location.pathname === "/") {
+    const pairing = pairingSearch(location.search);
+    return (
+      <Navigate
+        to={`${workspacePath(workspace)}/${pairing ? `environments/instances${pairing}` : "agents"}`}
+        replace
+      />
+    );
+  }
   return (
-    <Context value={query.data}>
-      <div key={`${user?.id}:${query.data.id}`}>{children}</div>
-    </Context>
+    <Context.Provider
+      value={{
+        organization,
+        workspace,
+        workspaces: workspaces.data!.items,
+        can: (action) => permissions.data!.actions.includes(action),
+        organizationAdmin: permissions.data.organization_admin,
+      }}
+    >
+      {children}
+    </Context.Provider>
   );
 }
-export function useWorkspace() {
-  const workspace = useContext(Context);
-  if (!workspace) throw new Error("WorkspaceProvider is required");
-  return workspace;
+
+function WorkspaceRecoveryActions({
+  workspaces,
+  currentWorkspaceId,
+  retry,
+}: {
+  workspaces: Schema["Workspace"][];
+  currentWorkspaceId?: string;
+  retry?: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {retry && <Button onClick={retry}>{t("Try again")}</Button>}
+      {workspaces
+        .filter((workspace) => workspace.id !== currentWorkspaceId)
+        .map((workspace) => (
+          <Button
+            key={workspace.id}
+            variant="outline"
+            render={<Link to={`${workspacePath(workspace)}/agents`} />}
+          >
+            {t("Switch workspace")}: {workspace.name}
+          </Button>
+        ))}
+      <Button variant="ghost" render={<Link to="/settings/profile" />}>
+        {t("Personal settings")}
+      </Button>
+    </>
+  );
 }
-export function useScope() {
-  const { client, user } = useAuth();
-  const workspace = useWorkspace();
+export function useAccess() {
+  const access = useContext(Context);
+  if (!access) throw new Error("Missing access provider");
+  return access;
+}
+export function useWorkspace() {
+  const access = useAccess();
+  if (!access.workspace) throw new Error("Missing workspace provider");
   return {
-    client,
-    workspace,
-    path: { workspace_id: workspace.id },
-    cache: [user?.id, workspace.id],
-    base: `/workspace/${workspace.id}`,
+    ...access,
+    workspace: access.workspace,
+    basePath: workspacePath(access.workspace),
   };
+}
+
+function NoWorkspace({
+  organization,
+}: {
+  organization: Schema["Organization"];
+}) {
+  const { t } = useTranslation(),
+    client = useClient(),
+    auth = useAuth(),
+    location = useLocation();
+  const permissions = useQuery({
+    queryKey: ["organization-permissions", organization.id],
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/organizations/{organization}/permissions", {
+          params: { path: { organization: organization.id } },
+          signal,
+        })
+        .then(data),
+  });
+  const logout = useMutation({ mutationFn: auth.logout });
+  return (
+    <Context.Provider
+      value={{
+        organization,
+        workspaces: [],
+        organizationAdmin: permissions.data?.organization_admin ?? false,
+        can: () => false,
+      }}
+    >
+      <main id="main-content">
+        <Page
+          title={organization.name}
+          actions={
+            <>
+              <Link to="/settings/profile">{t("Personal settings")}</Link>
+              {permissions.data?.organization_admin && (
+                <>
+                  <Link to="/organization/settings">
+                    {t("Organization settings")}
+                  </Link>
+                  <Link to="/organization/settings/providers">
+                    {t("Providers")}
+                  </Link>
+                </>
+              )}
+              <Button
+                variant="outline"
+                loading={logout.isPending}
+                onClick={() => logout.mutate()}
+                type="button"
+              >
+                {t("Sign out")}
+              </Button>
+            </>
+          }
+        >
+          <ErrorNotice
+            error={permissions.error}
+            retry={() => void permissions.refetch()}
+          />
+          <ErrorToast error={logout.error} />
+          {(isPersonalSettings(location.pathname) ||
+            location.pathname.startsWith("/organization/settings")) &&
+          !permissions.isPending ? (
+            <Outlet />
+          ) : permissions.isPending ? (
+            <Loading />
+          ) : (
+            <Empty
+              title={t("No workspaces available")}
+              description={t(
+                permissions.data?.organization_admin
+                  ? "Create your first workspace to start building agents."
+                  : "Ask your organization administrator to grant you workspace access.",
+              )}
+              action={
+                permissions.data?.organization_admin && (
+                  <CreateWorkspace organizationId={organization.id} />
+                )
+              }
+            />
+          )}
+        </Page>
+      </main>
+    </Context.Provider>
+  );
+}
+
+function NoOrganization() {
+  const auth = useAuth(),
+    { t } = useTranslation(),
+    location = useLocation();
+  const logout = useMutation({ mutationFn: auth.logout });
+  return (
+    <main id="main-content">
+      <Page
+        title={t("No organization access")}
+        actions={
+          <Button
+            variant="outline"
+            loading={logout.isPending}
+            onClick={() => logout.mutate()}
+            type="button"
+          >
+            {t("Sign out")}
+          </Button>
+        }
+      >
+        <ErrorToast error={logout.error} />
+        {isPersonalSettings(location.pathname) ? (
+          <Outlet />
+        ) : (
+          <>
+            <p>
+              {t(
+                "Ask an organization administrator to invite you or restore your membership.",
+              )}
+            </p>
+            <Link to="/settings/profile">{t("Personal settings")}</Link>
+          </>
+        )}
+      </Page>
+    </main>
+  );
 }

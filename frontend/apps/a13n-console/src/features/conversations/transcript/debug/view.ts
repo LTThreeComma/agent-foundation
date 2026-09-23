@@ -3,15 +3,18 @@ import { useSearchParams } from "react-router";
 import type { Schema } from "../../../../shared/api";
 import type { ViewLevel } from "../../api";
 
-type Thread = Pick<Schema["ThreadView"], "origin">;
+type Thread = Pick<Schema["ThreadResource"], "session_purpose" | "role">;
 
 /**
- * Where a Thread opens when the URL says nothing: a child Thread is read at
- * the Debug level, everything else as a conversation.
+ * Where a Thread opens when the URL says nothing: an execution Session and a
+ * child Thread are read at the Debug level, everything else as a conversation.
  * It is a default, not a lock; the reader can still ask for the other level.
  */
 function defaultLevel(thread?: Thread | null): ViewLevel {
-  return thread && thread.origin === "child" ? "debug" : "chat";
+  return thread &&
+    (thread.session_purpose === "execution" || thread.role === "child")
+    ? "debug"
+    : "chat";
 }
 
 /**

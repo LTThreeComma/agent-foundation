@@ -16,10 +16,16 @@ export { SchemaFields, withSchemaValues } from "./schema-fields";
 export { SecretReveal } from "./secret-reveal";
 export { useSuggestedName } from "./suggested-name";
 export {
+  inputOverride,
   jsonObject,
   jsonValue,
+  runOverride,
+  schemaErrors,
   stringValues,
+  validateAgentConfig,
+  validateInputOverride,
   validateJson,
   validateJsonObject,
+  validateRunOverride,
   validateSettings,
 } from "./validation";

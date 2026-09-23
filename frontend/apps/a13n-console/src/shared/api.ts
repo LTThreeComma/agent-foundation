@@ -10,7 +10,20 @@ export function representation<T>(result: { data?: T; response: Response }) {
 export function isUnauthorized(error: unknown) {
   return error instanceof ApiError && error.status === 401;
 }
-
+export function commandHeaders(
+  workspaceId: string | undefined,
+  key: string,
+  etag?: string,
+) {
+  return {
+    ...(workspaceId ? workspaceHeaders(workspaceId) : {}),
+    "Idempotency-Key": key,
+    ...(etag ? { "If-Match": etag } : {}),
+  };
+}
+export function workspaceHeaders(workspaceId: string) {
+  return { "X-A13N-Workspace-ID": workspaceId };
+}
 /** Picker collections traverse the canonical cursor; table views page explicitly. */
 export async function allPages<T>(
   read: (

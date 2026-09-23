@@ -1,461 +1,453 @@
-import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, ChoiceField, FormField, Input, ModalFrame } from "a13n-ui";
-import { useTranslation } from "react-i18next";
-import { useScope } from "../../layout/workspace";
-import { data, type components } from "../../service-client";
-import { ErrorNotice, Loading } from "../../shared/feedback";
+import { ConfigurationSummary } from "../../shared/configuration-summary";
+import { DotsThreeIcon } from "@phosphor-icons/react";
 import {
-  FormActions,
-  HeaderFields,
-  serializeHeaders,
-  type HeaderDraft,
-} from "../../shared/forms";
-import { ManagedForm } from "./managed-editor";
-import { ToolSelection } from "./tool-selection";
-import { emptyOAuth, OAuthFields, PersonalAuthorization } from "./oauth";
+  BrandIcon,
+  Button,
+  Input,
+  Menu,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuTrigger,
+  SettingsRow,
+  SettingsSection,
+  Tabs,
+  TabsList,
+  TabsTab,
+} from "a13n-ui";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useId, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useClient } from "../../auth/context";
+import { useWorkspace } from "../../layout/workspace";
+import { commandHeaders, data, type Schema } from "../../shared/api";
+import { Confirm } from "../../shared/dialogs";
+import {
+  ErrorNotice,
+  Loading,
+  StatePill,
+  Timestamp,
+} from "../../shared/feedback";
+import { CopyableId, IconTile } from "../../shared/identity";
+import { useIdempotency } from "../../shared/idempotency";
+import { Panel } from "../../shared/page";
+import { ConnectionSetup } from "../connectors/setup";
+import { MCPAuthorization } from "../mcp/authorization";
+import { MCPTools } from "../mcp/tools";
+import { MCPConnectionIcon } from "./mcp-icon";
 import styles from "./connections.module.css";
 
-type Connection = components["schemas"]["ConnectionView"];
-type Tool = components["schemas"]["ToolInfo"];
-type Auth = Connection["auth"];
-export function ConnectionEditor({
-  id,
+/** One connection, inspected beside the collection instead of over it. */
+export function ConnectionDetails({
+  connectionId,
+  onCleanup,
   onClose,
-  onSaved,
 }: {
-  id: string | null;
+  connectionId: string;
+  onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
   onClose: () => void;
-  onSaved: () => Promise<void>;
 }) {
-  const { client, path, cache } = useScope();
-  const { t } = useTranslation();
-  const [kind, setKind] = useState("mcp");
+  const client = useClient(),
+    { can, workspace } = useWorkspace(),
+    { t } = useTranslation(),
+    [generation, setGeneration] = useState(0);
   const query = useQuery({
-    queryKey: [...cache, "connection", id],
-    enabled: !!id,
-    refetchOnMount: "always",
-    queryFn: async ({ signal }) => {
-      const response = await client.http.GET(
-        "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-        { params: { path: { ...path, connection_id: id! } }, signal },
-      );
-      return {
-        value: data(response),
-        etag: response.response.headers.get("etag"),
-      };
-    },
+    queryKey: ["connections", workspace.id, connectionId],
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/connections/{connection_id}", {
+          params: { path: { connection_id: connectionId } },
+          signal,
+        })
+        .then(data)
+        .then((connection) => {
+          if (connection.workspace_id !== workspace.id)
+            throw new Error(t("Connection belongs to another workspace."));
+          return connection;
+        }),
   });
+  async function reload() {
+    await query.refetch();
+    setGeneration((value) => value + 1);
+  }
+  const connection = query.data;
+  const manage = can("connection.manage");
+  const mcp = connection?.source.kind === "mcp";
+  const tabNames = manage
+    ? ["details", "setup", ...(mcp ? ["tools"] : [])]
+    : ["details"];
+  const [tab, setTab] = useState<string>();
+  const active =
+    tab && tabNames.includes(tab)
+      ? tab
+      : connection && ["pending", "action_required"].includes(connection.status)
+        ? "setup"
+        : "details";
   return (
-    <ModalFrame
+    <Panel
       open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-      title={t(id ? "Edit connection" : "Add connection")}
-      closeLabel={t("Close")}
-    >
-      {id && (!query.data || !query.isFetchedAfterMount) ? (
+      onClose={onClose}
+      label={t("Connection details")}
+      title={
         <>
-          <ErrorNotice error={query.error} />
-          {!query.error && <Loading />}
-        </>
-      ) : (
-        <>
-          {!id && (
-            <ChoiceField
-              label={t("Connection type")}
-              value={kind}
-              options={[
-                { value: "mcp", label: t("Remote MCP") },
-                { value: "composio", label: "Composio" },
-              ]}
-              onValueChange={setKind}
-            />
-          )}
-          {(query.data?.value.type ?? kind) === "composio" ? (
-            <ManagedForm
-              loaded={{
-                initial: query.data?.value,
-                etag: query.data?.etag ?? null,
-              }}
-              onClose={onClose}
-              onSaved={onSaved}
-            />
-          ) : (
-            <ConnectionForm
-              loaded={{
-                initial: query.data?.value,
-                etag: query.data?.etag ?? null,
-              }}
-              onClose={onClose}
-              onSaved={onSaved}
-            />
-          )}
-        </>
-      )}
-    </ModalFrame>
-  );
-}
-function ConnectionForm({
-  loaded,
-  onClose,
-  onSaved,
-}: {
-  loaded: { initial?: Connection; etag: string | null };
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const { client, path, cache, workspace } = useScope();
-  const queries = useQueryClient();
-  const [{ initial, etag }] = useState(loaded);
-  const initialConfig =
-    initial && "url" in initial.config ? initial.config : undefined;
-  const { t } = useTranslation();
-  const [name, setName] = useState(initial?.name ?? "");
-  const [url, setUrl] = useState(initialConfig?.url ?? "");
-  const [auth, setAuth] = useState<Auth>(initial?.auth ?? "none");
-  const [replace, setReplace] = useState(!initial?.credential_configured);
-  const [oauth, setOAuth] = useState(initialConfig?.oauth ?? emptyOAuth);
-  const [token, setToken] = useState("");
-  const [headers, setHeaders] = useState<HeaderDraft[]>([]);
-  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-  const [tools, setTools] = useState<string[] | null>(
-    initialConfig?.tools ?? null,
-  );
-  const [safe, setSafe] = useState<string[]>(
-    initialConfig?.recovery_retry_safe_tools ?? [],
-  );
-  const [discovered, setDiscovered] = useState<Tool[]>();
-  const [error, setError] = useState<unknown>(null);
-  const [pending, setPending] = useState(false);
-  const editable = workspace.permissions.includes("write");
-  const identityChanged =
-    !!initial &&
-    (url !== initialConfig?.url ||
-      auth !== initial.auth ||
-      (auth === "oauth" &&
-        JSON.stringify(oauth) !== JSON.stringify(initialConfig?.oauth)) ||
-      (replace &&
-        auth !== "none" &&
-        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none")));
-  const [reaffirm, setReaffirm] = useState(false);
-  const canTest =
-    !!initial &&
-    !identityChanged &&
-    !pending &&
-    url === initialConfig?.url &&
-    auth === initial.auth &&
-    !token &&
-    headers.length === 0;
-  return (
-    <form
-      className={styles.form}
-      onSubmit={async (event) => {
-        event.preventDefault();
-        if (!editable || pending) return;
-        setError(null);
-        setPending(true);
-        try {
-          let credential:
-            components["schemas"]["ConnectionCreate"]["credential"] | undefined;
-          if (
-            auth === "none" ||
-            (auth === "oauth" && oauth.token_endpoint_auth_method === "none")
-          )
-            credential = null;
-          else if (replace || auth !== initial?.auth) {
-            if (auth === "bearer") credential = { token };
-            else if (auth === "oauth") credential = { client_secret: token };
-            else {
-              const values = serializeHeaders(headers, []);
-              credential = {
-                headers: Object.fromEntries(
-                  Object.entries(values).filter(
-                    (entry): entry is [string, string] => entry[1] !== null,
-                  ),
-                ),
-              };
-            }
-          }
-          const config = {
-            url,
-            oauth: auth === "oauth" ? oauth : null,
-            tools,
-            recovery_retry_safe_tools: identityChanged && !reaffirm ? [] : safe,
-          };
-          let response;
-          if (initial) {
-            if (!etag)
-              throw new Error(
-                "The connection version is unavailable. Close and reopen before saving.",
-              );
-            response = await client.http.PATCH(
-              "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-              {
-                params: { path: { ...path, connection_id: initial.id } },
-                headers: { "If-Match": etag },
-                body: {
-                  name,
-                  config,
-                  auth,
-                  enabled,
-                  ...(credential !== undefined ? { credential } : {}),
-                },
-              },
-            );
-          } else
-            response = await client.http.POST(
-              "/api/v1/workspaces/{workspace_id}/connections",
-              {
-                params: { path },
-                body: { type: "mcp", name, config, auth, credential },
-              },
-            );
-          const saved = data(response);
-          const queryKey = [...cache, "connection", saved.id];
-          await queries.cancelQueries({ queryKey });
-          queries.setQueryData(queryKey, {
-            value: saved,
-            etag: response.response.headers.get("etag"),
-          });
-          setToken("");
-          setHeaders([]);
-          await queries.invalidateQueries({
-            queryKey: [...cache, "connections"],
-          });
-          await onSaved();
-        } catch (failure) {
-          setError(failure);
-        } finally {
-          setPending(false);
-        }
-      }}
-    >
-      <p className={styles.help}>
-        {t(
-          "Remote MCP tools. Credentials are encrypted and never shown after saving.",
-        )}
-      </p>
-      <FormField label={t("Name")}>
-        <Input
-          required
-          maxLength={128}
-          value={name}
-          disabled={!editable || pending}
-          onChange={(event) => setName(event.target.value)}
-        />
-      </FormField>
-      <FormField label={t("Endpoint URL")}>
-        <Input
-          required
-          type="url"
-          value={url}
-          disabled={!editable || pending}
-          onChange={(event) => {
-            setUrl(event.target.value);
-            setDiscovered(undefined);
-            setReaffirm(false);
-          }}
-          placeholder="https://tools.example.com/mcp"
-        />
-      </FormField>
-      <ChoiceField
-        label={t("Authentication")}
-        value={auth}
-        disabled={!editable || pending}
-        options={[
-          { value: "none", label: t("None") },
-          { value: "bearer", label: t("Bearer token") },
-          { value: "headers", label: t("Headers") },
-          { value: "oauth", label: t("OAuth (personal account)") },
-        ]}
-        onValueChange={(value) => {
-          setAuth(value as Auth);
-          setReplace(true);
-          setToken("");
-          setHeaders([]);
-          setReaffirm(false);
-        }}
-      />
-      {auth === "oauth" && (
-        <OAuthFields
-          value={oauth}
-          disabled={!editable || pending}
-          onChange={(value) => {
-            setOAuth(value);
-            setReaffirm(false);
-            if (
-              value.token_endpoint_auth_method !==
-              oauth.token_endpoint_auth_method
-            ) {
-              setReplace(true);
-              setToken("");
-            }
-          }}
-        />
-      )}
-      {auth !== "none" &&
-        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none") &&
-        !replace && (
-          <div className={styles.row}>
-            <span>{t("Credential saved")}</span>
-            {editable && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setReplace(true)}
-              >
-                {t("Replace credential")}
-              </Button>
-            )}
-          </div>
-        )}
-      {auth !== "none" &&
-        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none") &&
-        replace && (
-          <>
-            {auth === "bearer" || auth === "oauth" ? (
-              <FormField
-                label={t(auth === "oauth" ? "Client secret" : "Bearer token")}
-              >
-                <Input
-                  type="password"
-                  required
-                  value={token}
-                  autoComplete="new-password"
-                  disabled={!editable || pending}
-                  onChange={(event) => setToken(event.target.value)}
-                />
-              </FormField>
+          <IconTile size={32} tone="surface">
+            {connection?.source.kind === "mcp" ? (
+              <MCPConnectionIcon endpoint={connection.source.endpoint_url} />
             ) : (
-              <HeaderFields
-                rows={headers}
-                onChange={setHeaders}
-                disabled={!editable || pending}
+              <BrandIcon
+                alias={
+                  connection?.source.kind === "connector"
+                    ? connection.source.connector_key
+                    : undefined
+                }
               />
             )}
-            {initial?.credential_configured && auth === initial.auth && (
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setReplace(false);
-                  setToken("");
-                  setHeaders([]);
-                }}
-              >
-                {t("Keep saved credential")}
-              </Button>
-            )}
-          </>
-        )}
-      {initial && (
-        <label className={styles.row}>
-          <span>{t("Enabled")}</span>
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={!editable || pending}
-            onChange={(event) => setEnabled(event.target.checked)}
+          </IconTile>
+          <strong title={connection?.name}>
+            {connection?.name ?? t("Connection")}
+          </strong>
+          <StatePill state={connection?.status ?? "pending"} />
+        </>
+      }
+      actions={
+        connection &&
+        manage && (
+          <ConnectionMenu
+            connection={connection}
+            onCleanup={onCleanup}
+            onDone={onClose}
           />
-        </label>
+        )
+      }
+      tabs={
+        connection && tabNames.length > 1 ? (
+          <Tabs
+            className={styles.panelTabs}
+            value={active}
+            onValueChange={(value) => setTab(String(value))}
+          >
+            <TabsList variant="underline" aria-label={t("Connection details")}>
+              <TabsTab value="details">{t("Details")}</TabsTab>
+              <TabsTab value="setup">{t("Authorization")}</TabsTab>
+              {mcp && <TabsTab value="tools">{t("Tools")}</TabsTab>}
+            </TabsList>
+          </Tabs>
+        ) : undefined
+      }
+    >
+      {query.isPending ? (
+        <Loading variant="form" rows={4} />
+      ) : query.error ? (
+        <ErrorNotice error={query.error} />
+      ) : (
+        connection && (
+          <div className={styles.panelBody} key={generation}>
+            {connection.status_reason && (
+              <p className={styles.reason}>
+                {t(`state.${connection.status_reason}`)}
+              </p>
+            )}
+            {!manage ? (
+              <ConfigurationSummary value={connection.safe_metadata ?? {}} />
+            ) : (
+              <>
+                {/* Details stays mounted so an unsaved name survives a tab visit. */}
+                <div hidden={active !== "details"} className={styles.stack}>
+                  <ConnectionSettings connection={connection} reload={reload} />
+                </div>
+                {active === "setup" &&
+                  (connection.source.kind === "connector" ? (
+                    <ConnectionSetup connection={connection} />
+                  ) : (
+                    <MCPAuthorization
+                      initial={connection}
+                      reload={reload}
+                      onConnectionChange={() => void reload()}
+                    />
+                  ))}
+                {active === "tools" && <MCPTools connection={connection} />}
+              </>
+            )}
+          </div>
+        )
       )}
-      {initial && (
-        <div>
+    </Panel>
+  );
+}
+
+/** Availability and removal for one connection. */
+function ConnectionMenu({
+  connection,
+  onCleanup,
+  onDone,
+}: {
+  connection: Schema["Connection"];
+  onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
+  onDone: () => void;
+}) {
+  const client = useClient(),
+    cache = useQueryClient(),
+    { workspace } = useWorkspace(),
+    { t } = useTranslation(),
+    key = useIdempotency();
+  const body = { expected_version: connection.version };
+  const done = () => {
+    void cache.invalidateQueries({ queryKey: ["connections"] });
+    onDone();
+  };
+  const retry = () =>
+    void cache.invalidateQueries({ queryKey: ["connections"] });
+  return (
+    <Menu>
+      <MenuTrigger
+        render={
           <Button
+            variant="ghost"
+            size="icon-sm"
             type="button"
-            variant="outline"
-            disabled={!canTest || !editable}
-            onClick={async () => {
-              setPending(true);
-              setError(null);
-              try {
-                const result = data(
-                  await client.http.POST(
-                    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/test",
-                    {
-                      params: { path: { ...path, connection_id: initial.id } },
-                    },
-                  ),
-                );
-                if (result.version !== initial.version)
-                  throw new Error(
-                    "The connection changed. Close and reopen before testing.",
-                  );
-                setDiscovered(result.tools);
-                if (tools === null)
-                  setTools(result.tools.map((tool) => tool.name));
-              } catch (failure) {
-                setError(failure);
-              } finally {
-                if (initial.auth === "oauth")
-                  await queries.invalidateQueries({
-                    queryKey: [
-                      ...cache,
-                      "connection-authorization",
-                      initial.id,
-                    ],
-                  });
-                setPending(false);
-              }
+            aria-label={t("Connection actions")}
+            title={t("Connection actions")}
+          />
+        }
+      >
+        <DotsThreeIcon size={16} />
+      </MenuTrigger>
+      <MenuPopup align="end">
+        <Confirm
+          subject={connection.name}
+          retry={retry}
+          title={t(
+            connection.status === "disabled"
+              ? "Enable connection"
+              : "Disable connection",
+          )}
+          description={t(
+            "This changes whether new agent calls can use the connection.",
+          )}
+          triggerElement={
+            <MenuItem closeOnClick={false}>
+              {t(connection.status === "disabled" ? "Enable" : "Disable")}
+            </MenuItem>
+          }
+          action={async () => {
+            const action =
+              connection.status === "disabled" ? "enable" : "disable";
+            data(
+              await client.http.POST(
+                action === "enable"
+                  ? "/api/v1/connections/{connection_id}/enable"
+                  : "/api/v1/connections/{connection_id}/disable",
+                {
+                  params: {
+                    path: { connection_id: connection.id },
+                    header: commandHeaders(
+                      workspace.id,
+                      key.forBody({ action, ...body }),
+                    ),
+                  },
+                  body,
+                },
+              ),
+            );
+            done();
+          }}
+        />
+        <MenuSeparator />
+        {(connection.source.kind === "connector"
+          ? (["revoke", "delete"] as const)
+          : (["delete"] as const)
+        ).map((action) => (
+          <Confirm
+            key={action}
+            subject={connection.name}
+            retry={retry}
+            title={t(
+              action === "revoke"
+                ? "Revoke authorization"
+                : "Delete connection",
+            )}
+            description={t(
+              "Local access is disabled immediately. The result reports whether external cleanup succeeded.",
+            )}
+            triggerElement={
+              <MenuItem closeOnClick={false} variant="destructive">
+                {t(action === "revoke" ? "Revoke" : "Delete")}
+              </MenuItem>
+            }
+            danger
+            action={async () => {
+              const header = commandHeaders(
+                workspace.id,
+                key.forBody({ action, ...body }),
+              );
+              const result =
+                action === "revoke"
+                  ? data(
+                      await client.http.POST(
+                        "/api/v1/connections/{connection_id}/connector/revoke",
+                        {
+                          params: {
+                            path: { connection_id: connection.id },
+                            header,
+                          },
+                          body,
+                        },
+                      ),
+                    )
+                  : data(
+                      await client.http.DELETE(
+                        "/api/v1/connections/{connection_id}",
+                        {
+                          params: {
+                            path: { connection_id: connection.id },
+                            header,
+                            query: body,
+                          },
+                        },
+                      ),
+                    );
+              onCleanup(result);
+              done();
+            }}
+          />
+        ))}
+      </MenuPopup>
+    </Menu>
+  );
+}
+
+/** Settings rows: the name is editable in place; everything else is evidence. */
+function ConnectionSettings({
+  connection,
+  reload,
+}: {
+  connection: Schema["Connection"];
+  reload: () => Promise<void>;
+}) {
+  const client = useClient(),
+    cache = useQueryClient(),
+    { t } = useTranslation(),
+    nameId = useId(),
+    [name, setName] = useState(connection.name);
+  const save = useMutation({
+    mutationFn: () =>
+      client.http
+        .PATCH("/api/v1/connections/{connection_id}", {
+          params: { path: { connection_id: connection.id } },
+          body: { name, expected_version: connection.version },
+        })
+        .then(data),
+    onSuccess: async () => {
+      void cache.invalidateQueries({ queryKey: ["connections"] });
+      await reload();
+    },
+  });
+  const check = useMutation({
+    mutationFn: () =>
+      client.http
+        .POST("/api/v1/connections/{connection_id}/check", {
+          params: { path: { connection_id: connection.id } },
+          body: { expected_version: connection.version },
+        })
+        .then(data),
+    onSuccess: () => {
+      void cache.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+  const changed = name !== connection.name;
+  return (
+    <>
+      <SettingsSection>
+        <SettingsRow label={t("Name")} controlId={nameId}>
+          <form
+            className={styles.inlineEdit}
+            onSubmit={(event) => {
+              event.preventDefault();
+              save.mutate();
             }}
           >
-            {t(pending ? "Working…" : "Test connection")}
-          </Button>
-          {!canTest && !pending && (
-            <p className={styles.help}>
-              {t("Save endpoint or credential changes before testing.")}
-            </p>
+            <Input
+              id={nameId}
+              size="sm"
+              required
+              value={name}
+              maxLength={128}
+              onChange={(event) => setName(event.target.value)}
+            />
+            {changed && (
+              <Button type="submit" size="sm" loading={save.isPending}>
+                {t("Save")}
+              </Button>
+            )}
+          </form>
+        </SettingsRow>
+        <SettingsRow label={t("Source")}>
+          {connection.source.kind === "mcp"
+            ? t("Remote MCP")
+            : t("Connected account")}
+        </SettingsRow>
+        <SettingsRow
+          label={t(
+            connection.source.kind === "mcp" ? "Endpoint" : "Connector key",
           )}
-        </div>
-      )}
-      {(discovered || tools?.length) && (
-        <ToolSelection
-          tools={tools}
-          safe={safe}
-          discovered={discovered}
-          setTools={setTools}
-          setSafe={setSafe}
-          disabled={!editable || pending}
-        />
-      )}
-      {identityChanged && safe.length > 0 && (
-        <label className={styles.help}>
-          <input
-            type="checkbox"
-            checked={reaffirm}
-            onChange={(event) => setReaffirm(event.target.checked)}
+        >
+          <CopyableId
+            value={
+              connection.source.kind === "mcp"
+                ? connection.source.endpoint_url
+                : connection.source.connector_key
+            }
           />
-          {t(
-            "Reconfirm retry safety for this endpoint and credential. Otherwise saving clears the declarations.",
-          )}
-        </label>
-      )}
-      <ErrorNotice error={error} />
-      <FormActions
-        onCancel={onClose}
-        pending={pending}
-        label={t("Save connection")}
-        disabled={
-          !editable || (auth === "headers" && replace && headers.length === 0)
-        }
-      />
-      {initial?.auth === "oauth" && (
-        <PersonalAuthorization
-          connectionId={initial.id}
-          draftChanged={
-            pending ||
-            identityChanged ||
-            name !== initial.name ||
-            enabled !== initial.enabled ||
-            JSON.stringify(tools) !==
-              JSON.stringify(initialConfig?.tools ?? null) ||
-            JSON.stringify(safe) !==
-              JSON.stringify(initialConfig?.recovery_retry_safe_tools ?? [])
+        </SettingsRow>
+        <SettingsRow label={t("Created")}>
+          <Timestamp value={connection.created_at} relative />
+        </SettingsRow>
+      </SettingsSection>
+      <ErrorNotice error={save.error} retry={() => void reload()} />
+      <SettingsSection title={t("Connection check")}>
+        <SettingsRow
+          label={t("Last check")}
+          description={
+            connection.last_check
+              ? t(
+                  connection.last_check.scope === "provider_account"
+                    ? "Provider account check"
+                    : "MCP discovery check",
+                )
+              : t("No check has run for this connection.")
           }
-        />
+        >
+          <span className={styles.checkRow}>
+            {connection.last_check && (
+              <>
+                <StatePill state={connection.last_check.status} />
+                <Timestamp value={connection.last_check.checked_at} relative />
+              </>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              loading={check.isPending}
+              disabled={connection.status === "disabled"}
+              onClick={() => check.mutate()}
+            >
+              {t("Check connection")}
+            </Button>
+          </span>
+        </SettingsRow>
+      </SettingsSection>
+      <ErrorNotice error={check.error} />
+      {connection.status === "disabled" && (
+        <p className={styles.reason}>
+          {t(
+            "After enabling, check the connection. Open the Authorization tab if new credentials are needed.",
+          )}
+        </p>
       )}
-    </form>
+      {Object.keys(connection.safe_metadata ?? {}).length > 0 && (
+        <ConfigurationSummary value={connection.safe_metadata ?? {}} />
+      )}
+    </>
   );
 }

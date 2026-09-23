@@ -14,10 +14,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { SetURLSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
-import { useAuth } from "../../auth/context";
-import { useScope } from "../../layout/workspace";
-import { allPages } from "../../shared/api";
-import { data, type components } from "../../service-client";
+import { useClient } from "../../auth/context";
+import { useWorkspace } from "../../layout/workspace";
+import { allPages, data, type Schema } from "../../shared/api";
 import { Toolbar } from "../../shared/collection";
 import { DateTimeField } from "../../shared/forms";
 import { ErrorNotice } from "../../shared/feedback";
@@ -28,7 +27,7 @@ import {
 import type { SessionFilters } from "./api";
 import styles from "./conversations.module.css";
 
-const statuses: components["schemas"]["RunView"]["status"][] = [
+const statuses: Schema["RunStatus"][] = [
   "accepted",
   "running",
   "waiting",
@@ -36,18 +35,20 @@ const statuses: components["schemas"]["RunView"]["status"][] = [
   "failed",
   "cancelled",
 ];
-const triggers: NonNullable<SessionFilters["trigger"]> = [
-  "input",
-  "queued",
+const triggers = [
+  "user_input",
   "feedback",
-  "child_result",
-  "spawned",
+  "queued_submission",
+  "inbound",
+  "async_subagent",
+  "async_subagent_resume",
+  "async_subagent_result",
 ];
 const keys = [
   "q",
   "agent_id",
   "status",
-  "trigger",
+  "trigger_type",
   "updated_after",
   "updated_before",
 ];
@@ -56,10 +57,8 @@ export function readSessionFilters(search: URLSearchParams): SessionFilters {
   return {
     q: search.get("q")?.trim() || undefined,
     agent_id: search.get("agent_id") || undefined,
-    status: search.getAll(
-      "status",
-    ) as components["schemas"]["RunView"]["status"][],
-    trigger: search.getAll("trigger") as NonNullable<SessionFilters["trigger"]>,
+    status: search.getAll("status") as Schema["RunStatus"][],
+    trigger_type: search.getAll("trigger_type"),
     updated_after: search.get("updated_after") || undefined,
     updated_before: search.get("updated_before") || undefined,
   };
@@ -73,22 +72,22 @@ export function SessionFilterBar({
   setSearch: SetURLSearchParams;
 }) {
   const { t } = useTranslation();
-  const { workspace } = useScope();
-  const { client } = useAuth();
+  const { workspace, can } = useWorkspace();
+  const client = useClient();
   const committedQuery = search.get("q") ?? "";
   const [query, setQuery] = useState(committedQuery);
   useEffect(() => setQuery(committedQuery), [committedQuery]);
   const agents = useQuery({
     queryKey: ["session-filter-agents", workspace.id],
-    enabled: workspace.permissions.includes("read"),
+    enabled: can("agent.read"),
     staleTime: 60_000,
     queryFn: ({ signal }) =>
       allPages((cursor) =>
         client.http
-          .GET("/api/v1/workspaces/{workspace_id}/agents", {
+          .GET("/api/v1/workspaces/{workspace}/agents", {
             params: {
-              path: { workspace_id: workspace.id },
-              query: { cursor, limit: 100 },
+              path: { workspace: workspace.id },
+              query: { cursor, limit: 100, include_archived: true },
             },
             signal,
           })
@@ -130,7 +129,7 @@ export function SessionFilterBar({
       <Toolbar
         search={query}
         onSearchChange={onSearchChange}
-        searchLabel={t("Search by session or thread ID")}
+        searchLabel={t("Search by title, session or thread ID")}
         filters={
           <>
             <div className={styles.agentFilter}>
@@ -164,12 +163,12 @@ export function SessionFilterBar({
             />
             <MultiFilter
               label={t("Trigger")}
-              values={search.getAll("trigger")}
+              values={search.getAll("trigger_type")}
               options={triggers.map((value) => ({
                 value,
                 label: t(`trigger.${value}`),
               }))}
-              onChange={(values) => update({ trigger: values })}
+              onChange={(values) => update({ trigger_type: values })}
             />
             <UpdatedFilter
               after={search.get("updated_after")}
