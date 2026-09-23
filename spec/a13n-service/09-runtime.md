@@ -16,36 +16,46 @@ All/control may auto-migrate under a bounded PostgreSQL advisory lock, unless de
 
 Worker reserves a local slot before claim. Heartbeat, cancellation and authorization refresh are supervised independently of the Harness task. Shutdown stops claim, requests handoff at safe boundaries and waits only to a configured drain deadline; unfinished attempts then rely on expiry. Attempt and handoff counts are bounded. A rolling deployment must retain workers compatible with outstanding checkpoints or explicitly migrate/reject those runs. `worker_build` is diagnostic metadata, not a sufficient compatibility test.
 
-Health means process liveness. Readiness checks role dependencies with bounded probes; it does not perform migrations or run a provider call per request. Redis failure degrades live observation and may backpressure execution; it never disables the database authority checks or substitutes a worker-local checkpoint store.
+Health means process liveness. Readiness checks role dependencies with bounded probes; it does not perform migrations or run a provider call per request. Redis failure degrades live observation and delays claim wakeups to the periodic scan; it never slows execution, disables the database authority checks or substitutes a worker-local checkpoint store.
 
 ## Sweeps
 
 Background work is named bounded functions over durable business evidence. The scheduler provides intervals, jitter, timeouts, cancellation and metrics. Coordination is chosen by the operation, not imposed as one process-wide lock pattern.
 
-| Work                    | Role    | Durable evidence / coordination                                                                                                                                                                |
-| ----------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| claim                   | worker  | Due accepted runs; existing periodic scan plus Redis List wakeups; local capacity plus `SKIP LOCKED`; all replicas participate                                                                 |
-| advance_threads         | control | Idle unarchived threads with eligible pending input; thread lock, bounded `SKIP LOCKED` batches                                                                                                |
-| expire_leases           | control | Current expired attempts; recheck thread/run/attempt state under locks                                                                                                                         |
-| deliver_outbox          | control | Due delivery rows; short tokenized claims, external I/O, conditional settlement                                                                                                                |
-| retain_facts            | control | Retention eligibility; restricted role, bounded SQL transactions and event-cursor locks                                                                                                        |
-| maintain_environments   | control | Managed sandbox lifecycle phases, idle and unmounted instances; fixed scan interval and per-instance operation claims; errors remain on the original phase; connect-only HTTP envd is excluded |
-| expire_credentials      | control | Expired tokens/invites; service-account disable/revocation, without deleting historical principals                                                                                             |
-| maintain_authorizations | control | Expiring tokens and outstanding OAuth/managed operation deadlines; single operation per authorization                                                                                          |
+| Work                  | Role    | Durable evidence / coordination                                                                                                                                                                |
+| --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| claim                 | worker  | Due accepted runs; periodic scan woken early by the Redis marker; local capacity plus `SKIP LOCKED`; all replicas participate                                                                  |
+| advance_threads       | control | Idle unarchived threads with eligible pending input; thread lock, bounded `SKIP LOCKED` batches                                                                                                |
+| expire_leases         | control | Current expired attempts; recheck thread/run/attempt state under locks                                                                                                                         |
+| deliver_outbox        | control | Due delivery rows; short tokenized claims, external I/O, conditional settlement; bounded retention of delivered/dead rows                                                                      |
+| maintain_environments | control | Managed sandbox lifecycle phases, idle and unmounted instances; fixed scan interval and per-instance operation claims; errors remain on the original phase; connect-only HTTP envd is excluded |
+| expire_credentials    | control | Expired tokens/invites; service-account disable/revocation, without deleting historical principals                                                                                             |
+| maintain_connections  | control | Expiring OAuth tokens and outstanding authorization operation deadlines; single operation per connection                                                                                       |
 
 Intervals are settings, not separate loop implementations. Claim/delivery/operations have different ownership semantics; they do not pretend to share four identical lease columns. Row claims allow replicas to share external work. Short SQL-only maintenance can use a transaction advisory lock as an optimization, but **no advisory lock or database connection is held across external I/O**. Correctness remains in row predicates and transactions. Every scan has an index, maximum batch, deadline and starvation behavior. Retry timing belongs to each operation: environment maintenance uses the fixed interval defined in [06](06-environments.md#one-outstanding-external-operation), while run recovery, outbox delivery and Redis reconnection retain their own backoff rules. No generic jobs table is needed.
 
 ### Worker claim wakeups
 
-Keep the existing periodic claim scan and its interval. Add Redis List notifications that trigger the same worker loop sooner; there is no second scan/claim path or claim by notification ID. PostgreSQL remains the task and ownership authority. This changes worker claim scheduling only; inbox acceptance, `advance_threads` and delivery to a running Harness keep their existing rules.
+The periodic claim scan is the mechanism; a Redis marker only makes it run sooner. PostgreSQL remains the task and ownership authority, and there is no claim by notification. Four rules:
 
-After a transaction creates or returns a run to `accepted`, its caller makes a bounded best-effort notification outside the transaction, covering every acceptance path and attempt recovery/handoff. The deployment-scoped List contains only the constant `wake`, never run IDs or task payloads. Its capacity is **1**: a short Redis Lua script atomically checks `LLEN` and `RPUSH`es only when empty. If full or Redis fails/times out, drop the notification without failing the committed operation. There is no notification retry, acknowledgement or outbox. `accept` itself remains SQL-only.
+1. The marker means "look now". It carries no run ID; the database claim decides ownership.
+2. The deployment-scoped list `a13n:wake` holds at most one marker: `wake()` runs `RPUSH` then `LTRIM -1 -1` in one `MULTI`, with a short timeout, and ignores failure.
+3. A worker takes a marker only when it has a free slot; a full worker leaves it for another worker.
+4. The marker wait is the periodic timer: `BLPOP` with a timeout equal to the scan interval (default 1 second). A Redis error sleeps for the same interval.
 
-Workers with free local capacity wait on `BLPOP`; each popped marker wakes one worker, not every replica. That worker uses the existing bounded scan and database claim. One marker may lead to multiple claims: while a scan claims work and capacity remains, continue without another marker. When full, stop popping markers; slot release triggers the same loop immediately. Startup and Redis reconnection also trigger a scan. All triggers share one loop per worker, so they cannot start overlapping scans within that worker; shutdown cancels the wait as well as stopping claims.
+```python
+async def claim_loop(worker, redis, poll_interval: float) -> None:
+    while not worker.stopping:
+        free = worker.free_slots
+        if free == 0:
+            await worker.slot_released.wait()                # full: leave markers; rescan when a slot frees
+            continue
+        claimed = await claim_due_runs(limit=free)           # SKIP LOCKED; PostgreSQL decides ownership
+        if claimed < free:
+            await wait_for_wake(redis, timeout=poll_interval)
+```
 
-The periodic trigger remains active even with notifications and is not postponed by them. It finds work after a lost/skipped notification, a consumer dying after pop, or Redis failure, and finds accepted runs when their `available_at` backoff becomes due. Redis failure must not cause a tight reconnect/scan loop; retain bounded backoff. No database session survives a Redis call or wait.
-
-Capacity 1 bounds pending markers, not wakeup frequency or worker count. A burst can coalesce into one wakeup, so immediate use of every idle worker is not guaranteed; later notifications and the unchanged periodic scans discover remaining work. Empty scans are still possible.
+Only two places register `wake()` as an after-commit callback through `infra/db.transaction()`: `start_run`, which every run-creation path uses, and the transition that returns a run to accepted when it is immediately due (handoff or recovery without backoff). A run whose backoff is still pending is found by the scan once due. A crash between commit and callback delays the run by at most one scan interval. A burst coalesces into one marker; workers not woken find the remaining runs within one interval. One loop per worker means scans never overlap within a worker, startup begins with a scan, and shutdown cancels the wait. No database session survives a Redis call or wait.
 
 ## Assembly
 
@@ -81,14 +91,14 @@ class AdmissionPolicy(Protocol):
     async def proceed(self, session: AsyncSession, call: CallContext) -> None: ...
 ```
 
-These methods are SQL-only, short, cancellation-safe and idempotent. They may use the shared transaction for their own tables, never commit it, contact another service, or invoke the Harness. External policy data must be prepared before the transaction with explicit validity and commit-time revalidation. Policy row locks follow core domain/ resource locks and are taken in a declared stable order; they precede event locks. Object I/O and conditional replacement are outside the transaction.
+These methods are SQL-only, short, cancellation-safe and idempotent. They may use the shared transaction for their own tables, never commit it, contact another service, or invoke the Harness. External policy data must be prepared before the transaction with explicit validity and commit-time revalidation. Policy row locks follow core domain/ resource locks and are taken in a declared stable order. Object I/O is outside the transaction.
 
 | Need                     | Concrete boundary                                                                                                                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | #411 composition         | Distribution extends core assembly, migrations and role-specific lifespan                                                                                                          |
 | Replace authentication   | Authenticator returns validated identity/confinement; independent management services remain                                                                                       |
 | Grants/custom roles      | Additional grant sources plus validated role registry; no fixed database role enum                                                                                                 |
-| Additional run admission | `accept` hook in every creation path: submit, feedback, fork, child and automatic advancement                                                                                      |
+| Additional run admission | `accept` hook in `start_run`, so every creation path passes it: submit, resume, fork, child and automatic advancement                                                              |
 | #410 budget check        | `proceed` before **every** model/paid-tool dispatch, including inline agents and auxiliary model calls; it checks recorded usage and refuses when that usage has reached the limit |
 
 `CallContext` contains organization/workspace/session/thread/run/attempt IDs, ancestor/root run identity, `call_id`, provider/model/tool identity and the price snapshot or unknown price. Establish `call_id` before dispatch and carry the same identity into its usage records, so a policy can correlate what it allowed with what was charged, including concurrent calls and late reports. Usage-record IDs still identify and deduplicate reports; an ID generated only after a response does not by itself establish this correlation. Children carry their root run identity; they cannot obtain fresh shared allowance by making a new run ID. Pre-dispatch reservation and settlement are not in v1.
@@ -101,11 +111,11 @@ OSS implements existing run usage/count ceilings and no monetary ledger. The two
 
 ## Settings and operational limits
 
-`A13N_` environment variables use double-underscore sections; optional configuration is named by `A13N_SETTINGS_FILE`. Unknown keys are rejected. Sections: server, database, objects, redis, auth, encryption, worker, control, environments, providers, telemetry, plus declared distribution sections. Configuration is validated once and injected as typed values.
+`A13N_` environment variables use double-underscore sections; optional configuration is named by `A13N_SETTINGS_FILE`. Unknown keys are rejected. Sections: server, database, objects, redis, auth, worker, control, environments, providers, telemetry, plus declared distribution sections. Configuration is validated once and injected as typed values.
 
-Limits must be finite and visible: request/upload size, expanded archives, ordinary outstanding inbox count/bytes and separate control-feedback payload/result bounds as defined in [05](05-runs.md#inbox-capacity), boundary delivery batch size, per-run display and output bytes, stream count/bytes, provider response bytes, worker slots, tool concurrency, attempts/handoffs, child depth/count, subscriptions per workspace, outbox retention and scan batches. No value is justified by “the inbox is small”. Reaching a limit returns a typed error or stops work with retained evidence; it never silently drops accepted input. Defaults follow vertical-slice measurements.
+Limits must be finite and visible: request/upload size, expanded archives, outstanding inbox count/bytes as defined in [05](05-runs.md#inbox-capacity), resume request size and answer count, boundary delivery batch size, per-run display and output bytes, thread stream length and idle TTL, provider response bytes, object write timeout, worker slots, tool concurrency, attempts/handoffs, child depth/count, subscriptions per workspace, outbox retention and scan batches. No value is justified by “the inbox is small”. Reaching a limit returns a typed error or stops work with retained evidence; it never silently drops accepted input. Defaults follow vertical-slice measurements.
 
-A provider call, credential refresh, environment operation and object publication have different deadlines. A single 30-second timeout does not make all of them recoverable. Measure queue wait, accepted-to-claim delay, heartbeat lag, checkpoint/display lag, workspace event-lock wait, oldest pending internal delivery, OAuth unknowns and environment operations with persistent failures. Alerts point to durable operation/run IDs and an available recovery action.
+A provider call, credential refresh, environment operation and object publication have different deadlines. A single 30-second timeout does not make all of them recoverable. Measure queue wait, accepted-to-claim delay, heartbeat lag, checkpoint commit latency and object size, leftover run objects, gateway authority-read load, oldest pending internal delivery, OAuth unknowns and environment operations with persistent failures. Alerts point to durable operation/run IDs and an available recovery action.
 
 ## Observability and validation
 

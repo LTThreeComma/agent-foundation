@@ -10,7 +10,7 @@ A provider is code the service calls while a run executes, selected by `type`. T
 
 Resource references resolve through the owning service: a web selection names a web-provider resource directly, while a model or environment template resolves its provider reference. The resource's `type` selects a registered definition.
 
-Connections select tool-source definitions through `type`, using the same registry rules. Their authentication mode is a separate field; adding an implementation does not require a core CHECK-enum change.
+Connections select tool-source definitions through `type`, using the same registry rules: `mcp` is built in, and every other type is served by a connector provider resource. Their authentication mode is a separate field; adding an implementation does not require a core CHECK-enum change.
 
 ## Interfaces
 
@@ -43,7 +43,7 @@ The service composes provider capabilities into the Harness run; host HTTP suppl
 ```python
 @dataclass(frozen=True)
 class ProviderDefinition:
-    kind: Literal["model", "environment", "tool", "web", "trace"]
+    kind: Literal["model", "environment", "connector", "web", "trace"]
     type: str
     config_schema: type[BaseModel]
     credential_schema: type[BaseModel] | None
@@ -64,13 +64,13 @@ The registry collects built-in and distribution definitions at startup. Resource
 
 ## Provider rollout
 
-| Kind        | Types                                                                                      | Notes                                                                                                                                                                                                                                                                                          |
-| ----------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| model       | whatever the Harness catalogue ships (OpenAI, Anthropic, Google, ... )                     | bridged in `providers/models`                                                                                                                                                                                                                                                                  |
-| environment | `docker`, development-only `local`; `http_envd` and hosted backends qualified individually | managed backends pass lifecycle recovery tests; connect-only HTTP envd passes the identity, Session and uncertain-command gates in 06/12; WebSocket envd is deferred                                                                                                                           |
-| tool        | `mcp`, `composio`                                                                          | MCP with none/bearer/headers/oauth auth, built as a Harness `ContextualMCP` whose header factory returns the run's `mcp_headers` for that connection, resolved once per logical run; Composio with native Harness Connector catalogue, managed account binding and exact dated action versions |
-| web         | Harness-supported search/scrape implementations                                            | configured accounts in `web_providers`; host transport supplies fetch/download                                                                                                                                                                                                                 |
-| trace       | `langfuse`, `logfire`                                                                      | read-only query                                                                                                                                                                                                                                                                                |
+| Kind        | Types                                                                                      | Notes                                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| model       | whatever the Harness catalogue ships (OpenAI, Anthropic, Google, ... )                     | bridged in `providers/models`                                                                                                                                        |
+| environment | `docker`, development-only `local`; `http_envd` and hosted backends qualified individually | managed backends pass lifecycle recovery tests; connect-only HTTP envd passes the identity, Session and uncertain-command gates in 06/12; WebSocket envd is deferred |
+| connector   | `composio`                                                                                 | configured once as a connector provider; each connection binds one account of one app through the provider's hosted setup and exposes its pinned actions             |
+
+Remote MCP is the built-in connection type and needs no provider resource: none/bearer/headers/oauth auth, built as a Harness `ContextualMCP` whose header factory returns the run's frozen copy of its thread's `mcp_headers` for that connection, resolved once per logical run. | web | Harness-supported search/scrape implementations | configured accounts in `web_providers`; host transport supplies fetch/download | | trace | `langfuse`, `logfire` | read-only query |
 
 Memory is not a provider kind in this design. Agent memory of any form (providers, agent entries, subjects, organization) is deferred until its scope is decided; nothing here reserves a table, a kind or an option for it.
 

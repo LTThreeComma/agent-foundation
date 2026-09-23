@@ -2,7 +2,7 @@
 
 This directory specifies the new `packages/a13n-service`. First archive the old Service code, specifications, user documentation and exported contracts in their corresponding `a13n-service-legacy` directories. The new system uses the canonical paths, distribution, import and command names from the start. [11: transition](11-transition.md#package-placement-and-build-boundary) owns this arrangement. There is no separate next package.
 
-This directory is the current product and architecture contract for this handoff. Historical decisions, reviews and research reports are intentionally omitted; no requirement depends on reading them. If a contract conflict is found, identify the exact conflict and resolve it before implementing the affected behavior; continue independent work.
+This directory is the current product and architecture contract of the Service. Historical decisions, reviews and research reports are intentionally omitted; no requirement depends on reading them. [acceptance.md](acceptance.md) records implementation evidence against [12](12-validation.md). If a contract conflict is found, identify the exact conflict and resolve it before implementing the affected behavior; continue independent work.
 
 ## The shape in one paragraph
 
@@ -32,26 +32,26 @@ Start with [01-goals.md](01-goals.md), [11-transition.md](11-transition.md) and 
 
 Define a complete rule once, in its owning section. Other chapters explain their own interface or storage contribution and link to that rule; they do not copy its full algorithm. Validation lists scenarios and expected observations, not a competing protocol. Update the owner, affected interfaces and validation requirements together when behavior changes.
 
-| Rule                                                                                                  | Owning section                                                                  |
-| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Package responsibilities, import direction and internal splitting                                     | [02: layout](02-layout.md#package-tree)                                         |
-| Provider resources, definitions, handles and capability boundaries                                    | [08: providers](08-providers.md)                                                |
-| Authorization and credential scope, including key issuance                                            | [03: tenancy](03-tenancy.md#authorization), [issuance](03-tenancy.md#flows)     |
-| MCP header validation, inheritance and comparison                                                     | [04: caller headers](04-resources.md#caller-headers)                            |
-| Input capacity, waiting/feedback selection, assignment, receipt confirmation and terminal disposition | [05: runs](05-runs.md#submit-and-accept)                                        |
-| Environment phases, operation identity and maintenance cadence                                        | [06: external lifecycle](06-environments.md#one-outstanding-external-operation) |
-| HTTP envd scope, direct connection and connect-only ownership                                         | [06: envd over HTTP](06-environments.md#envd-over-http)                         |
-| Object CAS/writer claims, checkpoint/display ordering, event and delivery durability                  | [07: facts and recovery](07-facts-and-delivery.md)                              |
-| Worker wakeups and admission/budget semantics                                                         | [09: runtime](09-runtime.md)                                                    |
-| Routes, request/response shapes, preconditions and request-key replay                                 | [10: API](10-api.md)                                                            |
-| Canonical identities, the four legacy directories, consumer/tooling updates and switch sequence       | [11: transition](11-transition.md)                                              |
-| New test ownership, live journeys and implementation completion evidence                              | [12: validation](12-validation.md)                                              |
+| Rule                                                                                                   | Owning section                                                                                    |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Package responsibilities, import direction and internal splitting                                      | [02: layout](02-layout.md#package-tree)                                                           |
+| Provider resources, definitions, handles and capability boundaries                                     | [08: providers](08-providers.md)                                                                  |
+| Authorization and credential scope, including key issuance                                             | [03: tenancy](03-tenancy.md#authorization), [issuance](03-tenancy.md#flows)                       |
+| Resource lifecycles, what a run freezes, MCP header validation and inheritance                         | [04: resources](04-resources.md#two-lifecycles), [caller headers](04-resources.md#caller-headers) |
+| Input capacity, source selection, resume, assignment, the checkpoint commit and terminal disposition   | [05: runs](05-runs.md#submit-and-accept)                                                          |
+| Environment phases, operation identity and maintenance cadence                                         | [06: external lifecycle](06-environments.md#one-outstanding-external-operation)                   |
+| HTTP envd scope, direct connection and connect-only ownership                                          | [06: envd over HTTP](06-environments.md#envd-over-http)                                           |
+| Immutability, run objects and their cleanup, display, the thread stream, outbox and lifecycle webhooks | [07: facts and recovery](07-facts-and-delivery.md)                                                |
+| Worker wakeups and admission/budget semantics                                                          | [09: runtime](09-runtime.md)                                                                      |
+| Routes, request/response shapes, preconditions and request-key replay                                  | [10: API](10-api.md)                                                                              |
+| Canonical identities, the four legacy directories, consumer/tooling updates and switch sequence        | [11: transition](11-transition.md)                                                                |
+| New test ownership, live journeys and implementation completion evidence                               | [12: validation](12-validation.md)                                                                |
 
 The glossary gives short definitions and links; it does not repeat recovery or transition rules.
 
 ## Conventions in these documents
 
-- Tables are shown as column lists. `NULL` marks a nullable column; every other column is NOT NULL. Types are omitted where obvious: `*_id` columns hold ids, `*_at` columns hold UTC timestamps, and `labels`, `config`, `payload`, `settings`, `failure` and the like are typed JSONB. `*_ref` holds an immutable payload key, expanded to ObjectRef at the API. Replaceable run snapshot keys derive from run ID; `sealed_checkpoint` and `sealed_display` hold exact terminal selection metadata.
+- Tables are shown as column lists. `NULL` marks a nullable column; every other column is NOT NULL. Types are omitted where obvious: `*_id` columns hold ids, `*_at` columns hold UTC timestamps, and `labels`, `config`, `payload`, `settings`, `failure` and the like are typed JSONB. `*_ref` holds an immutable payload key, expanded to ObjectRef at the API. `runs.checkpoint` and `runs.display` are typed pointers to the run's committed immutable state and display objects.
 - Code is Python 3.13, SQLAlchemy 2 (async), FastAPI, Pydantic 2. Snippets are illustrative signatures, not final code.
 - Historical old-code references use the original `packages/a13n-service` path at `e35a9637` on 2026-09-21 unless another revision is named. After the move, those modules belong to legacy, not the new canonical package; [11](11-transition.md) explains baseline tracking.
 - Guarantees the old package already provides and this design must keep are marked **Keeps:** in the section that owns them, together with the structure that carries them.

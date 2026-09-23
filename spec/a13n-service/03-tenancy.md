@@ -51,7 +51,7 @@ invitations
   principal_id NULL  expires_at  accepted_at NULL  revoked_at NULL  version  created_at  updated_at
 
 audit_events
-  id  organization_id NULL  workspace_id NULL  actor_id NULL  action  target_kind  target_id
+  id  organization_id  workspace_id NULL  actor_id NULL  action  target_kind  target_id
   outcome  details  occurred_at
   outcome IN ('ok', 'denied', 'failed')
 ```
@@ -64,7 +64,7 @@ Notes on the shape:
 - `tokens` are the short-lived secrets: login sessions, password-reset links, email-change links. All three are looked up by hash, expire, and are revoked when consumed or logged out. `data` holds the one field a kind needs (`{"new_email": ...}` for `email_change`). Expiry deletes these credential rows, never a principal still named by history.
 - `grants.workspace_id IS NULL` means the grant is at organization scope and applies to every workspace of that organization.
 - `workspaces.settings` holds workspace-wide defaults that are not resources, today the media-understanding model defaults (`{"media": {"image_model_id": ..., "audio_model_id": ..., "video_model_id": ...}}`). This replaces the old one-row-per-workspace defaults table.
-- `audit_events` is append-only (trigger, see [07](07-facts-and-delivery.md#retention-and-immutability)). `action` is a dotted verb phrase owned by the package that records it: `agent.revision.set_default`, `grant.create`, `credential.revoke`.
+- `audit_events` is append-only (trigger, see [07](07-facts-and-delivery.md#immutability)). `action` is a dotted verb phrase owned by the package that records it: `agent.revision.set_default`, `grant.create`, `credential.revoke`.
 
 ## Authentication
 
@@ -110,14 +110,14 @@ A grant must include the requested verb in its role. Subject to that requirement
 
 What each verb means, by example:
 
-| Verb  | Covers                                                                                                                                                        |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| read  | list and get anything in scope, including other principals' sessions, threads and runs; read events, usage, traces; read a secret's metadata, never its value |
-| run   | submit input, steer, interrupt, fork; create sessions and threads; add an environment to a thread; authorize a connection for oneself                         |
-| write | create, update, archive resources: agents and revisions, skills, templates, models and providers, connections, secrets, assets                                |
-| admin | grants, invitations, service accounts and their keys, workspace settings, webhook subscriptions, audit reads, revoking other principals' API keys             |
+| Verb  | Covers                                                                                                                                                                       |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| read  | list and get anything in scope, including other principals' sessions, threads and runs; read items, thread streams, usage, traces; read a secret's metadata, never its value |
+| run   | submit input, steer, interrupt, fork, resume; create sessions and threads; add an environment to a thread                                                                    |
+| write | create, update, archive resources: agents and revisions, skills, templates, models and providers, connections and their authorization, secrets, assets                       |
+| admin | grants, invitations, service accounts and their keys, workspace settings, webhook subscriptions, audit reads, revoking other principals' API keys                            |
 
-`admin` covers people, keys and webhook configuration. A builder can configure external models/tools too; the four-role model does not promise data-loss prevention against a builder or an authorized run. Deployment network policy constrains outbound destinations independently of roles. Private secrets, OAuth grants and devices add an owner check to workspace permission; `read` is not permission to reveal any credential value.
+`admin` covers people, keys and webhook configuration. A builder can configure external models/tools too; the four-role model does not promise data-loss prevention against a builder or an authorized run. Deployment network policy constrains outbound destinations independently of roles. Private secrets and devices add an owner check to workspace permission; `read` is not permission to reveal any credential value.
 
 **Keeps:** the merge order of the old authorizer (organization grants, then workspace grants, most permissive wins, unknown role values rejected at the boundary). What is gone is the second lattice for agent-scoped grants and the 84 named actions; see [01-goals.md](01-goals.md#what-is-dropped). Agent-level isolation is outside this product model, not a promised one-branch future change.
 
@@ -132,7 +132,7 @@ class GrantSource(Protocol):
 
 The default source reads `grants`; distributions may add sources, whose results are unioned subject to credential confinement. Built-in/custom role definitions share one startup registry. Role columns are validated text, not a CHECK hard-coded to four names. Unknown roles fail closed; removal of a role requires an explicit data migration or revocation. Role-name conflicts fail assembly. Grant sources return only validated, tenant-scoped values. External-source refresh occurs outside a database transaction, with bounded cache age and explicit fail-closed behavior when stale/unavailable.
 
-Observe each Principal, Workspace and credential on first use in one bounded operation and reuse the detached facts while checking every action, target and credential boundary. Do not take IAM read locks or refresh grants again within that operation. Later revocation applies to the next request, poll or independent background item; attempt authorization refresh is a separate operation. Commit arbitration still checks required domain state, versions, source integrity, capacity, leases, generations and idempotency. Credential consumption and mutation retain their own write arbitration. External grants use the declared freshness contract, never an unbounded network call under a row lock.
+Grants are read once per request/attempt refresh and cached only for that bounded scope. Database grants and resource state are revalidated at the mutation's commit arbitration; external grants use the declared freshness contract, never an unbounded network call under a row lock.
 
 ## Tenant integrity
 
@@ -158,15 +158,11 @@ Every key-issuance path resolves one workspace and checks both the target princi
 
 **Disable.** A global operator or the user can disable a user; a workspace admin can disable its service account. Subsequent authentication fails and execution stops on refresh. Grants remain so re-enabling restores them. Disabling is audited with its actual authority.
 
-Cookie sessions use Secure/HttpOnly cookies and CSRF validation on mutations. Authenticated `GET /auth/session` returns the current user and session CSRF token with `Cache-Control: no-store`. The CSRF token is a domain-separated HMAC of the session secret, stable for that session across reloads and tabs; storage keeps only its hash. Browser code keeps it in memory, obtains it on session restoration, and clears it on logout. Retrieval does not rotate or invalidate another tab's token. The session secret remains confined to the HttpOnly cookie; origin checks and mutation CSRF validation remain mandatory. Password reset/email-change tokens are hashed, single-use and consumed under lock; mail is queued transactionally in the outbox. Login/reset/callback have bounded rate limits and generic account-existence responses. Replacing authentication declares which local login routes remain installed; it never removes independent principal/grant/key management services.
+Cookie sessions use Secure/HttpOnly cookies and CSRF validation on mutations. Password reset/email-change tokens are hashed, single-use and consumed under lock; mail is queued transactionally in the outbox. Login/reset/callback have bounded rate limits and generic account-existence responses. Replacing authentication declares which local login routes remain installed; it never removes independent principal/grant/key management services.
 
 ## Audit
 
 Every service function that changes tenancy state records one `audit_events` row in the same transaction. Denied authorization attempts on `admin` verbs record `outcome = 'denied'`. Resource packages record their own actions with the same `record()`. Denial records use a separate bounded transaction after the rejected operation rolls back; raising an authorization error must not roll back the only denial evidence.
-
-Account-wide user identity and session/password/reset/email-change actions use `organization_id = NULL` and `workspace_id = NULL`. They produce one event regardless of whether the user has zero, one or multiple organization grants. The canonical recorder explicitly allows each account-wide action/target pair; missing tenant scope on any other action fails. SQL also enforces that a workspace requires an organization. User profile/disable actions retain global user scope, regardless of the actor's organization. Service-account, API-key, grant, invitation and resource mutations retain their actual organization and workspace scope. This storage distinction grants no global API-key or operator authority.
-
-Audit details are bounded and exclude passwords, bearer secrets, token hashes, reset links and CSRF material. Workspace audit reads select the actual organization/workspace and exclude all account-wide events; membership of an actor or target never makes those events tenant-owned.
 
 ## Open points
 

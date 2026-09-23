@@ -16,10 +16,10 @@ a13n_service/
     errors.py         ServiceError and the code list
     http.py           pagination, If-Match preconditions, error envelope
     objects/          object-store contract and local/S3 implementations
-      interface.py    owner-named keys, create-only writes and conditional replacement
+      interface.py    owner-named keys, create-only writes, reads, prefix listing and deletion
       local.py
       s3.py
-    redis.py          client and stream helpers
+    redis.py          client, capped stream append/read and the claim wakeup marker
     audit.py          audit_events table, record()
     outbox.py         outbox table, enqueue(), claim(), settle()
     sweeps.py         bounded sweep scheduling and explicit coordination
@@ -34,19 +34,19 @@ a13n_service/
   resources/
     revisions.py      shared helpers for revisioned kinds: add_revision(), set_default()
     agents/  skills/  environment_templates/  environment_providers/
-    model_providers/  models/  web_providers/
+    model_providers/  models/  web_providers/  connector_providers/
     connections/  secrets/  assets/  subscriptions/
                       each package: tables.py  schemas.py  service.py  routes.py
 
   runs/
     sessions.py  threads.py  inbox.py  runs.py  environments.py
     attempts.py       leases, heartbeat, the one fenced-update predicate
-    accept.py  claim.py  execute.py  seal.py
+    accept.py  resume.py  claim.py  execute.py  seal.py
     admission.py      AcceptedIntent, CallContext and built-in run limits
-    checkpoints.py    Harness envelope, writer claim, conditional publication and receipt repair
-    display.py        event folding, snapshot publication, bounded attempt segments
-    stream.py         attempt-isolated Redis streams and SSE control frames
-    events.py         lifecycle facts, cursor reads, workspace notifications
+    checkpoints.py    state/display objects, the checkpoint commit and run-prefix cleanup
+    display.py        folding Harness events into display items
+    stream.py         thread Redis streams, gateway authority reads and control frames
+    webhooks.py       lifecycle kinds and notify_subscribers()
     usage.py          usage records, ingest()
     traces.py         trace query over the trace providers
     routes.py
@@ -97,8 +97,8 @@ The contract file lives at the package root as `.importlinter` and is part of `m
 | `infra/clock.py`  | `now() -> datetime` (UTC, microseconds); replaceable in tests.                                                                                                                                                                                                                                     |
 | `infra/errors.py` | `ServiceError(code, message, details)` and the code list below; `not_found(kind, id)`, `conflict(kind, id)`, `disabled(kind, id)` factories.                                                                                                                                                       |
 | `infra/http.py`   | `Page[T]` and cursor encoding; `etag(row)` and `require_match(row, if_match)`; the error envelope; body size limits.                                                                                                                                                                               |
-| `infra/objects/`  | create-only payload writes and version-conditional snapshot replacement under owner-named keys, digest verification, `ObjectRef(key, digest, size, content_type)` and local/S3 adapters. No object reclamation in v1.                                                                              |
-| `infra/redis.py`  | the client; atomic bounded append and durable-prefix trim helpers with typed entries.                                                                                                                                                                                                              |
+| `infra/objects/`  | create-only writes, reads, prefix listing and deletion under owner-named keys, digest verification, `ObjectRef(key, digest, size, content_type)` and local/S3 adapters. No conditional replacement. Only run owners delete, and only their unreferenced state/display objects.                     |
+| `infra/redis.py`  | the client; capped stream append and multi-key read helpers with typed entries; `wake()` / `wait_for_wake()` for the claim marker.                                                                                                                                                                 |
 | `infra/audit.py`  | the `audit_events` table and `record(session, *, actor, action, target, outcome, details)`.                                                                                                                                                                                                        |
 | `infra/outbox.py` | the `outbox` table; `enqueue(session, kind, dedupe_key, target, payload)`; `claim(session, kind, limit)` with `SKIP LOCKED`; `settle(session, row, ok, error)`; backoff and dead-lettering.                                                                                                        |
 | `infra/sweeps.py` | `Sweep(name, every, run)`; `register(sweep)`; bounded scheduling; each operation declares row-claim or short SQL-lock coordination, never holding a connection across external work.                                                                                                               |
@@ -137,26 +137,26 @@ Lock, authorize, precondition, act, stamp, audit. Service APIs enforce authority
 
 ## Naming rules
 
-| Rule                                                                                                                                                                                                                                                      | Examples                                                                                                   |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Tables are plural nouns. Join tables are `<owner>_<owned>`.                                                                                                                                                                                               | `runs`, `inbox_entries`, `thread_environments`                                                             |
-| Object IDs follow the implementation repository's `spec/data-conventions.md`: a stable kind prefix, an underscore and a cryptographically random lowercase hexadecimal suffix. Retain allocated prefixes; the registry below owns new Service allocation. | `run_7e2a9c0d4b6f1835a8c1d902ef47`, `apr_…`, `inb_…`                                                       |
-| Foreign keys are the singular table name plus `_id`. Self-references say the relation.                                                                                                                                                                    | `thread_id`, `agent_revision_id`, `parent_run_id`, `origin_run_id`, `source_entry_id`                      |
-| Timestamps are a past participle plus `_at`.                                                                                                                                                                                                              | `created_at`, `sealed_at`, `archived_at`, `revoked_at`, `expires_at`, `finished_at`                        |
-| A state machine is one column called `status` with lowercase word values and a CHECK.                                                                                                                                                                     | `runs.status IN ('accepted','running','waiting','completed','failed','cancelled')`                         |
-| An on/off switch is `enabled`.                                                                                                                                                                                                                            | `connections.enabled`                                                                                      |
-| Retirement follows the owning lifecycle: heads archive, providers disable, credentials revoke, threads archive, assets retire; grants are explicitly removed. Secrets/subscriptions have audited deletion.                                                |                                                                                                            |
-| A discriminator column is `kind`. Never `type`, `*_type`, `*_kind` on the discriminated row itself.                                                                                                                                                       | `inbox_entries.kind`, `tokens.kind`                                                                        |
-| A provider implementation selector is `type`, because that is what the Harness calls it.                                                                                                                                                                  | `model_providers.type = 'openai'`                                                                          |
-| JSON columns are named for their content, never with a `_json` suffix.                                                                                                                                                                                    | `config`, `payload`, `output`, `failure`, `labels`, `settings`, `pending`                                  |
-| An immutable payload column ends in `_ref` and holds an object key; API values expand to ObjectRef. Mutable run snapshot keys derive from run ID; terminal selection is typed metadata.                                                                   | `payload_ref`, `output_ref`, `sealed_checkpoint`, `sealed_display`                                         |
-| A content hash is `digest` (SHA-256, hex). A hashed secret is `secret_hash`.                                                                                                                                                                              | `agent_revisions.digest`, `api_keys.secret_hash`                                                           |
-| Monotonic counters: `number` for revisions and attempts, `version` for mutable-resource concurrency, `position` for inbox order, `seq` for workspace event order; checkpoint/display sequences are distinct.                                              | `agent_revisions.number`, `run_attempts.number`, `threads.version`, `inbox_entries.position`, `events.seq` |
-| Who: `principal_id` is the identity something executes as, `created_by_id` / `updated_by_id` are authors, `actor_id` is the audit subject.                                                                                                                |                                                                                                            |
-| Row classes end in `Row`. API types have the plain noun. Frozen config types end in `Config`.                                                                                                                                                             | `AgentRow`, `Agent`, `AgentConfig`                                                                         |
-| Functions are verb phrases. Create, get, list, update, archive, disable; never manage, handle, process.                                                                                                                                                   | `create_agent`, `list_runs`, `archive_skill`, `submit_input`, `accept`, `claim`, `execute`, `seal`         |
-| Modules are named for what they hold, never for a phase or a quality.                                                                                                                                                                                     | `accept.py`, `claim.py`; never `preparation.py`, `service_common.py`, `support.py`                         |
-| One word, one meaning. The glossary is normative; a new word needs a glossary entry.                                                                                                                                                                      |                                                                                                            |
+| Rule                                                                                                                                                                                                                                                      | Examples                                                                                                                    |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Tables are plural nouns. Join tables are `<owner>_<owned>`.                                                                                                                                                                                               | `runs`, `inbox_entries`, `thread_environments`                                                                              |
+| Object IDs follow the implementation repository's `spec/data-conventions.md`: a stable kind prefix, an underscore and a cryptographically random lowercase hexadecimal suffix. Retain allocated prefixes; the registry below owns new Service allocation. | `run_7e2a9c0d4b6f1835a8c1d902ef47`, `apr_…`, `inb_…`                                                                        |
+| Foreign keys are the singular table name plus `_id`. Self-references say the relation.                                                                                                                                                                    | `thread_id`, `agent_revision_id`, `parent_run_id`, `origin_run_id`, `source_entry_id`                                       |
+| Timestamps are a past participle plus `_at`.                                                                                                                                                                                                              | `created_at`, `sealed_at`, `archived_at`, `revoked_at`, `expires_at`, `finished_at`                                         |
+| A state machine is one column called `status` with lowercase word values and a CHECK.                                                                                                                                                                     | `runs.status IN ('accepted','running','waiting','completed','failed','cancelled')`                                          |
+| An on/off switch is `enabled`.                                                                                                                                                                                                                            | `connections.enabled`                                                                                                       |
+| Retirement follows the owning lifecycle: heads archive, providers and templates disable, credentials revoke, threads archive, assets retire; grants are explicitly removed. Secrets/subscriptions have audited deletion.                                  |                                                                                                                             |
+| A discriminator column is `kind`. Never `type`, `*_type`, `*_kind` on the discriminated row itself.                                                                                                                                                       | `inbox_entries.kind`, `tokens.kind`                                                                                         |
+| A provider implementation selector is `type`, because that is what the Harness calls it.                                                                                                                                                                  | `model_providers.type = 'openai'`                                                                                           |
+| JSON columns are named for their content, never with a `_json` suffix.                                                                                                                                                                                    | `config`, `payload`, `output`, `failure`, `labels`, `settings`, `pending`                                                   |
+| An immutable payload column ends in `_ref` and holds an object key; API values expand to ObjectRef. A run's state and display objects are selected by the typed pointers `checkpoint` and `display`.                                                      | `payload_ref`, `output_ref`, `package_ref`, `runs.checkpoint`                                                               |
+| A content hash is `digest` (SHA-256, hex). A hashed secret is `secret_hash`.                                                                                                                                                                              | `agent_revisions.digest`, `api_keys.secret_hash`                                                                            |
+| Monotonic counters: `number` for revisions and attempts, `version` for mutable-resource concurrency, `position` for inbox order, `seq` for checkpoint and per-attempt stream sequences.                                                                   | `agent_revisions.number`, `run_attempts.number`, `threads.version`, `inbox_entries.position`, `incorporated_checkpoint_seq` |
+| Who: `principal_id` is the identity something executes as, `created_by_id` / `updated_by_id` are authors, `actor_id` is the audit subject.                                                                                                                |                                                                                                                             |
+| Row classes end in `Row`. API types have the plain noun. Frozen config types end in `Config`.                                                                                                                                                             | `AgentRow`, `Agent`, `AgentConfig`                                                                                          |
+| Functions are verb phrases. Create, get, list, update, archive, disable; never manage, handle, process.                                                                                                                                                   | `create_agent`, `list_runs`, `archive_skill`, `submit_input`, `accept`, `claim`, `execute`, `seal`                          |
+| Modules are named for what they hold, never for a phase or a quality.                                                                                                                                                                                     | `accept.py`, `claim.py`; never `preparation.py`, `service_common.py`, `support.py`                                          |
+| One word, one meaning. The glossary is normative; a new word needs a glossary entry.                                                                                                                                                                      |                                                                                                                             |
 
 ## Id prefixes
 
@@ -177,13 +177,12 @@ The platform's `spec/data-conventions.md`, sections Object Identity and Service 
 | `sk`                | skills                                         | 20                                    |
 | `skr`               | skill_revisions                                | 24                                    |
 | `envtpl`            | environment_templates                          | 20                                    |
-| `envrev`            | environment_template_revisions                 | 24                                    |
 | `envp`              | environment_providers                          | 20                                    |
 | `mprov`             | model_providers                                | 20                                    |
 | `mdl`               | models                                         | 20                                    |
 | `wprov`             | web_providers                                  | 32                                    |
-| `conn`              | connections                                    | 32                                    |
-| `authz`             | connection_authorizations                      | 32                                    |
+| `cnr`               | connector_providers                            | 20                                    |
+| `conn`              | connections                                    | 20                                    |
 | `sec`               | secrets                                        | 32                                    |
 | `ast`               | assets                                         | 24                                    |
 | `sub`               | subscriptions                                  | 32                                    |
@@ -193,16 +192,15 @@ The platform's `spec/data-conventions.md`, sections Object Identity and Service 
 | `inb`               | inbox_entries                                  | 28                                    |
 | `run`               | runs                                           | 28                                    |
 | `rat`               | run_attempts                                   | 28                                    |
-| `lev`               | events                                         | 32                                    |
 | `obx`               | outbox                                         | 32                                    |
 
 Use cryptographically secure random bytes encoded as lowercase hexadecimal (`0-9a-f`), with no timestamp or ordering component. The 20/24/28/32-character tiers provide 80/96/112/128 random bits and follow the platform's lifetime allocation budgets per prefix: `10**7`, `10**10`, `10**12` and `10**15` respectively. Unlisted or new kinds default to 32 characters until their owner explicitly assigns a shorter tier against a volume budget; callers cannot choose a shorter suffix. Claims, worker incarnations, publication generations and authentication workflows retain at least 128 random bits. A deployment must review capacity before exceeding a tier's budget; deleting records does not reset it. Database uniqueness is the final collision guard; a collision must never overwrite or reuse an existing object.
 
 Allocation is narrower than acceptance. Preserve the existing Service object-ID acceptance shape of a valid prefix plus 16-64 lowercase alphanumeric suffix characters; do not reject an existing ID merely because it differs from today's allocation length or alphabet. Thread acceptance also preserves `thread-` plus 32 lowercase hexadecimal characters and existing host-supplied forms at their established boundaries. Existing references are never rewritten. This compatibility concerns identity values, not a requirement to restore legacy Service endpoints or migrate legacy data.
 
-Users/service accounts and the token kinds intentionally share tables while retaining their own allocated prefixes. Harness usage-record IDs, native tool-call IDs and provider-owned IDs retain their owner's formats; do not generate a `usage_` replacement or re-encode an external ID. Join/cursor tables (`passwords`, `thread_environments`, `event_cursors`) do not need synthetic IDs. A metadata check verifies these explicit exceptions. API-key secret material, login cookies, OAuth state/verifiers, cursors, handles and digests retain their own contracts; the object-ID tiers do not shorten secrets or change their encoding.
+Users/service accounts and the token kinds intentionally share tables while retaining their own allocated prefixes. Harness usage-record IDs, native tool-call IDs and provider-owned IDs retain their owner's formats; do not generate a `usage_` replacement or re-encode an external ID. Join tables (`passwords`, `thread_environments`) do not need synthetic IDs. A metadata check verifies these explicit exceptions. API-key secret material, login cookies, OAuth state/verifiers, cursors, handles and digests retain their own contracts; the object-ID tiers do not shorten secrets or change their encoding.
 
-Consumers do not infer authority, routing, ownership or order by parsing an ID. Ordinary collection pagination documents concurrent-change behavior and uses an indexed stable sort; lifecycle following uses the explicit cursor protocol in [07](07-facts-and-delivery.md). Random IDs are not event-tail cursors.
+Consumers do not infer authority, routing, ownership or order by parsing an ID. Ordinary collection pagination documents concurrent-change behavior and uses an indexed stable sort. Random IDs are not tail cursors; live observation uses the thread stream in [07](07-facts-and-delivery.md#the-thread-stream).
 
 ## Error codes
 
@@ -229,7 +227,7 @@ The list is shared, not a fixed numerical target. A provider failure during exec
 
 ## Object store key layout
 
-Keys name their producer. Each run conditionally replaces one `orgs/{org}/runs/{run}/state.json` and one `orgs/{org}/runs/{run}/display.json`. Their confirmed writes make snapshots durable; database lifecycle remains authoritative and receipt confirmation is separate. Immutable payloads use digest-qualified keys; uploads use `orgs/{org}/uploads/{upload}`. There is no object reclamation in v1. The rules are in [07](07-facts-and-delivery.md#objects).
+Keys name their producer, and every object is immutable. A run writes digest-keyed `orgs/{org}/runs/{run}/state/{digest}` and `orgs/{org}/runs/{run}/display/{digest}` objects; only the run's committed pointers make them reachable, and the run's owner deletes the rest. Other payloads use digest-qualified keys; uploads use `orgs/{org}/uploads/{upload}`. There is no other object reclamation in v1. The rules are in [07](07-facts-and-delivery.md#objects).
 
 ## What is deliberately absent
 

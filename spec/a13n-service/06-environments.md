@@ -9,11 +9,13 @@ environment_providers
   id  organization_id  workspace_id NULL  type  name  config  credential NULL  enabled
   version  created_by_id  updated_by_id  created_at  updated_at
 
-environment_templates             revisioned head columns from 04
-environment_template_revisions    immutable config from 04
+environment_templates
+  id  organization_id  workspace_id  key  name  description NULL  provider_id  config  enabled
+  labels  version  created_by_id  updated_by_id  created_at  updated_at
+  UNIQUE (workspace_id, key)
 
 environments
-  id  organization_id  workspace_id  provider_id  provider_identity  template_revision_id NULL
+  id  organization_id  workspace_id  provider_id  provider_identity  template_id NULL
   owner_principal_id NULL  name  status  handle NULL  generation
   operation_id NULL  operation_started_at NULL  operation_deadline NULL
   lease_owner NULL  lease_token_hash NULL  lease_expires_at NULL
@@ -30,15 +32,15 @@ thread_environments
 
 Composite foreign keys enforce workspace consistency. The mount set a run uses is frozen at acceptance into `runs.environment_mounts`, like its revision and options. While the run is accepted or running, that column is the durable active-use evidence, across worker loss, handoff and backoff; a GIN index on it answers “which active runs use environment X”. No heartbeat or release callback is needed.
 
-`template_revision_id` is NULL only for registered external devices. Device ownership is private by default (`owner_principal_id`); workspace-managed sandboxes have NULL ownership. Attaching/using a private device requires its owner, not merely a workspace runner role. Retired environments retain tombstones while history refers to them.
+`template_id` is NULL only for registered external devices. Device ownership is private by default (`owner_principal_id`); workspace-managed sandboxes have NULL ownership. Attaching/using a private device requires its owner, not merely a workspace runner role. Retired environments retain tombstones while history refers to them.
 
-The template config specifies provider, base image, resources, network policy and storage semantics. Mount `workspace` appears at `/workspace`, extras at `/mnt/{name}`. Names and working directories are validated by the sandbox contract; path traversal cannot select the worker's host filesystem. The production `local` adapter is not an isolation boundary and is disabled outside explicit development mode.
+A template names its provider and holds a config covering base image, resources, network policy, idle policy and storage semantics. Templates are live and have no revisions ([04](04-resources.md#two-lifecycles)); an environment keeps no copy of the template config. Every operation reads the current template: `create` builds the instance from it, and `start`/`open` reapply the runtime settings the adapter can apply to an existing instance, such as network policy and resource limits, while `maintain_environments` applies the current idle policy. Properties built into the instance, such as image, storage mode and provider account, cannot change after creation: a template edit affects them only for environments created later, and the environment's own `provider_id`/`provider_identity`/`handle` keep identifying where it lives. A disabled template refuses new environments; existing environments keep reading it. Mount `workspace` appears at `/workspace`, extras at `/mnt/{name}`. Names and working directories are validated by the sandbox contract; path traversal cannot select the worker's host filesystem. The production `local` adapter is not an isolation boundary and is disabled outside explicit development mode.
 
 `provider_identity` freezes the non-secret account/project/region/backend locator that gives the handle meaning. Credentials may rotate, but a provider edit cannot silently redirect an existing handle to another account/endpoint. Resolve current credentials and validate this binding before each lifecycle operation; incompatible edits block use with an actionable reason. An operation's identity includes this binding for reconciliation.
 
 ## Select once, use an immutable mount set
 
-Acceptance locks the thread. If its agent needs a primary sandbox and no `workspace` mount exists, it selects the template's then-default revision and reserves a creating environment plus desired mount in that transaction. No external instance is created yet. It locks all selected environments in ID order, validates scope/ownership/state, and copies the desired mounts into `runs.environment_mounts`. This is the template selection point.
+Acceptance locks the thread. If its agent needs a primary sandbox and no `workspace` mount exists, it reserves a creating environment for the agent's template plus a desired mount in that transaction. No external instance is created yet; the create operation reads the template when it runs. It locks all selected environments in ID order, validates scope/ownership/state, and copies the desired mounts into `runs.environment_mounts`.
 
 Later agent/template changes do not rebuild an existing sandbox. Desired mount edits are thread operations with `If-Match`, valid during execution but affecting only later acceptance. Removing a desired mount cannot hide an active run's use. A caller can explicitly replace the primary mount for later runs; there is no automatic replacement after a provider failure. Fork/child copy the desired mount set under the origin thread lock unless a fresh fork was requested.
 
@@ -52,15 +54,15 @@ Every lifecycle operation has a durable ID before I/O. Status identifies the ope
 
 The completion transaction compares environment ID, generation, operation ID and claim token. A late caller cannot publish ready after deletion or after an operation changed. Claim expiry permits reconciliation of **the same operation**, not an unconditional new external call. A row lock or Redis mutex cannot fence a remote request already in flight.
 
-| State    | Next action and evidence                                                                                              |
-| -------- | --------------------------------------------------------------------------------------------------------------------- |
-| creating | Create with stable instance ID and operation ID; inspect/recover the same operation after lost response               |
-| ready    | Open a client using the existing handle; opening performs no lifecycle mutation                                       |
-| stopping | At each maintenance scan continue the same stop operation; known success becomes stopped; nobody resumes concurrently |
-| stopped  | A waiting active run requests a new starting operation                                                                |
-| starting | Resume the same handle; reconcile until known ready                                                                   |
-| deleting | Reconcile destruction; forbid new mounts or starts                                                                    |
-| deleted  | Terminal tombstone; never recreate this instance ID                                                                   |
+| State    | Next action and evidence                                                                                                                                                    |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| creating | Create from the current template with stable instance ID and operation ID; inspect/recover the same operation after lost response, which returns the instance first created |
+| ready    | Open a client using the existing handle and the current template's runtime settings; opening performs no lifecycle mutation                                                 |
+| stopping | At each maintenance scan continue the same stop operation; known success becomes stopped; nobody resumes concurrently                                                       |
+| stopped  | A waiting active run requests a new starting operation                                                                                                                      |
+| starting | Resume the same handle; reconcile until known ready                                                                                                                         |
+| deleting | Reconcile destruction; forbid new mounts or starts                                                                                                                          |
+| deleted  | Terminal tombstone; never recreate this instance ID                                                                                                                         |
 
 `maintain_environments` uses its existing **fixed scan interval** for all unfinished phases. For example, a stopping row is claimed, the adapter continues that same stop ID, and confirmed success changes it to stopped. Pending, timeout or error leaves it stopping with the same operation ID and updated failure details; the next scan visits it again. Each visit has a bounded batch/call deadline and a claim prevents concurrent callers. There is no per-environment backoff schedule or `reconcile_after` field. Scanning never creates a new operation ID merely because a call timed out.
 
@@ -74,7 +76,7 @@ The stop transaction locks the environment, then checks last use and the absence
 
 Destroy likewise requires no desired thread mounts and no active run mounts, checked under the environment lock. Mount creation and acceptance take that lock and refuse deleting/deleted targets and unresolved permanent provider/identity failures. Thread archive removes desired mounts; an active run's frozen use delays destruction until cancellation/seal commits. Historical mounts retain metadata but do not keep a sandbox running forever.
 
-Opening a ready handle only establishes a client; it cannot secretly resume or recreate. `start` is an explicit operation. If stop destroys ephemeral files by the chosen template policy, this is shown before the operation. Lost instances produce `environment_unavailable`; replacement is explicit and uses a new environment identity. No worker-local fallback.
+Opening a ready handle only establishes a client; it cannot secretly resume or recreate. `start` is an explicit operation. If stop destroys ephemeral files by the storage mode built in at creation, this is shown before the operation. Lost instances produce `environment_unavailable`; replacement is explicit and uses a new environment identity. No worker-local fallback.
 
 ## Provider contract
 
@@ -83,15 +85,15 @@ Plain DTOs live in `providers/interfaces.py`, not in resource ORM modules:
 ```python
 class EnvironmentProvider(Protocol):
     async def create(self, instance_id: str, operation_id: str, template: Template) -> OperationResult: ...
-    async def start(self, handle: Handle, operation_id: str) -> OperationResult: ...
+    async def start(self, handle: Handle, operation_id: str, template: Template) -> OperationResult: ...
     async def stop(self, handle: Handle, operation_id: str) -> OperationResult: ...
     async def destroy(self, handle: Handle, operation_id: str) -> OperationResult: ...
     async def inspect(self, instance_id: str, operation_id: str) -> OperationResult: ...
     async def inventory(self, cursor: str | None) -> InstancePage: ...
-    async def open(self, handle: Handle) -> Sandbox: ...
+    async def open(self, handle: Handle, template: Template | None) -> Sandbox: ...
 ```
 
-Results distinguish pending, known success/failure and unknown, including handle and evidence. An adapter declares which operations are safely repeatable by ID and how it proves completion. A label supports discovery; it does not by itself guarantee idempotent creation, unique lookup or cancellation of delayed requests. Inventory can return multiple handles for a label so duplicates are visible. Cleanup adopts only a matching live operation; orphan/deleted identities are destroyed with the same uncertainty rules.
+`template` is always the current template; `open` receives none for a registered device. Each adapter documents which settings it reapplies to an existing instance and ignores the rest. Results distinguish pending, known success/failure and unknown, including handle and evidence. An adapter declares which operations are safely repeatable by ID and how it proves completion. A label supports discovery; it does not by itself guarantee idempotent creation, unique lookup or cancellation of delayed requests. Inventory can return multiple handles for a label so duplicates are visible. Cleanup adopts only a matching live operation; orphan/deleted identities are destroyed with the same uncertainty rules.
 
 Providers unable to meet these guarantees are not advertised as supported managed environment backends. Start with a backend whose semantics can be demonstrated, rather than promising every old provider from the presence of an interface. Reuse the Harness definition's `supports_managed` distinction: connect-only providers cannot back managed templates or receive lifecycle calls; they use the registered handle through `open`.
 
@@ -99,7 +101,7 @@ Providers unable to meet these guarantees are not advertised as supported manage
 
 This iteration supports only the existing Harness `http_envd` provider. The operator deploys envd and supplies an HTTP(S) endpoint and credential. Control performs authorized registration; each executing worker connects directly through the HTTP adapter. The endpoint must be reachable from the service processes that use it. Reuse the existing EIP client and its transport/authentication policy; do not add a second protocol. Reverse WebSocket ingress, device pairing, connection tickets, Redis presence, reconnect takeover and the Control/Worker relay are out of scope. No tables, sweeps or extension hooks are reserved for them.
 
-The provider resource stores endpoint configuration and the encrypted, write-only credential; the existing `environments` row stores the registered device handle and native identity, with no template revision. Registration validates the remote identity outside a database transaction, then revalidates authority and provider configuration before recording it. Endpoint/native identity cannot silently retarget that environment; credential rotation follows the ordinary provider rules. Private-device ownership and frozen run mounts still apply. No envd-specific registration table is needed.
+The provider resource stores endpoint configuration and the encrypted, write-only credential; the existing `environments` row stores the registered device handle and native identity, with no template. Registration validates the remote identity outside a database transaction, then revalidates authority and provider configuration before recording it. Endpoint/native identity cannot silently retarget that environment; credential rotation follows the ordinary provider rules. Private-device ownership and frozen run mounts still apply. No envd-specific registration table is needed.
 
 HTTP envd is connect-only: the service neither creates the machine nor starts, stops or destroys the daemon. A registered device is `ready` for selection, which is not a promise of current network reachability. An authorized run opens its own adapter/Session against the registered identity; closing it releases those client resources without stopping the daemon or deleting files. An unreachable device produces `environment_unavailable` during preparation; it does not enter managed starting/stopping phases or trigger a replacement device. Retirement removes service access under the existing mount/reference rules without destroying remote infrastructure.
 
