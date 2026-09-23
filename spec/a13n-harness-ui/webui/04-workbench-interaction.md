@@ -8,6 +8,14 @@ The primary experience is doing work in a conversation. Configuration is availab
 
 The workbench uses the shared frontend design system with English interface text only. Controls describe user actions, such as Log in, Log out, Save changes, Connect account, and Reconnect, rather than internal credential-retention or publication operations. It has no language selector or translation runtime. Light and dark themes remain available; English-only interface text does not restrict the language of prompts, configuration content, names or comments.
 
+## Project Lead Entry
+
+When Sidekick is enabled, each configured Project pins one canonical Lead entry above its ordinary conversation list. There is no browser-local view switch or extra disclosure: opening the entry navigates directly to the conversation. The Project actions menu exposes **Enable Project Lead** or **Disable Project Lead**, reflecting persisted backend `lead_enabled`. The canonical Thread is not duplicated in the ordinary list. Existing search, pagination, ordinary creation, archive, and per-Thread execution controls remain available; direct conversation links do not redirect to the Lead.
+
+When the Project has no Lead, **Enable Project Lead** explicitly enables backend coordination, ensuring its identity and opening the existing `/threads/{id}` route without sending a prompt. Disabling Project Lead retains the pinned conversation but removes its role mark and introductory hint; re-enabling uses the same identity. Browsing, expanding Projects, and refetching are read-only. Disabling Sidekick hides the dedicated entry, role mark, and introductory hint; existing Threads and history remain accessible through ordinary navigation and archive controls. Re-enabling Sidekick restores the same canonical entry, including explicit Restore for an archived Lead; there is no replacement action. The shared selector projection exposes `sidekick_enabled` so navigation does not fetch configuration source files per Project.
+
+The entry uses a distinctive compass icon. While both Sidekick and Project Lead mode are enabled, a compact compass mark beside the conversation title identifies the Lead role independently from its editable title, without a repeated text badge. An empty enabled Lead shows a short static introductory hint, not a fabricated assistant message or a large icon panel. It reuses the ordinary conversation renderer, composer, result tracking, and pending-decision controls. The interface neither aggregates worker approvals nor invents Project-wide execution state.
+
 ## Entry and Navigation
 
 1. Open the instance URL and complete the existing key-entry flow if necessary.

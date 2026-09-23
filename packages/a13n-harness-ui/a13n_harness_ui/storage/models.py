@@ -101,6 +101,16 @@ class ProjectModelPreferenceRecord(Base):
     model_id: Mapped[str] = mapped_column(String(_ID), nullable=False)
 
 
+class ProjectLeadRecord(Base):
+    __tablename__ = "project_lead"
+
+    project_id: Mapped[str] = mapped_column(String(_ID), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
+    thread_id: Mapped[str] = mapped_column(
+        String(80), ForeignKey("thread.thread_id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+
+
 class ThreadRecord(Base):
     __tablename__ = "thread"
 

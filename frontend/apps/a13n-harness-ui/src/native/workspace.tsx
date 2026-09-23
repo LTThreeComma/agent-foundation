@@ -24,7 +24,12 @@ import {
   LinkSimple,
 } from "@phosphor-icons/react";
 import { ApiError, result, type Schema } from "../transport/client";
-import { useProjects, useStatus, useTransport } from "../transport/context";
+import {
+  useProjects,
+  useSelectors,
+  useStatus,
+  useTransport,
+} from "../transport/context";
 import { ErrorNotice, TextField } from "../shell/ui";
 import {
   FileBuffers,
@@ -47,6 +52,7 @@ import { ComposerDrafts } from "../conversations/composer";
 import { conversationTitle } from "../conversations/local-input";
 import { nativeLink, pageLink } from "../shell/page-links";
 import { OpenHostFile } from "../conversations/tool-call";
+import { LeadMark } from "../conversations/lead-icon";
 
 export function NativeWorkspace({
   children,
@@ -63,6 +69,7 @@ export function NativeWorkspace({
 }) {
   const { client } = useTransport();
   const projects = useProjects();
+  const selectors = useSelectors();
   const status = useStatus();
   const queries = useQueryClient();
   const buffers = useContext(FileBuffers);
@@ -505,6 +512,12 @@ export function NativeWorkspace({
       >
         <header className={styles.workToolbar}>
           {navigation}
+          {threadId &&
+            selectors.data?.sidekick_enabled === true &&
+            projects.data?.some(
+              (project) =>
+                project.lead_thread_id === threadId && project.lead_enabled,
+            ) && <LeadMark />}
           <h1 className={styles.workspaceTitle}>
             {threadId
               ? conversationTitle(

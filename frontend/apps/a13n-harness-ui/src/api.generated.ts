@@ -1121,6 +1121,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/lead": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ensure Project Lead */
+        post: operations["ensure_project_lead_api_projects__project_id__lead_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Set Project Lead Enabled */
+        patch: operations["set_project_lead_enabled_api_projects__project_id__lead_patch"];
+        trace?: never;
+    };
     "/api/threads/{thread_id}/decisions": {
         parameters: {
             query?: never;
@@ -3573,6 +3591,11 @@ export interface components {
             current: components["schemas"]["ThreadConfiguration"];
             replacement: components["schemas"]["ThreadConfiguration"];
         };
+        /** ProjectLeadUpdate */
+        ProjectLeadUpdate: {
+            /** Enabled */
+            enabled: boolean;
+        };
         /** ProjectPage */
         ProjectPage: {
             /**
@@ -3595,6 +3618,13 @@ export interface components {
             roots: string[];
             /** Last Active At */
             last_active_at?: string | null;
+            /** Lead Thread Id */
+            lead_thread_id?: string | null;
+            /**
+             * Lead Enabled
+             * @default false
+             */
+            lead_enabled?: boolean;
             defaults?: components["schemas"]["ProjectDefaults"];
         };
         /**
@@ -4592,6 +4622,11 @@ export interface components {
         };
         /** ThreadSelectorCatalog */
         ThreadSelectorCatalog: {
+            /**
+             * Sidekick Enabled
+             * @default false
+             */
+            sidekick_enabled?: boolean;
             /** Media Understanding */
             media_understanding?: {
                 [key: string]: string;
@@ -8250,6 +8285,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProjectSummary"][];
+                };
+            };
+        };
+    };
+    ensure_project_lead_api_projects__project_id__lead_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_project_lead_enabled_api_projects__project_id__lead_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectLeadUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

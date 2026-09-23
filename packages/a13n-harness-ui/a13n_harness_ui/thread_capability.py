@@ -8,7 +8,9 @@ from typing import Any, Literal, Protocol, cast
 
 from a13n_harness.context import AgentContext
 from a13n_harness.errors import DefinitionError
+from a13n_harness.input import RunInputValue
 from a13n_harness.tools import HarnessTool, HarnessToolMetadata, ToolOutputPolicy
+from a13n_logging import get_logger
 from pydantic import Field
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
@@ -20,7 +22,7 @@ from a13n_harness_ui.configuration.discovery import ResourceKind, resource_page
 from a13n_harness_ui.configuration_inspection import ThreadConfigurationInspection
 from a13n_harness_ui.errors import ConfigurationError, HarnessUiError, ThreadError
 from a13n_harness_ui.root_run import RootRunCoordinator
-from a13n_harness_ui.surfaces import NewThreadDefaults, RunModelOverrides, ThreadSummary
+from a13n_harness_ui.surfaces import NewThreadDefaults, RootOperationView, RunModelOverrides, ThreadSummary
 from a13n_harness_ui.thread_projection import ThreadProjectionService
 
 _THREAD_CAPABILITY_ID = "a13n.harness-ui.thread-collaboration"
@@ -184,6 +186,17 @@ class ThreadToolController:
             "Sending a message does not wait for an answer; do not invent a reply. "
             "Do not send acknowledgement-only replies or delegate the same task back to its requester."
         )
+        if (
+            source_composition is not None
+            and source_composition.is_project_lead
+            and source_composition.webui_sidekick is not None
+        ):
+            context += (
+                " The requester is the Project Lead coordinating this work. "
+                "Use ordinary send_thread_message messages for coordination questions, not ask_user_question. "
+                "If its answer is required, explain the blocker and finish this turn; its reply can start another Run. "
+                "Existing tool approvals still apply; ordinary messages cannot grant a denied approval."
+            )
         try:
             receipt = await self._root_runs.submit_prompt(
                 thread_id=created.thread_id,
@@ -196,14 +209,46 @@ class ThreadToolController:
             return {**_failure(exc, "thread_run_failed"), "thread_id": created.thread_id}
         return {"ok": True, "thread_id": created.thread_id, "receipt": receipt.model_dump(mode="json")}
 
+    async def notify_project_lead(self, project_id: str | None, operation: RootOperationView) -> None:
+        """Route one settled root operation, without a queue, retries or worker ownership."""
+        source = await self._configurations.current()
+        if project_id is None or source is None or source.document.webui.sidekick is None:
+            return
+        project = next((item for item in await self._projections.projects() if item.project_id == project_id), None)
+        if (
+            project is None
+            or not project.lead_enabled
+            or project.lead_thread_id is None
+            or project.lead_thread_id == operation.receipt.thread_id
+        ):
+            return
+        message = (
+            f"Host notification: Thread {operation.receipt.thread_id} ended a root operation "
+            f"in Project {project_id}. Receipt: {operation.receipt.receipt_id}. "
+            f"Run: {operation.run_id or 'not started'}. Status: {operation.status.value}. "
+            "Use get_thread to inspect its saved results and reconcile your tasks and notes. "
+            "This lifecycle notice is separate from any worker report; an ended operation does not prove "
+            "the task succeeded. Do not send an acknowledgement or repeat an already integrated report."
+        )
+        result = await self._run_or_steer(
+            thread_id=project.lead_thread_id,
+            prompt=[TextContent(message, metadata={"display": False})],
+        )
+        if not result["ok"]:
+            get_logger(__name__).info(
+                "Project Lead did not accept terminal notification: %s", operation.receipt.receipt_id
+            )
+
     async def send_thread_message(self, *, source_thread_id: str, thread_id: str, message: str) -> dict[str, Any]:
+        source = await self._projections.detail(source_thread_id)
+        return await self._run_or_steer(thread_id=thread_id, prompt=_thread_input(source.thread, message))
+
+    async def _run_or_steer(self, *, thread_id: str, prompt: RunInputValue) -> dict[str, Any]:
         detail = await self._projections.detail(thread_id)
         if detail.thread.parent_thread_id is not None:
             raise ThreadError("Child Threads use parent-scoped delegation controls.", code="child_thread_scoped")
         if detail.thread.archived:
             raise ThreadError("An archived Thread cannot receive messages.", code="thread_archived")
-        source = await self._projections.detail(source_thread_id)
-        prompt = _thread_input(source.thread, message)
         operation = await self._root_runs.active(thread_id)
         if operation is not None:
             # Resolve once. A rejected steer never falls through into a different operation.
@@ -267,15 +312,59 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
             "A positive result means acceptance only, not processing or saved delivery. A rejected or uncertain send "
             "must be reconciled, not blindly retried. Do not create acknowledgement loops or delegate a task back to its requester."
         )
+        is_lead = (
+            self.composition is not None
+            and self.composition.is_project_lead
+            and self.composition.webui_sidekick is not None
+        )
+        if is_lead:
+            instructions += (
+                "\nYou are this Project's Lead: an ordinary root Thread that helps the user plan work, "
+                "coordinate independent worker Threads, and integrate verified results. "
+                "Keep the user's objective and authorization in view. At the start of each Run, recover relevant "
+                "open work from the continuation summary and projected tasks and notes; use note_get for omitted "
+                "notes when available. Before planning new work or reporting progress, use get_thread(thread_id=...) "
+                "to check the known workers' current status and saved results. Use list_threads filtered to the "
+                "captured Project when you need to rediscover relevant conversations; do not assume every Project "
+                "Thread is your worker. Reuse existing work rather than creating duplicates. An inactive worker "
+                "is not necessarily successful: inspect its outcome, blockers, and validation before marking work done. "
+                "When notes tools are available, maintain a compact coordination note with each delegated objective, "
+                "worker Thread ID, last verified status, blocker, and next action. Treat it as an index, not live truth; "
+                "refresh stale observations with get_thread. Use task tools when available to track meaningful "
+                "deliverables and reconcile their status after verification, without copying whole worker transcripts. "
+                "Before summarize, reconcile tasks and notes. Use the summary for the user's objective, decisions, "
+                "verified outcomes, unresolved work, and immediate next step; do not duplicate the separately "
+                "projected notes and tasks. Never assume an unsaved plan will survive a handoff. "
+                "Answer workers through send_thread_message, using their source Thread IDs. "
+                "Ask ordinary coordination questions in text, not ask_user_question. When waiting for an answer, "
+                "state what is blocked and finish the turn; an incoming message can start another Run. "
+                "While Project Lead and Sidekick are enabled, the Host attempts to run or steer this Thread "
+                "when another root Thread in this Project ends an operation, including failure, cancellation "
+                "or suspension. These lifecycle notices are separate from worker reports. On receipt, inspect "
+                "the worker's saved results and reconcile tasks and notes; do not acknowledge the notice or "
+                "repeat an already integrated report. There is no background polling, durable notification queue, "
+                "retry or guaranteed delivery. Check progress at meaningful points while executing. "
+                "If only waiting remains, record the pending work and end the turn. A Host notification, "
+                "worker report or new user message may start another Run; do not promise a guaranteed wake-up. "
+                "Do not claim a worker finished from an admission receipt. "
+                "Existing tool approvals and pending-decision restrictions still apply; messages do not override denial. "
+                "Stopping this Thread does not stop other Threads."
+            )
         if self.composition is not None and (sidekick := self.composition.webui_sidekick) is not None:
             agent_id = sidekick.agent or self.composition.root.source_id
             model_selection = f", model_id={sidekick.model!r}" if sidekick.model is not None else ""
             instructions += (
-                "\nSidekick is enabled. Use subagents for parallel research, exploration, and other bounded tasks "
+                "\nSidekick is enabled. Create independent worker Threads for bounded parts of the user's "
+                "authorized Project work when useful. Use subagents for short, scoped work you will integrate "
+                "in this Run. For independent work, use "
+                if is_lead
+                else "\nSidekick is enabled. Use subagents for parallel research, exploration, and other bounded tasks "
                 "whose results you will integrate into the current conversation. If no suitable subagent is available, "
                 "keep that work in the current Thread rather than creating a Sidekick as a fallback. "
                 "Create a separate Thread only for coordination work that needs human attention, decisions, or "
                 "follow-up in its own conversation. For that work, use "
+            )
+            instructions += (
                 "create_thread(prompt=...). The Host applies the captured Sidekick defaults "
                 f"(Agent {agent_id!r}{model_selection}) when arguments are omitted. "
                 "Its configured Model becomes the new Thread's default for later turns. "

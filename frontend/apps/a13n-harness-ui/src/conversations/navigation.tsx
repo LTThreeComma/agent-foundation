@@ -25,11 +25,13 @@ import {
   ArrowDown,
   PencilSimpleIcon,
 } from "@phosphor-icons/react";
-import { useProjects } from "../transport/context";
+import { useProjects, useSelectors } from "../transport/context";
 import type { Schema } from "../transport/client";
 import { ErrorNotice } from "../shell/ui";
 import { useThread, useThreads } from "./queries";
 import { useProjectExpansion, useProjectOrder } from "./project-order";
+import { ProjectLeadEntry, useProjectLeadMode } from "./project-lead";
+import { LeadIcon } from "./lead-icon";
 import { NewProject } from "./new-project";
 import { RenameProject } from "../configuration/rename-project";
 import { newConversationPath } from "./new-conversation";
@@ -266,6 +268,12 @@ function ProjectGroup({
   const navigate = useNavigate();
   const results = useResults();
   const projects = useProjects();
+  const selectors = useSelectors();
+  const project = projects.data?.find(
+    (item) => item.project_id === group.projectId,
+  );
+  const hasLead = !!project && selectors.data?.sidekick_enabled === true;
+  const leadMode = useProjectLeadMode(group.projectId);
   const belongs = (thread: Schema<"ThreadSummary">) => {
     const project = thread.configuration.project_id;
     return group.scope === "projectless"
@@ -343,6 +351,7 @@ function ProjectGroup({
     if (row.thread.archived) continue;
     const unread = results.tracker?.isUnread(row.thread.thread_id);
     if (unread) unreadCount++;
+    if (hasLead && row.thread.thread_id === project?.lead_thread_id) continue;
     (row.thread.root_activity.state !== "inactive"
       ? activeRows
       : unread
@@ -432,6 +441,17 @@ function ProjectGroup({
                 <DotsThree />
               </MenuTrigger>
               <MenuPopup align="start" side="right">
+                {hasLead && project && (
+                  <MenuItem
+                    disabled={leadMode.isPending}
+                    onClick={() => leadMode.mutate(!project.lead_enabled)}
+                  >
+                    <LeadIcon size={16} />
+                    {project.lead_enabled
+                      ? "Disable Project Lead"
+                      : "Enable Project Lead"}
+                  </MenuItem>
+                )}
                 <MenuItem onClick={rename}>
                   <PencilSimpleIcon />
                   Rename project
@@ -471,55 +491,66 @@ function ProjectGroup({
         </div>
       </div>
       <div hidden={!expanded} className={styles.groupThreads}>
-        {rows.map((row, index) => (
-          <Fragment key={row.thread.thread_id}>
-            {activeRows.length > 0 && index === 0 && (
-              <small className={styles.emptyGroup}>
-                Running · {activeRows.length}
-              </small>
-            )}
-            {unreadRows.length > 0 && index === activeRows.length && (
-              <small className={styles.emptyGroup}>
-                New results · {unreadRows.length}
-              </small>
-            )}
-            {recentRows.length > 0 &&
-              (activeRows.length > 0 || unreadRows.length > 0) &&
-              index === activeRows.length + unreadRows.length && (
-                <small className={styles.emptyGroup}>Recent</small>
+        {hasLead && project && (
+          <ProjectLeadEntry
+            project={project}
+            presence={presence}
+            enabled={enabled && expanded}
+            mode={leadMode}
+          />
+        )}
+        <ErrorNotice error={leadMode.error} />
+        <div>
+          {rows.map((row, index) => (
+            <Fragment key={row.thread.thread_id}>
+              {activeRows.length > 0 && index === 0 && (
+                <small className={styles.emptyGroup}>
+                  Running · {activeRows.length}
+                </small>
               )}
-            <ThreadRow row={row} presence={presence} />
-          </Fragment>
-        ))}
-        {expanded && !rows.length && !list.data && list.isPending && (
-          <div
-            role="status"
-            aria-label="Loading conversations"
-            aria-busy="true"
-            className={styles.initialLoading}
-          >
-            <span>Loading conversations…</span>
-          </div>
-        )}
-        {list.isSuccess &&
-          !list.isPreviousData &&
-          !rows.length &&
-          !activeRows.length && (
-            <small className={styles.emptyGroup}>No conversations yet</small>
+              {unreadRows.length > 0 && index === activeRows.length && (
+                <small className={styles.emptyGroup}>
+                  New results · {unreadRows.length}
+                </small>
+              )}
+              {recentRows.length > 0 &&
+                (activeRows.length > 0 || unreadRows.length > 0) &&
+                index === activeRows.length + unreadRows.length && (
+                  <small className={styles.emptyGroup}>Recent</small>
+                )}
+              <ThreadRow row={row} presence={presence} />
+            </Fragment>
+          ))}
+          {expanded && !rows.length && !list.data && list.isPending && (
+            <div
+              role="status"
+              aria-label="Loading conversations"
+              aria-busy="true"
+              className={styles.initialLoading}
+            >
+              <span>Loading conversations…</span>
+            </div>
           )}
-        <ErrorNotice error={list.error} retry={() => void list.refetch()} />
-        {list.hasNextPage && (
-          <Button
-            variant="ghost"
-            size="sm"
-            loading={list.isFetchingNextPage}
-            onClick={() => void list.fetchNextPage()}
-            aria-label={`Show more conversations in ${group.name}`}
-            className={styles.moreConversations}
-          >
-            More
-          </Button>
-        )}
+          {list.isSuccess &&
+            !list.isPreviousData &&
+            !rows.length &&
+            !project?.lead_thread_id && (
+              <small className={styles.emptyGroup}>No conversations yet</small>
+            )}
+          <ErrorNotice error={list.error} retry={() => void list.refetch()} />
+          {list.hasNextPage && (
+            <Button
+              variant="ghost"
+              size="sm"
+              loading={list.isFetchingNextPage}
+              onClick={() => void list.fetchNextPage()}
+              aria-label={`Show more conversations in ${group.name}`}
+              className={styles.moreConversations}
+            >
+              More
+            </Button>
+          )}
+        </div>
       </div>
     </section>
   );
