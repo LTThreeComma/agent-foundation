@@ -35,14 +35,14 @@ flowchart TB
     end
 
     subgraph Service[a13n-service]
-        Gateway[Protocol Gateway]
+        Gateway[HTTP API]
         Control[Control plane]
         Definitions[AgentRevisions, Skill revisions, Assets, Model Providers, Models, and Web Providers]
-        Connectivity[Connectivity resources]
+        Connectivity[Connections and connector providers]
         Lifecycle[Durable Runs and RunAttempts]
         Worker[Worker]
         Reconstruct[Trusted reconstruction adapters]
-        A13nMCP[Worker-local a13n MCP groups]
+        A13nMCP[Built-in Service toolsets]
     end
 
     subgraph LocalUI[a13n-harness-ui]
@@ -129,9 +129,9 @@ Dependency direction is one-way: Hosts embed Harness and can use its Environment
 | `a13n-harness-ui`      | Human-editable multi-file resources, trusted Capability and extension catalogs, Projects, Full Control and Sandbox execution modes, Host-path-preserving and virtual Environment layouts, sticky root and child Thread configuration, immutable per-Run composition, Host Environment state, one process-local `HarnessUiApp`, full-terminal CLI, foreground WebUI, and reusable adapter APIs | Durable root-input acceptance, distributed execution, worker takeover, multi-tenant authorization, or another Agent loop                            |
 | `a13n-envd-client`     | Generated EIP control/data models, codecs, stubs, async file transfer, and bounded transport/session runtime                                                                                                                                                                                                                                                                                  | Harness routing, product-user authorization, executable discovery/download/launch, provider provisioning, Host lifecycle                            |
 | `a13n-envd`            | Client-neutral EIP Environment hosting, raw file transfer, operations, receipts, disk-backed command output, daemon generation, Session ownership, and bounded resource collection                                                                                                                                                                                                            | Agent loop, browser/product authentication, arbitrary URL fetch, durable execution, model policy                                                    |
-| a13n SDKs              | Language-typed access to the public a13n Service Native `/api` contract, including streams and notifications                                                                                                                                                                                                                                                                                  | Service internals, standard-protocol replacement, product policy, or durable lifecycle authority                                                    |
+| a13n SDKs              | Language-typed access to the public a13n Service Native `/api` contract, including the thread stream                                                                                                                                                                                                                                                                                          | Service internals, standard-protocol replacement, product policy, or durable lifecycle authority                                                    |
 | `a13n-service-cli`     | Cross-platform command-line interaction with public a13n Service operations through the Rust SDK                                                                                                                                                                                                                                                                                              | A second HTTP client, service process management, persistence, queues, migrations, or infrastructure control                                        |
-| `a13n-service`         | Managed resources, Environment Providers/templates/actual targets and lifecycle, immutable Run selections, installed plugin configuration, durable Runs/Attempts, Protocol Gateway, connectivity, events and observability                                                                                                                                                                    | Pydantic Agent loop, live Python object persistence, third-party credentials held by external integration services, and telemetry storage/authority |
+| `a13n-service`         | Tenancy, managed resources, Environment Providers/templates/instances and lifecycle, immutable Run selections, installed plugin configuration, durable Runs/Attempts, connections, the HTTP API, webhooks and trace queries                                                                                                                                                                   | Pydantic Agent loop, live Python object persistence, third-party credentials held by external integration services, and telemetry storage/authority |
 | Product                | Caller authentication, business policy, user experience, and final delivery                                                                                                                                                                                                                                                                                                                   | Harness internals and provider implementation                                                                                                       |
 
 ## Harness Foundation
@@ -187,9 +187,9 @@ Provider-defined portable data enters only `HarnessState.environment_states`, a 
 
 ## a13n Client Surfaces
 
-a13n Service SDKs, the remote CLI, and the browser management application operate only through the public `/api` namespace. The Agent-facing a13n MCP consists of in-process RunAttempt-bound tool groups and exposes no a13n SDK or network product API. The language SDKs provide idiomatic typed resource objects and bounded conveniences over existing Service concepts, with complete low-level protocol access for advanced use. [Consumer transition](a13n-service/11-transition.md#consumers) owns migration to the new contract; independent SDK repositories own their public APIs and releases. Applications retain business orchestration and cross-Run completion policy. The `a13n-service-cli` executable is a user-facing composition layer above the Rust SDK and does not duplicate HTTP serialization, authentication transport, retries, or service models.
+a13n Service SDKs, the remote CLI, and the browser management application operate only through the public `/api` namespace. Agent-facing Service tools are in-process built-in toolsets bound to one RunAttempt and expose no a13n SDK or network product API. The language SDKs provide idiomatic typed resource objects and bounded conveniences over existing Service concepts, with complete low-level protocol access for advanced use. Independent SDK repositories own their public APIs and releases. Applications retain business orchestration and cross-Run completion policy. The `a13n-service-cli` executable is a user-facing composition layer above the Rust SDK and does not duplicate HTTP serialization, authentication transport, retries, or service models.
 
-The accepted Service API defines native HTTP and lifecycle event contracts; the current foundation implements operational probes only. Hosted AG-UI and A2A adapters are excluded; shared protocol adapters remain available to other Hosts.
+The Service API is native HTTP with a provisional thread stream and signed lifecycle webhooks ([API](a13n-service/10-api.md)). Hosted AG-UI and A2A adapters are excluded; shared protocol adapters remain available to other Hosts.
 
 A CLI network command and its backing SDK operation enter the platform together with the corresponding real service API and end-to-end behavior. The CLI does not reserve unsupported commands as placeholders. Service-process startup, migrations, databases, Redis, queues, containers, Kubernetes, and other operator internals remain owned by a13n Service deployment surfaces rather than the remote client.
 
@@ -197,7 +197,7 @@ The CLI source, workspace isolation, validation, and binary-only release channel
 
 ## Hosted Service
 
-The new Service is a managed-agent runtime organized around tenancy, resources, runs and providers. [The Service contract](a13n-service/README.md) owns acceptance, claim, execution, sealing, checkpoint/display durability, workspace authorization and retained provider capabilities. [Transition](a13n-service/11-transition.md) owns historical isolation and deployment switching. The old Service is historical reference only.
+The a13n Service is a managed-agent runtime organized around tenancy, resources, runs and providers. [The Service contract](a13n-service/README.md) owns workspace authorization, configured resources, acceptance, claim, execution, sealing, checkpoint and display durability, delivery and provider integration; [its overview](a13n-service/00-overview.md#boundaries) states what it does not provide.
 
 ## Deployment Profiles
 
@@ -205,8 +205,8 @@ The new Service is a managed-agent runtime organized around tenancy, resources, 
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | Embedded            | Application-selected                                                                                                                                                           | Harness in product process                                               |
 | Local Harness UI    | Human-editable YAML/Markdown resources, SQLite mutable heads, and immutable Run-composition, continuation, Skill, and Environment-state files; expected-digest/version updates | Harness plus fresh Environment adapters and process-local async children |
-| Minimal service     | PostgreSQL, in-memory Redis, and local objects                                                                                                                                 | Control and worker together in one process                               |
-| Distributed service | PostgreSQL, real Redis, and shared object storage                                                                                                                              | Separately scalable control, worker, and connectivity roles              |
+| Minimal service     | PostgreSQL, Redis, and local objects                                                                                                                                           | The `all` role: control and worker together in one process               |
+| Distributed service | PostgreSQL, Redis, and shared S3-compatible object storage                                                                                                                     | Separately scalable `control` and `worker` roles                         |
 
 a13n Service configuration, role ownership, dependency requirements, and readiness are defined by [Runtime](a13n-service/09-runtime.md). [Facts and delivery](a13n-service/07-facts-and-delivery.md) owns durable state and objects; [layout](a13n-service/02-layout.md) and [runtime](a13n-service/09-runtime.md) own distribution composition and migration authority.
 
@@ -232,7 +232,7 @@ A Host definition revision contains only serializable Host data, exact locks, an
 
 ## Service API Boundaries
 
-[The API contract](a13n-service/10-api.md) owns public management, submission, observation, feedback and MCP. Hosted AG-UI, A2A, Bot integrations and reverse WebSocket envd are excluded. Service SDK and remote CLI repositories own their consumers of the exported contract.
+[The API contract](a13n-service/10-api.md) owns public management, submission, observation and resume. Hosted AG-UI, A2A, Bot integrations and reverse WebSocket envd are excluded. Service SDK and remote CLI repositories own their consumers of the exported contract.
 
 ## Extension Model
 
@@ -257,11 +257,11 @@ flowchart LR
     Agent --> Provider[Feature provider]
 ```
 
-Installed plugins and native objects are trusted in-process code. Harness Plugin, Environment Run Extension, Connectivity adapter, and Provider package presence is only availability; an operator explicitly selects trusted implementations before use. Capabilities remain native Agent features rather than a fourth Harness plugin plane. Provider-constructed Environment adapters, Connectivity adapters, and directly constructed code-first objects enter their owning concrete composition paths. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or runtime package-installation system. Service's [Harness plugin integration](a13n-service/08-providers.md) and selected [distribution providers](a13n-service/02-layout.md) are packaged in its build artifact and update through image rolling deployment; their catalogs and runtimes remain distinct. Retained Runs preserve normalized configuration and state while allowing compatible new plugin code.
+Installed plugins and native objects are trusted in-process code. Harness Plugin, Environment Run Extension, Connectivity adapter, and Provider package presence is only availability; an operator explicitly selects trusted implementations before use. Capabilities remain native Agent features rather than a fourth Harness plugin plane. Provider-constructed Environment adapters, Connectivity adapters, and directly constructed code-first objects enter their owning concrete composition paths. Untrusted or independently governed behavior belongs behind feature-specific protocols. The core defines no universal remote-plugin or runtime package-installation system. Service's [Harness plugin integration](a13n-service/08-providers.md#installed-harness-plugins) and selected [distribution providers](a13n-service/08-providers.md#registry) are packaged in its build artifact and update through image rolling deployment; their catalogs and runtimes remain distinct. Retained Runs preserve normalized configuration and state while allowing compatible new plugin code.
 
 ## Observability and Cost
 
-Pydantic AI instrumentation owns Agent/model/tool spans. Harness features add spans only for Harness-owned context, plugins, recovery, state, Environment, and delegation work. Service adds durable lifecycle, queue, child, client-delivery, and Connectivity spans.
+Pydantic AI instrumentation owns Agent/model/tool spans. Harness features add spans only for Harness-owned context, plugins, recovery, state, Environment, and delegation work. Service adds no spans of its own: it exports Harness spans to the operator's trace backend with tenant and attempt correlation attributes ([runtime](a13n-service/09-runtime.md#observability)).
 
 `RunUsage` is a process-local accumulator. The Harness captures one current or explicitly pinned build-time pricing policy and records its revision under the [cost calculation contract](a13n-harness/12-events-observability-and-usage.md#cost-calculation); Hosts own durable deduplication, cross-run aggregation, negotiated adjustments, budgets, billing, and payment.
 

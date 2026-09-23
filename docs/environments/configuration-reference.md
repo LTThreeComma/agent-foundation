@@ -25,7 +25,7 @@ All six cloud providers use the same configuration, backend, and private-credent
 | `shell_profiles`           | false    | array of DirectLocalShellProfile | default=[]                              |
 | `allowed_executables`      | false    | array of string                  | uniqueItems=true; default=[]            |
 | `inherit_environment`      | false    | boolean                          | default=false                           |
-| `allowed_environment_keys` | false    | array of string or null          | default=[]                              |
+| `allowed_environment_keys` | false    | array of string or null          | uniqueItems=true; default=[]            |
 | `allowed_ports`            | false    | array of integer                 | uniqueItems=true; default=[]            |
 | `max_value_bytes`          | false    | integer                          | exclusiveMinimum=0; default=67108864    |
 | `max_concurrent_processes` | false    | integer                          | exclusiveMinimum=0; default=128         |
@@ -54,12 +54,12 @@ All six cloud providers use the same configuration, backend, and private-credent
 
 One fixed-cwd Session selection; never a daemon launch policy.
 
-| Field               | Required | Type / choices                  | Constraints and default  |
-| ------------------- | -------- | ------------------------------- | ------------------------ |
-| `egress`            | false    | EnvdEgressConfiguration or null | default=null             |
-| `expected_boundary` | false    | EnvdBoundaryRequirement or null | default=null             |
-| `working_directory` | false    | string or null                  | default=null             |
-| `required_methods`  | false    | array of string                 | maxItems=128; default=[] |
+| Field               | Required | Type / choices                  | Constraints and default                  |
+| ------------------- | -------- | ------------------------------- | ---------------------------------------- |
+| `egress`            | false    | EnvdEgressConfiguration or null | default=null                             |
+| `expected_boundary` | false    | EnvdBoundaryRequirement or null | default=null                             |
+| `working_directory` | false    | string or null                  | format="eip-absolute-path"; default=null |
+| `required_methods`  | false    | array of string                 | maxItems=128; default=[]                 |
 
 ## `AllowlistDestinations`
 
@@ -159,7 +159,7 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `execution`                   | false    | EnvdExecutionConfiguration     | —; default from model factory                       |
 | `sandbox`                     | false    | SandboxPolicy                  | —; default from model factory                       |
 | `egress`                      | false    | EnvdNetworkConfiguration       | —; default from model factory                       |
-| `default_working_directory`   | false    | string or null                 | default=null                                        |
+| `default_working_directory`   | false    | string or null                 | format="path"; default=null                         |
 | `directory_discovery`         | false    | boolean                        | default=true                                        |
 | `trusted_executable_roots`    | false    | array of string                | default=[]                                          |
 | `shell_profiles`              | false    | array of LocalEnvdShellProfile | default=[]                                          |
@@ -171,11 +171,11 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 
 ## `EnvdExecutionConfiguration`
 
-| Field        | Required | Type / choices  | Constraints and default |
-| ------------ | -------- | --------------- | ----------------------- |
-| `uid`        | false    | integer or null | default=null            |
-| `gid`        | false    | integer or null | default=null            |
-| `allow_sudo` | false    | boolean         | default=true            |
+| Field        | Required | Type / choices  | Constraints and default                              |
+| ------------ | -------- | --------------- | ---------------------------------------------------- |
+| `uid`        | false    | integer or null | minimum=0; exclusiveMaximum=4294967295; default=null |
+| `gid`        | false    | integer or null | minimum=0; exclusiveMaximum=4294967295; default=null |
+| `allow_sudo` | false    | boolean         | default=true                                         |
 
 ## `EnvdNetworkConfiguration`
 
@@ -200,14 +200,14 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `image`                       | false    | string                            | minLength=1; maxLength=1024; default="ghcr.io/converge-ai-labs/a13n-docker-environment:dev" |
 | `mounts`                      | false    | array of DockerMountConfiguration | default=[]                                                                                  |
 | `environment`                 | false    | object                            | —; default from model factory                                                               |
-| `init_script`                 | false    | string or null                    | format="multiline"; default=null                                                            |
+| `init_script`                 | false    | string or null                    | maxLength=1048576; format="multiline"; default=null                                         |
 | `disable_network`             | false    | boolean                           | default=false                                                                               |
-| `user`                        | false    | string or null                    | default=null                                                                                |
+| `user`                        | false    | string or null                    | minLength=1; maxLength=128; default=null                                                    |
 | `shell`                       | false    | string                            | default="/bin/sh"                                                                           |
 | `python`                      | false    | string                            | default="python3"                                                                           |
-| `cpus`                        | false    | number or null                    | default=null                                                                                |
-| `memory_gb`                   | false    | number or null                    | default=null                                                                                |
-| `pids_limit`                  | false    | integer or null                   | default=null                                                                                |
+| `cpus`                        | false    | number or null                    | minimum=0.001; default=null                                                                 |
+| `memory_gb`                   | false    | number or null                    | minimum=0.006291456; default=null                                                           |
+| `pids_limit`                  | false    | integer or null                   | exclusiveMinimum=0; default=null                                                            |
 | `stop_grace_seconds`          | false    | integer                           | minimum=0; maximum=300; default=10                                                          |
 | `request_timeout_seconds`     | false    | integer                           | maximum=3600; exclusiveMinimum=0; default=60                                                |
 | `max_file_bytes`              | false    | integer                           | exclusiveMinimum=0; default=16777216                                                        |
@@ -253,7 +253,7 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `max_file_bytes`          | false    | integer        | maximum=67108864; exclusiveMinimum=0; default=16777216 |
 | `max_query_entries`       | false    | integer        | maximum=100000; exclusiveMinimum=0; default=10000      |
 | `max_output_bytes`        | false    | integer        | maximum=16777216; exclusiveMinimum=0; default=1048576  |
-| `snapshot`                | false    | string or null | default=null                                           |
+| `snapshot`                | false    | string or null | maxLength=256; default=null                            |
 | `cpu`                     | false    | integer        | minimum=1; maximum=32; default=2                       |
 | `memory`                  | false    | integer        | minimum=1; maximum=128; default=4                      |
 | `disk`                    | false    | integer        | minimum=1; maximum=1024; default=10                    |
@@ -300,7 +300,7 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `max_file_bytes`          | false    | integer        | maximum=67108864; exclusiveMinimum=0; default=16777216 |
 | `max_query_entries`       | false    | integer        | maximum=100000; exclusiveMinimum=0; default=10000      |
 | `max_output_bytes`        | false    | integer        | maximum=16777216; exclusiveMinimum=0; default=1048576  |
-| `region`                  | false    | string or null | default=null                                           |
+| `region`                  | false    | string or null | maxLength=64; default=null                             |
 
 ## `RunloopEnvironmentConfiguration`
 
@@ -313,18 +313,18 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `max_file_bytes`          | false    | integer                                          | maximum=67108864; exclusiveMinimum=0; default=16777216 |
 | `max_query_entries`       | false    | integer                                          | maximum=100000; exclusiveMinimum=0; default=10000      |
 | `max_output_bytes`        | false    | integer                                          | maximum=16777216; exclusiveMinimum=0; default=1048576  |
-| `blueprint_id`            | false    | string or null                                   | default=null                                           |
+| `blueprint_id`            | false    | string or null                                   | maxLength=128; default=null                            |
 | `resource_size`           | false    | "X_SMALL", "SMALL", "MEDIUM", "LARGE", "X_LARGE" | default="SMALL"                                        |
 | `idle_timeout_seconds`    | false    | integer                                          | minimum=300; maximum=172800; default=3600              |
 
 ## `RemoteEnvdEnvironmentConfiguration`
 
-| Field               | Required | Type / choices                  | Constraints and default  |
-| ------------------- | -------- | ------------------------------- | ------------------------ |
-| `egress`            | false    | EnvdEgressConfiguration or null | default=null             |
-| `expected_boundary` | false    | EnvdBoundaryRequirement or null | default=null             |
-| `working_directory` | false    | string or null                  | default=null             |
-| `required_methods`  | false    | array of string                 | maxItems=128; default=[] |
+| Field               | Required | Type / choices                  | Constraints and default                  |
+| ------------------- | -------- | ------------------------------- | ---------------------------------------- |
+| `egress`            | false    | EnvdEgressConfiguration or null | default=null                             |
+| `expected_boundary` | false    | EnvdBoundaryRequirement or null | default=null                             |
+| `working_directory` | false    | string or null                  | format="eip-absolute-path"; default=null |
+| `required_methods`  | false    | array of string                 | maxItems=128; default=[]                 |
 
 ## `HostLocalProviderConfiguration`
 

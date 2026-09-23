@@ -1,238 +1,222 @@
 # Layout and naming
 
+This chapter owns the package tree of `packages/a13n-service`, the import direction and the contracts that check it, the conventions every service function follows, naming, object-ID prefixes and the error codes. [DEVELOPMENT.md](../../DEVELOPMENT.md#database-sessions-and-transactions) owns the repository-wide engineering rules these build on: async I/O, short sessions and transactions, SQL operation design, migrations and logging.
+
 ## Package tree
 
 ```
 a13n_service/
-  app.py              build_app(distribution): routers, tables, sweeps, providers, in one place
-  cli.py              `a13n-service run --role all|control|worker`, `migrate`, `bootstrap`
-  settings.py         Settings, one section per concern
-  distribution.py     Distribution: what a build contributes
+  app.py              build_app(distribution, role=..., settings=...): the runtime, routers and background tasks of one role
+  cli.py              `a13n-service run | migrate | bootstrap | user disable | user enable`
+  settings.py         Settings: one section per concern, plus the sections a distribution declares
+  distribution.py     Distribution: what a build contributes; OSS, the built-in distribution
 
-  infra/
-    db.py             Base, column mixins, transaction(), lock(), advisory_lock()
-    ids.py            new_object_id("run") -> "run_7e2a9c0d4b6f1835a8c1d902ef47"
-    clock.py          application timestamps; lease authority uses PostgreSQL clock_timestamp()
-    errors.py         ServiceError and the code list
-    http.py           pagination, If-Match preconditions, error envelope
-    objects/          object-store contract and local/S3 implementations
-      interface.py    owner-named keys, create-only writes, reads, prefix listing and deletion
-      local.py
-      s3.py
-    redis.py          client, capped stream append/read and the claim wakeup marker
-    audit.py          audit_events table, record()
-    outbox.py         outbox table, enqueue(), claim(), settle()
-    sweeps.py         bounded sweep scheduling and explicit coordination
+  infra/              shared mechanisms without business rules
+    db.py  ids.py  errors.py  http.py  ingress.py  cursors.py  labels.py  crypto.py
+    audit.py  outbox.py  sweeps.py  redis.py  outbound.py  images.py  telemetry.py
+    objects/          interface.py  local.py  s3.py
 
-  tenancy/
-    organizations.py  workspaces.py  principals.py  credentials.py  invitations.py  grants.py
-                      (credentials.py holds the passwords, api_keys and tokens tables)
-    authenticate.py   Authenticator protocol; the local password/session/API-key implementation
-    authorize.py      authorize(principal, resource, verb); roles
-    routes.py
+  tenancy/            who is asking and what they may do
+    tables.py         organizations, workspaces, principals, passwords, api_keys, tokens, grants, invitations
+    access.py  authenticate.py  authorize.py  credentials.py  bootstrap.py  expiry.py  mail.py
+    organizations.py  workspaces.py  users.py  principals.py  service_accounts.py  api_keys.py
+    grants.py  invitations.py  audit.py
+    requests.py  schemas.py  routes.py  organization_routes.py  member_routes.py
 
-  resources/
-    revisions.py      shared helpers for revisioned kinds: add_revision(), set_default()
-    agents/  skills/  environment_templates/  environment_providers/
-    model_providers/  models/  web_providers/  connector_providers/
-    connections/  secrets/  assets/  subscriptions/
-                      each package: tables.py  schemas.py  service.py  routes.py
+  resources/          what a tenant configures
+    revisions.py      rules every revisioned kind shares
+    rows.py           rules every kind's rows share: scoped lookup, partial change, audit and key collisions
+    requests.py       the runtime dependency resource routes use
+    agents/           tables  schemas  service  routes  validation  definition  toolsets  assistant
+    skills/           tables  schemas  service  routes  package  content  github  pins
+    providers/        tables (all four provider tables)  schemas  service  routes  scope  probe
+    models/           tables  schemas  service  routes  catalog  media  runtime
+    environment_templates/   tables  schemas  service  routes
+    connector_providers/     schemas  routes  catalog
+    web_providers/    runtime
+    connections/      tables  schemas  service  routes  access  authorization  oauth  account  credentials
+                      operations  discovery  headers  runtime
+    secrets/          tables  schemas  service  routes
+    uploads/          schemas  service  routes
+    assets/           tables  schemas  service  routes
+    subscriptions/    tables  schemas  service  routes  delivery
 
-  runs/
-    sessions.py  threads.py  inbox.py  runs.py  environments.py
-    attempts.py       leases, heartbeat, the one fenced-update predicate
-    accept.py  resume.py  claim.py  execute.py  seal.py
-    admission.py      AcceptedIntent, CallContext and built-in run limits
-    checkpoints.py    state/display objects, the checkpoint commit and run-prefix cleanup
-    display.py        folding Harness events into display items
-    stream.py         thread Redis streams, gateway authority reads and control frames
-    webhooks.py       lifecycle kinds and notify_subscribers()
-    usage.py          usage records, ingest()
-    traces.py         trace query over the trace providers
-    routes.py
+  runs/               how input becomes sealed runs
+    tables.py         sessions, threads, inbox_entries, runs, run_attempts, usage_records
+    sessions.py  threads.py  archive.py  inbox.py  entries.py  inputs.py
+    submit.py  accept.py  admission.py  resume.py  claim.py  worker.py  attempts.py  execute.py  seal.py
+    agent.py  host.py  calls.py  boundaries.py  checkpoints.py  display.py  deferred.py  children.py  subagents.py
+    configuration.py  assets.py  skills.py  secrets.py  web.py
+    stream.py  webhooks.py  usage.py  traces.py  runs.py  runtime.py
+    schemas.py  routes.py  trace_routes.py
+    environments/     tables  schemas  service  routes  lifecycle  maintenance  mounts  execution  adapters
 
-  providers/
-    interfaces.py     typed provider contracts and plain DTOs (including web)
-    registry.py       definitions keyed by (kind, type)
-    models/           bridge to the Harness ProviderCatalog
-    environments/     docker.py  e2b.py  envd/ (HTTP only)  ...
-    tools/            mcp.py  composio.py
-    web/              bridge to the Harness Web provider catalogue and HTTP transport
-    traces/           langfuse.py  logfire.py
+  providers/          what the Service calls
+    registry.py       provider definitions by (kind, type)
+    endpoints.py      the environment endpoints Service processes dial, checked by the endpoint policy
+    model_settings.py the settings schema of each calling API
+    environments/     the offered environment types; docker.py  local.py
+    tools/            the tool-source contract; mcp.py  oauth.py  connectors.py  discovery.py
+                      mcp_catalog.py  mcp_servers.json
+    traces/           the trace backend contract; langfuse.py  logfire.py
 
-  migrations/         Alembic environment and versions
+  migrations/         env.py  runner.py  script.py.mako  versions/
 ```
 
-Four business packages answer four questions. `tenancy`: who is asking and what may they do. `resources`: what has the tenant configured. `runs`: how does one input become one sealed run. `providers`: what does a run call while it executes. Shared mechanisms live under `infra/`; startup, configuration and assembly entry points remain at the root.
+Four business packages answer four questions. `tenancy`: who is asking and what may they do ([03](03-tenancy.md)). `resources`: what has the tenant configured ([04](04-resources.md)). `runs`: how does one input become one sealed run ([05](05-runs.md), [06](06-environments.md), [07](07-facts-and-delivery.md)). `providers`: what does the Service call ([08](08-providers.md)). Shared mechanisms live under `infra/`; configuration and assembly stay at the root ([09](09-runtime.md)).
 
-Provider packages under `resources/` own tenant-configured backend records: identity, scope, configuration, encrypted credentials, enabled state and management APIs. Packages under `providers/` own backend definitions and adapters. For example, `resources/web_providers/` manages a search account; `providers/web/` connects to its backend.
+Packages under `resources/` own tenant-configured records: identity, scope, configuration, encrypted credentials, enabled state and their API. `providers/` owns backend adapters and contracts that receive plain values. For example, `resources/providers/` stores a web provider account, and the Harness definition registered in `providers/registry.py` builds the backend that serves it.
 
-The tree fixes responsibility and import boundaries, not a final file inventory. These starting modules may become packages when their responsibilities need separate implementations. Keep each split inside its owner and preserve a focused public interface: `infra/db.py` may become `infra/db/`, just as object-store implementations already belong in `infra/objects/`. This applies equally to `tenancy/`, `resources/`, `runs/` and `providers/`; neither a four-file resource template nor a single `execute.py` is a file-size constraint. Split by cohesive responsibility when implementation warrants it, without pre-creating empty layers.
+The tree fixes responsibilities and boundaries, not a file inventory. A module becomes a package, or a package gains a module, when a cohesive responsibility needs it; empty layers are not created ahead of need.
 
 ## Import direction
 
 ```
+app.py, cli.py, distribution.py, migrations/  ->  everything   (no infra, business or provider module imports them)
 runs  ->  resources  ->  tenancy  ->  infra
-providers  ->  infra                   (and the Harness)
-runs, resources  ->  providers.interfaces, providers.registry   (never a concrete provider)
-app.py, distribution.py  ->  everything                  (nothing imports app.py)
+runs, resources  ->  providers.registry, providers.tools, providers.traces
+tenancy, resources, runs  ->  settings.py
+settings.py      ->  providers.tools.mcp_catalog, providers.traces
+providers  ->  infra                                          (and the Harness)
 ```
 
-Rules, each checked by import-linter in CI:
+`packages/a13n-service/.importlinter` states these contracts, and `make service-boundaries` checks them; `make typecheck`, `make verify` and the Service CI workflow run it.
 
-1. Layers: assembly above `runs` above `resources` above `tenancy` above `infra`. A lower layer never imports a higher one. `distribution.py` is a composition-root contract module alongside app, not an infrastructure mechanism. `infra` never imports the business packages or startup/assembly modules; callers provide configuration values. Generic outbox persistence and scheduling belong in `infra`; delivery handlers and scan predicates stay with their business owners and are wired at assembly.
-2. Within the Service, provider implementations may import their own package, `infra` and `providers.interfaces`; they may also use the Harness and external libraries. They never import `tenancy`, `resources` or `runs`. A provider receives plain values (a frozen config, a credential) and returns a capability.
-3. `runs` reaches providers only through `providers.registry`. Grep for `from a13n_service.providers.environments` inside `runs/` must find nothing.
-4. Packages under `resources/` may call each other's `service.py` functions (an agent revision checks that the model it names exists and is enabled; a template checks its provider) and import each other's `schemas.py`. The graph of such calls must be acyclic, and import-linter checks it; `agents` can depend on referenced-resource services; those packages do not depend on `agents`. Cross-resource references are plain IDs/DTOs, not ORM copies.
-5. Use another resource's service API/DTOs rather than importing its ORM. Owners may expose focused relational queries taking the caller's short session. Assembly/migrations register metadata explicitly; foreign-key declarations may use table names. Cross-domain transactions are orchestrated by the higher layer, not hidden behind service commits.
+| Contract                | Rule                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `layers`                | `runs` above `resources` above `tenancy` above `infra`; a lower layer never imports a higher one                           |
+| `providers`             | `providers` never imports `tenancy`, `resources` or `runs`: providers are adapters over infrastructure                     |
+| `assembly`              | `infra`, `tenancy`, `resources`, `runs` and `providers` never import `app`, `distribution` or `cli`                        |
+| `infrastructure`        | `infra` never imports `settings`; callers pass configuration values                                                        |
+| `environment-providers` | `tenancy`, `resources` and `runs` never import `providers.environments`; they reach environment types through the registry |
+| `acyclic-resources`     | the packages under `resources/` depend on each other without cycles                                                        |
 
-The contract file lives at the package root as `.importlinter` and is part of `make verify`.
+Generic mechanisms belong in `infra`: the outbox table and its claim, settle and retry rules are there, while delivery handlers and scan predicates stay with their business owners and are wired in `distribution.py`.
 
-## Infrastructure and assembly
+The resource packages depend on each other in one direction:
 
-| Module            | Owns                                                                                                                                                                                                                                                                                               |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `infra/db.py`     | Async engine/session factory, short transactions, column mixins, row locks and SQL-only advisory locks. `Stamped` includes a database-incremented version. Composite tenant foreign keys and explicit exceptions are validated from metadata. Lease decisions use fresh database time after locks. |
-| `infra/ids.py`    | One shared `new_object_id(kind) -> str` allocator and the prefix/length registry below; reuse the existing allocation mechanism. Consumers treat IDs as opaque values.                                                                                                                             |
-| `infra/clock.py`  | `now() -> datetime` (UTC, microseconds); replaceable in tests.                                                                                                                                                                                                                                     |
-| `infra/errors.py` | `ServiceError(code, message, details)` and the code list below; `not_found(kind, id)`, `conflict(kind, id)`, `disabled(kind, id)` factories.                                                                                                                                                       |
-| `infra/http.py`   | `Page[T]` and cursor encoding; `etag(row)` and `require_match(row, if_match)`; the error envelope; body size limits.                                                                                                                                                                               |
-| `infra/objects/`  | create-only writes, reads, prefix listing and deletion under owner-named keys, digest verification, `ObjectRef(key, digest, size, content_type)` and local/S3 adapters. No conditional replacement. Only run owners delete, and only their unreferenced state/display objects.                     |
-| `infra/redis.py`  | the client; capped stream append and multi-key read helpers with typed entries; `wake()` / `wait_for_wake()` for the claim marker.                                                                                                                                                                 |
-| `infra/audit.py`  | the `audit_events` table and `record(session, *, actor, action, target, outcome, details)`.                                                                                                                                                                                                        |
-| `infra/outbox.py` | the `outbox` table; `enqueue(session, kind, dedupe_key, target, payload)`; `claim(session, kind, limit)` with `SKIP LOCKED`; `settle(session, row, ok, error)`; backoff and dead-lettering.                                                                                                        |
-| `infra/sweeps.py` | `Sweep(name, every, run)`; `register(sweep)`; bounded scheduling; each operation declares row-claim or short SQL-lock coordination, never holding a connection across external work.                                                                                                               |
-| `settings.py`     | `Settings` built from environment variables and an optional file; sections `server`, `database`, `redis`, `objects`, `worker`, `control`, `auth`, `providers`, `telemetry`. A distribution may append sections.                                                                                    |
-| `distribution.py` | the `Distribution` dataclass, see [09-runtime.md](09-runtime.md#assembly).                                                                                                                                                                                                                         |
-| `app.py`          | `build_app(distribution) -> FastAPI` plus the process entry for each role.                                                                                                                                                                                                                         |
+```
+agents     ->  connections, environment_templates, models, providers, secrets, skills
+connections  ->  connector_providers, providers
+models, environment_templates, connector_providers, web_providers  ->  providers
+skills, assets  ->  uploads
+```
+
+A package uses another's service functions, schemas and focused queries, and may import its row class where a query needs it. Cross-package references are IDs and detached values, never live ORM rows held across a session.
+
+## Infrastructure
+
+| Module         | Owns                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `db.py`        | `Storage` (the engine and session factory), `short_session` and `transaction` (which runs `after_commit` callbacks), `lock` (`FOR UPDATE`), `advisory_lock` (transaction-scoped), `now` (database `clock_timestamp()`), `Base`, `Stamped` (`version`, `created_at`, `updated_at`, advanced by the `stamp_resource` trigger except for a table's unversioned columns) and the declarative trigger rules `immutable` and `identity_guarded` |
+| `ids.py`       | `new_object_id(kind)` and the `ObjectId` acceptance type ([Object IDs](#object-ids))                                                                                                                                                                                                                                                                                                                                                      |
+| `errors.py`    | `ServiceError(code, message, details)`, the code list, the factories `not_found`, `conflict`, `disabled`, `invalid` and `rate_limited`, and `at_field`, which reports a failed reference as the field that names it                                                                                                                                                                                                                       |
+| `http.py`      | request IDs, the error envelope, its status mapping and its OpenAPI description, strong ETags and `require_match`, the `If-Match`, page-limit and `Idempotency-Key` parameter types, and the headers stored content is served with ([10](10-api.md))                                                                                                                                                                                      |
+| `ingress.py`   | request-body size and arrival-time bounds before parsing                                                                                                                                                                                                                                                                                                                                                                                  |
+| `cursors.py`   | opaque, bounded pagination positions bound to one collection and the query that issued them ([10](10-api.md#collections))                                                                                                                                                                                                                                                                                                                 |
+| `labels.py`    | the `labels` type and its `key:value` list filter                                                                                                                                                                                                                                                                                                                                                                                         |
+| `crypto.py`    | the key ring and the authenticated envelope bound to its organization, table, column and row ([03](03-tenancy.md#credential-encryption))                                                                                                                                                                                                                                                                                                  |
+| `audit.py`     | the `audit_events` table and `record` ([03](03-tenancy.md#audit))                                                                                                                                                                                                                                                                                                                                                                         |
+| `outbox.py`    | the `outbox` table: `enqueue`, `claim` with a random fencing token, `settle` (including deferral), backoff and dead-lettering ([07](07-facts-and-delivery.md#outbox))                                                                                                                                                                                                                                                                     |
+| `sweeps.py`    | `Sweep` and the bounded loop that runs a role's sweeps ([09](09-runtime.md#sweeps))                                                                                                                                                                                                                                                                                                                                                       |
+| `redis.py`     | best-effort rate limits, the claim wakeup marker and capped stream append and reads ([09](09-runtime.md#redis))                                                                                                                                                                                                                                                                                                                           |
+| `outbound.py`  | host-owned HTTP clients under the endpoint policy and response bounds ([08](08-providers.md#outbound-endpoint-policy))                                                                                                                                                                                                                                                                                                                    |
+| `images.py`    | owner images: signature-checked PNG, JPEG and WebP stored create-only at their digest and served inert ([03](03-tenancy.md#images))                                                                                                                                                                                                                                                                                                       |
+| `telemetry.py` | the OTLP trace export pipeline and attempt correlation attributes ([09](09-runtime.md#observability))                                                                                                                                                                                                                                                                                                                                     |
+| `objects/`     | the object-store contract (`ObjectRef`, create-only writes, verified reads, prefix listing and deletion) with local and S3 implementations ([07](07-facts-and-delivery.md#objects))                                                                                                                                                                                                                                                       |
 
 ## A resource package
 
-The four files below are a starting layout for a resource package. The package-wide splitting rule above applies; OAuth orchestration, for example, can have its own module while keeping service and route responsibilities distinct.
+A resource package starts from four modules and grows cohesive ones beside them, such as `connections/authorization.py` or `skills/package.py`:
 
-| File         | Contains                                                                                          | Never contains             |
-| ------------ | ------------------------------------------------------------------------------------------------- | -------------------------- |
-| `tables.py`  | the SQLAlchemy row classes, their constraints and indexes                                         | queries, business rules    |
-| `schemas.py` | the Pydantic types the API accepts and returns, and the frozen config type where the kind has one | SQLAlchemy                 |
-| `service.py` | the use cases as functions taking a session: `create_agent()`, `archive_agent()` ...              | FastAPI, HTTP status codes |
-| `routes.py`  | the FastAPI router: parse, authorize, call the service, shape the response                        | SQL, business rules        |
+| Module       | Contains                                                                                   | Never contains             |
+| ------------ | ------------------------------------------------------------------------------------------ | -------------------------- |
+| `tables.py`  | the row classes, their constraints, indexes and trigger rules                              | queries, business rules    |
+| `schemas.py` | the Pydantic types the API accepts and returns, and the kind's frozen configuration type   | SQLAlchemy                 |
+| `service.py` | the use cases, and the resolution functions other packages call                            | FastAPI, HTTP status codes |
+| `routes.py`  | the FastAPI router: parse the request, call one use case, set the ETag, shape the response | SQL, business rules        |
 
-A service function looks like this, and every one of them looks like this:
+Every service function follows the same conventions:
 
-```python
-async def set_default_revision(
-    session: AsyncSession, actor: Principal, agent_id: str, revision_id: str, *, if_match: str
-) -> Agent:
-    agent = await lock(session, AgentRow, agent_id)          # not_found if missing
-    authorize(actor, agent, "write")
-    require_match(agent, if_match)                           # precondition_failed
-    revision = await get_revision(session, agent, revision_id)
-    if set_default(agent, revision):                         # False when already default
-        touch(agent, actor)                                  # updated_at, updated_by_id
-        record(session, actor=actor, action="agent.revision.set_default", target=agent)
-    return Agent.from_row(agent)
-```
-
-Lock, authorize, precondition, act, stamp, audit. Service APIs enforce authority even when called by tools, sweeps or extensions. Authorize before external preparation too, then revalidate relevant versions/state under locks. Callers own transaction boundaries; SQL-only service functions never commit or hide external I/O. Providers/resources requiring I/O expose an explicit preparation/orchestration function outside the transaction.
+- A public use case takes `Storage`, the acting principal and plain values, opens its own `short_session` or `transaction`, and returns detached API values. Authorization happens inside the use case, so tools, sweeps and extensions that call it get the same checks as HTTP.
+- Inside a transaction the order is authorize the path, lock the row and authorize the verb on it (a changing verb refuses an archived workspace's row), `require_match`, act, stamp `updated_by_id`, `record` the audit event. A no-op returns without stamping or auditing.
+- A function that takes an `AsyncSession` belongs to its caller's transaction: it may flush, never commits and performs no external I/O. Resolution functions such as `resolve_provider` and `resolve_connection` are of this kind and return frozen values.
+- External I/O happens between short sessions, never inside one. The value it produced is published in a new transaction that rechecks the rows it depended on.
 
 ## Naming rules
 
-| Rule                                                                                                                                                                                                                                                      | Examples                                                                                                                    |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Tables are plural nouns. Join tables are `<owner>_<owned>`.                                                                                                                                                                                               | `runs`, `inbox_entries`, `thread_environments`                                                                              |
-| Object IDs follow the implementation repository's `spec/data-conventions.md`: a stable kind prefix, an underscore and a cryptographically random lowercase hexadecimal suffix. Retain allocated prefixes; the registry below owns new Service allocation. | `run_7e2a9c0d4b6f1835a8c1d902ef47`, `apr_…`, `inb_…`                                                                        |
-| Foreign keys are the singular table name plus `_id`. Self-references say the relation.                                                                                                                                                                    | `thread_id`, `agent_revision_id`, `parent_run_id`, `origin_run_id`, `source_entry_id`                                       |
-| Timestamps are a past participle plus `_at`.                                                                                                                                                                                                              | `created_at`, `sealed_at`, `archived_at`, `revoked_at`, `expires_at`, `finished_at`                                         |
-| A state machine is one column called `status` with lowercase word values and a CHECK.                                                                                                                                                                     | `runs.status IN ('accepted','running','waiting','completed','failed','cancelled')`                                          |
-| An on/off switch is `enabled`.                                                                                                                                                                                                                            | `connections.enabled`                                                                                                       |
-| Retirement follows the owning lifecycle: heads archive, providers and templates disable, credentials revoke, threads archive, assets retire; grants are explicitly removed. Secrets/subscriptions have audited deletion.                                  |                                                                                                                             |
-| A discriminator column is `kind`. Never `type`, `*_type`, `*_kind` on the discriminated row itself.                                                                                                                                                       | `inbox_entries.kind`, `tokens.kind`                                                                                         |
-| A provider implementation selector is `type`, because that is what the Harness calls it.                                                                                                                                                                  | `model_providers.type = 'openai'`                                                                                           |
-| JSON columns are named for their content, never with a `_json` suffix.                                                                                                                                                                                    | `config`, `payload`, `output`, `failure`, `labels`, `settings`, `pending`                                                   |
-| An immutable payload column ends in `_ref` and holds an object key; API values expand to ObjectRef. A run's state and display objects are selected by the typed pointers `checkpoint` and `display`.                                                      | `payload_ref`, `output_ref`, `package_ref`, `runs.checkpoint`                                                               |
-| A content hash is `digest` (SHA-256, hex). A hashed secret is `secret_hash`.                                                                                                                                                                              | `agent_revisions.digest`, `api_keys.secret_hash`                                                                            |
-| Monotonic counters: `number` for revisions and attempts, `version` for mutable-resource concurrency, `position` for inbox order, `seq` for checkpoint and per-attempt stream sequences.                                                                   | `agent_revisions.number`, `run_attempts.number`, `threads.version`, `inbox_entries.position`, `incorporated_checkpoint_seq` |
-| Who: `principal_id` is the identity something executes as, `created_by_id` / `updated_by_id` are authors, `actor_id` is the audit subject.                                                                                                                |                                                                                                                             |
-| Row classes end in `Row`. API types have the plain noun. Frozen config types end in `Config`.                                                                                                                                                             | `AgentRow`, `Agent`, `AgentConfig`                                                                                          |
-| Functions are verb phrases. Create, get, list, update, archive, disable; never manage, handle, process.                                                                                                                                                   | `create_agent`, `list_runs`, `archive_skill`, `submit_input`, `accept`, `claim`, `execute`, `seal`                          |
-| Modules are named for what they hold, never for a phase or a quality.                                                                                                                                                                                     | `accept.py`, `claim.py`; never `preparation.py`, `service_common.py`, `support.py`                                          |
-| One word, one meaning. The glossary is normative; a new word needs a glossary entry.                                                                                                                                                                      |                                                                                                                             |
+| Rule                                                                                                                                                                                                                                                                                                                  | Examples                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Tables are plural nouns. Join tables are `<owner>_<owned>`.                                                                                                                                                                                                                                                           | `runs`, `inbox_entries`, `thread_environments`                                                            |
+| Foreign keys are the singular table name plus `_id`. Self-references say the relation.                                                                                                                                                                                                                                | `thread_id`, `agent_revision_id`, `parent_run_id`, `connector_provider_id`                                |
+| Timestamps are a past participle plus `_at`.                                                                                                                                                                                                                                                                          | `created_at`, `sealed_at`, `archived_at`, `retired_at`, `lease_expires_at`                                |
+| A state machine is one column called `status` with lowercase word values and a CHECK.                                                                                                                                                                                                                                 | `runs.status IN ('accepted', 'running', 'waiting', 'completed', 'failed', 'cancelled')`                   |
+| An on/off switch is `enabled`.                                                                                                                                                                                                                                                                                        | `connections.enabled`                                                                                     |
+| Retirement follows the owning lifecycle: heads archive, providers, models, templates and connections disable, credentials revoke, threads archive, assets retire.                                                                                                                                                     | `archived_at`, `enabled`, `retired_at`                                                                    |
+| A discriminator is `kind`. A provider or connection implementation selector is `type`, because that is what the Harness calls it.                                                                                                                                                                                     | `inbox_entries.kind`, `tokens.kind`, `model_providers.type`, `connections.type`                           |
+| JSON columns are named for their content, never with a `_json` suffix.                                                                                                                                                                                                                                                | `config`, `payload`, `failure`, `labels`, `settings`                                                      |
+| A column holding an immutable object key ends in `_ref`; a run's state and display objects are named by the typed pointers `checkpoint` and `display`.                                                                                                                                                                | `package_ref`, `content_ref`, `runs.checkpoint`                                                           |
+| A content hash is `digest` (SHA-256, hex). A hashed secret is `secret_hash`.                                                                                                                                                                                                                                          | `agent_revisions.digest`, `api_keys.secret_hash`                                                          |
+| Counters: `number` for revisions and attempts, `version` for mutable-row concurrency, `position` for inbox order, `seq` for checkpoints, `generation` for invalidation.                                                                                                                                               | `run_attempts.number`, `inbox_entries.position`, `incorporated_checkpoint_seq`, `environments.generation` |
+| Who: `principal_id` is the identity something executes as or belongs to, `created_by_id` and `updated_by_id` are authors, `actor_id` is the audit subject.                                                                                                                                                            | `runs.principal_id`, `secrets.principal_id`                                                               |
+| Row classes end in `Row`; API types are the plain noun, except the read types of runs, threads, sessions, inbox entries, attempts, environments, mounts and grants, which end in `View` because their plain nouns already name Harness or domain types those modules use; frozen configuration types end in `Config`. | `AgentRow`, `Agent`, `RunView`, `AgentConfig`, `McpConfig`                                                |
+| Functions are verb phrases.                                                                                                                                                                                                                                                                                           | `create_agent`, `resolve_connection`, `accept`, `claim`, `execute`, `seal`                                |
+| Modules are named for what they hold, never for a phase or a quality.                                                                                                                                                                                                                                                 | `accept.py`, `claim.py`, `mounts.py`                                                                      |
+| One word, one meaning; the [glossary](glossary.md) is normative, and a new word needs an entry.                                                                                                                                                                                                                       |                                                                                                           |
 
-## Id prefixes
+## Object IDs
 
-The platform's `spec/data-conventions.md`, sections Object Identity and Service ID Allocation, remains authoritative and is not part of the archived Service specifications. The new Service preserves its allocation rules and existing kind prefixes even when a package, table or public resource name changes. Prefixes are never reassigned to a different meaning. A prefix is 2-8 lowercase ASCII letters/digits, beginning with a letter; it need not spell the table's singular noun.
+Object IDs follow the platform's [data conventions](../data-conventions.md#service-id-allocation): a kind prefix, an underscore and a cryptographically random lowercase hexadecimal suffix whose length the shared allocator assigns per prefix. The data conventions own the tiers, their volume budgets and the retired prefixes. The Service accepts any ID of a valid prefix and 16 to 64 lowercase alphanumeric characters (at most 72 in all), so an ID never fails validation because its length differs from today's allocation. Consumers never infer authority, ownership or order from an ID.
 
-| Prefix              | Table                                          | Random suffix length (hex characters) |
-| ------------------- | ---------------------------------------------- | ------------------------------------- |
-| `org`               | organizations                                  | 20                                    |
-| `ws`                | workspaces                                     | 20                                    |
-| `usr`, `sa`         | principals (user, service account)             | 20                                    |
-| `key`               | api_keys                                       | 32                                    |
-| `ase`, `prt`, `ect` | tokens (session, password_reset, email_change) | 32                                    |
-| `rb`                | grants                                         | 24                                    |
-| `inv`               | invitations                                    | 24                                    |
-| `audit`             | audit_events                                   | 32                                    |
-| `ap`                | agents                                         | 20                                    |
-| `apr`               | agent_revisions                                | 24                                    |
-| `sk`                | skills                                         | 20                                    |
-| `skr`               | skill_revisions                                | 24                                    |
-| `envtpl`            | environment_templates                          | 20                                    |
-| `envp`              | environment_providers                          | 20                                    |
-| `mprov`             | model_providers                                | 20                                    |
-| `mdl`               | models                                         | 20                                    |
-| `wprov`             | web_providers                                  | 32                                    |
-| `cnr`               | connector_providers                            | 20                                    |
-| `conn`              | connections                                    | 20                                    |
-| `sec`               | secrets                                        | 32                                    |
-| `ast`               | assets                                         | 24                                    |
-| `sub`               | subscriptions                                  | 32                                    |
-| `sess`              | sessions                                       | 24                                    |
-| `thread`            | threads                                        | 32                                    |
-| `env`               | environments                                   | 24                                    |
-| `inb`               | inbox_entries                                  | 28                                    |
-| `run`               | runs                                           | 28                                    |
-| `rat`               | run_attempts                                   | 28                                    |
-| `obx`               | outbox                                         | 32                                    |
+| Prefix              | Kind                                                                  | Prefix    | Kind                   |
+| ------------------- | --------------------------------------------------------------------- | --------- | ---------------------- |
+| `org`               | organizations                                                         | `mdl`     | models                 |
+| `ws`                | workspaces                                                            | `envtpl`  | environment_templates  |
+| `usr`, `sa`         | principals (user, service account)                                    | `conn`    | connections            |
+| `key`               | api_keys                                                              | `connop`  | connection operations  |
+| `ase`, `prt`, `ect` | tokens (login session, password reset, email change)                  | `sec`     | secrets                |
+| `rb`                | grants                                                                | `ast`     | assets                 |
+| `inv`               | invitations                                                           | `sub`     | subscriptions          |
+| `audit`             | audit_events                                                          | `sess`    | sessions               |
+| `obx`               | outbox                                                                | `thread`  | threads                |
+| `ap`, `apr`         | agents, agent_revisions                                               | `inb`     | inbox_entries          |
+| `sk`, `skr`         | skills, skill_revisions                                               | `run`     | runs                   |
+| `mprov`             | model_providers                                                       | `rat`     | run_attempts           |
+| `eprov`             | environment_providers                                                 | `env`     | environments           |
+| `cprov`             | connector_providers                                                   | `envoper` | environment operations |
+| `wprov`             | web_providers                                                         | `wrk`     | worker IDs             |
+| `ctl`               | control sweep claim owners (outbox delivery, environment maintenance) | `req`     | request IDs            |
 
-Use cryptographically secure random bytes encoded as lowercase hexadecimal (`0-9a-f`), with no timestamp or ordering component. The 20/24/28/32-character tiers provide 80/96/112/128 random bits and follow the platform's lifetime allocation budgets per prefix: `10**7`, `10**10`, `10**12` and `10**15` respectively. Unlisted or new kinds default to 32 characters until their owner explicitly assigns a shorter tier against a volume budget; callers cannot choose a shorter suffix. Claims, worker incarnations, publication generations and authentication workflows retain at least 128 random bits. A deployment must review capacity before exceeding a tier's budget; deleting records does not reset it. Database uniqueness is the final collision guard; a collision must never overwrite or reuse an existing object.
-
-Allocation is narrower than acceptance. Preserve the existing Service object-ID acceptance shape of a valid prefix plus 16-64 lowercase alphanumeric suffix characters; do not reject an existing ID merely because it differs from today's allocation length or alphabet. Thread acceptance also preserves `thread-` plus 32 lowercase hexadecimal characters and existing host-supplied forms at their established boundaries. Existing references are never rewritten. This compatibility concerns identity values, not a requirement to restore legacy Service endpoints or migrate legacy data.
-
-Users/service accounts and the token kinds intentionally share tables while retaining their own allocated prefixes. Harness usage-record IDs, native tool-call IDs and provider-owned IDs retain their owner's formats; do not generate a `usage_` replacement or re-encode an external ID. Join tables (`passwords`, `thread_environments`) do not need synthetic IDs. A metadata check verifies these explicit exceptions. API-key secret material, login cookies, OAuth state/verifiers, cursors, handles and digests retain their own contracts; the object-ID tiers do not shorten secrets or change their encoding.
-
-Consumers do not infer authority, routing, ownership or order by parsing an ID. Ordinary collection pagination documents concurrent-change behavior and uses an indexed stable sort. Random IDs are not tail cursors; live observation uses the thread stream in [07](07-facts-and-delivery.md#the-thread-stream).
+Uploads are `upl_` plus a 64-character SHA-256 derived from the upload's scope and request key ([04](04-resources.md#uploads-and-assets)). `passwords` and `thread_environments` are join tables without IDs, and `usage_records` keep the Harness's record IDs; every other table has a 72-character `id` primary key, and every workspace-owned row has a composite `(organization_id, workspace_id)` foreign key. Display items are `itm_` plus the first 32 hex characters of a SHA-256 of their run, kind and source, so they are stable across attempts ([07](07-facts-and-delivery.md#checkpoints-and-display)). Harness tool-call IDs, provider-owned IDs, secrets, cursors and digests keep their owners' formats.
 
 ## Error codes
 
-One exception class, `ServiceError(code, message, details)`, mapped to HTTP status in one table in `infra/http.py`. The codes:
+One exception class, `ServiceError(code, message, details)`, carries every refusal, and one table in `infra/http.py` maps codes to HTTP status. Clients branch on `code` and `details`, never on `message`; the envelope is [10](10-api.md#errors)'s.
 
-| Code                    | Status | Details carry                                               |
-| ----------------------- | ------ | ----------------------------------------------------------- |
-| `invalid_argument`      | 400    | `field`, `reason`                                           |
-| `invalid_cursor`        | 400    |                                                             |
-| `unauthenticated`       | 401    |                                                             |
-| `forbidden`             | 403    | `verb`, `resource`                                          |
-| `not_found`             | 404    | `kind`, `id`                                                |
-| `already_exists`        | 409    | `kind`, `key`                                               |
-| `conflict`              | 409    | `kind`, `id`, `reason` (a state rule refused the operation) |
-| `precondition_failed`   | 412    | `current_etag`                                              |
-| `precondition_required` | 428    | required header                                             |
-| `payload_too_large`     | 413    | `limit`                                                     |
-| `disabled`              | 422    | `kind`, `id`                                                |
-| `unavailable`           | 503    | `dependency` (database, redis, objects, a provider type)    |
-| `rate_limited`          | 429    | `retry_after`                                               |
-| `internal`              | 500    |                                                             |
+| Code                    | Status | Details carry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_argument`      | 400    | `field` and `reason`; a failed reference also keeps its `kind` and `id`; request validation gives `fields`, up to 20 `{field, reason}` with reason the validation error type                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `invalid_cursor`        | 400    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `unauthenticated`       | 401    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `forbidden`             | 403    | `verb` when a grant is missing; `field` when a referenced resource refused the caller; `id` when a principal-owned object is not the caller's                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `not_found`             | 404    | `kind`, `id`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `already_exists`        | 409    | `kind` and the colliding `key`; a duplicate grant has kind `grant` and the principal ID as `key`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `conflict`              | 409    | `kind`, `id` and `reason`, a stable word naming the state rule that refused the operation; `limit` when the rule is a capacity bound                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `precondition_failed`   | 412    | `current_etag`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `precondition_required` | 428    | `header`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `payload_too_large`     | 413    | `limit`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `request_timeout`       | 408    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `disabled`              | 422    | `kind`, `id`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `unavailable`           | 503    | `dependency`: `database`, `redis`, `objects`, `encryption` (no active key, or an envelope that does not decrypt), `mail`, `github`, `oauth`, `connection`, `connection:{type}`, `connector:{type}`, `environment` (with `id`), `{kind}:{type}` (a provider type, `environment:{type}` included), `model_api:{api}` (settings for a calling API the deployment no longer offers, [08](08-providers.md#provider-type-descriptions)), `harness` (the Harness run ended without a result), `url` (URL input, [05](05-runs.md#assignment-and-incorporation)), `trace` (no backend configured) or `trace:{type}`; sometimes a safe `reason` |
+| `rate_limited`          | 429    | `retry_after_seconds`, also sent as `Retry-After`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `internal`              | 500    |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
-The list is shared, not a fixed numerical target. A provider failure during execution is not an HTTP error; it is a run failure recorded in `runs.failure` with the provider's own reason string.
-
-## Object store key layout
-
-Keys name their producer, and every object is immutable. A run writes digest-keyed `orgs/{org}/runs/{run}/state/{digest}` and `orgs/{org}/runs/{run}/display/{digest}` objects; only the run's committed pointers make them reachable, and the run's owner deletes the rest. Other payloads use digest-qualified keys; uploads use `orgs/{org}/uploads/{upload}`. There is no other object reclamation in v1. The rules are in [07](07-facts-and-delivery.md#objects).
+A provider failure during execution is not an HTTP error: it becomes the run's recorded failure with the provider's classified code ([05](05-runs.md)).
 
 ## What is deliberately absent
 
-- No `common`, `support`, `management`, `utils` or `helpers` modules. A helper belongs to the root module of its concern or to the package that uses it.
-- No generic `Resource[T]` base class or CRUD generator. Ten resources written out by hand in the same shape are easier to read and to diff than one generator.
-- No per-feature error classes, cursor modules, audit wrappers or lock helpers.
-- No `_json`, `_sha256`, `_type` suffixes; no `Record`, `Manager`, `Coordinator`, `Reconciler` class names.
+- No `common`, `support`, `management`, `utils` or `helpers` modules. A helper belongs to the module of its concern or to the package that uses it.
+- No generic `Resource[T]` base class or CRUD generator. Resources written out by hand in the same shape are easier to read and to diff than one generator.
+- No per-feature HTTP error types, cursor codecs or lock mechanisms: every refusal is a `ServiceError` with a shared code, and every list uses `infra/cursors.py`. A protocol adapter may classify its own failures (`OAuthError`), which callers translate into a code.
+- No `_json` or `_sha256` column suffixes, and no `Record`, `Manager`, `Coordinator` or `Reconciler` class names.
 - No function-local imports. If one seems necessary, the layering is wrong.

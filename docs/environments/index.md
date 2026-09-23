@@ -227,6 +227,6 @@ The [Harness Environment guide](../a13n-harness/environments.md) covers complete
 
 ## Hosted preparation and recovery
 
-The accepted [Service Environment design](https://github.com/converge-ai-labs/agent-foundation/blob/main/spec/a13n-service/06-environments.md) defines managed lifecycle operations, frozen run mounts, and connect-only HTTP envd. These hosted capabilities are not implemented in the current Service foundation. The embedded Provider lifecycle described above remains usable independently.
+The Service builds on these providers: it creates managed Docker environments from templates, registers connect-only HTTP envd devices, and freezes each run's mounts; see [Service environments](../a13n-service/environments.md). The embedded Provider lifecycle described above remains usable independently.
 
 For direct SDK integrations, use [Environment lifecycle and errors](lifecycle.md) and [remote Envd](remote-envd.md).

@@ -45,7 +45,7 @@ For context lifecycle features, callers supply Harness-managed policy through th
 
 ## Long-Term Memory
 
-Memory is opt-in. `MemoryCapability` works with any implementation of the typed `MemoryBackend` contract. Mem0 OSS and Platform are built-in adapters. For OSS, open a native transport in your Host and pass it to the Capability. Memory is excluded from the current Service rewrite; embedded Hosts retain these capabilities. The OSS adapter calls public native endpoints on an existing deployment; no source patch or special server image is required. Its list operation is bounded, not paginated.
+Memory is opt-in. `MemoryCapability` works with any implementation of the typed `MemoryBackend` contract. Mem0 OSS and Platform are built-in adapters. For OSS, open a native transport in your Host and pass it to the Capability. The Service does not offer memory; embedded Hosts retain these capabilities. The OSS adapter calls public native endpoints on an existing deployment; no source patch or special server image is required. Its list operation is bounded, not paginated.
 
 ```python
 from a13n_harness.capabilities import MemoryCapability, MemoryScope
@@ -117,7 +117,7 @@ async with definition.open({"base_url": mem0_url}, {"api_key": mem0_api_key}) as
     # Or call backend operations directly with trusted MemorySubject values.
 ```
 
-Installed extensions contribute `ProviderManifest.memory` alongside Model and Web through the same `a13n_harness.providers.plugins` entry point. A host calls `load_provider_plugins(("acme",))` and explicitly builds a catalog from the selected definitions. Installation does not enable a package. Duplicate types fail; unselected entry points remain unloaded. The embedding Host owns credential selection and authorization. Service memory resources are excluded from the current rewrite.
+Installed extensions contribute `ProviderManifest.memory` alongside Model and Web through the same `a13n_harness.providers.plugins` entry point. A host calls `load_provider_plugins(("acme",))` and explicitly builds a catalog from the selected definitions. Installation does not enable a package. Duplicate types fail; unselected entry points remain unloaded. The embedding Host owns credential selection and authorization. The Service has no memory resources.
 
 The implemented built-ins are `mem0_oss`, `mem0_platform`, and the document-only `filesystem`. OSS uses HTTP directly and needs no Platform SDK. Install `a13n-harness[mem0]` for Platform. Its native SDK loads only when used; local construction defers the SDK's synchronous validation ping. Neither Mem0 backend automatically retries uncertain writes. Each definition declares `supports_records`, `supports_documents`, `supports_revisions`, and `supports_changes`; a definition without record support has no `open_backend`, declares `FilesystemMemoryConfiguration`, and opens only through the Host's own file binding.
 

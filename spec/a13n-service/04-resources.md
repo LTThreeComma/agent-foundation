@@ -1,193 +1,347 @@
 # Resources: what a tenant configures
 
-`resources/` holds everything a tenant sets up before submitting work. Each kind is one package using the default layout in [02-layout.md](02-layout.md#a-resource-package). This document lists the kinds, their tables, and the few rules they share.
+`resources/` holds what a tenant configures before submitting work: agents, skills, provider resources, models, environment templates, connections, secrets, uploads, assets and webhook subscriptions. Each kind is one package ([02](02-layout.md#a-resource-package)). This chapter owns their lifecycles, stored shape, validation and the rules they share. The exported contract ([10](10-api.md)) owns exact request and response shapes, [03](03-tenancy.md) owns verbs and credential encryption, and [08](08-providers.md) owns provider definitions, capability flags and runtime handles.
 
 ## Two lifecycles
 
-Every resource is one of two things, decided by one question: **does a run freeze it?** A run freezes only the content that execution, including recovery, re-reads to define the agent's behavior: its agent revision and the skill and subagent revisions that revision pins. Everything else is live. A consumer that needs a value to stay fixed copies it at the point of use, as a webhook outbox row copies its subscription's URL and key; what is physically built into an environment instance stays with that instance.
+Every resource has one lifecycle, decided by one question: **does a run freeze it?** A run freezes only the content that execution, including recovery, re-reads to define the agent's behavior: its agent revision and the skill and subagent revisions that revision pins. Everything else is live: each use resolves the current row and checks it again, because credentials rotate, endpoints move and policies change.
 
-| Lifecycle                                                                                                                                               | Shape                                                 | Kinds                                                                                                                                                               | Retire                                                     |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| **Revisioned.** Agent selection happens at acceptance; skill and subagent edges pin revisions.                                                          | head plus immutable revisions; head points at default | agents, skills                                                                                                                                                      | `archived_at` on head                                      |
-| **Live.** A run or environment operation resolves the current row each time it is used, because credentials rotate, endpoints move and policies change. | one mutable row, optimistic concurrency by ETag       | environment templates, environment providers, model providers, models, web providers, connector providers, connections, subscriptions; secrets are live credentials | disable resources; explicitly delete secrets/subscriptions |
+| Lifecycle         | Shape                                                                    | Kinds                                                                                  | Retirement                                                                                                          |
+| ----------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Revisioned        | a head plus immutable numbered revisions; the head points at its default | agents, skills                                                                         | `archived_at` on the head, reversed by `unarchive`                                                                  |
+| Live              | one mutable row with an ETag                                             | provider resources, models, environment templates, connections, secrets, subscriptions | `enabled = false` for provider resources, models, templates and connections; deletion for secrets and subscriptions |
+| Immutable content | one row over stored bytes                                                | assets                                                                                 | `retired_at`; the content stays readable                                                                            |
 
-Assets are immutable content; retirement hides new use without deleting retained content.
+A consumer that needs a live value to stay fixed copies it where it uses it: a webhook delivery copies its subscription's URL and signing secret ([07](07-facts-and-delivery.md#lifecycle-webhooks)), an environment instance keeps the recipe it was created with ([06](06-environments.md)), and a run freezes its thread's caller headers ([Caller headers](#caller-headers)).
 
-Mutable rows have a monotonic bigint `version`, incremented by the database on changes. Strong ETags encode identity/version and representation variant, checked under the row lock. Timestamps are for display, not concurrency. Expanded representations must include their dependencies in the tag or expose separate resource reads; a tag cannot promise byte-equivalence for fields changing independently of its row.
+Every mutable row has a `version` that the database advances on each change of a versioned column; state the Service maintains on its own, such as a connection's renewed tokens, is unversioned ([Connections](#connections)). Its ETag and the `If-Match` every conditional route requires are [10](10-api.md#preconditions)'s. Timestamps are for display, never for concurrency.
 
-### Shared columns
+## Rules every kind follows
 
-```
-Tenant:   organization_id  workspace_id
-Stamped:  version  created_at  updated_at
-Authored: created_by_id  updated_by_id
-```
+- A change is one short transaction: authorize, lock the row, check `If-Match`, act, stamp `updated_by_id`, record the audit event. Work that needs the network, such as a GitHub import, a provider test, tool discovery or an authorization step, runs outside any transaction after authorization; what it depended on is read again under the lock.
+- An update that changes nothing keeps the version and records no audit event.
+- A resource row of an archived workspace refuses every verb but `read` with `disabled` (details `kind: workspace`), as the workspace itself does ([03](03-tenancy.md#authorization)). A connection's `revoke` is offboarding and stays allowed ([Connections](#connections)).
+- Every change records one audit event with action `<kind>.<verb>`, such as `agent.update`, `agent.revision.create`, `model_provider.update` or `connection.authorization.complete`, through the function [03](03-tenancy.md#audit) owns. An update's details name the changed `fields`, never values or credentials.
+- References are validated when written, and live references again when used. A failed check is `invalid_argument` naming the field path. A referenced row the caller cannot read is `not_found` and a disabled one is `disabled`, except inside an agent configuration, where a missing, disabled, archived or unusable reference is `invalid_argument` at its field with the referenced `kind` and `id`; a missing verb stays `forbidden`.
+- Retired rows stay readable. An archived head is listed with `archived_at` and refuses new runs, revisions and pins; a disabled provider resource, model, template or connection is listed and refuses new use. Disabling or removing a credential can fail later execution; it changes no recorded fact and no staged webhook delivery.
+- `labels` is a string map of at most 32 entries, keys and values at most 128 characters, on agents, skills and environment templates (and on sessions, threads and runs, [05](05-runs.md)). It is edited through the resource's own `PATCH`; lists filter with up to eight `?label=key:value` selectors, all of which must match.
+- Lists are cursor-paged in a stable order ([10](10-api.md#collections)).
 
-Revisioned heads:
+## Revisioned heads
+
+Agents and skills share the head and revision shape and one set of helpers in `resources/revisions.py`.
 
 ```
 <heads>
-  id  organization_id  workspace_id  key  name  description  default_revision_id NULL
-  labels  archived_at NULL  version  created_by_id  updated_by_id  created_at  updated_at
+  id  organization_id  workspace_id  key  name  description  default_revision_id NULL  labels
+  archived_at NULL  version  created_by_id  updated_by_id  created_at  updated_at
   UNIQUE (workspace_id, key)
+  FOREIGN KEY (id, default_revision_id) -> <revisions> (<head>_id, id), deferred
 
 <revisions>
   id  organization_id  workspace_id  <head>_id  number  config  digest  note NULL
   created_by_id  created_at
   UNIQUE (<head>_id, number)
+  CHECK (number > 0)
 ```
 
-`key` is a caller-chosen, URL-safe handle unique in the workspace (`code-review`), used in the Console URL and by the SDKs. `number` starts at 1 and increments per head. `config` is the complete frozen configuration of that revision; `digest` is its SHA-256 and is what a run's checkpoint records. Revision rows are immutable by trigger. `default_revision_id` is NULL only between creating a head and its first revision; runs cannot start on such a head.
+- **Creation.** Creating a head creates revision 1 in the same transaction and makes it the default, so a committed head always has a default. The default must be a revision of the same head.
+- **Revisions.** A revision is immutable by trigger. `number` increments per head under the head's row lock. `config` is the complete validated configuration, and `digest` is the SHA-256 of its canonical JSON. The head's `version` orders every head mutation, publication included, through its ETag ([data conventions](../data-conventions.md#resource-revisions-and-concurrency)).
+- **Publication.** `POST …/revisions` takes the configuration, an optional `note` and `make_default` (default true) and requires `If-Match` on the head. A new revision changes the head's ETag whether or not it becomes the default, and is audited as `<kind>.revision.create` on the head with its `revision_id`. A configuration whose digest equals the head's current default creates nothing, whatever `make_default` says: the request answers 201 with that revision, and the head's version, ETag and audit trail stay unchanged. With `make_default: false`, any other digest creates a revision that is not the default.
+- **Default.** `set-default` (with `If-Match`) repoints the head at one of its revisions, audited as `<kind>.revision.set_default`; repointing at the current default changes nothing.
+- **Keys.** `key` is a URL-safe handle unique in the workspace. A custom agent's key may change; links that use the old key stop resolving, while runs and revisions refer to IDs. Path parameters accept an ID or a key, and an ID wins.
+- **Archive.** An archived head changes only by `unarchive`: metadata `PATCH`, new revisions and default changes are 409 `conflict` with reason `archived`. A new run naming an archived agent is `disabled`, and a configuration cannot newly pin an archived skill or subagent; a run's override keeps the pins its revision holds without that check.
+- **Lists.** Head lists filter by `label`, `q` (a case-insensitive substring of key, name or description, with `%` and `_` taken literally) and `archived` (true: only archived; false: only open; omitted: all). Revision lists are newest first.
 
-`resources/revisions.py` holds the two helpers every revisioned kind calls:
-
-```python
-async def add_revision(session, head: HeadRow, config: BaseModel, *, actor, note) -> RevisionRow
-def set_default(head: HeadRow, revision: RevisionRow) -> bool   # False when already default
-```
-
-`add_revision` allocates the next `number` under the head's row lock, computes the digest, and sets the default if the head had none. Whether a new revision becomes the default is the caller's choice (`make_default: bool` on the request, default true).
-
-## Kinds
-
-### agents
+## Agents
 
 ```
-agents            head columns
+agents            head columns + source  image NULL
+                  CHECK (source IN ('custom', 'builtin'))
 agent_revisions   revision columns; config: AgentConfig
 ```
 
-`AgentConfig` is the Harness agent definition as the service accepts it: model selection (a `model_id`), instructions, skills (`[{skill_id, revision_id}]`, pinned), connections (`[connection_id]`), web tool selection, tool permissions and reviewer settings, subagents (named edges to other agents, inline or async, each with a pinned `agent_revision_id`), `environment_template_id`, secret requirements, output schema, usage limits. Its exact schema lives in `resources/agents/schemas.py` and follows the Harness contract.
+`AgentConfig` is the agent definition as the Service accepts it:
 
-Creating a revision validates every reference: the model exists and is enabled, each skill revision exists and belongs to this workspace, each connection is enabled, the template exists, with tenant/owner checks from [03](03-tenancy.md#tenant-integrity). Inline edges must be acyclic; async depth/count limits apply at spawn. Pinning direct edges prevents changed defaults altering recovered execution without copying a second graph. The template is referenced by ID, not pinned: it is read only when an environment is created or started, never during execution. Credentials are resolved only at execution; live references are revalidated.
+- `model`: `model_id`, native `settings` for the model's calling API and context `characteristics`.
+- `instructions`.
+- `toolsets`: the built-in toolsets `files`, `shell`, `web`, `assets` and `configuration`, stored normalized against the catalogue `GET /workspaces/{ws}/toolsets` serves. Enabled web search and scrape name a web provider resource.
+- `skills`: `{skill_id, revision_id}` selections.
+- `connection_tools`: `{connection_id, tools, defer_loading, permission, permissions}` selections ([Connections](#connections)).
+- `client_tools`, whose results a client supplies through resume, and `user_questions`, which offers `ask_user_question`.
+- `subagent_mode` (`inline` or `async`) and named `subagents`: `{agent_id, revision_id, description, context, usage_limits, environment}`. `environment.mode` is `none`, `shared` or `dedicated`, and `dedicated` names a `template_id`.
+- `reviewer`: a model and its settings for the `review` tool permission.
+- `media_understanding`: an image, video and audio model.
+- `plugins`: `{instance_name, plugin_key, config}` selections of installed Harness plugins ([08](08-providers.md#installed-harness-plugins)).
+- `output_spec`, `retries` and `secret_requirements` ([Secrets](#secrets)).
+- `default_environment_template_id`: referenced, not pinned; it is read when an environment is created from it, never during execution.
 
-Operations: create, get, list, update (name, description, labels), archive, unarchive, duplicate (creates a head and copies one revision), export and import (YAML of one revision), create revision, set default revision, list revisions. There is no "current revision set" separate from "set default"; the old package had both.
+Tool permissions live on each selection and compile into one Harness tool-permission table.
 
-#### The configuration assistant
+### Validation
 
-The assistant is an ordinary agent whose head has `source = 'builtin'` (`agents.source IN ('custom', 'builtin')`, one extra column on this head only). At startup, `all` and `control` synchronize it per workspace under a head lock and unique builtin key. Compare digests after locking to avoid duplicate revisions across replicas; workspace bootstrap uses the same path. The agent is visible and duplicable; the builtin definition changes only through deployment configuration.
+Revision creation, `set-default`, duplication and `POST /agents/validate` apply one validation. It pins every skill and subagent edge whose `revision_id` is omitted to that head's current default, and it reports the first failure as `invalid_argument` with the field path relative to the configuration:
 
-Its tools are read tools over resources the caller may read (agents, models, skills, connections, templates) plus two write tools, `create_agent` and `create_agent_revision`, which call the same service functions the API calls, under the invoking user's authority, gated by the Harness tool-approval flow. There is no draft, no candidate state, no separate session kind. The conversation is the editing session; the revision is the result.
+1. Rules the configuration obeys on its own: enabled web search and scrape name `provider_id`; client tool names do not collide with built-in tool names, and their parameter schemas are valid, self-contained JSON Schemas; the `review` permission requires a `reviewer`; an async agent's edges set only `usage_limits.request_limit`.
+2. The output schema compiles, and each plugin's installed factory accepts its configuration.
+3. Skill and subagent edges name open heads and revisions of those heads.
+4. The model exists, is enabled and is usable by the author. `model.settings` must match the settings schema of the model's calling API (`providers/model_settings.py`, reached through the registry: the schema `GET /provider-types/model` publishes, [08](08-providers.md#provider-type-descriptions)); the reviewer's `model_settings` is checked against the reviewer model's API as `reviewer.model_settings`.
+5. Each media model is usable and declares the matching `{kind}_understanding` capability.
+6. Each connection selection passes the connection's own check, and the agent declares no more tool permissions than one agent may have.
+7. Each web provider is enabled and usable, and its type serves the selected operation (and domain restriction for scrape). Operation support is checked here, not at run time.
+8. The default template and every dedicated edge's template are usable.
+9. The inline subagent graph does not lead back to the agent itself, nests at most 16 deep and reaches at most 256 revisions.
 
-### skills
+An author's references need `read`. A run's override (`options.overrides`, [05](05-runs.md#submit-and-accept)) passes the same validation on the configuration it produces, with verb `run` under the run's authority, and is frozen with the same pins. Credentials are resolved only at execution, where live references are checked again. Pinning direct edges keeps changed defaults from altering recovered execution without copying a second graph.
+
+### Operations
+
+- `POST /agents` `{key, name, description, labels, config}` creates the head and revision 1.
+- `POST /agents/validate` `{config, agent_id?}` needs `write`, applies revision validation and writes nothing: 204, or the same `invalid_argument`. `agent_id` names the agent the configuration would become a revision of, so the graph check sees cycles through it.
+- `GET /agents` filters by `label`, `q`, `archived`, `skill_id` and `skill_revision_id`.
+- `PATCH /agents/{agent}` changes `name`, `key`, `description` and `labels`.
+- `POST /agents/{agent}/archive` and `/unarchive` take `If-Match`.
+- `POST /agents/{agent}/duplicate` `{key, name, description, labels, revision_id?}` creates a custom head whose revision 1 copies one revision of an unarchived source, validated again. The avatar is not copied.
+- Revisions: `POST`, list, get, and `POST …/revisions/{rev}/set-default`, which validates the configuration again.
+- `PUT`, `GET` and `DELETE /agents/{agent}/avatar` manage the head's image. Changing it needs `write` on an unarchived custom agent and `If-Match`; reading it needs `read`. The image follows the [image rules](03-tenancy.md#images).
+
+Export and import are Console features: the Console serializes one revision's configuration and imports by creating an agent.
+
+### The configuration assistant
+
+The configuration assistant is an ordinary agent with key `configuration-assistant` and `source = 'builtin'`. `POST /workspaces/{ws}/configuration-assistant` (needs `write`) creates or refreshes it on demand and returns it:
+
+- Its model is the one it already uses while that model stays usable, else the first model whose upstream name, after its last `/`, matches `assistant.models` in preference order, else the workspace's first usable model by key. Without a usable model the call is 409 `model_required`. A custom agent holding the key makes the call 409 `key_in_use`.
+- A refresh appends a revision only when the configuration's digest changed.
+- A builtin head refuses metadata and avatar changes, revisions, default changes and archiving (409 `builtin`). It is visible and can be duplicated into a custom agent.
+
+Its tools are the built-in `configuration` toolset, which any agent may enable: `find_resources`, `read_resource` (an agent with its default revision's configuration, or with `revision_id`'s) and `describe_agent_config` read resources the run's principal may read, and `create_agent` and `create_agent_revision` call the same service functions as the API under the run's authority. The write tools default to the `ask` permission. How a refusal reaches the model is [05](05-runs.md#execute)'s Service tools rule. There are no drafts and no separate session kind: the conversation is the editing session, and the revision is its result.
+
+## Skills
 
 ```
 skills            head columns
-skill_revisions   revision columns; config: SkillManifest; package_ref (object key of the zip)
+skill_revisions   revision columns + package_ref; config: SkillManifest
 ```
 
-A package is uploaded through `/uploads`, which stores it under a tenant-bound upload key and returns an `upload_id`. Revision creation validates the manifest, expanded-size/file-count limits and archive paths, then references the upload key as `package_ref`. GitHub import accepts `{repository, ref, path}` and fetches before the transaction; validation records the resolved commit. Unreferenced uploads remain stored in v1; there is no expiry or inventory cleanup. Upload size/rate limits still apply. An upload handle never authorizes an arbitrary object-store key; see [07](07-facts-and-delivery.md#objects).
+A skill revision is a validated package. Its source is `{kind: upload, upload_id}` or `{kind: github, repository, ref?, path, commit?}`:
 
-### environment_templates and environment_providers
+- **Upload.** The package is a staged upload of the caller's workspace ([Uploads and assets](#uploads-and-assets)).
+- **GitHub.** The Service reads a directory of a public repository at `ref` and records the resolved commit. A given `commit` that differs from the resolved one is 409 `commit_mismatch`. The content is staged as the actor's upload, keyed by repository and package digest, so a repeated import reuses it. Every GitHub read (creation, validation or a new revision) spends the caller's [upload budget](#uploads-and-assets) first, and a new revision checks `If-Match` and the head before anything is fetched. Each GitHub request, the archive download included, passes the endpoint policy and is bounded by `control.import_timeout` and each response by `objects.max_bytes`. A repository, ref or path GitHub does not find, or a path without files, is `invalid_argument` on `source`; GitHub's rate limit is `rate_limited`, and any other GitHub failure is `unavailable` with dependency `github`.
 
-See [06-environments.md](06-environments.md). Both are live. There are no template revisions: an environment is created from the template's current configuration and reapplies the current runtime settings when it starts or opens.
+The package contract: a zip archive with `SKILL.md` at its root or in its only top-level directory; at most 1000 files, 8 MiB per file, 32 MiB expanded, 256 KiB for `SKILL.md` and 1024 bytes per path; no links and no path escaping the root; `__MACOSX/` entries are ignored. The manifest records the name, description, root, files, size, package digest and size, and the source with its resolved commit.
 
-### model_providers and models
+- `POST /skills` `{key?, name?, description?, labels, source}` creates the head and revision 1. `key` defaults to the `SKILL.md` name when that is a valid key; otherwise the request is `invalid_argument` on `key`. Name and description default to the manifest's.
+- `POST /skills/validate` `{source}` needs `write`, checks a package exactly as creation does and returns the manifest, staging nothing.
+- `GET /skills` filters by `label`, `q`, `archived` and `source` (`upload` or `github`, the default revision's source). A skill's representation includes `default_revision {id, number, source}`.
+- `PATCH` changes `name`, `description` and `labels`; a skill's key does not change.
+- Revisions: `POST` with a source and `If-Match`, list, get, `set-default`, `GET …/revisions/{rev}/content` (the zip) and `GET …/revisions/{rev}/files/{path}` (one file of the package). Both reads serve the bytes as an attachment ([10](10-api.md#representations)).
+
+## Provider resources
+
+A provider resource is a tenant-configured backend account: a model provider, an environment provider, a connector provider or a web provider. [08](08-providers.md) owns the definitions its `type` selects.
 
 ```
-model_providers
-  id  organization_id  workspace_id NULL  type  name  config  credential NULL  enabled
-  version  created_by_id  updated_by_id  created_at  updated_at
+model_providers        (mprov_)
+environment_providers  (eprov_)
+connector_providers    (cprov_)
+web_providers          (wprov_)
+  id  organization_id  workspace_id NULL  type  name  config  credential NULL  extra_headers
+  enabled  version  created_by_id  updated_by_id  created_at  updated_at
+  UNIQUE (organization_id, id)
+```
 
-models
-  id  organization_id  workspace_id NULL  provider_id  key  name  config  pricing NULL  enabled
-  version  created_by_id  updated_by_id  created_at  updated_at
+- **Scope.** `workspace_id` is required on create: a workspace ID, or explicit null to share the provider with every workspace of the organization. A shared provider needs organization-scope `write` to create or change; workspace grants may use it with their `read` and `run` verbs ([03](03-tenancy.md#authorization)). Lists without `workspace_id` return shared rows plus rows of every workspace the caller reads; with it, shared rows plus that workspace's. A provider the caller cannot read is `not_found`.
+- **Configuration and credential.** `config` and `credential` are validated against the type's schemas; a refusal carries at most five locations with the schema's own messages, never the submitted value. The credential is write-only: encrypted for its row ([03](03-tenancy.md#credential-encryption)), never returned (views show `credential_configured`), replaced whole when present and removed by `null`. A credential is bound to the configuration it was entered with: a `PATCH` that changes `config` while a credential is stored must also replace or remove `credential`, or it is `invalid_argument` on `credential`.
+- **Extra headers.** A model provider may carry up to 32 extra request headers. Values are write-only secrets, each encrypted for its row and header name; views return only `header_names`. `PATCH` edits them per name: a value sets one, `null` removes one, and names left out keep theirs. Names the Harness definition reserves for transport, authentication or protocol are refused, and other kinds refuse the field (`invalid_argument` on `extra_headers`). A `config` change must also replace or remove every stored header; replacing only the credential keeps them. The audit event names the field, never a value.
+- **Enabled.** `enabled` is set on create and changed by `PATCH`. A disabled provider refuses new use (`disabled`); maintenance of environments that already use it continues ([06](06-environments.md)).
+- **Same-scope references.** Constraint triggers `models_provider_id_in_scope`, `environment_templates_provider_id_in_scope`, `connections_connector_provider_id_in_scope` and `environments_provider_id_in_scope` refuse a row that references a provider of another organization, or of another workspace unless the provider is shared.
+- **Test.** `POST /{kind}-providers/{id}/test` needs `run`. It makes one non-billable probe of the current configuration outside any transaction, bounded by `providers.operation_seconds` and `providers.response_bytes`, and changes nothing. It returns `{provider_id, provider_version, status, message}` with status `succeeded`, `failed` or `unsupported`; the message is fixed text or the provider's classified code, never an upstream body. A model type is probed when its definition has a connection probe; a connector provider runs its own account test; web types are `unsupported`. An environment provider test only reads. The endpoint the account names passes the endpoint policy first ([08](08-providers.md#outbound-endpoint-policy)): a denied one fails with `provider_endpoint_denied` and a host that does not resolve with `provider_unavailable`, without being dialed; Docker then answers one ping, and HTTP envd one authenticated identity read. Nothing is pulled, created or started, and a failure reports only the provider's error code. Billable verification goes through a run and its admission checks, so a test never becomes an unmetered execution path.
+
+Environment providers serve [environment templates](#environment-templates) and instances ([06](06-environments.md)). A connector provider, such as Composio, is configured once per organization or workspace with the platform's API key as its credential; each [connection](#connections) through it binds one external account. `GET /workspaces/{ws}/connector-providers/{id}/apps` (`query`, `refresh`, cursor), `…/apps/{app}` and `…/apps/{app}/actions` read its app catalogue with the provider's credential and need `run`; app and action listings are cached for `providers.discovery_ttl` per provider version, and `refresh=true` reads the apps again.
+
+## Models
+
+```
+models   (mdl_)
+  id  organization_id  workspace_id NULL  provider_id  key  name  description  config  pricing NULL
+  enabled  version  created_by_id  updated_by_id  created_at  updated_at
   UNIQUE (provider_id, key)
 ```
 
-`type` selects a Harness `ProviderDefinition` from the registry; `config` and `credential` are validated against that definition's schemas. `credential` is write-only: encrypted at rest (see [Secrets](#secrets)), never returned, replaced whole or removed with `null`. `workspace_id IS NULL` makes a provider (and its models) shared by every workspace of the organization: a matching workspace grant may exercise its permitted `read`/`run` verbs; only an organization-scope grant may `write` or `admin` it (the rule in [03-tenancy.md](03-tenancy.md#authorization)).
+A model is one upstream model served by one model provider, in the same organization collection as providers (`/organizations/{org}/models`).
 
-`models.config` holds the model's settings bounds and characteristics (context window, modalities); `pricing` holds the price table used for cost display and, later, budgets. Operations on providers: create, get, list, update, disable, test (one probe call, never inside a transaction), list catalogue (the definition's known models, for the Console to offer). Operations on models: create (manual or from catalogue), update, disable.
+- `config` holds `model_name`, `model_api`, `characteristics` (context window, modalities and understanding capabilities) and optional `max_tokens`, `temperature` and `top_p`. `model_api` must be one of the provider type's calling APIs (`invalid_argument` on `config.model_api`).
+- `pricing`, when present, prices `config.model_name`: `pricing.model` must equal it (`invalid_argument` on `pricing.model`), because execution looks prices up by upstream model name.
+- Creation takes either `config` and `pricing`, or `catalog_key`, which takes the name, characteristics and price from the catalogue and the provider type's first calling API. `GET /model-providers/{id}/catalog` lists the catalogue models the provider's type serves.
+- `description` is optional (default empty), and a model may be created disabled.
+- A model spends its provider's credential: creating one or changing its `config` needs `write` on the provider, so models under a shared provider are configured by organization-scope grants. A workspace provider serves only models of its own workspace (`invalid_argument` on `workspace_id`); a disabled provider refuses new models (`disabled`); a duplicate key under the provider is `already_exists`.
+- A model the caller cannot read is `not_found`. Using a model at execution needs it and its provider enabled and usable under the run's authority.
 
-Provider `test` uses non-billable authentication/metadata probes. Billable model/tool verification goes through an ordinary run and the admission policy; a resource test must not become an unmetered execution path.
+Every model call is attributed to the resolved model serving its upstream (provider, model name) pair, and its usage record carries the model and a price snapshot ([07](07-facts-and-delivery.md#usage-records)). A run whose agent graph resolves two models with the same pair fails with `upstream_model_ambiguous`.
 
-### web_providers
+**Media-understanding defaults.** `GET` and `PUT /workspaces/{ws}/media-understanding-defaults` hold the workspace's image, video and audio models in `workspaces.settings.media`. `PUT` replaces all three, needs workspace `admin` and `If-Match` on the workspace version, and refuses a model that does not declare `{kind}_understanding`; it records `workspace.media.replace`. At execution an agent's own selection wins and must be usable; an unusable workspace default is skipped with a warning, leaving that media kind without understanding.
 
-Same table shape and scope rules as `model_providers` (`type`, `config`, `credential`, `enabled`). Each row configures a backend account for search or scrape; its implementation lives in `providers/web/`. Multiple accounts may use the same implementation. Fetch and download use the host HTTP transport and require no provider resource.
-
-### connector_providers
-
-Same table shape and scope rules as `model_providers`. A connector provider is a hosted integration platform such as Composio, configured once per organization or workspace: `type` selects its registered definition, `config` holds its non-secret settings and `credential` its platform API key. Connections choose one and bind a single external account through it.
-
-Four provider tables with shared columns is deliberate: each has typed foreign keys from the kind that uses it, and the shared shape is a mixin, `ProviderColumns`, not a shared table with a `kind` column.
-
-### connections
+## Environment templates
 
 ```
-connections
-  id  organization_id  workspace_id  type  name  config  auth  credential NULL
-  connector_provider_id NULL  status  generation  failure NULL  expires_at NULL
-  authorization NULL  oauth_state_hash NULL
-  operation_id NULL  operation_kind NULL  operation_deadline NULL
+environment_templates   (envtpl_)
+  id  organization_id  workspace_id  key  name  description NULL  provider_id  config  enabled  labels
+  version  created_by_id  updated_by_id  created_at  updated_at
+  UNIQUE (workspace_id, key)
+```
+
+A template is the live configuration managed environments are created from ([06](06-environments.md)). `config` is `{recipe, stop_after_seconds, delete_after_seconds}`:
+
+- `recipe` is validated by the provider type's environment schema and stored normalized; errors carry each location and the schema's own message, never the submitted value. The provider must be enabled and able to create environments (`supports_managed`); a connect-only type is `invalid_argument` on `provider_id`. Creating a template, or changing its provider or normalized recipe, needs `write` on the provider, whose account the recipe runs on; changing only the idle policy needs `read`. The operator further restricts Docker recipes ([08](08-providers.md#registry)).
+- `stop_after_seconds` (default 1800, 60 to 2592000, null for never) and `delete_after_seconds` (default null, 60 to 31536000) are the idle policy; [06](06-environments.md#idle-policy) owns how it applies.
+
+A template is created enabled. `PATCH` (with `If-Match`) may change `provider_id`, `config`, `name`, `description`, `labels` and `enabled`; a disabled template refuses new environments. How template changes reach instances is [06](06-environments.md#templates-and-instances)'s.
+
+## Connections
+
+```
+connections   (conn_)
+  id  organization_id  workspace_id  type  name  config  auth  credential NULL  tokens NULL  expires_at NULL
+  client_secret NULL  connector_provider_id NULL  status  failure NULL
+  authorization NULL  oauth_state_hash NULL  authorization_expires_at NULL
+  operation_id NULL  operation_kind NULL  operation_deadline NULL  last_test NULL
   enabled  version  created_by_id  updated_by_id  created_at  updated_at
-  auth IN ('none', 'bearer', 'headers', 'oauth', 'account')
-  status IN ('pending', 'ready', 'reauthorization_required')
-  operation_kind IN ('setup', 'complete', 'refresh', 'revoke')
+  CHECK (auth IN ('none', 'bearer', 'headers', 'oauth', 'account'))
+  CHECK (status IN ('pending', 'ready', 'reauthorization_required'))
+  CHECK (operation_kind IN ('setup', 'complete', 'refresh', 'revoke'))
   CHECK ((connector_provider_id IS NULL) = (auth <> 'account'))
   CHECK ((type = 'mcp') = (connector_provider_id IS NULL))
   CHECK (status <> 'ready' OR auth = 'none' OR credential IS NOT NULL)
-  UNIQUE (operation_id) WHERE operation_id IS NOT NULL
+  CHECK (client_secret IS NULL OR auth = 'oauth')
+  CHECK ((tokens IS NOT NULL) = (auth = 'oauth' AND credential IS NOT NULL))
+  CHECK operation_id, operation_kind and operation_deadline are all set or all NULL
+  CHECK authorization, oauth_state_hash and authorization_expires_at are all set or all NULL
+  UNIQUE (operation_id), UNIQUE (oauth_state_hash) where set
+  tokens, expires_at, the operation columns, failure, the authorization columns and last_test are unversioned
 ```
 
-A connection is a source of tools with **one credential**. `type = 'mcp'` names a Remote MCP server (`config.url`, `config.tools` selection). Any other `type` is a connector type served by the chosen `connector_provider_id` (`config.app`, `config.actions`); the connection binds exactly one external account of that app. Two accounts of the same app are two connections. There is no per-principal credential: anyone with `run` on the workspace can let an agent use a connection's account, so a private account belongs in a personal workspace.
+A connection is a source of tools with **one credential**:
 
-`auth` says how the credential is obtained. `none` has no credential. `bearer` and `headers` are entered by a writer and stored write-only. `oauth` runs an OAuth authorization-code flow for an MCP server; the credential is the token bundle. `account` runs the connector provider's hosted account setup; the credential is the provider's account reference, and the provider keeps and refreshes the external tokens. `status` is `ready` when the connection can be used, `pending` before a browser authorization completes, and `reauthorization_required` when an unknown or rejected operation left no usable credential.
+- `type = 'mcp'` is a Remote MCP server: `config` is `{url, tools?, headers, oauth?}`. `url` passes the endpoint policy ([08](08-providers.md#outbound-endpoint-policy)). `tools` narrows what the connection exposes; without it the connection exposes everything the server lists.
+- Any other `type` is a connector app served by `connector_provider_id`, whose provider must have that type: `config` is `{app, actions, setup}`, where `actions` (1 to 128) are the exposed actions and `setup` is validated by the provider type. The connection binds exactly one external account; two accounts of one app are two connections.
 
-`POST /connections/{conn}/authorize` starts the browser flow for `oauth` and `account` connections and requires `write` on the connection, because the resulting credential serves every run in the workspace. It stores the one-use state hash and the encrypted `authorization` (PKCE verifier, redirect/return targets, the connector's pending account reference) and returns the redirect URL; the current credential stays usable until the flow replaces it. The callback completes the flow, stores the new credential, sets `ready` and clears `authorization`. Revoking clears the credential, sets `pending` and asks the remote side to revoke where the definition supports it.
+There is no per-principal credential: anyone with `run` in the workspace can let an agent use a connection's account, so a private account belongs in a personal workspace. Reading a connection needs `read`, and changing one needs `write`. There is no delete: `PATCH {enabled: false}` and `…/revoke` retire a connection.
 
-The connection service owns every remote authorization step: connector account setup and completion, OAuth code exchange and refresh, and revocation. Before dispatch, lock the connection, claim its **single operation**, increment `generation` and persist operation ID/kind/deadline. Only the winner sends the external request; concurrent callers await its result outside the database with a bounded deadline. On success, publish only for the same generation/operation, then clear the operation. Revoke, a new authorization and auth-relevant configuration changes increment generation and invalidate outstanding operations; generations never reset. Changing the server, issuer, client, connector provider, app or auth settings invalidates the credential; another endpoint cannot inherit tokens.
+A connection's version, and so its ETag, changes only with what a person configures or authorizes: the configuration, the entered credential, `enabled`, and a completed, revoked or lost authorization. Renewed tokens, the outstanding operation, failures, a pending browser flow and test outcomes leave it unchanged.
 
-A request that may have been sent but lost its response has no generic exactly-once retry. Deadline recovery sets `reauthorization_required`, keeps the failed operation identity in `failure`, and refuses to reuse the old refresh token. Only a definition with explicit replay/retrieval guarantees can recover it, for example by inspecting the connector account it created. A late response cannot revive a revoked or reauthorized connection. Occasional reauthorization after a crash is preferable to corrupting credentials. A CAS only **after** two calls cannot prevent refresh-token-family revocation; see [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html#name-refresh-token-protection).
+**Authentication.** `auth` says how the credential is obtained, and `status` is `ready` when the connection can be used, `pending` before its credential exists, and `reauthorization_required` when an operation left no usable credential:
 
-Callback state is random, hashed, one-use and bound to connection/generation, PKCE, expiry and an allowlisted redirect URI. Claim before exchange; duplicate callbacks read/join the operation instead of exchanging again. Public reads expose no tokens, verifiers or account references. Refresh on use and optional keep-alive use exactly this service. Adapters receive plain values and return credentials; they never mutate business tables or blindly retry token POSTs. Operation deadlines are monitored even when keep-alive is disabled.
+| `auth`    | Credential                                                                                                                        |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `none`    | none; the connection is `ready` at once                                                                                           |
+| `bearer`  | an entered token, presented as `Authorization: Bearer`                                                                            |
+| `headers` | entered values for exactly the header names in `config.headers`, bounded like [caller headers](#caller-headers)                   |
+| `oauth`   | the OAuth client an MCP server's grant was made to, in `credential`, and the grant's tokens, in `tokens`; obtained by `authorize` |
+| `account` | the connector provider's account reference, obtained by `authorize`; the provider keeps and refreshes the external tokens         |
 
-#### Caller headers
+The credential, tokens, client secret and pending flow are encrypted for their row and column ([03](03-tenancy.md#credential-encryption)) and never returned. Entered credentials are replaced whole when present and removed by `null`; views show `credential_configured`. A connection's credential is bound to its identity: changing the server URL, the header names, the OAuth settings, the app or its setup, or `auth` drops the credential and any pending authorization, so another endpoint never inherits a credential. Changing only the name, the tool selection or `enabled` keeps it. A credential dropped this way is only cleared, never revoked remotely.
 
-`threads.mcp_headers` is a map from connection ID to header name/value pairs. It is how a bot tells its MCP server which conversation a tool call belongs to, so it belongs to the thread, not to individual messages. It is set when the thread is created and edited with `PATCH /threads/{thread}` under the thread `If-Match`; acceptance freezes the current map into the run's options, so an edit affects later runs only.
+**Header names.** The credential header names in `config.headers`, the MCP server catalogue's `header_names` ([08](08-providers.md#mcp-server-catalogue)) and [caller headers](#caller-headers) follow one rule: a lowercase HTTP token of at most 128 characters that is none of `authorization` (which only a bearer credential sets), `connection`, `content-length`, `content-type`, `accept`, `accept-encoding`, `cookie`, `set-cookie`, `host`, `keep-alive`, `te`, `trailer`, `transfer-encoding` and `upgrade`, and does not start with `proxy-`, `mcp-` or `sec-`.
 
-Validate the map when it is written: every key is an enabled `mcp` connection in the thread's workspace, header names follow the same reject list as `static_headers` (hop-by-hop, cookie, authorization, proxy, MCP protocol and session headers), and values contain no control characters. There is no per-connection allow list and no check against any agent revision, because different messages in one thread may select different agents. A caller header colliding case-insensitively with the connection's own authentication headers is rejected; recheck collisions when resolving live credentials at use.
+**OAuth clients.** `config.oauth` is `{client_id?, token_endpoint_auth_method, grant_type, scopes}`:
 
-A child thread copies its parent run's frozen map; a fork copies its origin thread's map. Context is not a tool grant: a call must still use a connection declared for its executing agent and pass the ordinary live-resource and credential checks. The header factory returns only the map entry for that exact connection ID; other entries are unused. Values remain plain context, stored and returned like other thread settings, never credentials. Headers take no part in steer compatibility: every run of a thread already carries that thread's context.
+- Without `client_id`, each authorization registers a public client dynamically. With one, the client is registered in advance, and `GET /connections/redirect-uri` returns the Service's callback, `{server.public_url}/api/v1/connections/callback`, for registering it.
+- `token_endpoint_auth_method` is `none`, `client_secret_basic` or `client_secret_post`. A secret method needs `client_id`, and its `client_secret` is write-only (`client_secret_configured`). The secret belongs to the server and client ID: it is dropped when either changes, when the method becomes `none` or when `auth` leaves `oauth`. A new secret drops the credential obtained with the old one; the secret survives revoke and a lost refresh. Authorizing without it is 409 `client_secret_missing`.
+- `grant_type = client_credentials` needs a secret method. It is a machine credential that serves every run of the workspace, the same exposure as a bearer token. `authorize` obtains the token without a browser as the connection's single operation and returns `{redirect_url: null, expires_at: null}`. Renewal requests a new token; a failed renewal needs `authorize` again.
 
-There is no OAuth client registration table, no shared-setup lock, no discovery cache table. Discovery results (the server's tool list) are fetched on `test` and at execution, and cached in Redis with a short TTL.
+**Authorization.** `POST …/authorize` `{return_url?}` needs `write` on the connection and `If-Match`, because the resulting credential serves every run of the workspace. `return_url` must be a page on the origin of `server.public_url` or exactly one of `providers.return_urls` (`invalid_argument` otherwise).
 
-### secrets
+- For `oauth` with the authorization-code grant, the Service discovers the authorization server, registers a client when none is configured, and stores the hash of a random one-use `state` with the encrypted pending flow (PKCE verifier, client, initiator, return URL and browser binding) and its expiry, `authorization_expires_at`, after `providers.flow_seconds`. It returns `{redirect_url, expires_at}`. An authorization-server failure is 503 `unavailable` with dependency `oauth` and a safe `reason` code, `authorization_server_denied` when the endpoint policy refuses the server.
+- For `account`, starting the provider's hosted setup is the connection's single operation. The pending flow stores the account reference the setup created and expires at the sooner of `providers.flow_seconds` and the provider's own expiry. A setup failure is 503 `unavailable` with dependency `connector:{type}` and a safe `reason`.
+- An MCP connection whose `auth` is not `oauth` is 409 `no_browser_authorization`.
+- A browser flow (the authorization-code grant or a connector account setup) requires a login session (`forbidden` for an API key, [03](03-tenancy.md#authorization)), so an API-key client never hands a third party an authorization URL. The flow is bound to that browser: the response sets the cookie `__Secure-a13n_flow_{connection_id}` (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/api/v1/connections/callback`, `Max-Age` of `providers.flow_seconds`), and the flow keeps only the hash of its random value. An API key may start only a flow without a browser, the client-credentials grant.
+- A new flow replaces any pending one, and the view's `authorization_pending` holds until `authorization_expires_at`. Starting an OAuth browser flow replaces only the pending flow and a completion of it in progress; an outstanding refresh or revocation continues, and the current credential stays usable until a completed flow replaces it. Completing a flow while a refresh is outstanding ends that refresh as lost: `failure` becomes `{reason: outcome_unknown, code: superseded}` and the completed flow's credential replaces the old one; a possibly rotated refresh token is never presented again.
+
+The public callback `GET /api/v1/connections/callback` is authenticated by `state` and the flow's cookie. Its attempts are rate-limited per client address ([03](03-tenancy.md#authentication)). An unknown, used or replaced `state` is `invalid_argument` on `state`. The callback completes the flow once as the connection's single operation, for the principal who started it, who must still hold `write`. The OAuth path checks the issuer and exchanges the code; the account path inspects only the account the setup created, by its stored reference, and ignores account identifiers the browser sends. A duplicate callback joins the completion in progress. An expired flow (`authorization_expired`), a callback without the flow's cookie (`browser_mismatch`), an initiator who lost `write`, and a refused or failed flow record `failure` and clear the pending flow. The callback answers `{connection_id, status, error}` as JSON, or redirects (303) to the return URL with those values as query parameters. `error` is a code of at most 64 ASCII letters, digits and underscores; any other browser- or provider-supplied value becomes `failed`. Responses delete the flow cookie and carry `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+A completed authorization that replaces a credential revokes the replaced OAuth grant or connector account remotely as a best effort, bounded by `providers.operation_seconds`; a failure there changes nothing. A replaced grant issued to the same client (the same issuer and `client_id`) is not revoked, since revoking it can end the new grant too.
+
+`POST …/revoke` (`write`, `If-Match`) clears the credential, any pending flow and any outstanding operation at once and sets `pending`. For an `oauth` or `account` connection that holds a credential and whose remote side offers revocation, a disabled connection and one in an archived workspace included (revoking is offboarding), it then asks the remote side to end the credential as the connection's single operation; a connector connection whose provider is disabled or not usable is only cleared (`skipped`). It answers the connection with `remote_revocation`: `revoked`, `failed` (details in `failure`) or `skipped` (nothing to end remotely). A connection with `auth = 'none'` is 409 `no_credential`. Starting an authorization is audited as `connection.authorize`, its completion as `connection.authorization.complete` for the initiator, and revoke as `connection.revoke` with `{remote}`.
+
+**Single operation.** A connection has at most one outstanding remote operation (`setup`, `complete`, `refresh` or `revoke`), claimed under the row lock before its request is sent: the claim records a new `connop_` `operation_id`, `operation_kind` and a deadline of twice `providers.operation_seconds`. Only the claimant sends the request. Sending it and publishing its result are shielded from the caller's cancellation and bounded by `providers.operation_seconds`, so only a timeout or a crash leaves an outcome unknown, and only a claim that is still current publishes. A renewal that finds an operation outstanding waits for it outside the database, bounded by its deadline, and then reads its outcome; a duplicate callback joins the completion. A connector account setup, a client-credentials authorization, a completing callback, revoke and a change of identity end the outstanding operation, and an OAuth browser flow ends only a completion in progress; an ended operation's late result changes nothing and its caller gets 409 `superseded`. `failure` records the last failed operation: `{operation_id, operation_kind, reason, code}`, where `reason` is `rejected` or `outcome_unknown` and `code` is a safe classified code.
+
+An operation that may have been sent but has no result is never repeated. An operation past its deadline fails as `outcome_unknown` with code `deadline_exceeded`, audited as `connection.operation.expire` without an actor: before a renewal reads the grant, and in the `recover_connection_operations` sweep ([09](09-runtime.md#sweeps)). A failed setup or completion clears the pending flow. A failed refresh clears the credential and sets `reauthorization_required` only when its outcome is unknown, the server refused the grant (`invalid_grant`) or the client is a client-credentials client; any other refusal keeps the credential and records `failure`, and a later use renews again. A token request that never left the Service, refused by the endpoint policy (`token_endpoint_denied`) or failing while waiting for or making a connection (`token_endpoint_unreachable`), has a known outcome and keeps the credential; the token client's connection and pool timeouts are a fifth of `providers.operation_seconds`, so that failure arrives before the operation's bound. Occasional reauthorization after a crash is preferred to presenting a possibly revoked refresh token ([RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html#name-refresh-token-protection)).
+
+**Use.** An MCP connection presents its credential on every request. An OAuth access token within 60 seconds of expiry is renewed on use as the connection's `refresh` operation, with the refresh token or, for a client-credentials client, by asking again; concurrent users wait for its result, and a cancelled caller never loses the renewed credential. A renewal the server fails is 503 `unavailable` with dependency `oauth` and a safe `reason`; a use without a grant is 409 `reauthorization_required`. At execution a run resolves each selected connection under its authority: the connection must be enabled and `ready`, and a connector's provider enabled and usable. Before every tool call the connection must still be enabled and `ready`, and the call must pass the run's dispatch check ([09](09-runtime.md#extension-points)); otherwise the call is never sent.
+
+**Tools and discovery.** `GET …/tools` and `POST …/test` need `run`, because discovery presents the credential.
+
+- Discovery reads up to the Harness bound of 2048 tools. A connection exposes at most 128 tools to a model, and an agent selects at most 128 from one connection, because every definition costs model context. An MCP connection without `config.tools` whose server lists more than 128 makes a run fail with `connection_tools_exceeded`.
+- `GET …/tools` returns cached tools when present (Redis, `providers.discovery_ttl`, keyed by connection version) and otherwise discovers them; a failure is `unavailable` with dependency `connection:{type}`. Renewed OAuth tokens keep the cached tools, since they leave the version unchanged. Before an account is bound, a connector connection lists the app's catalogue, and its test fails.
+- `test` always discovers with the current configuration and credential and returns `{connection_id, connection_version, status, message, tested_at, tools}`; a failure is `status: failed` with a safe message, not an HTTP error. It records `last_test {connection_version, status, message, tested_at}` without changing the version, and an outcome for an older version never replaces a newer one. Tests are not audited.
+- Tools report `name`, `description`, `input_schema`, `output_schema` and `annotations` as the server or app declares them. Annotations are hints shown to people, never permissions.
+
+**Selections.** An agent's `connection_tools` entry names an enabled connection of its workspace. `tools` must be a subset of what the connection exposes; `permission` applies to every tool without its own entry in `permissions`, whose keys must be selected tools. `defer_loading` lets the model find an MCP connection's tools through tool search; it applies only to MCP connections, and a connector selection with it is `invalid_argument`. At execution, selected tools the connection no longer exposes are dropped.
+
+The Remote MCP servers suggested for new connections are a catalogue that only prefills a connection ([08](08-providers.md#mcp-server-catalogue)).
+
+### Caller headers
+
+`threads.mcp_headers` maps connection IDs to header name/value pairs. It is how a caller tells its MCP server which conversation a tool call belongs to, so it belongs to the thread, not to individual messages. It is set when the thread is created and edited with `PATCH /threads/{thread}` under the thread's `If-Match`; acceptance freezes the current map into the run, so an edit affects later runs only. The run view never shows the frozen map.
+
+The map is validated when written:
+
+- It names at most 32 connections, and every key is an enabled `mcp` connection of the thread's workspace.
+- Names are stored lower-case, unique ignoring case, and follow the [header-name rule](#connections); `authorization` is refused.
+- Each connection has at most 32 headers, values of at most 4096 printable ASCII characters, and at most 8192 bytes in total; the whole map holds at most 16384 bytes.
+- A name colliding with the connection's own credential header names is refused, and the collision is checked again when a run resolves the connection.
+
+There is no per-connection allow list and no check against an agent revision, because different messages of one thread may select different agents. A child thread copies its parent run's frozen map; a fork copies its origin thread's map. Context is not a tool grant: a call still needs a connection its agent selects and passes the ordinary checks, and only the entry for that exact connection is sent, through the Harness `ContextualMCP` header factory, resolved once per logical run. Values are plain context, stored and returned with the thread, never credentials. Headers take no part in steer compatibility, since every run of a thread carries the same context.
+
+## Secrets
 
 ```
-secrets
+secrets   (sec_)
   id  organization_id  workspace_id  principal_id NULL  key  ciphertext
   version  created_by_id  updated_by_id  created_at  updated_at
   UNIQUE (workspace_id, COALESCE(principal_id, ''), key)
 ```
 
-A secret is an opaque value a caller stores and never reads back. `principal_id IS NULL` means workspace-owned; otherwise it is private to that principal. An agent revision declares `secret_requirements: [{key, scope: workspace | user}]`; at execution the worker resolves each requirement to a row (workspace-owned by key, or owned by the run's principal by key), and hands the Harness a credential broker that answers by requirement key. The model never sees a value; a tool that needs one names its requirement.
+A secret is an opaque value a caller stores and never reads back. `key` matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, and the value is 1 to 16384 characters, encrypted for its row ([03](03-tenancy.md#credential-encryption)).
 
-All encrypted columns (`secrets.ciphertext`, every `credential`) use one primitive, `protect(plaintext, aad) -> ciphertext` and `reveal(ciphertext, aad)`, AES-256-GCM under one operator-configured key ring. The envelope carries a key ID; authenticated data binds organization, table, column and row ID. Copying into an outbox row requires reveal/reprotect with the new AAD. Rotation retains decryptability until referenced envelopes are re-encrypted. Plaintext brokers never enter checkpoints, display, audit or errors. **Keeps:** write-only credential semantics. Private secret access requires its owner as well as workspace rights.
+- `scope: workspace` (`principal_id` null) serves every principal of the workspace; creating or changing one needs `write`.
+- `scope: user` is private to its creator: the owner needs `run` to change it, and nobody else sees it in lists or reads or may replace it. A workspace admin may delete another principal's private secret.
+- `PUT` replaces the value and `DELETE` deletes the row; both require `If-Match`. A duplicate key in the same scope is `already_exists`. Audit events carry the key and scope.
 
-### assets
+An agent revision declares `secret_requirements: [{key, scope}]`. Before a run starts, every declared requirement of the run's agent graph must resolve, workspace secrets by key and user secrets by key among the run principal's own; a missing one fails the run naming the key. During execution a managed tool may use only the audiences its own agent node declares, so an inline subagent never borrows its parent's secrets. Each value is read fresh when the call is authorized, lives only in that call's credential lease and is cleared when the call ends; no value reaches the model, logs, errors, events or Harness state.
+
+## Uploads and assets
+
+`POST /workspaces/{ws}/uploads` stages bytes: a multipart `file` with a required `Idempotency-Key`, needing `write`. Its size is at most the smaller of `objects.upload_bytes` and `objects.max_bytes`.
+
+Stored bytes are never reclaimed, so each principal has one **upload budget** of `objects.upload_limit` requests per `objects.upload_window_seconds`, spent by every upload, every stored image ([03](03-tenancy.md#images)) and every [GitHub read](#skills); an exhausted budget is `rate_limited`.
+
+- The upload ID (`upl_` and 64 hex characters) is derived from the organization, workspace, principal and request key. The same key with the same bytes, filename and content type returns the same upload; anything else is 409 `idempotency_key_reused` ([10](10-api.md#idempotency)).
+- Bytes land under `orgs/{org}/uploads/{upload}` ([07](07-facts-and-delivery.md#objects)), and a receipt written last binds them to the workspace. An upload resolves only through its receipt and only in its own workspace, so a handle never names an arbitrary object key. Staged uploads are not reclaimed.
 
 ```
-assets
+assets   (ast_)
   id  organization_id  workspace_id  name  content_type  size  digest  content_ref
   source NULL  retired_at NULL  version  created_by_id  created_at  updated_at
+  UNIQUE (workspace_id, content_ref)
+  CHECK (size >= 0)
 ```
 
-Immutable content. Uploaded through the same `/uploads` staging as skills, then `POST /assets {upload_id, name}`. `source` records provenance when a run produced it: `{"run_id", "run_attempt_id", "tool_call_id"}`. Assets are referenced by id from inbox entry payloads and run outputs. DELETE retires it for new use; authorized readers of retained input and output can still read its content. No physical deletion or retention purge is implemented in v1.
+An asset is immutable content with metadata. `POST /assets {upload_id, name}` returns 201 with the new asset, or 200 when the same upload and name already made one; the same upload with another name is 409 `upload_in_use`. The built-in `publish_asset` tool publishes a file of the run's environment the same way under the run's authority, with `source = {run_id, run_attempt_id, tool_call_id}`. Inbox entries and run outputs reference assets by ID; new input naming a retired asset, or one of another workspace, is `invalid_argument` (field `asset_id`, reason `not_usable`, with the asset's `kind` and `id`). `DELETE` retires an asset (`write`, `If-Match`, idempotent); `GET …/content` still serves a retired asset, as an attachment ([10](10-api.md#representations)). No asset content is physically deleted.
 
-### subscriptions
+## Subscriptions
 
 ```
-subscriptions
+subscriptions   (sub_)
   id  organization_id  workspace_id  name  url  signing_secret  kinds  filter  enabled
   version  created_by_id  updated_by_id  created_at  updated_at
+  CHECK (kinds is a non-empty array)
 ```
 
-A webhook subscription. `kinds` is the list of lifecycle kinds it wants (`["run.completed", "run.failed"]`, any of the twelve run and attempt kinds); `filter` optionally narrows by `agent_id`, `session_id` or `thread_id`. `signing_secret` is encrypted; deliveries carry an HMAC signature header. Delivery is described in [07-facts-and-delivery.md](07-facts-and-delivery.md#lifecycle-webhooks). There are no revisions: the outbox row copies the URL and re-encrypts the secret for its own identity, so changing a subscription affects future deliveries only.
+A subscription is a webhook. `kinds` lists the lifecycle kinds it wants, any of `run.accepted`, `run.running`, `run.waiting`, `run.completed`, `run.failed`, `run.cancelled`, `run_attempt.leased`, `run_attempt.running`, `run_attempt.succeeded`, `run_attempt.yielded`, `run_attempt.failed` and `run_attempt.cancelled`; `filter` optionally narrows by `agent_id`, `session_id` and `thread_id`.
 
-## Rules every kind follows
-
-- **Lock, authorize, precondition, act, stamp, audit**, in that order, in one short transaction. Anything that needs the network (fetching a GitHub repository, probing a provider) happens before the transaction and is re-checked inside by comparing `version` of the rows it depended on. Authorization precedes external preparation too.
-- **References are validated at write time, live references again at execution time.**
-- **Retirement is one column per lifecycle**, and retired things stay readable: an archived agent is listed with `archived_at` set and refuses new runs; a disabled provider is listed and refuses execution; a disabled template refuses new environments while existing ones keep reading it. Assets retire while referenced; secrets/subscriptions can be deleted with audited intent. Removing a credential can fail later execution but changes neither historical facts nor already frozen webhook deliveries.
-- **Every mutation records an audit event** with `action = "<kind>.<verb>"`.
-- **Labels** are a free-form string map on heads, sessions, threads and runs, edited through the resource's `PATCH`, filterable on list with `?label=k:v`.
+- Every operation needs workspace `admin`. A workspace holds at most `control.subscriptions` subscriptions; more are 409 `subscription_limit`.
+- `url` passes the endpoint policy when written.
+- The signing secret (16 to 256 characters) is generated as `whsec_` and random text when absent, encrypted, and returned only in the create response. `PATCH` may replace it, which never returns it.
+- `PATCH` and `DELETE` require `If-Match`; `DELETE` deletes the row. Delivery staging, signing, retries, the delivery list and redelivery are [07](07-facts-and-delivery.md#lifecycle-webhooks)'s. Each delivery copies the URL and secret when staged, so a change affects later deliveries only.

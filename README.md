@@ -28,7 +28,7 @@ Harness UI and a13n Service both embed Agent Harness, but they own different lif
 | The application or UI owns execution, configuration, continuation storage, and recovery policy. | The Service owns managed resources and revisions, durable acceptance, scheduling, Runs and Attempts, permissions, and recovery. |
 | Models and execution Environments may still be remote.                                          | The Service may still run on the same machine as its client.                                                                    |
 
-`a13n` identifies Service client packages, not an umbrella package or another Agent execution engine. [Console](docs/a13n-service/console.md) is the repository's Service management browser application. [Service SDKs](docs/a13n-service/sdks.md) and the remote CLI are maintained and released in independent repositories.
+`a13n` identifies Service client packages, not an umbrella package or another Agent execution engine. Console is the repository's Service management browser application; [Get started](docs/a13n-service/get-started.md) signs in to it. Service SDKs and the remote CLI are maintained and released in independent repositories, linked from the [Service overview](docs/a13n-service/index.md).
 
 Harness UI interaction is provided by the terminal CLI. Its optional `a13n-harness-ui webui` server retains the HTTP API; the bundled browser page provides authentication, status, and version information, not browser chat or Service management. See [the browser-server guide](docs/a13n-harness-ui/webui.md).
 

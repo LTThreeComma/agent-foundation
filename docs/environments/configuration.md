@@ -46,9 +46,7 @@ The private container filesystem supplies `/workspace`. Optional host mounts hav
 
 Advanced options include user, shell, Python executable, stop grace (ten seconds), per-helper request timeout (60 seconds; includes init scripts, not Agent Runs or ordinary shell duration), file values (16 MiB), output previews (64 KiB), captured bytes per stream (16 MiB), aggregate observation/retention budgets (64 MiB each), and concurrent process observations (128). Custom images need Linux, Python 3.10+, the configured shell, writable `/workspace` and `/tmp/a13n`; Git is required only for git-ignore queries.
 
-`DockerConnectionConfiguration.docker_host` selects the Engine socket. Worker restarts must reach that same Engine. Service permits Docker only in `deployment.mode = "single_host"`; the shipped Compose mounts the host socket and grants its non-root Service process access.
-
-Use **Test image** beside the template image field before saving when checking a custom image. The test runs on the selected Worker Engine and returns the exact image ID used by the temporary container plus file, command/output, and process-control checks. It omits the init script and external mounts; leaving the editor or changing the draft sends an explicit cancellation request. The Provider details show Engine connectivity separately from whether the Provider is enabled. Normal Environment creation still checks requirements even if no manual test ran.
+`DockerConnectionConfiguration.docker_host` selects the Engine socket. Worker restarts must reach that same Engine. The Service's [Compose deployment](https://github.com/converge-ai-labs/agent-foundation/tree/main/deploy/compose) mounts the host socket and grants its non-root Service process access.
 
 ## Cloud providers
 

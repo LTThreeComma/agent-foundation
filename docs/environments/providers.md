@@ -119,11 +119,11 @@ The native Provider overrides the image entrypoint, enables Docker init support 
 
 `close()` disconnects local observations without stopping the container or its background processes. A fresh managed adapter reuses the saved container; confirmed absence creates a replacement with an empty private workspace. Transport failures do not prove absence. Docker file paths are native container paths, while Harness adds its aggregate mount prefix; relative tool paths start in `/workspace`.
 
-Use `make image-docker-environment` to build the image, and follow the [Docker lifecycle example](examples.md#docker) for direct Provider use. The former Service Docker live journey and hosted Compose environment orchestration are not implemented in the new foundation.
+Use `make image-docker-environment` to build the image, and follow the [Docker lifecycle example](examples.md#docker) for direct Provider use. The Service manages Docker environments from templates; see [Service environments](../a13n-service/environments.md).
 
 ## Cloud providers
 
-E2B (`e2b`), Daytona (`daytona`), Modal (`modal`), Vercel Sandbox (`vercel`), Fly.io Sprites (`sprites`), and Runloop (`runloop`) provide cloud execution without installing envd. All support files and shell commands; E2B additionally supports process observations, stdin, retained SDK text output, and loopback ports. Select them in the Service Console's Environment Providers page, enter the backend settings and write-only credentials, and create a template. The Console renders the backend and template schemas supplied by the same provider catalog used by Workers.
+E2B (`e2b`), Daytona (`daytona`), Modal (`modal`), Vercel Sandbox (`vercel`), Fly.io Sprites (`sprites`), and Runloop (`runloop`) provide cloud execution without installing envd. All support files and shell commands; E2B additionally supports process observations, stdin, retained SDK text output, and loopback ports. The Service does not offer these types; use them through the Harness.
 
 | Provider       | Backend settings                                                               | Credential fields               | Common template settings                                                       |
 | -------------- | ------------------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------ |
@@ -134,7 +134,7 @@ E2B (`e2b`), Daytona (`daytona`), Modal (`modal`), Vercel Sandbox (`vercel`), Fl
 | Fly.io Sprites | `organization`                                                                 | `api_key` (Sprites token)       | `region`                                                                       |
 | Runloop        | `organization`                                                                 | `api_key`                       | `blueprint_id`, `resource_size`, `idle_timeout_seconds`                        |
 
-Use the organization/workspace owning the supplied credentials; these fields describe backend namespaces, not permission grants. Credentials are never part of a template or reconnect state. All six cloud types are enabled in the default Service catalog; deployments can restrict `environments.provider_builtins`.
+Use the organization/workspace owning the supplied credentials; these fields describe backend namespaces, not permission grants. Credentials are never part of a template or reconnect state.
 
 Daytona, Modal, Vercel, Sprites, and Runloop recipes accept `root`, `python`, `shell`, and bounded request/file/output settings. `python` names an executable on the guest PATH or an absolute guest path; it never discovers a Host executable. Custom images and snapshots must include Linux, Python 3 with the standard library, and the selected shell. The root maps file paths such as `/notes.txt` into that guest directory; shell execution retains the authority of the native guest user. The default Modal image uses `/usr/local/bin/python3`; Vercel defaults to `/vercel/sandbox` as its root. Those five providers do not advertise process handles, ports, retained output, interactive stdin, per-command network denial, or resource limits other than wall time. Unsupported requests fail before command execution.
 
@@ -174,7 +174,7 @@ environment = await E2B.create(
 )
 ```
 
-Pass this Environment to Harness as usual. Persist `environment.dump_state()` on the Host and give it to a fresh adapter for re-entry. `close()` preserves the sandbox and user files; it disconnects this adapter's output observations without killing commands. Use fresh adapters for `stop()` (pause), `prepare()` (resume) and `destroy()` (kill). Keepalive reports actual expiry and never resumes a paused sandbox. The library never reads `.env`; a13n Service receives the domain through Provider Backend configuration and `api_key` through its credential reference.
+Pass this Environment to Harness as usual. Persist `environment.dump_state()` on the Host and give it to a fresh adapter for re-entry. `close()` preserves the sandbox and user files; it disconnects this adapter's output observations without killing commands. Use fresh adapters for `stop()` (pause), `prepare()` (resume) and `destroy()` (kill). Keepalive reports actual expiry and never resumes a paused sandbox. The library never reads `.env`; the Host passes the domain as Provider configuration and `api_key` as its credential.
 
 A fresh adapter can use native process discovery to find commands still running in the same sandbox. This is best-effort: the sandbox ID is not proof that a particular process survived, and missing commands are never restarted automatically. Native listing is not paginated by the SDK; returned projections are bounded, but the upstream inventory is not.
 

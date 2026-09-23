@@ -1,110 +1,177 @@
 # Environments: mounts and external lifecycle
 
-A thread chooses environments; a run uses the mount set accepted for it. Several threads may share one instance. That makes lifecycle coordination a property of the **instance and all its active users**, not of a single thread or worker's last-used timestamp.
+## Design position
+
+A thread chooses environments; a run uses the mount set frozen for it at acceptance. Several threads may share one instance, so lifecycle coordination is a property of the **instance and all its active users**, never of one thread or worker. Every external lifecycle call belongs to a durable, fenced operation, and an instance is never silently replaced: a lost instance fails the runs that need it until a caller explicitly mounts another.
+
+## Boundaries
+
+| Concern                                                                | Owner                                                                                                            |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Environment provider resources and templates as configuration          | [04: provider resources](04-resources.md#provider-resources), [templates](04-resources.md#environment-templates) |
+| Registered environment types, capability flags and the endpoint policy | [08](08-providers.md#environment-providers)                                                                      |
+| When a run freezes mounts, and how a failed preparation ends a run     | [05](05-runs.md#source-selection)                                                                                |
+| Instances, thread mounts, operations, idle policy and execution mounts | This chapter                                                                                                     |
 
 ## Tables
 
 ```
-environment_providers
-  id  organization_id  workspace_id NULL  type  name  config  credential NULL  enabled
-  version  created_by_id  updated_by_id  created_at  updated_at
-
-environment_templates
-  id  organization_id  workspace_id  key  name  description NULL  provider_id  config  enabled
-  labels  version  created_by_id  updated_by_id  created_at  updated_at
-  UNIQUE (workspace_id, key)
-
-environments
-  id  organization_id  workspace_id  provider_id  provider_identity  template_id NULL
-  owner_principal_id NULL  name  status  handle NULL  generation
+environments   (env_)
+  id  organization_id  workspace_id  provider_id  provider_identity NULL  template_id NULL
+  device_id NULL  owner_principal_id NULL  name  status  handle NULL  generation
   operation_id NULL  operation_started_at NULL  operation_deadline NULL
   lease_owner NULL  lease_token_hash NULL  lease_expires_at NULL
-  failure NULL  last_used_at NULL  version  created_at  updated_at
-  status IN ('creating','starting','ready','stopping','stopped','deleting','deleted')
-  CHECK (status NOT IN ('ready','starting','stopping','stopped') OR handle IS NOT NULL)
+  failure NULL  last_used_at NULL  created_by_id  version  created_at  updated_at
+  status IN ('creating', 'starting', 'ready', 'stopping', 'stopped', 'deleting', 'deleted')
+  CHECK (status NOT IN ('ready', 'starting', 'stopping', 'stopped') OR handle IS NOT NULL)
+  CHECK ((status IN ('creating', 'starting', 'stopping', 'deleting')) = (operation_id IS NOT NULL))
+  CHECK ((operation_id IS NULL) = (operation_started_at IS NULL))
+  CHECK (operation_deadline IS NULL OR operation_id IS NOT NULL)
+  CHECK (lease_owner, lease_token_hash, lease_expires_at all set or all NULL,
+         and set only with operation_id)
+  CHECK (template_id IS NOT NULL OR status IN ('ready', 'deleted'))
+  CHECK ((template_id IS NULL) = (device_id IS NOT NULL))
   UNIQUE (operation_id) WHERE operation_id IS NOT NULL
 
 thread_environments
-  thread_id  environment_id  organization_id  workspace_id  name
-  working_directory NULL  created_at
+  thread_id  environment_id  organization_id  workspace_id  name  working_directory NULL  created_at
   PRIMARY KEY (thread_id, name)
+  UNIQUE (thread_id, environment_id)
 ```
 
-Composite foreign keys enforce workspace consistency. The mount set a run uses is frozen at acceptance into `runs.environment_mounts`, like its revision and options. While the run is accepted or running, that column is the durable active-use evidence, across worker loss, handoff and backoff; a GIN index on it answers “which active runs use environment X”. No heartbeat or release callback is needed.
+A **managed** instance has a template; a **registered device** has none and a `device_id` instead. A device belongs to the principal that registered it (`owner_principal_id`); managed instances have no owner. The constraint trigger `environments_provider_id_in_scope` refuses a provider outside the instance's scope ([04](04-resources.md#provider-resources)), and identity columns never change.
 
-`template_id` is NULL only for registered external devices. Device ownership is private by default (`owner_principal_id`); workspace-managed sandboxes have NULL ownership. Attaching/using a private device requires its owner, not merely a workspace runner role. Retired environments retain tombstones while history refers to them.
+- `handle` is `{recipe, state}`: the recipe the instance was built from and the provider's portable state for reaching it. A device's recipe is empty.
+- `provider_identity` is `{type, backend}`, the provider type and non-secret backend locator the handle is meaningful in. It is frozen when the create operation is first claimed, or when a device is registered; NULL means the create was never claimed.
+- `failure` is `{code, message, certainty, permanent, operation_id, at}`. `certainty` is `not_dispatched`, `known` or `unknown` (the call may have taken effect); `permanent` failures refuse new use until the cause is fixed or the instance is deleted. An unknown outcome is never permanent.
+- The view shows everything except `handle`, `provider_identity`, `generation`, `operation_deadline` and the lease columns.
 
-A template names its provider and holds a config covering base image, resources, network policy, idle policy and storage semantics. Templates are live and have no revisions ([04](04-resources.md#two-lifecycles)); an environment keeps no copy of the template config. Every operation reads the current template: `create` builds the instance from it, and `start`/`open` reapply the runtime settings the adapter can apply to an existing instance, such as network policy and resource limits, while `maintain_environments` applies the current idle policy. Properties built into the instance, such as image, storage mode and provider account, cannot change after creation: a template edit affects them only for environments created later, and the environment's own `provider_id`/`provider_identity`/`handle` keep identifying where it lives. A disabled template refuses new environments; existing environments keep reading it. Mount `workspace` appears at `/workspace`, extras at `/mnt/{name}`. Names and working directories are validated by the sandbox contract; path traversal cannot select the worker's host filesystem. The production `local` adapter is not an isolation boundary and is disabled outside explicit development mode.
+Mount names match `^[a-z][a-z0-9-]{0,62}$`; `workspace` is the primary mount. A `working_directory` is a canonical absolute path of at most 1024 characters, without empty, `.` or `..` segments. Inserting, updating or deleting a thread's mounts bumps the thread version.
 
-`provider_identity` freezes the non-secret account/project/region/backend locator that gives the handle meaning. Credentials may rotate, but a provider edit cannot silently redirect an existing handle to another account/endpoint. Resolve current credentials and validate this binding before each lifecycle operation; incompatible edits block use with an actionable reason. An operation's identity includes this binding for reconciliation.
+## Templates and instances
 
-## Select once, use an immutable mount set
+A template is live configuration ([04](04-resources.md#environment-templates)). Its effect on instances:
 
-Acceptance locks the thread. If its agent needs a primary sandbox and no `workspace` mount exists, it reserves a creating environment for the agent's template plus a desired mount in that transaction. No external instance is created yet; the create operation reads the template when it runs. It locks all selected environments in ID order, validates scope/ownership/state, and copies the desired mounts into `runs.environment_mounts`.
+- **The recipe is frozen per instance.** The first claim of an instance's create operation copies the template's current recipe into `handle.recipe` and freezes `provider_identity`. Later template edits apply only to instances created afterwards; an existing instance never changes its image, resources or storage.
+- **The idle policy is read live.** Maintenance applies each template's current `stop_after_seconds` and `delete_after_seconds` to all its instances ([idle policy](#idle-policy)).
+- **Disabling refuses new instances.** A disabled template refuses reservation, and a reserved instance whose create was never claimed fails its first claim with the permanent failure `environment_template_disabled`. Instances already created keep working.
 
-Later agent/template changes do not rebuild an existing sandbox. Desired mount edits are thread operations with `If-Match`, valid during execution but affecting only later acceptance. Removing a desired mount cannot hide an active run's use. A caller can explicitly replace the primary mount for later runs; there is no automatic replacement after a provider failure. Fork/child copy the desired mount set under the origin thread lock unless a fresh fork was requested.
+## Mounts
 
-Shared environments deliberately share mutable files and can have concurrent tools from different branches. Run history/checkpoints do not snapshot or roll back those files. Choose fresh environments when file isolation is required. No claim of branch isolation follows from having separate threads.
+A thread's **desired mounts** are the environments later runs will use. `POST …/threads/{thread}/environments` adds one (`{name, environment_id, working_directory?}`) and `DELETE …/threads/{thread}/environments/{name}` removes one; both need `run` and the thread `If-Match`, answer with the new thread ETag, and are audited as `thread_environment.create` and `.delete`. Adding needs an open thread. Replacing a mount is explicit: remove the name, then add it again. A duplicate name is `already_exists` (kind `mount`); an environment already mounted on the thread is `conflict` (`already_mounted`). A thread holds at most 32 desired mounts: a path that would add more is `conflict` (`mount_limit`, details `limit`), and a request naming more than 32 is `invalid_argument`. Acceptance's primary reservation below may add one beyond them, and a `shared` child adopts all of its parent run's frozen mounts. `GET` lists the mounts with the thread ETag.
+
+Every new use checks the instance under its row lock:
+
+- a private device of another principal is `forbidden`;
+- a `deleting` or `deleted` instance is `conflict` (`environment_{status}`);
+- an instance with a permanent failure is `conflict` with the failure's code.
+
+Mounts lock their instances in ID order, after the workspace's reservation lock (below). The same checks apply to every path that adds mounts:
+
+- **New threads and forks** may name up to 32 initial `environments`, added in the transaction that accepts the first run. A fork also shares the origin thread's desired mounts unless `fresh_environments` is set, and its shared and named mounts together count against the 32; shared and named mounts are checked and locked in one ID-ordered pass, so an unusable shared mount refuses the fork (`forbidden` or `conflict`).
+- **Child threads** take their mounts from the delegating edge ([05](05-runs.md#child-runs)): `shared` adopts the parent run's frozen mounts, `dedicated` reserves an instance from the edge's template, `none` mounts nothing.
+- **Acceptance** freezes the thread's desired mounts into `runs.environment_mounts` ([05](05-runs.md#source-selection)), checking each instance for the run's principal. If the agent has a `default_environment_template_id` and the thread has no `workspace` mount, acceptance first reserves a managed instance from that template and mounts it as `workspace`. A child thread never uses its agent's default template.
+
+While a run is accepted or running, its frozen `environment_mounts` is the durable active-use evidence, across worker loss, handoff and backoff; a GIN index answers "which active runs use this instance". Removing a desired mount never hides an active run's use.
+
+**Reservation** creates a managed instance in `creating` with its first operation, from an enabled template of an enabled provider the principal may `run`. A workspace holds at most `environments.managed_count` managed instances that are not deleted; reservations are serialized by the workspace's reservation lock, and one beyond the limit, whether explicit, at acceptance or for a dedicated child edge, is `conflict` (`environment_limit`, details `limit`). In the lock order that lock follows thread → run → attempt and precedes every environment row, so a transaction that may reserve, or locks a set of instances, takes it before any environment row ([05](05-runs.md#lock-discipline)). Nothing external exists until maintenance or a waiting attempt dispatches the create. `POST …/environments {template_id, name?}` reserves one directly (`run`; 201; audited as `environment.create`); the name defaults to the template's name.
 
 ## One outstanding external operation
 
-The managed lifecycle below applies to service-managed sandboxes. Registered HTTP envd devices are connect-only and follow [envd over HTTP](#envd-over-http); they are excluded from automatic create/start/stop/destroy and orphan cleanup.
+The status names the instance's outstanding operation: `creating`, `starting`, `stopping` or `deleting`. No other status carries one, and an error stays on the phase with the same operation.
 
-Every lifecycle operation has a durable ID before I/O. Status identifies the operation: creating, starting, stopping or deleting, including when progress encounters an error. Store that error in `failure`; do not replace the phase with a generic `blocked` status or add an `operation_kind` column. Under the environment row lock, set the phase, increment generation, allocate `operation_id`, set its call deadline and commit. Workers/control claim dispatch with token/expiry, then release the database before calling the provider. Concurrent callers join that operation; they never issue a conflicting one. A new claim refreshes the bounded call deadline, preserving the operation ID, generation and original `operation_started_at`.
+1. **Begin.** Under the environment row lock, set the phase, increment `generation`, allocate a new `envoper_` `operation_id`, clear any claim and failure, and commit. A different operation replaces an outstanding one only when the outstanding one is **settled**: nobody holds or silently lost its claim, and its last call did not end with an unknown outcome.
+2. **Claim.** A dispatcher locks the row, finds the claim free or expired, records a fresh token, a call deadline of `environments.operation_seconds` and a claim that outlives the deadline by 10 seconds, and commits. The claim first refuses, as permanent failures without dispatching: a provider whose backend identity cannot be resolved (`environment_provider_unavailable`), a disabled provider for `creating` or `starting` (`environment_provider_disabled`), a disabled template at the create's first claim (`environment_template_disabled`), a template whose provider changed since the reservation, also at that claim (`environment_template_moved`), and a provider that now points at another account or endpoint (`provider_identity_changed`). Stop and delete still proceed on a disabled provider.
+3. **Perform.** With no database session held, one bounded call: `creating` prepares the instance; `starting` reconciles it, fails with the permanent, known `environment_unavailable` if it no longer exists, and otherwise prepares it; `stopping` stops it; `deleting` destroys it.
+4. **Publish.** Lock the row and record the outcome only if generation, operation ID and claim token still match; a superseded dispatcher changes nothing. Success clears the operation and failure, reaches `ready`, `stopped` or `deleted`, stores the new handle state (a deleted instance keeps no handle), sets `last_used_at` on `ready`, and audits `environment.{ready | stopped | deleted}` with no actor. A failure clears the claim, keeps any state the provider reported, and records the failure on the same phase. A failure before dispatch after an earlier unresolved dispatch is recorded as unknown. A dispatcher interrupted mid-call publishes the unknown failure `environment_operation_interrupted`.
 
-The completion transaction compares environment ID, generation, operation ID and claim token. A late caller cannot publish ready after deletion or after an operation changed. Claim expiry permits reconciliation of **the same operation**, not an unconditional new external call. A row lock or Redis mutex cannot fence a remote request already in flight.
+An expired claim lets the next dispatcher continue the **same** operation. The Harness lifecycle calls reconcile the instance they are bound to: preparation looks the instance up before creating one, and stop and destroy observe its actual state. So continuing never issues conflicting work, and a timeout never mints a new operation ID.
 
-| State    | Next action and evidence                                                                                                                                                    |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| creating | Create from the current template with stable instance ID and operation ID; inspect/recover the same operation after lost response, which returns the instance first created |
-| ready    | Open a client using the existing handle and the current template's runtime settings; opening performs no lifecycle mutation                                                 |
-| stopping | At each maintenance scan continue the same stop operation; known success becomes stopped; nobody resumes concurrently                                                       |
-| stopped  | A waiting active run requests a new starting operation                                                                                                                      |
-| starting | Resume the same handle; reconcile until known ready                                                                                                                         |
-| deleting | Reconcile destruction; forbid new mounts or starts                                                                                                                          |
-| deleted  | Terminal tombstone; never recreate this instance ID                                                                                                                         |
+| Status     | Next action                                                                                   |
+| ---------- | --------------------------------------------------------------------------------------------- |
+| `creating` | Prepare the instance from the frozen recipe; a continued create finds the instance first made |
+| `ready`    | None; opening a client is not a lifecycle operation                                           |
+| `stopping` | Continue the same stop until it is known                                                      |
+| `stopped`  | A waiting attempt begins `starting`                                                           |
+| `starting` | Resume the same handle; a lost instance fails permanently and is never recreated              |
+| `deleting` | Continue destruction; new mounts and starts are refused                                       |
+| `deleted`  | Terminal tombstone; the ID is never reused                                                    |
 
-`maintain_environments` uses its existing **fixed scan interval** for all unfinished phases. For example, a stopping row is claimed, the adapter continues that same stop ID, and confirmed success changes it to stopped. Pending, timeout or error leaves it stopping with the same operation ID and updated failure details; the next scan visits it again. Each visit has a bounded batch/call deadline and a claim prevents concurrent callers. There is no per-environment backoff schedule or `reconcile_after` field. Scanning never creates a new operation ID merely because a call timed out.
+**Maintenance.** The `maintain_environments` sweep ([09](09-runtime.md#sweeps)) runs every `environments.scan_seconds`. Each pass begins idle deletes, then idle stops, then dispatches up to `environments.batch` outstanding operations whose claim is free or expired, oldest change first, concurrently. A failed operation is revisited at the fixed interval with the same operation ID; there is no per-instance backoff. A dispatch that fails unexpectedly is logged and retried by a later pass. A pass is bounded by twice `environments.operation_seconds` plus 30 seconds.
 
-The adapter owns safe repetition/confirmation: it may inspect the existing operation or replay the same ID only when the backend supports that guarantee. Timeout alone does not prove failure or authorize another remote request. Ordinary network failures remain automatically recoverable on later scans. Invalid credentials or an outcome the provider cannot safely establish remains visible in `failure`, with recovery instructions; scans do not invent a conflicting operation. Provider identity/credential errors also refuse use of an otherwise ready handle without overwriting its known lifecycle phase.
+### Idle policy
 
-An acknowledged completion clears the operation's claim fields and stale failure. Initiating a different operation requires proof that the previous one can no longer execute. A completed stop cannot execute again after a later start because of a delayed duplicate; this is part of the adapter contract, not something a PostgreSQL CAS can guarantee remotely. No silent instance replacement.
+Idle time counts from `last_used_at`, or `created_at` when the instance was never used. `last_used_at` is set when an instance becomes ready, when an attempt finds it ready and when an attempt stops using it. Instances in `creating` are not subject to the policy.
 
-## Stop, resume and destroy arbitration
+- **Idle stop.** A ready managed instance whose type supports stop, idle past its template's `stop_after_seconds`, and not used by an active run begins `stopping`.
+- **Idle delete.** A ready or stopped managed instance whose type supports destroy, idle past `delete_after_seconds`, mounted by no thread and used by no active run begins `deleting`.
 
-The stop transaction locks the environment, then checks last use and the absence of **accepted or running runs whose `environment_mounts` name it**, and marks stopping. Acceptance locks that same row before installing new active use. If stop wins first, acceptance can reference it, but execution waits for stop completion then starts it. If acceptance wins, stop observes active use and declines. All checks use fresh READ COMMITTED statements after lock acquisition.
+Both recheck active use and mounts with fresh statements under the row lock, and audit `environment.stop` or `environment.delete` with no actor and reason `idle`.
 
-Destroy likewise requires no desired thread mounts and no active run mounts, checked under the environment lock. Mount creation and acceptance take that lock and refuse deleting/deleted targets and unresolved permanent provider/identity failures. Thread archive removes desired mounts; an active run's frozen use delays destruction until cancellation/seal commits. Historical mounts retain metadata but do not keep a sandbox running forever.
+## Stop, start and delete
 
-Opening a ready handle only establishes a client; it cannot secretly resume or recreate. `start` is an explicit operation. If stop destroys ephemeral files by the storage mode built in at creation, this is shown before the operation. Lost instances produce `environment_unavailable`; replacement is explicit and uses a new environment identity. No worker-local fallback.
+Stop and delete arbitrate with use under the environment row lock and only begin an operation; provider calls happen in the fenced lifecycle, never in the request. Acceptance locks the same row before installing new active use, so whichever commits first wins: a stop that wins is observed by the run, which starts the instance again; an acceptance that wins makes the stop decline.
 
-## Provider contract
+- `POST …/environments/{id}/stop` (`write`, `If-Match`, 202) needs a ready managed instance whose type supports stop, used by no active run. Otherwise it is `conflict` with `connect_only`, `environment_{status}`, `stop_unsupported` or `in_use`.
+- `DELETE …/environments/{id}` (`write`, `If-Match`, 202) returns a `deleting` or `deleted` instance unchanged. It refuses an instance a thread mounts (`mounted`), an active run uses (`in_use`) or whose outstanding operation is not settled (`operation_unresolved`). A device, or a reservation whose create was never dispatched, becomes `deleted` at once without a provider call. A managed instance whose type cannot destroy is `conflict` (`destroy_unsupported`); any other begins `deleting`.
+- `PATCH …/environments/{id}` renames (`write`, `If-Match`).
+- Starting is never a request: a waiting attempt begins it ([execution](#execution)).
 
-Plain DTOs live in `providers/interfaces.py`, not in resource ORM modules:
+A private device is managed by its owner, or by a workspace administrator; anyone else is `forbidden`. Stop, delete and rename are audited as `environment.stop`, `.delete` and `.update`. `GET …/environments` lists a workspace's instances; `status` filters by one status, and without it tombstones are left out.
 
-```python
-class EnvironmentProvider(Protocol):
-    async def create(self, instance_id: str, operation_id: str, template: Template) -> OperationResult: ...
-    async def start(self, handle: Handle, operation_id: str, template: Template) -> OperationResult: ...
-    async def stop(self, handle: Handle, operation_id: str) -> OperationResult: ...
-    async def destroy(self, handle: Handle, operation_id: str) -> OperationResult: ...
-    async def inspect(self, instance_id: str, operation_id: str) -> OperationResult: ...
-    async def inventory(self, cursor: str | None) -> InstancePage: ...
-    async def open(self, handle: Handle, template: Template | None) -> Sandbox: ...
-```
+Archiving a thread removes its desired mounts ([05](05-runs.md#waiting-interrupt-and-fork)); an active run's frozen use delays deletion until the run seals.
 
-`template` is always the current template; `open` receives none for a registered device. Each adapter documents which settings it reapplies to an existing instance and ignores the rest. Results distinguish pending, known success/failure and unknown, including handle and evidence. An adapter declares which operations are safely repeatable by ID and how it proves completion. A label supports discovery; it does not by itself guarantee idempotent creation, unique lookup or cancellation of delayed requests. Inventory can return multiple handles for a label so duplicates are visible. Cleanup adopts only a matching live operation; orphan/deleted identities are destroyed with the same uncertainty rules.
+## Execution
 
-Providers unable to meet these guarantees are not advertised as supported managed environment backends. Start with a backend whose semantics can be demonstrated, rather than promising every old provider from the presence of an interface. Reuse the Harness definition's `supports_managed` distinction: connect-only providers cannot back managed templates or receive lifecycle calls; they use the registered handle through `open`.
+Before the Harness run, an attempt prepares every frozen mount, waiting at most `environments.wait_seconds` in all. Each check is a short transaction that proves the attempt's lease and locks the instance:
+
+- The instance must still be usable by the run's principal (the checks in [mounts](#mounts)), and its provider must resolve under the run's authority.
+- A `ready` instance whose provider identity changed is refused as `provider_identity_changed` without recording a failure, so restoring the provider heals it; otherwise the check sets `last_used_at` and returns the target.
+- A `stopped` instance begins `starting`.
+- If the outstanding operation has no failure and is not `stopping`, the attempt dispatches it once itself; after a failed call it only waits, leaving retries to maintenance.
+
+A mount that can no longer be used fails the run with `environment_unavailable`. A wait that runs out is `unavailable` (reason `environment_not_ready`): the attempt fails and the run recovers within `max_attempts` ([05](05-runs.md#failure-semantics)). Cancelling the attempt stops the wait at once. A drain ends it too: the attempt yields as a handoff and is not charged ([05](05-runs.md#execute)).
+
+The attempt then builds a fresh adapter per mount that connects to the ready instance and never creates, starts or replaces one. `workspace` appears at `/workspace` and is the default environment; other mounts appear at `/mnt/{name}`; `working_directory` is the mount's default directory and route root. The Harness enters and closes the adapters it binds; when the run ends, the rest are closed and the instances are marked used. Closing an adapter releases client resources only; the instance keeps running.
 
 ## envd over HTTP
 
-This iteration supports only the existing Harness `http_envd` provider. The operator deploys envd and supplies an HTTP(S) endpoint and credential. Control performs authorized registration; each executing worker connects directly through the HTTP adapter. The endpoint must be reachable from the service processes that use it. Reuse the existing EIP client and its transport/authentication policy; do not add a second protocol. Reverse WebSocket ingress, device pairing, connection tickets, Redis presence, reconnect takeover and the Control/Worker relay are out of scope. No tables, sweeps or extension hooks are reserved for them.
+`http_envd` is the connect-only type ([08](08-providers.md#registry)). The operator deploys envd; the provider resource holds its HTTP(S) endpoint and the encrypted, write-only credential. Each executing worker connects directly to the endpoint, which must be reachable from every process that uses it, and the endpoint policy is checked whenever the Service dials it.
 
-The provider resource stores endpoint configuration and the encrypted, write-only credential; the existing `environments` row stores the registered device handle and native identity, with no template. Registration validates the remote identity outside a database transaction, then revalidates authority and provider configuration before recording it. Endpoint/native identity cannot silently retarget that environment; credential rotation follows the ordinary provider rules. Private-device ownership and frozen run mounts still apply. No envd-specific registration table is needed.
+`POST …/environments {provider_id, device_id, name?}` registers a device. It needs `write`, an enabled provider the caller may `run`, and a connect-only provider type (otherwise `invalid_argument` on `provider_id`). The Service verifies the device by opening and closing one session outside any transaction, within `providers.operation_seconds`. A refusal that repeating cannot overcome (an invalid, unsupported, missing, denied or conflicting outcome) is `conflict` on the provider with the provider's error code as reason; any other failure is `unavailable` (dependency `environment:{type}`) with that code, or `environment_timeout` for a timeout, as reason. It then rechecks that the provider did not change meanwhile (`conflict` `changed_during_registration`) and records a `ready` instance owned by the caller, named `device_id` unless a name is given, audited as `environment.register`. The view shows the non-secret `device_id`; the tombstone keeps it.
 
-HTTP envd is connect-only: the service neither creates the machine nor starts, stops or destroys the daemon. A registered device is `ready` for selection, which is not a promise of current network reachability. An authorized run opens its own adapter/Session against the registered identity; closing it releases those client resources without stopping the daemon or deleting files. An unreachable device produces `environment_unavailable` during preparation; it does not enter managed starting/stopping phases or trigger a replacement device. Retirement removes service access under the existing mount/reference rules without destroying remote infrastructure.
+The Service never creates, starts, stops or destroys a device, and maintenance never touches it. `ready` means selectable, not currently reachable: an unreachable device fails preparation of the runs that mount it. Deleting a device only removes the Service's access. A timeout or broken connection after dispatch does not authorize replaying an unknown command; the envd session and operation-identity checks of the Harness client apply.
 
-Keep the existing EIP Session, device-generation and operation-identity checks. A timeout or broken HTTP connection after dispatch does not authorize replaying an unknown non-idempotent command. Recovery must distinguish failure before dispatch from an unknown outcome; reconnecting alone is not proof that the previous operation did not execute.
+## Provider contract
 
-**Keeps:** explicit environment identity, no silent substitution, active-use protection, short transactions, inspectable unknown outcomes and recoverable external operations. Required crash schedules are in [12](12-validation.md).
+The Harness environment definition is the contract ([08](08-providers.md#environment-providers)). It builds a single-use adapter from plain values: the provider configuration and credential, the instance's recipe and portable state, the operation ID, and whether this call may create an instance. Lifecycle operations use one adapter per call and close it; execution passes adapters to the Harness. The definition declares `supports_managed` (templates may use the type), `supports_stop` and `supports_destroy`. A connect-only type cannot back a template and never receives a lifecycle call. What the Service's Docker type lets a recipe and an account do is [08](08-providers.md#registry)'s.
+
+A provider error carries a category and a certainty. Invalid, unsupported, missing, denied and conflicting outcomes are permanent unless their outcome is unknown; transport errors, timeouts and unknown outcomes are retried on the same operation.
+
+## Failure semantics
+
+| Situation                                                                                       | Observable outcome                                                       | Recovery                                          |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------- |
+| Provider call times out or fails transiently                                                    | `failure` on the same phase, certainty `unknown` when it was dispatched  | Maintenance continues the same operation          |
+| Dispatcher dies mid-call                                                                        | Claim expires; `environment_operation_interrupted` when it could publish | The next dispatcher reconciles the same operation |
+| Permanent refusal (disabled provider or template, identity changed, invalid recipe)             | Permanent `failure`; new mounts and acceptance refused with its code     | Fix the cause, or delete the instance             |
+| Template moved to another provider before the create was claimed (`environment_template_moved`) | Permanent `failure`                                                      | Reserve a new environment                         |
+| Instance lost while stopped                                                                     | `starting` fails permanently with `environment_unavailable`              | Mount a new environment; no silent replacement    |
+| Mount unusable during preparation                                                               | The run fails with `environment_unavailable`                             | None for that run                                 |
+| Instance not ready within `environments.wait_seconds`                                           | The attempt fails; the run recovers                                      | Within `max_attempts`                             |
+| Delete requested during an unresolved operation                                                 | `conflict` (`operation_unresolved`)                                      | Retry once the operation settles                  |
+
+## Trade-offs
+
+- **Shared environments share mutable files.** Threads, forks and children that mount one instance see each other's changes and can run tools concurrently. Checkpoints neither snapshot nor roll back files; a caller that needs isolation mounts fresh environments.
+- **Frozen recipes.** A template fix does not reach existing instances; replacing an instance is explicit.
+- **Fixed-interval recovery.** A failed operation waits for the next maintenance pass instead of a per-instance schedule, in exchange for one simple rule: an operation is only ever continued, never duplicated.
+
+## Invariants
+
+- An instance has at most one outstanding operation, and a completion is recorded only by the dispatcher whose generation, operation ID and claim token still match.
+- A different operation begins only after the previous one is settled.
+- Stop and delete never begin while an accepted or running run's frozen mounts name the instance; delete also requires that no thread mounts it.
+- Opening an instance for execution never creates, starts or replaces it.
+- An instance's recipe and provider identity never change after its create is first claimed.
+- The Service never calls a lifecycle operation on a registered device.
