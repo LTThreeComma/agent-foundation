@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from a13n_service.infra.db import Base
 from a13n_service.infra.ids import new_object_id
+from a13n_service.runs import activity
 from a13n_service.runs.tables import AttemptRow, RunRow
 
 
@@ -89,13 +90,14 @@ def stage(run: RunRow, *, attempt: AttemptRow | None = None) -> EventRow:
 
 
 async def flush(session: AsyncSession, events: Sequence[EventRow]) -> None:
-    """Last SQL phase: no domain lock or external I/O may follow before commit."""
+    """Final domain writes, Session activity, then the last workspace cursor lock."""
     if not events:
         return
     organization_id, workspace_id = events[0].organization_id, events[0].workspace_id
     if any(event.organization_id != organization_id or event.workspace_id != workspace_id for event in events):
         raise ValueError("One event batch belongs to one workspace")
     await session.flush()
+    await activity.touch(session, workspace_id, (event.session_id for event in events))
     await session.execute(
         insert(EventCursorRow)
         .values(

@@ -14,10 +14,17 @@ export function ConnectionSelector({
   value,
   onChange,
   disabled,
+  permissions,
+  onPermissionChange,
 }: {
   value: Selection[];
   onChange: (value: Selection[]) => void;
   disabled: boolean;
+  permissions?: components["schemas"]["ToolPermissions"];
+  onPermissionChange?: (
+    identity: string,
+    permission: "inherit" | "allow" | "deny" | "ask",
+  ) => void;
 }) {
   const { client, path, cache, base } = useScope();
   const { t } = useTranslation();
@@ -137,6 +144,31 @@ export function ConnectionSelector({
                   />{" "}
                   {tool.name}
                 </label>
+                {tool.permission_id && onPermissionChange && (
+                  <ChoiceField
+                    label={`${tool.name} · ${t("Permission")}`}
+                    value={
+                      permissions?.rules?.[tool.permission_id] ?? "inherit"
+                    }
+                    disabled={disabled || !selectedTools.includes(tool.name)}
+                    options={[
+                      { value: "inherit", label: t("Use default") },
+                      { value: "allow", label: t("Run automatically") },
+                      { value: "ask", label: t("Ask for approval") },
+                      { value: "deny", label: t("Do not run") },
+                    ]}
+                    onValueChange={(value) => {
+                      if (
+                        tool.permission_id &&
+                        (value === "inherit" ||
+                          value === "allow" ||
+                          value === "deny" ||
+                          value === "ask")
+                      )
+                        onPermissionChange(tool.permission_id, value);
+                    }}
+                  />
+                )}
                 {tool.description && (
                   <p className={styles.help}>{tool.description}</p>
                 )}

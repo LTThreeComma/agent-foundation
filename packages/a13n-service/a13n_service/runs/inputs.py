@@ -2,17 +2,35 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import Storage, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.resources.agents.schemas import AgentConfig
 from a13n_service.resources.agents.tables import AgentRevisionRow
+from a13n_service.runs import activity
 from a13n_service.runs.attempts import lock_authority
+from a13n_service.runs.feedback import FeedbackPayload
 from a13n_service.runs.options import compatible
 from a13n_service.runs.schemas import AttemptClaim, Checkpoint, MessagePayload, RunOptions
 from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
+
+
+async def ordinary_usage(session: AsyncSession, thread_id: str) -> tuple[int, int]:
+    """The sole ordinary-capacity predicate; control feedback has an independent bound."""
+    count, size = (
+        await session.execute(
+            select(
+                func.count(), func.coalesce(func.sum(func.octet_length(cast(InboxEntryRow.payload, String))), 0)
+            ).where(
+                InboxEntryRow.thread_id == thread_id,
+                InboxEntryRow.status.in_(("pending", "assigned")),
+                InboxEntryRow.kind.in_(("message", "child_result")),
+            )
+        )
+    ).one()
+    return count, size
 
 
 async def lock_thread(session: AsyncSession, claim: AttemptClaim) -> ThreadRow:
@@ -67,6 +85,7 @@ async def confirm(storage: Storage, claim: AttemptClaim, checkpoint: Checkpoint)
         run, _, now = await lock_authority(session, claim)
         if await confirm_locked(session, run, checkpoint, now):
             thread.updated_at = now
+            await activity.touch(session, run.workspace_id, [run.session_id])
 
 
 async def assigned_inputs(storage: Storage, claim: AttemptClaim) -> tuple[tuple[str, MessagePayload], ...]:
@@ -76,12 +95,26 @@ async def assigned_inputs(storage: Storage, claim: AttemptClaim) -> tuple[tuple[
         entries = (
             await session.scalars(
                 select(InboxEntryRow)
-                .where(InboxEntryRow.assigned_run_id == run.id, InboxEntryRow.status == "assigned")
+                .where(
+                    InboxEntryRow.assigned_run_id == run.id,
+                    InboxEntryRow.status == "assigned",
+                    InboxEntryRow.kind == "message",
+                )
                 .order_by(InboxEntryRow.position)
             )
         ).all()
         entries = sorted(entries, key=lambda entry: (entry.id != run.source_entry_id, entry.position))
         return tuple((entry.id, MessagePayload.model_validate(entry.payload)) for entry in entries)
+
+
+async def source_feedback(storage: Storage, claim: AttemptClaim) -> FeedbackPayload | None:
+    async with transaction(storage) as session:
+        await lock_thread(session, claim)
+        run, _, _ = await lock_authority(session, claim)
+        entry = await session.get(InboxEntryRow, run.source_entry_id)
+        if entry is None or entry.kind != "feedback":
+            return None
+        return FeedbackPayload.model_validate(entry.payload)
 
 
 async def assign_steers(
@@ -90,7 +123,13 @@ async def assign_steers(
     async with transaction(storage) as session:
         thread = await lock_thread(session, claim)
         run, _, now = await lock_authority(session, claim)
-        if thread.archived_at is not None or run.cancel_requested_at is not None:
+        source = await session.get(InboxEntryRow, run.source_entry_id)
+        if (
+            thread.archived_at is not None
+            or run.cancel_requested_at is not None
+            or source is None
+            or source.status != "consumed"
+        ):
             return ()
         entries = (
             await session.scalars(
@@ -127,4 +166,5 @@ async def assign_steers(
             selected.append((entry.id, payload))
         if selected:
             thread.updated_at = now
+            await activity.touch(session, run.workspace_id, [run.session_id])
         return tuple(selected)

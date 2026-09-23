@@ -54,3 +54,11 @@ In Console, add a **Composio** Connection, enter the write-only project key, loa
 The workspace key is separate from each person's account binding. Account credentials stay with Composio; Service encrypts only the private binding. API-key initiation requires browser completion by the same authenticated principal and does not imply companion CLI support. Missing tab state, expired login or a switched login requires reconnection. Personal discovery is uncached. `mcp_headers` never apply to Composio.
 
 **Disconnect account** blocks local use before a best-effort remote revoke. An unknown or unsupported remote result is displayed; review the account in Composio Dashboard if needed. Lost setup responses require a fresh enrollment. Unknown claimed completion can inspect only its saved account and never resends the one-use URI. Actions with unknown results are not automatically repeated, including after Worker failure.
+
+## Uploads and retained Assets
+
+Stage a multipart `file` with `POST /api/v1/workspaces/{workspace_id}/uploads` and a stable `Idempotency-Key`. The default file limit is 1 MiB; the total request, including multipart framing, must also fit the configured HTTP body limit. Uploads are limited to 60 requests per principal and Workspace per minute by default, including retries. The response contains `upload_id`, validated filename and content type, byte size and SHA-256 digest.
+
+Create an Asset with `POST /api/v1/workspaces/{workspace_id}/assets` and `{"upload_id":"...","name":"..."}`. Keep the same upload key and known upload ID when retrying a lost response. Repeating the same upload and normalized name returns the same Asset; changing the bytes, upload metadata or Asset name conflicts. First Asset creation returns 201; readback returns 200 with current state.
+
+DELETE an Asset with its current ETag in `If-Match` to retire it. Retirement prevents new use while preserving authorized historical content reads at `GET /assets/{asset_id}/content`. A creation retry may return an already retired Asset and never resurrects it. Unused or incomplete uploads are retained; there is no cleanup in this version. Console attachment integration is still under development.

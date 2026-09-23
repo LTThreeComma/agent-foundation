@@ -4,6 +4,15 @@
       "AgentConfig": {
         "additionalProperties": false,
         "properties": {
+          "client_tools": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ClientToolDefinition"
+            },
+            "maxItems": 128,
+            "title": "Client Tools",
+            "type": "array"
+          },
           "compaction_trigger_tokens": {
             "anyOf": [
               {
@@ -44,6 +53,14 @@
             "pattern": "^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$",
             "title": "Model Id",
             "type": "string"
+          },
+          "tool_permissions": {
+            "$ref": "#/components/schemas/ToolPermissions"
+          },
+          "user_questions": {
+            "default": false,
+            "title": "User Questions",
+            "type": "boolean"
           }
         },
         "required": [
@@ -190,6 +207,205 @@
           "version"
         ],
         "title": "AgentView",
+        "type": "object"
+      },
+      "Answer": {
+        "discriminator": {
+          "mapping": {
+            "approve": "#/components/schemas/Approve",
+            "complete": "#/components/schemas/Complete",
+            "reject": "#/components/schemas/Reject"
+          },
+          "propertyName": "action"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Approve"
+          },
+          {
+            "$ref": "#/components/schemas/Reject"
+          },
+          {
+            "$ref": "#/components/schemas/Complete"
+          }
+        ]
+      },
+      "Approve": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "approve",
+            "title": "Action",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "action"
+        ],
+        "title": "Approve",
+        "type": "object"
+      },
+      "AssetCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+            "title": "Name",
+            "type": "string"
+          },
+          "upload_id": {
+            "pattern": "^upl_[a-f0-9]{64}$",
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "name"
+        ],
+        "title": "AssetCreate",
+        "type": "object"
+      },
+      "AssetInput": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "maxLength": 72,
+            "pattern": "^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$",
+            "title": "Asset Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "asset",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "asset_id"
+        ],
+        "title": "AssetInput",
+        "type": "object"
+      },
+      "AssetPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AssetView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "AssetPage",
+        "type": "object"
+      },
+      "AssetView": {
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired At"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "name",
+          "content_type",
+          "size",
+          "digest",
+          "source",
+          "retired_at",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AssetView",
         "type": "object"
       },
       "AuditEvent": {
@@ -486,6 +702,20 @@
         "title": "BearerCredential",
         "type": "object"
       },
+      "Body_upload_api_v1_workspaces__workspace_id__uploads_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_api_v1_workspaces__workspace_id__uploads_post",
+        "type": "object"
+      },
       "CatalogRequest": {
         "additionalProperties": false,
         "properties": {
@@ -574,6 +804,95 @@
           "toolkit_version"
         ],
         "title": "CatalogView",
+        "type": "object"
+      },
+      "ClientToolDefinition": {
+        "additionalProperties": false,
+        "description": "Portable model guidance for one externally executed client tool.",
+        "properties": {
+          "description": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "maxLength": 16384,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instruction"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.:-]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "parameters_json_schema": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Parameters Json Schema",
+            "type": "object"
+          },
+          "permission": {
+            "default": "inherit",
+            "enum": [
+              "inherit",
+              "allow",
+              "deny"
+            ],
+            "title": "Permission",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters_json_schema"
+        ],
+        "title": "ClientToolDefinition",
+        "type": "object"
+      },
+      "Complete": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "complete",
+            "title": "Action",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "tool_call_id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "action",
+          "result"
+        ],
+        "title": "Complete",
         "type": "object"
       },
       "ComposioConfig": {
@@ -1063,9 +1382,13 @@
                 "$ref": "#/components/schemas/MessagePayload"
               },
               {
+                "$ref": "#/components/schemas/FeedbackPayload"
+              },
+              {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Payload"
           },
           "position": {
             "title": "Position",
@@ -1085,6 +1408,17 @@
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
+          },
+          "waiting_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiting Run Id"
           }
         },
         "required": [
@@ -1100,6 +1434,85 @@
           "payload"
         ],
         "title": "EntryView",
+        "type": "object"
+      },
+      "EnvironmentPathInput": {
+        "additionalProperties": false,
+        "properties": {
+          "mount": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Mount",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "type": {
+            "const": "environment_path",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "mount",
+          "path"
+        ],
+        "title": "EnvironmentPathInput",
+        "type": "object"
+      },
+      "FeedbackPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/NormalizedAnswer"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "title": "Answers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "answers"
+        ],
+        "title": "FeedbackPayload",
+        "type": "object"
+      },
+      "FeedbackSubmission": {
+        "additionalProperties": false,
+        "properties": {
+          "answers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Answer"
+            },
+            "maxItems": 128,
+            "title": "Answers",
+            "type": "array"
+          },
+          "kind": {
+            "const": "feedback",
+            "title": "Kind",
+            "type": "string"
+          },
+          "waiting_run_id": {
+            "maxLength": 72,
+            "pattern": "^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$",
+            "title": "Waiting Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "waiting_run_id"
+        ],
+        "title": "FeedbackSubmission",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1162,6 +1575,25 @@
           "next_cursor"
         ],
         "title": "InboxPage",
+        "type": "object"
+      },
+      "JsonInput": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "json",
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "title": "JsonInput",
         "type": "object"
       },
       "JsonObject": {
@@ -1390,7 +1822,33 @@
         "properties": {
           "content": {
             "items": {
-              "$ref": "#/components/schemas/TextInput"
+              "discriminator": {
+                "mapping": {
+                  "asset": "#/components/schemas/AssetInput",
+                  "environment_path": "#/components/schemas/EnvironmentPathInput",
+                  "json": "#/components/schemas/JsonInput",
+                  "text": "#/components/schemas/TextInput",
+                  "url": "#/components/schemas/UrlInput"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TextInput"
+                },
+                {
+                  "$ref": "#/components/schemas/AssetInput"
+                },
+                {
+                  "$ref": "#/components/schemas/UrlInput"
+                },
+                {
+                  "$ref": "#/components/schemas/EnvironmentPathInput"
+                },
+                {
+                  "$ref": "#/components/schemas/JsonInput"
+                }
+              ]
             },
             "maxItems": 32,
             "minItems": 1,
@@ -1901,6 +2359,53 @@
         "title": "NewThread",
         "type": "object"
       },
+      "NoResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "no_response",
+            "default": "no_response",
+            "title": "Action",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id"
+        ],
+        "title": "NoResponse",
+        "type": "object"
+      },
+      "NormalizedAnswer": {
+        "discriminator": {
+          "mapping": {
+            "approve": "#/components/schemas/Approve",
+            "complete": "#/components/schemas/Complete",
+            "no_response": "#/components/schemas/NoResponse",
+            "reject": "#/components/schemas/Reject"
+          },
+          "propertyName": "action"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Approve"
+          },
+          {
+            "$ref": "#/components/schemas/Reject"
+          },
+          {
+            "$ref": "#/components/schemas/Complete"
+          },
+          {
+            "$ref": "#/components/schemas/NoResponse"
+          }
+        ]
+      },
       "OAuthClientCredential": {
         "additionalProperties": false,
         "properties": {
@@ -1960,6 +2465,45 @@
         ],
         "title": "OAuthConfig",
         "type": "object"
+      },
+      "PendingItem": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Arguments",
+            "type": "object"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PendingKind"
+          },
+          "tool_call_id": {
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "kind",
+          "tool_name",
+          "arguments"
+        ],
+        "title": "PendingItem",
+        "type": "object"
+      },
+      "PendingKind": {
+        "enum": [
+          "approval",
+          "client_tool",
+          "user_input"
+        ],
+        "type": "string"
       },
       "PriceComponent-Input": {
         "additionalProperties": false,
@@ -2427,6 +2971,40 @@
         "title": "ProviderView",
         "type": "object"
       },
+      "Reject": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "reject",
+            "title": "Action",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "tool_call_id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "action"
+        ],
+        "title": "Reject",
+        "type": "object"
+      },
       "RevisionCreate": {
         "additionalProperties": false,
         "properties": {
@@ -2613,6 +3191,20 @@
             ],
             "title": "Output"
           },
+          "pending": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PendingItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending"
+          },
           "run_id": {
             "title": "Run Id",
             "type": "string"
@@ -2626,6 +3218,16 @@
           },
           "status": {
             "$ref": "#/components/schemas/RunStatus"
+          },
+          "wait_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaitReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "workspace_id": {
             "title": "Workspace Id",
@@ -2734,6 +3336,16 @@
         ],
         "type": "string"
       },
+      "RunTrigger": {
+        "enum": [
+          "input",
+          "queued",
+          "feedback",
+          "child_result",
+          "spawned"
+        ],
+        "type": "string"
+      },
       "RunView": {
         "properties": {
           "agent_id": {
@@ -2818,6 +3430,20 @@
             ],
             "title": "Parent Run Id"
           },
+          "pending": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PendingItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending"
+          },
           "sealed_at": {
             "anyOf": [
               {
@@ -2845,9 +3471,22 @@
             "title": "Thread Id",
             "type": "string"
           },
+          "trigger": {
+            "$ref": "#/components/schemas/RunTrigger"
+          },
           "version": {
             "title": "Version",
             "type": "integer"
+          },
+          "wait_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaitReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2857,6 +3496,7 @@
           "agent_id",
           "agent_revision_id",
           "status",
+          "trigger",
           "current_attempt_id",
           "parent_run_id",
           "source_entry_id",
@@ -2948,6 +3588,54 @@
         "title": "SessionPage",
         "type": "object"
       },
+      "SessionPreview": {
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_name": {
+            "title": "Agent Name",
+            "type": "string"
+          },
+          "input_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Text"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/RunTrigger"
+          }
+        },
+        "required": [
+          "thread_id",
+          "run_id",
+          "agent_id",
+          "agent_name",
+          "run_status",
+          "trigger",
+          "input_text"
+        ],
+        "title": "SessionPreview",
+        "type": "object"
+      },
       "SessionProfile": {
         "properties": {
           "csrf_token": {
@@ -2983,6 +3671,36 @@
             "title": "Labels",
             "type": "object"
           },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_count": {
+            "title": "Run Count",
+            "type": "integer"
+          },
+          "selected_thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Thread Id"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
           "version": {
             "title": "Version",
             "type": "integer"
@@ -2997,7 +3715,11 @@
           "workspace_id",
           "labels",
           "created_at",
-          "version"
+          "updated_at",
+          "version",
+          "run_count",
+          "preview",
+          "selected_thread_id"
         ],
         "title": "SessionView",
         "type": "object"
@@ -3247,6 +3969,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "permission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission Id"
           }
         },
         "required": [
@@ -3255,6 +3988,101 @@
           "input_schema"
         ],
         "title": "ToolInfo",
+        "type": "object"
+      },
+      "ToolPermissionMode": {
+        "enum": [
+          "allow",
+          "deny",
+          "ask",
+          "review"
+        ],
+        "type": "string"
+      },
+      "ToolPermissionSetting": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ToolPermissionMode"
+          },
+          {
+            "const": "inherit",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolPermissions": {
+        "additionalProperties": false,
+        "description": "Portable configuration. Inherit resolves a tool default, never an execution decision.",
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/ToolPermissionSetting",
+            "default": "inherit"
+          },
+          "rules": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ToolPermissionSetting"
+            },
+            "maxProperties": 1024,
+            "title": "Rules",
+            "type": "object"
+          }
+        },
+        "title": "ToolPermissions",
+        "type": "object"
+      },
+      "UploadView": {
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "upload_id": {
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "filename",
+          "content_type",
+          "size",
+          "digest"
+        ],
+        "title": "UploadView",
+        "type": "object"
+      },
+      "UrlInput": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "url",
+            "title": "Type",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "minLength": 8,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "url"
+        ],
+        "title": "UrlInput",
         "type": "object"
       },
       "UsageLimit": {
@@ -3355,6 +4183,15 @@
           "run",
           "write",
           "admin"
+        ],
+        "type": "string"
+      },
+      "WaitReason": {
+        "enum": [
+          "approval",
+          "client_tool",
+          "user_input",
+          "multiple"
         ],
         "type": "string"
       },
@@ -4648,6 +5485,280 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/assets": {
+      "get": {
+        "operationId": "list_assets_api_v1_workspaces__workspace_id__assets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Assets",
+        "tags": [
+          "assets"
+        ]
+      },
+      "post": {
+        "operationId": "create_asset_api_v1_workspaces__workspace_id__assets_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetView"
+                }
+              }
+            },
+            "description": "Existing Asset with the same upload and name"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Asset",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/assets/{asset_id}": {
+      "delete": {
+        "operationId": "retire_asset_api_v1_workspaces__workspace_id__assets__asset_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retire Asset",
+        "tags": [
+          "assets"
+        ]
+      },
+      "get": {
+        "operationId": "get_asset_api_v1_workspaces__workspace_id__assets__asset_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Asset",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/assets/{asset_id}/content": {
+      "get": {
+        "operationId": "asset_content_api_v1_workspaces__workspace_id__assets__asset_id__content_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Asset Content",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/audit-events": {
       "get": {
         "operationId": "audit_events_api_v1_workspaces__workspace_id__audit_events_get",
@@ -5583,6 +6694,103 @@
           },
           {
             "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 72,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 72,
+                  "pattern": "^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/RunStatus"
+              },
+              "maxItems": 6,
+              "title": "Status",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trigger",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/RunTrigger"
+              },
+              "maxItems": 5,
+              "title": "Trigger",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "updated_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "updated_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated Before"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
@@ -5600,6 +6808,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 2048,
                   "type": "string"
                 },
                 {
@@ -5980,7 +7189,22 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Submission"
+                "discriminator": {
+                  "mapping": {
+                    "feedback": "#/components/schemas/FeedbackSubmission",
+                    "message": "#/components/schemas/Submission"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Submission"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FeedbackSubmission"
+                  }
+                ],
+                "title": "Body"
               }
             }
           },
@@ -6090,6 +7314,69 @@
         "summary": "List Runs",
         "tags": [
           "runs"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/uploads": {
+      "post": {
+        "operationId": "upload_api_v1_workspaces__workspace_id__uploads_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_api_v1_workspaces__workspace_id__uploads_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload",
+        "tags": [
+          "assets"
         ]
       }
     },

@@ -10,16 +10,21 @@ import httpx
 import pytest
 from a13n_service.infra.db import short_session
 from a13n_service.runs import seal
+from a13n_service.runs.input_frames import PreparedInputs
 from a13n_service.runs.schemas import Checkpoint
 from a13n_service.runs.snapshots import object_key
 from a13n_service.runs.tables import AttemptRow, RunRow
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
 pytestmark = pytest.mark.anyio
 
 
 @pytest.mark.parametrize("cut", ["before_offer", "offered"])
+@pytest.mark.parametrize("input_kind", ["text", "asset"])
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
-async def test_process_death_without_input_checkpoint_recovers_exact_source(public_service, tmp_path, model_url, cut):
+async def test_process_death_without_input_checkpoint_recovers_exact_source(
+    public_service, tmp_path, model_url, cut, input_kind
+):
     service = public_service
     settings = service.app.state.settings
     value = settings.model_dump(mode="json")
@@ -33,13 +38,28 @@ async def test_process_death_without_input_checkpoint_recovers_exact_source(publ
     config.write_text(json.dumps(value))
     config.chmod(0o600)
     marker = tmp_path / "before-offer"
+    if input_kind == "asset":
+        uploaded = await service.client.post(
+            service.workspace_path + "/uploads",
+            headers={"Idempotency-Key": "process-media-upload"},
+            files={"file": ("source.txt", b"process-exact-bytes", "text/plain")},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        asset = await service.client.post(
+            service.workspace_path + "/assets",
+            json={"upload_id": uploaded.json()["upload_id"], "name": "source.txt"},
+        )
+        assert asset.status_code == 201, asset.text
+        content = [{"type": "asset", "asset_id": asset.json()["id"]}]
+    else:
+        content = [{"type": "text", "text": "Exactly one source"}]
     accepted = await service.client.post(
         service.workspace_path + "/threads",
         headers={"Idempotency-Key": "process-crash"},
         json={
             "kind": "message",
             "agent_id": service.agent_id,
-            "payload": {"content": [{"type": "text", "text": "Exactly one source"}]},
+            "payload": {"content": content},
         },
     )
     assert accepted.status_code == 201
@@ -96,6 +116,20 @@ async def test_process_death_without_input_checkpoint_recovers_exact_source(publ
         assert [(item["id"], item["status"]) for item in result.json()["inputs"]] == [(entry_id, "consumed")]
         assert result.json()["segments"][0]["interrupted"]
         assert len(result.json()["segments"]) == 2
+        if input_kind == "asset":
+            stored = await service.app.state.objects.read(object_key(run.organization_id, run_id, "state"))
+            checkpoint = Checkpoint.model_validate_json(stored.content)
+            prepared = PreparedInputs(run_id, receipts=(entry_id,))
+            prepared.restore(checkpoint.state.message_history)
+            assert prepared.incorporated(checkpoint.state.message_history) == (entry_id,)
+            assert any(
+                isinstance(native, BinaryContent) and native.data == b"process-exact-bytes"
+                for message in checkpoint.state.message_history
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+                if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                for native in part.content
+            )
         async with httpx.AsyncClient() as model:
             assert (await model.get(model_url.removesuffix("/v1") + "/fixture/model-state")).json()[
                 "request_count"

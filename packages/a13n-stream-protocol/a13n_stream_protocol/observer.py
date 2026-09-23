@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterable, Callable, Sequence
+from collections.abc import AsyncIterable, Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -61,7 +61,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import DeferredToolRequests
 
 from a13n_stream_protocol.fragments import fragment_custom_event
-from a13n_stream_protocol.messages import ContentMetadata, project_input_content
+from a13n_stream_protocol.messages import ContentMetadata, InputSource, project_input_content
 
 _AGUI_EVENT_ADAPTER = TypeAdapter(Event)
 _ANY_ADAPTER = TypeAdapter(Any)
@@ -219,18 +219,32 @@ class HarnessAguiObserver:
             _observe_request_lifecycle(source, state)
             return [_custom_harness_event(item, source)]
         if isinstance(source, ModelInputEvent):
-            return _convert_input(item, source.content)
+            return _convert_input(
+                item,
+                (
+                    (native, InputSource(kind="model_input", content_index=index))
+                    for index, native in enumerate(source.content)
+                ),
+            )
         elif isinstance(source, EnqueuedMessagesEvent):
             # Native delivery is authoritative. Never send its raw messages
             # through the generic serializer: they may contain binary payloads.
-            content = [
-                content
-                for message in source.messages
+            content = (
+                (
+                    native,
+                    InputSource(
+                        kind="enqueued_messages",
+                        message_index=message_index,
+                        part_index=part_index,
+                        content_index=content_index,
+                    ),
+                )
+                for message_index, message in enumerate(source.messages)
                 if isinstance(message, ModelRequest)
-                for part in message.parts
+                for part_index, part in enumerate(message.parts)
                 if isinstance(part, UserPromptPart)
-                for content in user_prompt_content(part)
-            ]
+                for content_index, native in enumerate(user_prompt_content(part))
+            )
             return [
                 CustomEvent(
                     timestamp=_timestamp_ms(item),
@@ -338,6 +352,8 @@ class HarnessAguiObserver:
 
         original_data = original.model_dump(mode="python")
         replacement_data = replacement.model_dump(mode="python")
+        if ("input_source" in replacement_data) != ("input_source" in original_data):
+            raise AguiObservationError("The event processor changed structural field input_source")
         mutable_fields = _MUTABLE_FIELDS_BY_EVENT_TYPE.get(original.type, frozenset())
         for field_name, original_value in original_data.items():
             if field_name not in mutable_fields and replacement_data.get(field_name) != original_value:
@@ -346,9 +362,9 @@ class HarnessAguiObserver:
         return replacement.model_copy(deep=True)
 
 
-def _convert_input(item: HarnessEvent, content: Sequence[UserContent]) -> list[Event]:
+def _convert_input(item: HarnessEvent, content: Iterable[tuple[UserContent, InputSource]]) -> list[Event]:
     events: list[Event] = []
-    for index, native in enumerate(content):
+    for index, (native, source) in enumerate(content):
         projected = project_input_content(native)
         if projected is None:
             continue
@@ -356,7 +372,9 @@ def _convert_input(item: HarnessEvent, content: Sequence[UserContent]) -> list[E
         message_id = f"{item.run_id}:input:{item.sequence}:{index}"
         if isinstance(value, str):
             events.extend(
-                _text_message_events(item, message_id=message_id, content=value, role="user", metadata=metadata)
+                _text_message_events(
+                    item, message_id=message_id, content=value, role="user", metadata=metadata, source=source
+                )
             )
         else:
             events.append(
@@ -368,6 +386,7 @@ def _convert_input(item: HarnessEvent, content: Sequence[UserContent]) -> list[E
                         "message_id": message_id,
                         "role": "user",
                         "metadata": metadata.model_dump(mode="json"),
+                        "input_source": source.model_dump(mode="json", exclude_none=True),
                         "value": _source_value(item, {"content": value}),
                     }
                 )
@@ -376,7 +395,13 @@ def _convert_input(item: HarnessEvent, content: Sequence[UserContent]) -> list[E
 
 
 def _text_message_events(
-    item: HarnessEvent, *, message_id: str, content: str, role: Literal["user", "assistant"], metadata: ContentMetadata
+    item: HarnessEvent,
+    *,
+    message_id: str,
+    content: str,
+    role: Literal["user", "assistant"],
+    metadata: ContentMetadata,
+    source: InputSource,
 ) -> list[Event]:
     # Every chunk is independently attributable and below typical transport limits,
     # even when JSON escaping expands a code point to six bytes.
@@ -385,6 +410,7 @@ def _text_message_events(
         "timestamp": _timestamp_ms(item),
         "role": role,
         "metadata": metadata.model_dump(mode="json"),
+        "input_source": source.model_dump(mode="json", exclude_none=True),
     }
     return [
         TextMessageStartEvent.model_validate(fields),

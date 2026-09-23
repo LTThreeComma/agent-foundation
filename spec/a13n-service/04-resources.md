@@ -15,6 +15,8 @@ Assets are immutable content; retirement hides new use without deleting retained
 
 Mutable rows have a monotonic bigint `version`, incremented by the database on changes. Strong ETags encode identity/version and representation variant, checked under the row lock. Timestamps are for display, not concurrency. Expanded representations must include their dependencies in the tag or expose separate resource reads; a tag cannot promise byte-equivalence for fields changing independently of its row.
 
+Sessions separate metadata concurrency from durable conversation activity. Their database stamp increments `version` exactly once when any business column changes, excluding only `version` and `updated_at` from change detection. An activity-only touch preserves the metadata version and takes the greater of the previous and supplied activity times; a metadata change takes at least the previous time and fresh database time. Supplied versions and no-op writes cannot manufacture a change. This exception applies only to Sessions; other resource stamps remain unchanged. The expanded Session read includes independently changing Run summaries and Agent names, so it exposes its metadata version without a strong ETag. See [Session activity](05-runs.md) for activity ownership and lock ordering.
+
 ### Shared columns
 
 ```
@@ -183,7 +185,7 @@ assets
   source NULL  retired_at NULL  version  created_by_id  created_at  updated_at
 ```
 
-Immutable content. Uploaded through the same `/uploads` staging as skills, then `POST /assets {upload_id, name}`. `source` records provenance when a run produced it: `{"run_id", "run_attempt_id", "tool_call_id"}`. Assets are referenced by id from inbox entry payloads and run outputs. DELETE retires it for new use; authorized readers of retained input and output can still read its content. No physical deletion or retention purge is implemented in v1.
+Immutable content. Uploaded through the same `/uploads` staging as skills, then `POST /assets {upload_id, name}`. Unique `(workspace_id, content_ref)` makes one upload materialize at most one Asset. Same upload and normalized name returns that Asset with its current retirement state; a conflicting name is rejected. A new upload identity can create a distinct Asset even for identical bytes. Asset identity, metadata, content and provenance are immutable, and retirement cannot be reversed. `source` records provenance when a run produced it: `{"run_id", "run_attempt_id", "tool_call_id"}`. Assets are referenced by id from inbox entry payloads and run outputs. DELETE retires it for new use; authorized readers of retained input and output can still read its content. No physical deletion or retention purge is implemented in v1.
 
 ### subscriptions
 

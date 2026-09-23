@@ -3,7 +3,7 @@
 import hashlib
 import json
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,13 +13,28 @@ from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
 from a13n_service.resources.agents.service import validate_configuration
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.assets.tables import AssetRow
 from a13n_service.resources.connections.scope import connection_scope, validate_context
-from a13n_service.runs import events
+from a13n_service.runs import activity, events, feedback
+from a13n_service.runs.feedback import FeedbackSubmission
 from a13n_service.runs.input_views import project
+from a13n_service.runs.inputs import ordinary_usage
 from a13n_service.runs.options import compatible
-from a13n_service.runs.policy import AcceptedIntent, AdmissionPolicy
-from a13n_service.runs.schemas import AgentConfig, NewThread, RunOptions, RunView, Submission, Submitted
+from a13n_service.runs.policy import AcceptedIntent, AdmissionPolicy, authorize_execution
+from a13n_service.runs.schemas import (
+    AgentConfig,
+    AssetInput,
+    EnvironmentPathInput,
+    InboxSubmission,
+    MessagePayload,
+    NewThread,
+    RunOptions,
+    RunView,
+    Submission,
+    Submitted,
+)
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
+from a13n_service.runs.waiting import Waiting
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, authorize, execution_authority
 from a13n_service.tenancy.grants import principal_for, resolve_workspace
 
@@ -52,6 +67,38 @@ async def submitted(session: AsyncSession, entry: InboxEntryRow, *, replayed: bo
     )
 
 
+async def validate_input_references(
+    session: AsyncSession,
+    principal: Principal,
+    scope: Scope,
+    payload: MessagePayload,
+    *,
+    authority: ExecutionAuthority | None = None,
+) -> None:
+    """Reject unavailable sources and recheck Asset selection at acceptance."""
+    if any(isinstance(part, EnvironmentPathInput) for part in payload.content):
+        raise ServiceError("unavailable", "Selected Environment path input is not configured")
+    identities = {part.asset_id for part in payload.content if isinstance(part, AssetInput)}
+    if not identities:
+        return
+    authorize(principal, scope, "read", authority=authority)
+    rows = (
+        await session.scalars(
+            select(AssetRow)
+            .where(AssetRow.workspace_id == scope.workspace_id, AssetRow.id.in_(identities))
+            .with_for_update(read=True)
+        )
+    ).all()
+    if len(rows) != len(identities):
+        raise ServiceError("not_found", "Selected Asset was not found")
+    if any(row.retired_at is not None for row in rows):
+        raise ServiceError("disabled", "Selected Asset is retired")
+
+
+def feedback_target(thread: ThreadRow, target: RunRow) -> bool:
+    return thread.current_run_id is None and thread.head_run_id == target.id and target.status == "waiting"
+
+
 async def accept(
     session: AsyncSession,
     thread: ThreadRow,
@@ -61,13 +108,18 @@ async def accept(
     keys: KeyRing,
     policy: AdmissionPolicy | None = None,
     actor: Principal | None = None,
-) -> tuple[RunRow | None, list[events.EventRow]]:
+) -> tuple[RunRow | None, list[events.EventRow], bool]:
     """The thread lock serializes explicit submission and bounded automatic advancement."""
     if thread.archived_at is not None or thread.current_run_id is not None:
-        return None, []
+        return None, [], False
     latest = await session.get(RunRow, thread.last_run_id) if thread.last_run_id else None
+    head = await session.get(RunRow, thread.head_run_id) if thread.head_run_id else None
+    waiting = Waiting.model_validate(head.pending) if head is not None and head.status == "waiting" else None
+    eligible_kinds = ("feedback",) if waiting is not None and not waiting.question_only else ("message", "feedback")
     if latest is not None and latest.status in {"failed", "cancelled"}:
-        identities = [entry.id] if entry is not None and entry.status == "pending" else []
+        identities = (
+            [entry.id] if entry is not None and entry.status == "pending" and entry.kind in eligible_kinds else []
+        )
     else:
         identities = (
             await session.scalars(
@@ -75,13 +127,14 @@ async def accept(
                 .where(
                     InboxEntryRow.thread_id == thread.id,
                     InboxEntryRow.status == "pending",
-                    InboxEntryRow.kind == "message",
+                    InboxEntryRow.kind.in_(eligible_kinds),
                 )
                 .order_by(InboxEntryRow.position)
                 .limit(32)
             )
         ).all()
     observed = {actor.id: actor} if actor is not None else {}
+    changed = False
     for identity in identities:
         candidate = await session.get(InboxEntryRow, identity, with_for_update=True)
         assert candidate is not None
@@ -93,9 +146,12 @@ async def accept(
                         session, candidate.principal_id, confinement=Scope(thread.organization_id, thread.workspace_id)
                     )
                     observed[principal.id] = principal
-                return await _accept_entry(
+                accepted, facts = await _accept_entry(
                     session, thread, candidate, principal, max_attempts=max_attempts, keys=keys, policy=policy
                 )
+                if accepted is not None:
+                    return accepted, facts, True
+                changed |= candidate.status == "failed"
         except ServiceError as error:
             if error.code not in {
                 "forbidden",
@@ -108,10 +164,11 @@ async def accept(
                 raise
             candidate = await session.get(InboxEntryRow, identity)
             assert candidate is not None
+            changed = True
             candidate.status = "failed"
             candidate.failure = {"code": error.code, "message": error.message}
             candidate.finished_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-    return None, []
+    return None, [], changed
 
 
 async def _accept_entry(
@@ -131,16 +188,44 @@ async def _accept_entry(
         return None, []
     authority = ExecutionAuthority.model_validate(entry.authority)
     authorize(principal, Scope(thread.organization_id, thread.workspace_id), "run", authority=authority)
-    agent = await session.get(AgentRow, entry.agent_id)
+    parent_id = thread.head_run_id or thread.origin_run_id
+    parent = await session.get(RunRow, parent_id) if parent_id else None
+    if entry.kind == "feedback":
+        if parent is None or entry.waiting_run_id != parent.id or not feedback_target(thread, parent):
+            entry.status = "failed"
+            entry.failure = {"code": "stale_feedback", "message": "Waiting run is no longer the idle thread head"}
+            entry.finished_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+            return None, []
+        principal = await authorize_execution(session, parent)
+        authority = ExecutionAuthority.model_validate(parent.authority)
+        agent_id, pinned_revision, option_values = parent.agent_id, parent.agent_revision_id, parent.options
+    else:
+        if (
+            parent is not None
+            and parent.status == "waiting"
+            and not Waiting.model_validate(parent.pending).question_only
+        ):
+            return None, []
+        if parent_id is not None and (parent is None or parent.status not in {"completed", "waiting"}):
+            raise ServiceError("conflict", "Thread has no continuable parent")
+        agent_id, pinned_revision, option_values = entry.agent_id, entry.agent_revision_id, entry.options
+        await validate_input_references(
+            session,
+            principal,
+            Scope(thread.organization_id, thread.workspace_id),
+            MessagePayload.model_validate(entry.payload),
+            authority=authority,
+        )
+    agent = await session.get(AgentRow, agent_id)
     if agent is None or agent.workspace_id != thread.workspace_id or agent.archived_at is not None:
         raise ServiceError("disabled", "Selected agent is unavailable")
-    revision_id = entry.agent_revision_id or agent.default_revision_id
+    revision_id = pinned_revision or agent.default_revision_id
     revision = await session.get(AgentRevisionRow, revision_id) if revision_id else None
     if revision is None or revision.agent_id != agent.id:
         raise ServiceError("invalid_argument", "Agent revision was not found")
     config = AgentConfig.model_validate(revision.config)
     await validate_configuration(session, principal, Scope(thread.organization_id, thread.workspace_id), config)
-    options = RunOptions.model_validate(entry.options)
+    options = RunOptions.model_validate(option_values)
     await validate_context(
         session,
         principal,
@@ -150,11 +235,6 @@ async def _accept_entry(
         keys=keys,
         authority=authority,
     )
-    parent_id = thread.head_run_id or thread.origin_run_id
-    if parent_id is not None:
-        parent = await session.get(RunRow, parent_id)
-        if parent is None or parent.status != "completed":
-            raise ServiceError("conflict", "Thread requires control feedback before another message can run")
     run = RunRow(
         id=new_object_id("run"),
         organization_id=thread.organization_id,
@@ -163,7 +243,7 @@ async def _accept_entry(
         thread_id=thread.id,
         agent_id=agent.id,
         agent_revision_id=revision.id,
-        revision_selection="pinned" if entry.agent_revision_id else "default",
+        revision_selection="pinned" if pinned_revision else "default",
         principal_id=principal.id,
         authority=authority.model_dump(mode="json"),
         options=options.model_dump(mode="json"),
@@ -204,7 +284,7 @@ async def submit(
     storage: Storage,
     actor: Principal,
     workspace_id: str,
-    body: Submission,
+    body: InboxSubmission,
     *,
     request_key: str,
     thread_id: str | None,
@@ -219,7 +299,7 @@ async def submit(
     operation = "thread.create" if thread_id is None else "inbox.submit"
     encoded = json.dumps([operation, thread_id, body.model_dump(mode="json")], sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode()).hexdigest()
-    payload = body.payload.model_dump(mode="json")
+    payload = body.payload.model_dump(mode="json") if isinstance(body, Submission) else None
     payload_size = len(json.dumps(payload).encode())
     scope: Scope | None = None
     try:
@@ -232,9 +312,13 @@ async def submit(
                 return prior
             if workspace.archived_at is not None:
                 raise ServiceError("disabled", "Workspace is archived")
-            if payload_size > max_bytes:
+            if isinstance(body, Submission) and payload_size > max_bytes:
                 raise ServiceError("payload_too_large", "Input exceeds inbox byte capacity")
+            if isinstance(body, Submission):
+                await validate_input_references(session, actor, scope, body.payload)
             if thread_id is None:
+                if isinstance(body, FeedbackSubmission):
+                    raise ServiceError("invalid_argument", "Feedback requires an existing thread")
                 session_id = body.session_id if isinstance(body, NewThread) else None
                 if session_id is not None:
                     owner = await session.get(SessionRow, session_id)
@@ -268,23 +352,14 @@ async def submit(
                     raise ServiceError("not_found", "Thread was not found")
                 if thread.archived_at is not None:
                     raise ServiceError("disabled", "Thread is archived")
-            count, byte_count = (
-                await session.execute(
-                    select(
-                        func.count(), func.coalesce(func.sum(func.octet_length(cast(InboxEntryRow.payload, String))), 0)
-                    ).where(
-                        InboxEntryRow.thread_id == thread.id,
-                        InboxEntryRow.status.in_(("pending", "assigned")),
-                        InboxEntryRow.kind.in_(("message", "child_result")),
+            if isinstance(body, Submission):
+                count, byte_count = await ordinary_usage(session, thread.id)
+                if count >= max_entries or byte_count + payload_size > max_bytes:
+                    raise ServiceError(
+                        "rate_limited",
+                        "Thread inbox capacity reached",
+                        {"count": count, "bytes": byte_count, "count_limit": max_entries, "byte_limit": max_bytes},
                     )
-                )
-            ).one()
-            if count >= max_entries or byte_count + payload_size > max_bytes:
-                raise ServiceError(
-                    "rate_limited",
-                    "Thread inbox capacity reached",
-                    {"count": count, "bytes": byte_count, "count_limit": max_entries, "byte_limit": max_bytes},
-                )
             position = (
                 await session.execute(
                     select(func.coalesce(func.max(InboxEntryRow.position), 0)).where(
@@ -292,63 +367,99 @@ async def submit(
                     )
                 )
             ).scalar_one() + 1
-            agent = await session.get(AgentRow, body.agent_id)
-            if agent is None or agent.workspace_id != workspace_id or agent.archived_at is not None:
-                raise ServiceError("invalid_argument", "Agent is unavailable in this workspace")
-            if body.agent_revision_id is not None:
-                revision = await session.get(AgentRevisionRow, body.agent_revision_id)
+            if isinstance(body, FeedbackSubmission):
+                target = await session.get(RunRow, body.waiting_run_id)
+                if target is None or target.thread_id != thread.id or target.workspace_id != workspace_id:
+                    raise ServiceError("not_found", "Waiting run was not found in this thread")
+                if target.status != "waiting" or target.pending is None:
+                    raise ServiceError("invalid_argument", "Feedback target has no sealed pending batch")
+                payload = feedback.normalize(Waiting.model_validate(target.pending), body).model_dump(mode="json")
+                stale = not feedback_target(thread, target)
+                fields = {
+                    "kind": "feedback",
+                    "delivery": "next_run",
+                    "waiting_run_id": target.id,
+                    "agent_id": None,
+                    "agent_revision_id": None,
+                    "options": {},
+                    "status": "failed" if stale else "pending",
+                    "failure": {"code": "stale_feedback", "message": "Waiting run is no longer the idle thread head"}
+                    if stale
+                    else None,
+                    "finished_at": (await session.execute(select(func.clock_timestamp()))).scalar_one()
+                    if stale
+                    else None,
+                }
+            else:
+                agent = await session.get(AgentRow, body.agent_id)
+                if agent is None or agent.workspace_id != workspace_id or agent.archived_at is not None:
+                    raise ServiceError("invalid_argument", "Agent is unavailable in this workspace")
+                if body.agent_revision_id is not None:
+                    revision = await session.get(AgentRevisionRow, body.agent_revision_id)
+                    if revision is None or revision.agent_id != agent.id:
+                        raise ServiceError("invalid_argument", "Agent revision was not found")
+                revision_id = body.agent_revision_id or agent.default_revision_id
+                if thread.current_run_id and body.delivery == "steer":
+                    active = await session.get(RunRow, thread.current_run_id)
+                    if (
+                        active is not None
+                        and active.agent_id == body.agent_id
+                        and body.agent_revision_id in {None, active.agent_revision_id}
+                    ):
+                        active_revision = await session.get(AgentRevisionRow, active.agent_revision_id)
+                        assert active_revision is not None
+                        active_config = AgentConfig.model_validate(active_revision.config)
+                        if body.options.mcp_headers.keys() <= connection_scope(active_config).keys() and compatible(
+                            active_config, body.options, RunOptions.model_validate(active.options)
+                        ):
+                            revision_id = active.agent_revision_id
+                revision = await session.get(AgentRevisionRow, revision_id) if revision_id else None
                 if revision is None or revision.agent_id != agent.id:
                     raise ServiceError("invalid_argument", "Agent revision was not found")
-            revision_id = body.agent_revision_id or agent.default_revision_id
-            if thread.current_run_id and body.delivery == "steer":
-                active = await session.get(RunRow, thread.current_run_id)
-                if (
-                    active is not None
-                    and active.agent_id == body.agent_id
-                    and body.agent_revision_id in {None, active.agent_revision_id}
-                ):
-                    active_revision = await session.get(AgentRevisionRow, active.agent_revision_id)
-                    assert active_revision is not None
-                    active_config = AgentConfig.model_validate(active_revision.config)
-                    if body.options.mcp_headers.keys() <= connection_scope(active_config).keys() and compatible(
-                        active_config, body.options, RunOptions.model_validate(active.options)
-                    ):
-                        revision_id = active.agent_revision_id
-            revision = await session.get(AgentRevisionRow, revision_id) if revision_id else None
-            if revision is None or revision.agent_id != agent.id:
-                raise ServiceError("invalid_argument", "Agent revision was not found")
-            await validate_context(
-                session, actor, scope, AgentConfig.model_validate(revision.config), body.options.mcp_headers, keys=keys
-            )
+                await validate_context(
+                    session,
+                    actor,
+                    scope,
+                    AgentConfig.model_validate(revision.config),
+                    body.options.mcp_headers,
+                    keys=keys,
+                )
+                fields = {
+                    "kind": "message",
+                    "delivery": body.delivery,
+                    "agent_id": body.agent_id,
+                    "agent_revision_id": body.agent_revision_id,
+                    "options": body.options.model_dump(mode="json"),
+                    "status": "pending",
+                }
             entry = InboxEntryRow(
                 id=new_object_id("inb"),
                 organization_id=scope.organization_id,
                 workspace_id=workspace_id,
                 thread_id=thread.id,
-                kind="message",
-                delivery=body.delivery,
                 position=position,
                 principal_id=actor.id,
                 authority=execution_authority(actor, scope).model_dump(mode="json"),
                 payload=payload,
-                agent_id=body.agent_id,
-                agent_revision_id=body.agent_revision_id,
-                options=body.options.model_dump(mode="json"),
                 request_key=request_key,
                 request_digest=digest,
                 request_kind=operation,
                 request_target=thread_id,
-                status="pending",
+                **fields,
             )
             session.add(entry)
             await session.flush()
-            _, facts = await accept(
-                session, thread, entry, max_attempts=max_attempts, keys=keys, policy=policy, actor=actor
-            )
+            facts = []
+            if entry.status == "pending":
+                _, facts, _ = await accept(
+                    session, thread, entry, max_attempts=max_attempts, keys=keys, policy=policy, actor=actor
+                )
             # Every visible append changes the thread version, even when already busy.
             thread.updated_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
             await session.flush()
             result = await submitted(session, entry, replayed=False)
+            if not facts:
+                await activity.touch(session, workspace_id, [thread.session_id])
             await events.flush(session, facts)
             return result
     except IntegrityError as error:

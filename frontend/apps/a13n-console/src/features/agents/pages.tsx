@@ -11,6 +11,7 @@ import { ErrorNotice, ErrorPage, Loading } from "../../shared/feedback";
 import { ModelSelector } from "../models/selector";
 import { ConnectionSelector } from "../connections/selector";
 import { RevisionHistory } from "./revisions";
+import { InteractionSettings } from "./interactions";
 import styles from "./agents.module.css";
 
 type Config = components["schemas"]["AgentConfig"];
@@ -321,8 +322,27 @@ function AgentEditor({
             </div>
           </div>
         </Section>
+        <InteractionSettings
+          key={baseline.head?.version ?? "new"}
+          config={config}
+          disabled={!editable || pending}
+          onChange={setConfig}
+        />
         <Section title={t("Tools")}>
           <ConnectionSelector
+            permissions={config.tool_permissions}
+            onPermissionChange={(identity, permission) =>
+              setConfig({
+                ...config,
+                tool_permissions: {
+                  ...config.tool_permissions,
+                  rules: {
+                    ...config.tool_permissions?.rules,
+                    [identity]: permission,
+                  },
+                },
+              })
+            }
             value={config.connections ?? []}
             onChange={(connections) => setConfig({ ...config, connections })}
             disabled={!editable || pending}

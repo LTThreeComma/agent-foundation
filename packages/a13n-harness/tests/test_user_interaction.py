@@ -190,3 +190,95 @@ async def test_invalid_question_returns_tool_failure_before_deferral(invalid_kin
     assert result.status == "suspended"
     assert result.deferred is not None
     assert [call.tool_call_id for call in result.deferred.calls] == ["valid-1"]
+
+
+@pytest.mark.parametrize("successful", [False, True])
+async def test_removed_question_tool_accepts_only_native_negative_closure(successful):
+    from a13n_harness import DefinitionError
+    from pydantic_ai.messages import UserPromptPart
+
+    first = await _build().run("clarify")
+    assert first.deferred is not None and first.state is not None
+    observed = []
+
+    async def stream(messages, info):
+        observed.extend(messages)
+        yield "new revision continued"
+
+    agent = HarnessBuilder().build(AgentSpec(), output_type=str, model=FunctionModel(stream_function=stream))
+    supplied = {"answers": {"Which scope should be used?": "Focused"}} if successful else ToolFailed("No response")
+
+    async def resume():
+        return await agent.run(
+            "ordinary reply",
+            previous_state=first.state,
+            deferred_resume=DeferredToolResume(
+                first.deferred,
+                first.deferred.build_results(calls={"question-1": supplied}),
+            ),
+        )
+
+    if successful:
+        with pytest.raises(DefinitionError, match="current tool surface"):
+            await resume()
+        assert not observed
+    else:
+        result = await resume()
+        assert result.output_or_raise() == "new revision continued"
+        returns = [
+            part
+            for message in observed
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        assert len(returns) == 1 and returns[0].outcome == "failed" and returns[0].content == "No response"
+        prompts = [
+            part.content
+            for message in observed
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart)
+        ]
+        assert prompts.count("ordinary reply") == 1
+
+
+async def test_negative_question_closure_rejects_present_local_substitution():
+    from a13n_harness import DefinitionError
+    from pydantic_ai import Tool
+    from pydantic_ai.capabilities import Capability
+
+    first = await _build().run("clarify")
+    assert first.deferred is not None and first.state is not None
+    effects = []
+
+    async def substituted(**arguments):
+        effects.append(arguments)
+        return "must not run"
+
+    async def model(messages, info):
+        pytest.fail("A substituted surface must fail before model work")
+        yield "unreachable"
+
+    tool = Tool.from_schema(
+        substituted,
+        name="ask_user_question",
+        description="Substituted local tool",
+        json_schema={"type": "object", "properties": {}},
+        takes_ctx=False,
+    )
+    agent = HarnessBuilder().build(
+        AgentSpec(),
+        output_type=str,
+        model=FunctionModel(stream_function=model),
+        capabilities=(Capability(id="replacement", tools=[tool]),),
+    )
+    with pytest.raises(DefinitionError, match="current tool surface"):
+        await agent.run(
+            previous_state=first.state,
+            deferred_resume=DeferredToolResume(
+                first.deferred,
+                first.deferred.build_results(calls={"question-1": ToolFailed("No response")}),
+            ),
+        )
+    assert not effects

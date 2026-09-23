@@ -572,3 +572,98 @@ async def test_consumed_external_results_do_not_freeze_later_tool_surfaces() -> 
         ),
     )
     assert completed.output_or_raise() == "client-result:received"
+
+
+@pytest.mark.parametrize(
+    ("declaration", "policy", "rules", "suspended"),
+    [
+        ("inherit", "inherit", {}, True),
+        ("allow", "inherit", {}, True),
+        ("deny", "inherit", {}, False),
+        ("allow", "deny", {}, False),
+        ("deny", "allow", {}, True),
+        ("deny", "inherit", {"*": "allow"}, True),
+        ("allow", "inherit", {"*": "allow", "tool/client/*": "deny"}, False),
+        ("deny", "inherit", {"*": "deny", "tool/client/*": "deny", "tool/client/client_action": "allow"}, True),
+    ],
+)
+async def test_client_declaration_permission_uses_native_identity_precedence(declaration, policy, rules, suspended):
+    from a13n_harness.tools.permissions import ToolPermissions, ToolPermissionsCapability
+
+    spec = ClientToolsSpec(
+        default_toolsets=(
+            ClientToolsetDefinition(
+                toolset_id="client",
+                tools=(_tool("client_action").model_copy(update={"permission": declaration}),),
+            ),
+        )
+    )
+    agent = _build(
+        spec,
+        tool_name="client_action",
+        extra_capabilities=(ToolPermissionsCapability(ToolPermissions(default=policy, rules=rules)),),
+    )
+    result = await agent.run("go")
+    assert (result.status == "suspended") == suspended
+    if suspended:
+        assert result.deferred is not None
+        assert [call.tool_name for call in result.deferred.calls] == ["client_action"]
+    else:
+        assert result.status == "completed" and result.deferred is None
+        parts = [
+            part
+            for message in result.all_messages()
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        assert len(parts) == 1 and parts[0].outcome == "failed"
+        assert parts[0].content == "Tool invocation is denied by its permission configuration."
+
+
+@pytest.mark.parametrize("mode", ["ask", "review"])
+async def test_client_effective_approval_modes_are_unsupported(mode):
+    from a13n_harness.tools.permissions import ToolPermissions, ToolPermissionsCapability
+
+    agent = _build(
+        ClientToolsSpec(default_toolsets=(_toolset("client_action"),)),
+        tool_name="client_action",
+        extra_capabilities=(ToolPermissionsCapability(ToolPermissions(default=mode)),),
+    )
+    with pytest.raises(DefinitionError, match="External tools do not support"):
+        await agent.run("go")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_client_metadata_cannot_supply_permission_identity(nested):
+    from a13n_harness.tools.identity import TOOL_IDENTITY_KEY
+
+    metadata = {TOOL_IDENTITY_KEY: {"tool_id": "tool/trusted/action", "default_mode": "allow"}}
+    if nested:
+        metadata = {"nested": [metadata]}
+    data = _tool("client_action").model_dump()
+    data["metadata"] = metadata
+    with pytest.raises(ValidationError, match="reserved Harness key"):
+        ClientToolDefinition.model_validate(data)
+
+
+async def test_negative_closure_does_not_replace_missing_runtime_deferred_function():
+    from pydantic_ai import CallDeferred, ToolFailed
+
+    async def local_action(value: int):
+        raise CallDeferred()
+
+    first = await _build(
+        ClientToolsSpec(), tool_name="local_action", extra_capabilities=(Capability(id="local", tools=[local_action]),)
+    ).run("go")
+    assert first.deferred is not None and first.state is not None
+    assert first.deferred.metadata["external-1"]["a13n.harness.deferred-function-id"]
+    missing = _build(ClientToolsSpec(), tool_name="local_action")
+    with pytest.raises(DefinitionError, match="current tool surface"):
+        await missing.run(
+            previous_state=first.state,
+            deferred_resume=DeferredToolResume(
+                first.deferred,
+                first.deferred.build_results(calls={"external-1": ToolFailed("Unavailable")}),
+            ),
+        )

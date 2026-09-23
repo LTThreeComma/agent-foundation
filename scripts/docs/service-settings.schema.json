@@ -402,6 +402,34 @@
       "title": "Server",
       "type": "object"
     },
+    "Uploads": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "default": 1048576,
+          "maximum": 33554432,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "limit": {
+          "default": 60,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "window_seconds": {
+          "default": 60,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Window Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "Uploads",
+      "type": "object"
+    },
     "Worker": {
       "additionalProperties": false,
       "properties": {
@@ -522,6 +550,9 @@
     },
     "objects": {
       "$ref": "#/$defs/Objects"
+    },
+    "uploads": {
+      "$ref": "#/$defs/Uploads"
     },
     "control": {
       "$ref": "#/$defs/Control"

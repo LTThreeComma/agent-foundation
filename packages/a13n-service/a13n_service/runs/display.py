@@ -48,6 +48,7 @@ class Fold:
         segment = self.display.segments[-1]
         segment.event_sequence += 1
         metadata = event.get("metadata")
+        # Presentation hints do not establish Service input ownership or receipts.
         if isinstance(metadata, dict) and metadata.get("display") is False:
             return
         kind = event.get("type")

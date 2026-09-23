@@ -7,7 +7,7 @@ from pathlib import Path
 
 from a13n_service.app import build_app
 from a13n_service.infra.objects.local import LocalObjects
-from a13n_service.runs import attempts
+from a13n_service.runs import attempts, inputs
 from a13n_service.settings import Settings
 
 
@@ -23,8 +23,24 @@ async def main():
             if checkpoint["sequence"] == 1 and not checkpoint["receipts"]:
                 Path(signal).write_text("baseline durable, native offer not reached")
                 await asyncio.Event().wait()
+        if (
+            cut == "waiting_candidate"
+            and key.endswith("/state.json")
+            and json.loads(content).get("candidate") == "waiting"
+        ):
+            Path(signal).write_text("waiting candidate durable, seal not reached")
+            await asyncio.Event().wait()
         return result
 
+    original_confirm = inputs.confirm
+
+    async def confirm(storage, claim, checkpoint):
+        await original_confirm(storage, claim, checkpoint)
+        if cut == "feedback_confirmed" and checkpoint.receipts and checkpoint.candidate is None:
+            Path(signal).write_text("feedback checkpoint and receipt confirmed before dispatch")
+            await asyncio.Event().wait()
+
+    inputs.confirm = confirm
     original_start = attempts.start
 
     async def start(*args, **kwargs):

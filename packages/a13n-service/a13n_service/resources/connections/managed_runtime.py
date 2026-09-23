@@ -21,7 +21,9 @@ from a13n_service.providers.tools import ToolsetWrapper
 from a13n_service.resources.connections import managed_access
 from a13n_service.resources.connections.managed import check_inspection
 from a13n_service.resources.connections.managed_transport import actions, open_provider
+from a13n_service.resources.connections.scope import validate_approval_target
 from a13n_service.resources.connections.service import ResolvedConnection
+from a13n_service.runs.waiting import ToolTarget
 from a13n_service.tenancy.authorize import Principal
 
 
@@ -37,10 +39,18 @@ async def open_actions(
     current,
     wrapper: ToolsetWrapper,
     run_id: str,
-) -> Toolset[AgentContext]:
+    expected: tuple[ToolTarget, ...],
+) -> tuple[Toolset[AgentContext], ToolTarget]:
     config = selected.config
     assert isinstance(config, ComposioConfig)
     owned = await managed_access.access(storage, principal, selected, keys=keys)
+    target = ToolTarget(
+        connection_id=selected.id,
+        version=selected.version,
+        authorization_id=owned.authorization_id,
+        authorization_generation=owned.generation,
+    )
+    validate_approval_target(target, expected)
     allowed: set[str] = set()
     dispatched: set[str] = set()
 
@@ -100,4 +110,4 @@ async def open_actions(
         )
 
     tools = FunctionToolset[AgentContext](tools=[tool(item) for item in definitions], max_retries=0, id=selected.id)
-    return Toolset(wrapper(tools))
+    return Toolset(wrapper(tools)), target

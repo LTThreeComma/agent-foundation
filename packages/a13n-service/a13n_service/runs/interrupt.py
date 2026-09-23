@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, transaction
 from a13n_service.infra.errors import ServiceError
-from a13n_service.runs import events
+from a13n_service.runs import activity, events
 from a13n_service.runs.schemas import RunView
 from a13n_service.runs.seal import fail_locked
 from a13n_service.runs.tables import RunRow, ThreadRow
@@ -51,5 +51,7 @@ async def interrupt(storage: Storage, actor: Principal, workspace_id: str, run_i
         await session.flush()
         await session.refresh(run)
         result = RunView.model_validate(run)
+        if not facts:
+            await activity.touch(session, workspace_id, [run.session_id])
         await events.flush(session, facts)
         return result

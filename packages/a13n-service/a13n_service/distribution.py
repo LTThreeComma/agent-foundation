@@ -15,6 +15,8 @@ from a13n_service.providers.mcp import DEFINITION as MCP
 from a13n_service.providers.tools import ConnectionProvider
 from a13n_service.resources.agents.routes import router as agents_router
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
+from a13n_service.resources.assets.routes import router as assets_router
+from a13n_service.resources.assets.tables import AssetRow
 from a13n_service.resources.connections.catalog_routes import router as connection_catalog_router
 from a13n_service.resources.connections.oauth_routes import router as oauth_router
 from a13n_service.resources.connections.routes import router as connections_router
@@ -69,6 +71,7 @@ OSS = Distribution(
         ModelRow,
         ConnectionRow,
         ConnectionAuthorizationRow,
+        AssetRow,
         AgentRow,
         AgentRevisionRow,
         SessionRow,
@@ -85,6 +88,7 @@ OSS = Distribution(
         models_router,
         catalog_router,
         agents_router,
+        assets_router,
         connections_router,
         connection_catalog_router,
         oauth_router,

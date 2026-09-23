@@ -6,6 +6,7 @@ import httpx2
 from a13n_harness.providers.catalog import ProviderCatalog, ProviderNotSelected
 from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
+from a13n_harness.tools.identity import source_tool_id
 from redis.asyncio import Redis
 
 from a13n_service.infra.crypto import KeyRing
@@ -110,6 +111,13 @@ async def test_connection(
         current = await get_row(session, selected.workspace_id, selected.id)
         if current.version != selected.version or not current.enabled:
             raise ServiceError("conflict", "Connection changed during its test")
-    result = ConnectionTest(connection_id=selected.id, version=selected.version, tools=tools)
+    result = ConnectionTest(
+        connection_id=selected.id,
+        version=selected.version,
+        tools=[
+            tool.model_copy(update={"permission_id": source_tool_id(selected.id, tool.name, kind="mcp")})
+            for tool in tools
+        ],
+    )
     await cache.write(redis, selected, result)
     return result

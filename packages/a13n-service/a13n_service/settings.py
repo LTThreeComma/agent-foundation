@@ -86,6 +86,12 @@ class Objects(Section):
     timeout: float = Field(default=5, gt=0, le=60)
 
 
+class Uploads(Section):
+    max_bytes: int = Field(default=1048576, ge=1, le=33554432)
+    limit: int = Field(default=60, ge=1, le=1000)
+    window_seconds: int = Field(default=60, ge=1, le=3600)
+
+
 class Control(Section):
     scan_seconds: float = Field(default=1, gt=0, le=60)
     inbox_count: int = Field(default=128, ge=1, le=10000)
@@ -142,6 +148,7 @@ class Settings(Section):
     encryption: Encryption = Field(default_factory=Encryption)
     providers: Outbound = Field(default_factory=Outbound)
     objects: Objects = Field(default_factory=Objects)
+    uploads: Uploads = Field(default_factory=Uploads)
     control: Control = Field(default_factory=Control)
     worker: Worker = Field(default_factory=Worker)
 

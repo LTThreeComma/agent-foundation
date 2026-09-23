@@ -16,6 +16,7 @@ from a13n_service.runs.display import Display, Segment
 from a13n_service.runs.schemas import Checkpoint, DisplayCut, EntryView, RunStatus, RunView, SnapshotRef
 from a13n_service.runs.snapshots import object_key
 from a13n_service.runs.tables import AttemptRow, RunRow, ThreadRow
+from a13n_service.runs.waiting import PendingItem, WaitReason
 from a13n_service.tenancy.authorize import Principal
 from a13n_service.tenancy.grants import workspace_scope
 
@@ -24,6 +25,8 @@ class RunItems(BaseModel):
     workspace_id: str
     run_id: str
     status: RunStatus
+    wait_reason: WaitReason | None = None
+    pending: tuple[PendingItem, ...] | None = None
     current_attempt_id: str | None
     display_version: str
     cursor: str | None
@@ -144,6 +147,8 @@ async def items(
             workspace_id=workspace_id,
             run_id=run.id,
             status=run.status,
+            wait_reason=run.wait_reason,
+            pending=run.pending,
             current_attempt_id=run.current_attempt_id,
             display_version=version,
             cursor=encode("run-stream", run.id, number, sequence) if number is not None else None,

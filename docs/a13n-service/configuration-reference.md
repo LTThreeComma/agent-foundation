@@ -91,6 +91,14 @@ The complete machine-readable validation schema, including named enum/union defi
 | `objects.max_bytes` | `A13N_OBJECTS__MAX_BYTES` | integer        | minimum=65536; maximum=67108864; default=16777216 |
 | `objects.timeout`   | `A13N_OBJECTS__TIMEOUT`   | number         | maximum=60; exclusiveMinimum=0; default=5         |
 
+## `uploads`
+
+| Setting                  | Environment variable           | Type / choices | Constraints and default                      |
+| ------------------------ | ------------------------------ | -------------- | -------------------------------------------- |
+| `uploads.max_bytes`      | `A13N_UPLOADS__MAX_BYTES`      | integer        | minimum=1; maximum=33554432; default=1048576 |
+| `uploads.limit`          | `A13N_UPLOADS__LIMIT`          | integer        | minimum=1; maximum=1000; default=60          |
+| `uploads.window_seconds` | `A13N_UPLOADS__WINDOW_SECONDS` | integer        | minimum=1; maximum=3600; default=60          |
+
 ## `control`
 
 | Setting                | Environment variable         | Type / choices | Constraints and default                         |

@@ -43,6 +43,7 @@ async def load(storage: Storage, claim: AttemptClaim) -> tuple[ExecutionSelectio
                 "authority": run.authority,
                 "options": run.options,
                 "parent_checkpoint": parent.sealed_checkpoint if parent else None,
+                "parent_waiting": parent.pending if parent is not None and parent.status == "waiting" else None,
             }
         )
         return selected, await resolve_model(session, run, agent.config.model_id, principal)

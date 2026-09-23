@@ -67,7 +67,8 @@ async def completion(request: Request):
         if tool_result is None or any(flag in prompt for flag in ("[structured-invalid]", "[delegate]"))
         else None
     )
-    observation["tool_call_selected"] = tool_call is not None
+    tool_calls = tool_call if isinstance(tool_call, list) else [tool_call] if tool_call is not None else []
+    observation["tool_call_selected"] = bool(tool_calls)
     document = Path(__file__).with_name("response.md").read_text()
     text = (
         document
@@ -110,7 +111,7 @@ async def completion(request: Request):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": None, "tool_calls": [tool_call]}
+                    "message": {"role": "assistant", "content": None, "tool_calls": tool_calls}
                     if tool_call
                     else {"role": "assistant", "content": text},
                     "finish_reason": "tool_calls" if tool_call else "stop",
@@ -138,7 +139,7 @@ async def completion(request: Request):
 
         yield await emit({"role": "assistant", "content": ""})
         if tool_call:
-            yield await emit({"tool_calls": [{"index": 0, **tool_call}]})
+            yield await emit({"tool_calls": [{"index": index, **item} for index, item in enumerate(tool_calls)]})
             yield await emit({}, "tool_calls")
             if include_usage:
                 yield usage_chunk
@@ -166,7 +167,7 @@ async def completion(request: Request):
     return StreamingResponse(observed_chunks(), media_type="text/event-stream")
 
 
-def planned_tool(body: dict, prompt: str) -> dict | None:
+def planned_tool(body: dict, prompt: str) -> dict | list[dict] | None:
     choices = (
         (
             "[client]",
@@ -182,6 +183,37 @@ def planned_tool(body: dict, prompt: str) -> dict | None:
         ),
     )
     tools = [item["function"] for item in body.get("tools", [])]
+    waiting = re.search(r"\[service-wait:(question|client|approval|mixed)\]", prompt)
+    if waiting:
+        kind = waiting[1]
+        selected = []
+        for tool in tools:
+            name = tool["name"]
+            if name == "ask_user_question" and kind in {"question", "mixed"}:
+                arguments = {
+                    "questions": [
+                        {
+                            "header": "Scope",
+                            "question": "Which scope?",
+                            "options": [
+                                {"label": "Small", "description": "Use the selected scope"},
+                                {"label": "All", "description": "Use the whole scope"},
+                            ],
+                            "multiSelect": False,
+                        }
+                    ]
+                }
+                identity = "call_question"
+            elif name == "local_review" and kind in {"client", "mixed"}:
+                arguments, identity = {"prompt": "Provide a manual JSON result"}, "call_client"
+            elif name.startswith("increment_") and kind in {"approval", "mixed"}:
+                arguments, identity = {"label": "waiting proof", "hold": "[hold-mcp]" in prompt}, "call_approval"
+            else:
+                continue
+            item = call(name, arguments)
+            item["id"] = identity
+            selected.append(item)
+        return selected or None
     if "[service-composio]" in prompt:
         selected = next((item for item in tools if item["name"].startswith("GITHUB_CREATE_ISSUE_")), None)
         if selected:

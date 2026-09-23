@@ -48,17 +48,7 @@ def preflight_deferred_resume(
         raise RunError("Deferred resume requires previous_state.", code="deferred_state_required")
 
     detached = DeferredToolResume(resume.requests, resume.results)
-    call_ids = _request_ids(detached.requests.calls, category="calls")
-    approval_ids = _request_ids(detached.requests.approvals, category="approvals")
-    if call_ids & approval_ids:
-        raise RunError(
-            "Deferred request categories must not overlap.",
-            code="deferred_request_category_overlap",
-        )
-    if len(call_ids) + len(approval_ids) == 0:
-        raise RunError("Deferred resume has no pending requests.", code="deferred_requests_empty")
-    if len(call_ids) + len(approval_ids) > MAX_DEFERRED_ITEMS:
-        raise RunError("Deferred resume has too many pending requests.", code="deferred_requests_too_large")
+    call_ids, approval_ids = validate_deferred_requests(detached.requests)
 
     if set(detached.results.calls) != call_ids or set(detached.results.approvals) != approval_ids:
         raise RunError(
@@ -93,10 +83,7 @@ def preflight_deferred_resume(
                 require_finite_json(approval.override_args)
     except (RecursionError, ValueError) as exc:
         raise RunError("Deferred results contain invalid JSON values.", code="deferred_results_invalid") from exc
-    _validate_metadata(detached.requests.metadata, call_ids | approval_ids)
     _validate_metadata(detached.results.metadata, call_ids | approval_ids)
-    for request in detached.requests.approvals:
-        managed_approval_tool_id(detached.requests, request.tool_call_id)
 
     pending = {part.tool_call_id: part for part in (*detached.requests.calls, *detached.requests.approvals)}
     completed: set[str] = set()
@@ -148,6 +135,26 @@ def preflight_deferred_resume(
                 details={"tool_call_id": call_id},
             )
     return detached
+
+
+def validate_deferred_requests(requests: DeferredToolRequests) -> tuple[set[str], set[str]]:
+    """Validate the shared bounded batch shape for live resumes and retained facts."""
+    call_ids = _request_ids(requests.calls, category="calls")
+    approval_ids = _request_ids(requests.approvals, category="approvals")
+    if call_ids & approval_ids:
+        raise RunError(
+            "Deferred request categories must not overlap.",
+            code="deferred_request_category_overlap",
+        )
+    if len(call_ids) + len(approval_ids) == 0:
+        raise RunError("Deferred resume has no pending requests.", code="deferred_requests_empty")
+    if len(call_ids) + len(approval_ids) > MAX_DEFERRED_ITEMS:
+        raise RunError("Deferred resume has too many pending requests.", code="deferred_requests_too_large")
+
+    _validate_metadata(requests.metadata, call_ids | approval_ids)
+    for request in requests.approvals:
+        managed_approval_tool_id(requests, request.tool_call_id)
+    return call_ids, approval_ids
 
 
 def bind_managed_approval_identities(

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+from a13n_harness.tools.identity import source_tool_id
 from sqlalchemy import select
 
 from a13n_service.infra.crypto import KeyRing
@@ -101,5 +102,13 @@ async def discover(
     return ConnectionTest(
         connection_id=selected.id,
         version=selected.version,
-        tools=[ToolInfo(name=tool.key, description=tool.description, input_schema=tool.input_schema) for tool in tools],
+        tools=[
+            ToolInfo(
+                name=tool.key,
+                description=tool.description,
+                input_schema=tool.input_schema,
+                permission_id=source_tool_id(selected.id, tool.key),
+            )
+            for tool in tools
+        ],
     )

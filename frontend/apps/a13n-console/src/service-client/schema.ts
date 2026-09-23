@@ -309,6 +309,59 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/workspaces/{workspace_id}/assets": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Assets */
+    get: operations["list_assets_api_v1_workspaces__workspace_id__assets_get"];
+    put?: never;
+    /** Create Asset */
+    post: operations["create_asset_api_v1_workspaces__workspace_id__assets_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/assets/{asset_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Asset */
+    get: operations["get_asset_api_v1_workspaces__workspace_id__assets__asset_id__get"];
+    put?: never;
+    post?: never;
+    /** Retire Asset */
+    delete: operations["retire_asset_api_v1_workspaces__workspace_id__assets__asset_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/assets/{asset_id}/content": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Asset Content */
+    get: operations["asset_content_api_v1_workspaces__workspace_id__assets__asset_id__content_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/workspaces/{workspace_id}/audit-events": {
     parameters: {
       query?: never;
@@ -653,6 +706,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/workspaces/{workspace_id}/uploads": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Upload */
+    post: operations["upload_api_v1_workspaces__workspace_id__uploads_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/workspaces/{workspace_id}/usage": {
     parameters: {
       query?: never;
@@ -710,6 +780,11 @@ export interface components {
   schemas: {
     /** AgentConfig */
     AgentConfig: {
+      /**
+       * Client Tools
+       * @default []
+       */
+      client_tools?: components["schemas"]["ClientToolDefinition"][];
       /** Compaction Trigger Tokens */
       compaction_trigger_tokens?: number | null;
       /**
@@ -729,6 +804,12 @@ export interface components {
       max_requests?: number;
       /** Model Id */
       model_id: string;
+      tool_permissions?: components["schemas"]["ToolPermissions"];
+      /**
+       * User Questions
+       * @default false
+       */
+      user_questions?: boolean;
     };
     /** AgentCreate */
     AgentCreate: {
@@ -774,6 +855,77 @@ export interface components {
       organization_id: string;
       /** Source */
       source: string;
+      /** Version */
+      version: number;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    Answer:
+      | components["schemas"]["Approve"]
+      | components["schemas"]["Reject"]
+      | components["schemas"]["Complete"];
+    /** Approve */
+    Approve: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      action: "approve";
+      /** Tool Call Id */
+      tool_call_id: string;
+    };
+    /** AssetCreate */
+    AssetCreate: {
+      /** Name */
+      name: string;
+      /** Upload Id */
+      upload_id: string;
+    };
+    /** AssetInput */
+    AssetInput: {
+      /** Asset Id */
+      asset_id: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      type: "asset";
+    };
+    /** AssetPage */
+    AssetPage: {
+      /** Items */
+      items: components["schemas"]["AssetView"][];
+      /** Next Cursor */
+      next_cursor: string | null;
+    };
+    /** AssetView */
+    AssetView: {
+      /** Content Type */
+      content_type: string;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /** Digest */
+      digest: string;
+      /** Id */
+      id: string;
+      /** Name */
+      name: string;
+      /** Retired At */
+      retired_at: string | null;
+      /** Size */
+      size: number;
+      /** Source */
+      source: {
+        [key: string]: components["schemas"]["JsonValue"];
+      } | null;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
       /** Version */
       version: number;
       /** Workspace Id */
@@ -882,6 +1034,11 @@ export interface components {
        */
       token: string;
     };
+    /** Body_upload_api_v1_workspaces__workspace_id__uploads_post */
+    Body_upload_api_v1_workspaces__workspace_id__uploads_post: {
+      /** File */
+      file: string;
+    };
     /** CatalogRequest */
     CatalogRequest: {
       /** App */
@@ -900,6 +1057,43 @@ export interface components {
       toolkit_version: string | null;
       /** Tools */
       tools: components["schemas"]["ToolInfo"][];
+    };
+    /**
+     * ClientToolDefinition
+     * @description Portable model guidance for one externally executed client tool.
+     */
+    ClientToolDefinition: {
+      /** Description */
+      description: string;
+      /** Instruction */
+      instruction?: string | null;
+      /** Metadata */
+      metadata?: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /** Name */
+      name: string;
+      /** Parameters Json Schema */
+      parameters_json_schema: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /**
+       * Permission
+       * @default inherit
+       * @enum {string}
+       */
+      permission?: "inherit" | "allow" | "deny";
+    };
+    /** Complete */
+    Complete: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      action: "complete";
+      result: components["schemas"]["JsonValue"];
+      /** Tool Call Id */
+      tool_call_id: string;
     };
     /** ComposioConfig */
     ComposioConfig: {
@@ -1042,7 +1236,11 @@ export interface components {
       incorporated_checkpoint_seq: number | null;
       /** Kind */
       kind: string;
-      payload: components["schemas"]["MessagePayload"] | null;
+      /** Payload */
+      payload:
+        | components["schemas"]["MessagePayload"]
+        | components["schemas"]["FeedbackPayload"]
+        | null;
       /** Position */
       position: number;
       /**
@@ -1052,6 +1250,40 @@ export interface components {
       status: "pending" | "assigned" | "consumed" | "failed" | "withdrawn";
       /** Thread Id */
       thread_id: string;
+      /** Waiting Run Id */
+      waiting_run_id?: string | null;
+    };
+    /** EnvironmentPathInput */
+    EnvironmentPathInput: {
+      /** Mount */
+      mount: string;
+      /** Path */
+      path: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      type: "environment_path";
+    };
+    /** FeedbackPayload */
+    FeedbackPayload: {
+      /** Answers */
+      answers: components["schemas"]["NormalizedAnswer"][];
+    };
+    /** FeedbackSubmission */
+    FeedbackSubmission: {
+      /**
+       * Answers
+       * @default []
+       */
+      answers?: components["schemas"]["Answer"][];
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      kind: "feedback";
+      /** Waiting Run Id */
+      waiting_run_id: string;
     };
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -1071,6 +1303,15 @@ export interface components {
       items: components["schemas"]["EntryView"][];
       /** Next Cursor */
       next_cursor: string | null;
+    };
+    /** JsonInput */
+    JsonInput: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      type: "json";
+      value: components["schemas"]["JsonValue"];
     };
     JsonObject: {
       [key: string]: components["schemas"]["JsonValue"];
@@ -1152,7 +1393,13 @@ export interface components {
     /** MessagePayload */
     MessagePayload: {
       /** Content */
-      content: components["schemas"]["TextInput"][];
+      content: (
+        | components["schemas"]["TextInput"]
+        | components["schemas"]["AssetInput"]
+        | components["schemas"]["UrlInput"]
+        | components["schemas"]["EnvironmentPathInput"]
+        | components["schemas"]["JsonInput"]
+      )[];
     };
     /** ModelConfig */
     ModelConfig: {
@@ -1297,6 +1544,21 @@ export interface components {
       /** Session Id */
       session_id?: string | null;
     };
+    /** NoResponse */
+    NoResponse: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      action: "no_response";
+      /** Tool Call Id */
+      tool_call_id: string;
+    };
+    NormalizedAnswer:
+      | components["schemas"]["Approve"]
+      | components["schemas"]["Reject"]
+      | components["schemas"]["Complete"]
+      | components["schemas"]["NoResponse"];
     /** OAuthClientCredential */
     OAuthClientCredential: {
       /**
@@ -1324,6 +1586,20 @@ export interface components {
       token_endpoint_auth_method?:
         "none" | "client_secret_basic" | "client_secret_post";
     };
+    /** PendingItem */
+    PendingItem: {
+      /** Arguments */
+      arguments: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      kind: components["schemas"]["PendingKind"];
+      /** Tool Call Id */
+      tool_call_id: string;
+      /** Tool Name */
+      tool_name: string;
+    };
+    /** @enum {string} */
+    PendingKind: "approval" | "client_tool" | "user_input";
     /**
      * PriceComponent
      * @description One genai-prices usage dimension and its USD unit price.
@@ -1480,6 +1756,18 @@ export interface components {
       /** Workspace Id */
       workspace_id: string | null;
     };
+    /** Reject */
+    Reject: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      action: "reject";
+      /** Reason */
+      reason?: string | null;
+      /** Tool Call Id */
+      tool_call_id: string;
+    };
     /** RevisionCreate */
     RevisionCreate: {
       config: components["schemas"]["AgentConfig"];
@@ -1535,11 +1823,14 @@ export interface components {
       output: {
         [key: string]: unknown;
       } | null;
+      /** Pending */
+      pending?: components["schemas"]["PendingItem"][] | null;
       /** Run Id */
       run_id: string;
       /** Segments */
       segments: components["schemas"]["Segment"][];
       status: components["schemas"]["RunStatus"];
+      wait_reason?: components["schemas"]["WaitReason"] | null;
       /** Workspace Id */
       workspace_id: string;
     };
@@ -1567,6 +1858,8 @@ export interface components {
     /** @enum {string} */
     RunStatus:
       "accepted" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+    /** @enum {string} */
+    RunTrigger: "input" | "queued" | "feedback" | "child_result" | "spawned";
     /** RunView */
     RunView: {
       /** Agent Id */
@@ -1598,6 +1891,8 @@ export interface components {
       } | null;
       /** Parent Run Id */
       parent_run_id: string | null;
+      /** Pending */
+      pending?: components["schemas"]["PendingItem"][] | null;
       /** Sealed At */
       sealed_at: string | null;
       /** Session Id */
@@ -1607,8 +1902,10 @@ export interface components {
       status: components["schemas"]["RunStatus"];
       /** Thread Id */
       thread_id: string;
+      trigger: components["schemas"]["RunTrigger"];
       /** Version */
       version: number;
+      wait_reason?: components["schemas"]["WaitReason"] | null;
     };
     /** Segment */
     Segment: {
@@ -1639,6 +1936,21 @@ export interface components {
       /** Next Cursor */
       next_cursor: string | null;
     };
+    /** SessionPreview */
+    SessionPreview: {
+      /** Agent Id */
+      agent_id: string;
+      /** Agent Name */
+      agent_name: string;
+      /** Input Text */
+      input_text: string | null;
+      /** Run Id */
+      run_id: string;
+      run_status: components["schemas"]["RunStatus"];
+      /** Thread Id */
+      thread_id: string;
+      trigger: components["schemas"]["RunTrigger"];
+    };
     /** SessionProfile */
     SessionProfile: {
       /** Csrf Token */
@@ -1658,6 +1970,16 @@ export interface components {
       labels: {
         [key: string]: string;
       };
+      preview: components["schemas"]["SessionPreview"] | null;
+      /** Run Count */
+      run_count: number;
+      /** Selected Thread Id */
+      selected_thread_id: string | null;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
       /** Version */
       version: number;
       /** Workspace Id */
@@ -1676,8 +1998,8 @@ export interface components {
        */
       delivery?: "steer" | "next_run";
       /**
-       * Kind
-       * @constant
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
        */
       kind: "message";
       options?: components["schemas"]["RunOptions"];
@@ -1699,8 +2021,8 @@ export interface components {
       /** Text */
       text: string;
       /**
-       * Type
-       * @constant
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
        */
       type: "text";
     };
@@ -1749,6 +2071,47 @@ export interface components {
       };
       /** Name */
       name: string;
+      /** Permission Id */
+      permission_id?: string | null;
+    };
+    /** @enum {string} */
+    ToolPermissionMode: "allow" | "deny" | "ask" | "review";
+    ToolPermissionSetting:
+      components["schemas"]["ToolPermissionMode"] | "inherit";
+    /**
+     * ToolPermissions
+     * @description Portable configuration. Inherit resolves a tool default, never an execution decision.
+     */
+    ToolPermissions: {
+      /** @default inherit */
+      default?: components["schemas"]["ToolPermissionSetting"];
+      /** Rules */
+      rules?: {
+        [key: string]: components["schemas"]["ToolPermissionSetting"];
+      };
+    };
+    /** UploadView */
+    UploadView: {
+      /** Content Type */
+      content_type: string;
+      /** Digest */
+      digest: string;
+      /** Filename */
+      filename: string;
+      /** Size */
+      size: number;
+      /** Upload Id */
+      upload_id: string;
+    };
+    /** UrlInput */
+    UrlInput: {
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      type: "url";
+      /** Url */
+      url: string;
     };
     /** UsageLimit */
     UsageLimit: {
@@ -1783,6 +2146,8 @@ export interface components {
     };
     /** @enum {string} */
     Verb: "read" | "run" | "write" | "admin";
+    /** @enum {string} */
+    WaitReason: "approval" | "client_tool" | "user_input" | "multiple";
     /** Workspace */
     Workspace: {
       /** Id */
@@ -2513,6 +2878,178 @@ export interface operations {
       };
     };
   };
+  list_assets_api_v1_workspaces__workspace_id__assets_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        cursor?: string | null;
+      };
+      header?: never;
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AssetPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_asset_api_v1_workspaces__workspace_id__assets_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AssetCreate"];
+      };
+    };
+    responses: {
+      /** @description Existing Asset with the same upload and name */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AssetView"];
+        };
+      };
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AssetView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_asset_api_v1_workspaces__workspace_id__assets__asset_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AssetView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  retire_asset_api_v1_workspaces__workspace_id__assets__asset_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AssetView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  asset_content_api_v1_workspaces__workspace_id__assets__asset_id__content_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   audit_events_api_v1_workspaces__workspace_id__audit_events_get: {
     parameters: {
       query?: {
@@ -3053,6 +3590,12 @@ export interface operations {
   list_sessions_api_v1_workspaces__workspace_id__sessions_get: {
     parameters: {
       query?: {
+        q?: string | null;
+        agent_id?: string | null;
+        status?: components["schemas"]["RunStatus"][];
+        trigger?: components["schemas"]["RunTrigger"][];
+        updated_after?: string | null;
+        updated_before?: string | null;
         limit?: number;
         cursor?: string | null;
       };
@@ -3265,7 +3808,9 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["Submission"];
+        "application/json":
+          | components["schemas"]["Submission"]
+          | components["schemas"]["FeedbackSubmission"];
       };
     };
     responses: {
@@ -3311,6 +3856,43 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["RunPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  upload_api_v1_workspaces__workspace_id__uploads_post: {
+    parameters: {
+      query?: never;
+      header: {
+        "Idempotency-Key": string;
+      };
+      path: {
+        workspace_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "multipart/form-data": components["schemas"]["Body_upload_api_v1_workspaces__workspace_id__uploads_post"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["UploadView"];
         };
       };
       /** @description Validation Error */

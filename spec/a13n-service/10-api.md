@@ -81,17 +81,30 @@ Every API key is confined to exactly one workspace. `POST /users/me/keys` requir
 
 Mutable-resource PATCH/PUT/DELETE and state-changing operations such as set-default, archive and revoke require the resource's strong `If-Match`; missing is 428 and stale is 412. Thread inbox edits/reorder and desired mount edits use the thread ETag. Only pending entries can be edited/withdrawn; withdrawal retains a tombstone and request key. There is no delete-and-reuse-key loophole. Assigned/consumed/failed entries return conflict.
 
+Expanded Session reads include dynamic preview/count/activity and therefore emit no strong metadata-version ETag. Their explicit `version` is the Session metadata revision; activity-only writes preserve it. A future metadata mutation must use its metadata precondition boundary, without treating that token as a cache validator for expanded read bytes.
+
 Appending a message or feedback requires no ETag. Interrupt names an exact run and is idempotent by its state contract. Fork names an immutable completed/waiting origin. Tests/probes are repeatable operations without a mutation key.
+
+## Session navigation
+
+Session list and detail share one scoped SQL summary. `preview` selects the newest readable Run by `(created_at, id)` before Agent/status/trigger filtering. It contains exact Thread/Run/Agent identity, Agent name, native Run status and trigger (`input`, `queued`, `feedback`, `child_result`, `spawned`), and at most 512 characters of plain text from its canonical message source. Non-message and unavailable text remain null; no feedback JSON, object reads or older-input fallback contributes an excerpt. `run_count` counts all readable Runs in the Session, including when the preview is filtered to a Thread. An empty Session has count zero and null preview.
+
+`q` matches an exact Session or Thread ID in the resolved Workspace. A Thread match previews that Thread's newest Run and returns `selected_thread_id` even when it has no Run. `agent_id`, set-valued `status` and `trigger`, and timezone-qualified `updated_after` (inclusive) / `updated_before` (exclusive) apply to the selected preview or canonical Session activity. Bounds must be ordered. Cursor identity includes normalized filters (sorted unique sets and UTC bounds), resolved Workspace and descending `(updated_at, Session.id)` ordering. Mismatched cursors fail. This is live keyset pagination: concurrent activity can reorder Sessions across pages; refresh obtains current order, not a historical snapshot. Bounded SQL pages and scoped aggregates replace per-row requests and application-side history scans.
 
 ## Idempotency
 
 Only the following v1 commands promise request-key replay. Do not advertise generic idempotency on resource creates whose schema provides no evidence:
 
-| Command                                                                                        | Evidence / key namespace                                                                          |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| New thread plus first input, existing-thread submission (message or feedback), fork plus input | Original entry, unique `(workspace_id, principal_id, request_key)` shared across these operations |
-| Internal spawn                                                                                 | Child thread, unique origin run/tool call                                                         |
-| Child result                                                                                   | Original result entry, unique sealed child run; outbox has the same dedupe identity               |
+| Command                                                                                        | Evidence / key namespace                                                                                          |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| New thread plus first input, existing-thread submission (message or feedback), fork plus input | Original entry, unique `(workspace_id, principal_id, request_key)` shared across these operations                 |
+| Multipart upload                                                                               | Immutable receipt; domain-separated `(organization_id, workspace_id, principal_id, request_key)` upload namespace |
+| Internal spawn                                                                                 | Child thread, unique origin run/tool call                                                                         |
+| Child result                                                                                   | Original result entry, unique sealed child run; outbox has the same dedupe identity                               |
+
+Multipart `POST /uploads` accepts a `file` field with filename and MIME type and requires a printable ASCII `Idempotency-Key` of 1–128 characters. Both first publication and same-intent replay return 200 with `{upload_id, filename, content_type, size, digest}`. Changed bytes or normalized metadata under the same key return 409. The default file bound is 1 MiB and the default per-principal/Workspace rate is 60 requests per 60 seconds; configured object and total HTTP-body limits also apply. Multipart framing counts toward the latter.
+
+`POST /assets {upload_id,name}` returns 201 on first materialization and 200 on same-upload/same-normalized-name readback, including a retired result. A changed name returns 409. Current authority and complete upload validation precede creation/readback. The unique upload reference arbitrates races and resolves uncertain commits without a new key or tentative losing ID. A retired result must not be attached as new input; staging a new upload is an explicit new intent. Other resource creates do not gain generic request-key replay.
 
 Execution creation commands require `Idempotency-Key`. Entry evidence stores operation kind, requested target and canonical request digest. Same key/different intent returns 409 conflict. Authentication/current scope permission precede lookup; replay lookup precedes mutable state/precondition validation. Responses return the same created IDs with current status (200 instead of 201), not a promise to replay byte-for-byte an old response. Pending edits never change the original digest.
 
@@ -113,7 +126,7 @@ POST /api/v1/workspaces/{ws}/threads/{thread}/inbox
 {
   "kind": "message",
   "delivery": "steer",
-  "payload": {"content": [{"type": "text", "text": "..."}, {"type": "asset", "asset_id": "asset_…"}]},
+  "payload": {"content": [{"type": "text", "text": "..."}, {"type": "asset", "asset_id": "ast_…"}]},
   "agent_id": "agent_…",
   "agent_revision_id": null,
   "options": {"labels": {}, "max_usage": {"requests": 200},
@@ -128,6 +141,8 @@ Inbox POST accepts two public kinds, both requiring the thread's `run` verb and 
 | ---------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `message`  | Required `payload` and `agent_id`; optional revision/options and `delivery` | Ordinary input, including replies to user questions                                                      |
 | `feedback` | Required `waiting_run_id`; optional `answers` list, default empty           | Approval decisions and client-tool results for that exact control wait; execution settings are inherited |
+
+Message content is one nonempty sequence of at most 32 typed blocks: `text` with `text`, `asset` with `asset_id`, `url` with an HTTP(S) `url`, `environment_path` with a selected `mount` and `path`, or `json` with a required `value`. The JSON value can itself be `null`, `false`, zero, an empty string, array or object. It remains JSON in the inbox; execution renders a deterministic labeled native text block. Asset selection requires workspace read authority and a current nonretired Asset at submission and acceptance. Accepted historical references remain readable after retirement. URL preparation uses the outbound endpoint policy, bounded redirects, time, bytes and media types before the native input is offered. Environment paths require the selected live Environment mount; a host filesystem path is never an input source.
 
 Each supplied answer carries `tool_call_id` and a typed action: `approve`, `reject` (optional reason), or `complete` (client-tool result). Feedback accepts no message `payload`, agent selection, options or delivery mode. A question UI submits its answer as a message. The service validates and normalizes feedback into the stored entry payload under [05's waiting rules](05-runs.md#waiting-interrupt-and-fork); missing waiting targets are rejected, never inferred. For example:
 

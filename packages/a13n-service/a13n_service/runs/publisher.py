@@ -8,7 +8,8 @@ from typing import Literal
 from uuid import uuid4
 
 from a13n_harness import AgentContext, HarnessEvent, HarnessExtensionEvent, HarnessState, HarnessStreamEvent
-from a13n_stream_protocol import HarnessAguiObserver
+from a13n_stream_protocol import HarnessAguiObserver, InputSource, input_source
+from ag_ui.core import Event
 from pydantic import JsonValue
 
 from a13n_service.infra.db import Storage
@@ -16,7 +17,9 @@ from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.objects.local import LocalObjects, StoredObject
 from a13n_service.runs import attempts, inputs, snapshots
 from a13n_service.runs.display import Display, Fold, Segment
+from a13n_service.runs.input_frames import PreparedInputs
 from a13n_service.runs.schemas import AgentSelection, AttemptClaim, Checkpoint, DisplayCut, RunOptions, SnapshotRef
+from a13n_service.runs.waiting import Waiting
 
 
 @dataclass
@@ -26,6 +29,7 @@ class _Publication:
     receipts: tuple[str, ...]
     candidate: Literal["completed", "waiting"] | None
     output: str | None
+    waiting: Waiting | None
     result: asyncio.Future[None]
 
 
@@ -64,7 +68,13 @@ class Publisher:
         self._task: asyncio.Task[None] | None = None
         self._failure: BaseException | None = None
         self._quiescent = False
-        self._observer = HarnessAguiObserver()
+        self.prepared: PreparedInputs | None = None
+        self._owned_source: set[InputSource] = set()
+        self._observer = HarnessAguiObserver(processor=self._filter_input)
+
+    def _filter_input(self, item: HarnessStreamEvent, event: Event) -> Event | None:
+        source = input_source(event)
+        return None if source is not None and source in self._owned_source else event
 
     def _checkpoint(self, stored: StoredObject) -> Checkpoint:
         value = Checkpoint.model_validate_json(stored.content)
@@ -141,9 +151,16 @@ class Publisher:
             raise ServiceError("payload_too_large", "Run event count exceeds its limit")
         if isinstance(item, HarnessEvent) and self.observe_barrier(item):
             return ()
-        values = tuple(
-            event.model_dump(mode="json", by_alias=True, exclude_none=True) for event in self._observer.observe(item)
-        )
+        if isinstance(item, HarnessEvent) and self.prepared is not None:
+            self._owned_source = self.prepared.owned_coordinates(item.event)
+        try:
+            values = tuple(
+                event.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for event in self._observer.observe(item)
+            )
+        finally:
+            # Source positions are valid only for this synchronous observer call.
+            self._owned_source.clear()
         for value in values:
             self.fold.add(value)
         return values
@@ -189,8 +206,15 @@ class Publisher:
     async def flush_display(self) -> None:
         await self._enqueue(None, (), None, None)
 
-    async def finalize(self, state: HarnessState, receipts: tuple[str, ...], *, output: str) -> None:
-        await self._enqueue(state, receipts, "completed", output)
+    async def finalize(
+        self,
+        state: HarnessState,
+        receipts: tuple[str, ...],
+        *,
+        output: str | None = None,
+        waiting: Waiting | None = None,
+    ) -> None:
+        await self._enqueue(state, receipts, "waiting" if waiting is not None else "completed", output, waiting)
         self._quiescent = True
         await self._queue.join()
 
@@ -200,6 +224,7 @@ class Publisher:
         receipts: tuple[str, ...],
         candidate: Literal["completed", "waiting"] | None,
         output: str | None,
+        waiting: Waiting | None = None,
     ) -> None:
         if self._quiescent or self._failure is not None or self._task is None or self._task.done():
             raise ServiceError("unavailable", "Run publisher is stopped") from self._failure
@@ -210,6 +235,7 @@ class Publisher:
             receipts,
             candidate,
             output,
+            waiting.model_copy(deep=True) if waiting is not None else None,
             future,
         )
         async with asyncio.timeout(self.timeout * 4):
@@ -273,6 +299,7 @@ class Publisher:
             ),
             candidate=command.candidate,
             output=command.output,
+            waiting=command.waiting,
         )
         if self.checkpoint is not None and not set(self.checkpoint.receipts).issubset(checkpoint.receipts):
             raise ServiceError("conflict", "Checkpoint lost prior input receipts")

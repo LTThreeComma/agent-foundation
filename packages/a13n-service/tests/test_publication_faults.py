@@ -5,9 +5,10 @@ import asyncio
 import httpx
 import pytest
 from a13n_service.infra.objects.local import ObjectConflict
-from a13n_service.runs import inputs, seal
+from a13n_service.runs import input_preparation, inputs, seal
 from a13n_service.runs.attempts import claim_run
 from a13n_service.runs.execute import execute
+from a13n_service.runs.input_frames import PreparedInputs
 from a13n_service.runs.schemas import Checkpoint
 from a13n_service.runs.snapshots import object_key
 
@@ -15,21 +16,39 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.mark.parametrize("fault", ["failed_checkpoint", "takeover_before_checkpoint"])
+@pytest.mark.parametrize("input_kind", ["text", "asset"])
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
-async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_service, monkeypatch, fault, model_url):
+async def test_display_ahead_of_state_remains_interrupted_after_recovery(
+    public_service, monkeypatch, fault, model_url, input_kind
+):
     service = public_service
     app = service.app
     if fault == "takeover_before_checkpoint":
         # Hold the real object write beyond natural lease expiry to exercise its late-writer fence.
         objects = type(app.state.settings.objects)(**{**app.state.settings.objects.model_dump(), "timeout": 60})
         app.state.settings = app.state.settings.model_copy(update={"objects": objects})
+    if input_kind == "asset":
+        staged = await service.client.post(
+            service.workspace_path + "/uploads",
+            headers={"Idempotency-Key": "publication-asset-upload"},
+            files={"file": ("source.txt", b"never-refetch-after-receipt", "text/plain")},
+        )
+        assert staged.status_code == 200, staged.text
+        asset = await service.client.post(
+            service.workspace_path + "/assets",
+            json={"upload_id": staged.json()["upload_id"], "name": "source.txt"},
+        )
+        assert asset.status_code == 201, asset.text
+        content = [{"type": "asset", "asset_id": asset.json()["id"]}]
+    else:
+        content = [{"type": "text", "text": "One canonical source"}]
     response = await service.client.post(
         service.workspace_path + "/threads",
         headers={"Idempotency-Key": "publication-fault"},
         json={
             "kind": "message",
             "agent_id": service.agent_id,
-            "payload": {"content": [{"type": "text", "text": "One canonical source"}]},
+            "payload": {"content": content},
         },
     )
     assert response.status_code == 201
@@ -94,6 +113,12 @@ async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_
         second = await claim_run(app.state.storage, worker_id="new", worker_build="test", lease_seconds=30)
         assert second is not None and second.number == 2
         assert await inputs.assigned_inputs(app.state.storage, second) == ()
+        if input_kind == "asset":
+
+            async def unexpected_refetch(*args, **kwargs):
+                raise AssertionError("Incorporated Asset was fetched again")
+
+            monkeypatch.setattr(input_preparation, "_asset", unexpected_refetch)
         # The exact older execution content still owns recovery; ahead display did not replace it.
         assert (await app.state.objects.read(state_key)).content == older.content
         await run(second)
@@ -115,7 +140,9 @@ async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_
             state = (await client.get(model_url.removesuffix("/v1") + "/fixture/model-state")).json()
         assert state["request_count"] == 2
         final_checkpoint = Checkpoint.model_validate_json(final_object.content)
-        assert final_checkpoint.state.model_dump_json().count(f'"source_id":"{entry_id}"') == 1
+        restored = PreparedInputs(run_id, receipts=(entry_id,))
+        restored.restore(final_checkpoint.state.message_history)
+        assert restored.incorporated(final_checkpoint.state.message_history) == (entry_id,)
     finally:
         release.set()
         task.cancel()

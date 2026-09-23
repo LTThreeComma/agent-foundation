@@ -9,7 +9,8 @@ from a13n_service.infra.db import short_session
 from a13n_service.resources.agents.tables import AgentRevisionRow
 from a13n_service.runs import inputs, seal
 from a13n_service.runs.attempts import claim_run, start
-from a13n_service.runs.harness import CheckpointCapability, entry_input
+from a13n_service.runs.harness import CheckpointCapability
+from a13n_service.runs.input_frames import PreparedInputs
 from a13n_service.runs.publisher import Publisher
 from a13n_service.runs.schemas import AgentSelection, RunOptions
 from a13n_service.runs.tables import RunRow
@@ -72,6 +73,8 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
             await never.wait()
 
     calls = []
+    prepared = PreparedInputs(run_id)
+    publisher.prepared = prepared
 
     async def pause_tool():
         tool_entered.set()
@@ -86,7 +89,7 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
             yield "Recovered"
 
     native_inputs = []
-    capability = CheckpointCapability(run_id, publish_at_cut)
+    capability = CheckpointCapability(run_id, publish_at_cut, prepared=prepared)
     executable = HarnessBuilder().build(
         AgentDefinition(
             agent=AgentSpec(),
@@ -98,7 +101,8 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
     await publisher.initialize(HarnessState.new())
     try:
         async with executable.stream(
-            entry_input(run_id, entry_id, "Keep this original input"), previous_state=publisher.checkpoint.state
+            prepared.offer(entry_id, [TextContent("Keep this original input")]),
+            previous_state=publisher.checkpoint.state,
         ) as stream:
             await start(storage, first, harness_run_id=stream.run_id)
 
@@ -127,12 +131,14 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
                     expected_ids.append(target_id)
                     assigned = await inputs.assign_steers(storage, first, max_count=10, max_bytes=1048576)
                     assert [item[0] for item in assigned] == [target_id]
-                    await stream.steer(entry_input(run_id, target_id, "Keep this steer input"))
+                    await stream.steer(prepared.offer(target_id, [TextContent("Keep this steer input")]))
                     tool_release.set()
                 await asyncio.wait_for(reached_cut.wait(), timeout=5)
                 assert len(calls) == (1 if input_kind == "steer" else 0)
                 assert not any(
-                    isinstance(content, TextContent) and content.metadata.get("source_id") == target_id
+                    isinstance(content, TextContent)
+                    and isinstance(content.metadata, dict)
+                    and content.metadata.get("a13n.service.input", {}).get("entry_id") == target_id
                     for item in native_inputs
                     for content in item.event.content
                 )  # The target's native projection has not reached the consumer at this cut.
@@ -178,7 +184,12 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
         await recovered.initialize(HarnessState.new())
         assert recovered.checkpoint.receipts == tuple(expected_ids)
         assert await inputs.assigned_inputs(storage, second) == ()  # No reoffer to regenerate observations.
-        capability = CheckpointCapability(run_id, recovered.publish, receipts=recovered.checkpoint.receipts)
+        restored = PreparedInputs(run_id, receipts=recovered.checkpoint.receipts)
+        restored.restore(recovered.checkpoint.state.message_history)
+        recovered.prepared = restored
+        capability = CheckpointCapability(
+            run_id, recovered.publish, prepared=restored, receipts=recovered.checkpoint.receipts
+        )
         executable = HarnessBuilder().build(
             AgentDefinition(
                 agent=AgentSpec(),
@@ -196,7 +207,7 @@ async def test_public_input_survives_native_projection_gap_without_reoffer(
                 stream.result.state, tuple(capability.receipts), output=stream.result.output_or_raise()
             )
         _, state_ref, display_ref = recovered.selected()
-        await seal.completed(storage, objects, second, state_ref, display_ref)
+        await seal.continuation(storage, objects, second, state_ref, display_ref)
         after = await service.client.get(f"{service.workspace_path}/runs/{run_id}/items")
         assert after.status_code == 200, after.text
         value = after.json()

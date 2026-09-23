@@ -5,7 +5,7 @@ from sqlalchemy.orm import aliased
 
 from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage, transaction
-from a13n_service.runs import events
+from a13n_service.runs import activity, events
 from a13n_service.runs.acceptance import accept
 from a13n_service.runs.policy import AdmissionPolicy
 from a13n_service.runs.tables import InboxEntryRow, RunRow, ThreadRow
@@ -36,7 +36,9 @@ async def advance_one(storage: Storage, *, max_attempts: int, keys: KeyRing, pol
         )
         if thread is None:
             return False
-        _, facts = await accept(session, thread, None, max_attempts=max_attempts, keys=keys, policy=policy)
+        _, facts, changed = await accept(session, thread, None, max_attempts=max_attempts, keys=keys, policy=policy)
         thread.updated_at = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        if changed and not facts:
+            await activity.touch(session, thread.workspace_id, [thread.session_id])
         await events.flush(session, facts)
         return True

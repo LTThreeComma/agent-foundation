@@ -24,7 +24,11 @@ async def read(redis: Redis, connection: ResolvedConnection) -> ConnectionTest |
         if content is None or len(content) > RESPONSE_BYTES:
             return None
         result = ConnectionTest.model_validate_json(content)
-        if result.connection_id == connection.id and result.version == connection.version:
+        if (
+            result.connection_id == connection.id
+            and result.version == connection.version
+            and all(tool.permission_id for tool in result.tools)
+        ):
             return result
     except (RedisError, TimeoutError, ValidationError):
         pass

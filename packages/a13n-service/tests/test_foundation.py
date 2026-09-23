@@ -50,6 +50,46 @@ def test_schema_roundtrip_and_metadata_parity(database):
     check(database, OSS)
 
 
+def test_session_activity_migration_restores_only_session_stamp(database):
+    def inspect(config):
+        connection = config.attributes["connection"]
+        triggers = dict(
+            connection.execute(
+                text(
+                    "SELECT c.relname, p.proname FROM pg_trigger t "
+                    "JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_proc p ON p.oid = t.tgfoid "
+                    "WHERE NOT t.tgisinternal AND c.relname IN ('sessions', 'threads', 'runs') "
+                    "AND p.proname IN ('stamp_resource', 'stamp_session')"
+                )
+            ).all()
+        )
+        indexes = set(
+            connection.scalars(
+                text(
+                    "SELECT indexname FROM pg_indexes WHERE indexname IN "
+                    "('ix_sessions_workspace_activity', 'ix_runs_workspace_session_created')"
+                )
+            )
+        )
+        return triggers, indexes
+
+    with migration_connection(database, OSS) as config:
+        before = inspect(config)
+        assert before[0] == {"sessions": "stamp_session", "threads": "stamp_resource", "runs": "stamp_resource"}
+        assert len(before[1]) == 2
+        # Inspection opens a transaction; finish it before Alembic owns the DDL transaction.
+        config.attributes["connection"].commit()
+        command.downgrade(config, "611cf188440e")
+        triggers, indexes = inspect(config)
+        assert triggers == dict.fromkeys(("sessions", "threads", "runs"), "stamp_resource")
+        assert not indexes
+        assert config.attributes["connection"].scalar(text("SELECT to_regproc('stamp_session')")) is None
+        config.attributes["connection"].commit()
+        command.upgrade(config, "head")
+        assert inspect(config) == before
+    check(database, OSS)
+
+
 @pytest.mark.anyio
 async def test_bootstrap_race_password_audit_and_database_guards(database):
     storage = Storage(database.url.get_secret_value())

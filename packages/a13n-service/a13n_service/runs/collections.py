@@ -14,15 +14,6 @@ from a13n_service.tenancy.authorize import Principal
 from a13n_service.tenancy.grants import workspace_scope
 
 
-class SessionView(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: str
-    workspace_id: str
-    labels: dict[str, str]
-    created_at: datetime
-    version: int
-
-
 class ThreadView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -37,11 +28,6 @@ class ThreadView(BaseModel):
     version: int
 
 
-class SessionPage(BaseModel):
-    items: list[SessionView]
-    next_cursor: str | None
-
-
 class ThreadPage(BaseModel):
     items: list[ThreadView]
     next_cursor: str | None
@@ -50,41 +36,6 @@ class ThreadPage(BaseModel):
 class RunPage(BaseModel):
     items: list[RunView]
     next_cursor: str | None
-
-
-async def list_sessions(
-    storage: Storage, actor: Principal, workspace_id: str, *, limit: int, cursor: str | None
-) -> SessionPage:
-    async with short_session(storage) as session:
-        scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
-        workspace_id = scope.workspace_id
-        owner = workspace_id
-        query = select(SessionRow).where(SessionRow.workspace_id == workspace_id)
-
-        if cursor is not None:
-            timestamp, identity = cursors.time_position(cursor, "sessions", owner)
-            query = query.where(
-                tuple_(SessionRow.created_at, SessionRow.id) < tuple_(literal(timestamp), literal(identity))
-            )
-        rows = (
-            await session.scalars(query.order_by(SessionRow.created_at.desc(), SessionRow.id.desc()).limit(limit + 1))
-        ).all()
-        return SessionPage(
-            items=[SessionView.model_validate(row) for row in rows[:limit]],
-            next_cursor=cursors.encode("sessions", owner, rows[limit - 1].created_at.isoformat(), rows[limit - 1].id)
-            if len(rows) > limit
-            else None,
-        )
-
-
-async def get_session(storage: Storage, actor: Principal, workspace_id: str, identity: str) -> SessionView:
-    async with short_session(storage) as session:
-        scope = await workspace_scope(session, actor, workspace_id, "read")
-        row = await session.get(SessionRow, identity)
-        if row is None or row.workspace_id != scope.workspace_id:
-            raise ServiceError("not_found", "Session was not found")
-        return SessionView.model_validate(row)
 
 
 async def list_threads(

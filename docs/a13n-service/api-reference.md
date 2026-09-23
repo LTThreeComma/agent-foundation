@@ -116,6 +116,101 @@ Responses:
 - **200** — Successful Response (`application/json: AgentView`).
 - **422** — Validation Error (`application/json: HTTPValidationError`).
 
+## assets
+
+### `GET /api/v1/workspaces/{workspace_id}/assets`
+
+List Assets.
+
+| Parameter      | Location | Required | Type / schema  | Constraints and default            |
+| -------------- | -------- | -------- | -------------- | ---------------------------------- |
+| `workspace_id` | path     | true     | string         | —                                  |
+| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
+| `cursor`       | query    | false    | string or null | —                                  |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AssetPage`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/assets`
+
+Create Asset.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `AssetCreate`.
+
+Responses:
+
+- **200** — Existing Asset with the same upload and name (`application/json: AssetView`).
+- **201** — Successful Response (`application/json: AssetView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `DELETE /api/v1/workspaces/{workspace_id}/assets/{asset_id}`
+
+Retire Asset.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `asset_id`     | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AssetView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/assets/{asset_id}`
+
+Get Asset.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `asset_id`     | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AssetView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/assets/{asset_id}/content`
+
+Asset Content.
+
+| Parameter      | Location | Required | Type / schema | Constraints and default |
+| -------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id` | path     | true     | string        | —                       |
+| `asset_id`     | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response.
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/uploads`
+
+Upload.
+
+| Parameter         | Location | Required | Type / schema | Constraints and default    |
+| ----------------- | -------- | -------- | ------------- | -------------------------- |
+| `workspace_id`    | path     | true     | string        | —                          |
+| `Idempotency-Key` | header   | true     | string        | minLength=1; maxLength=128 |
+
+Request body: required.
+
+- `multipart/form-data`: `Body_upload_api_v1_workspaces__workspace_id__uploads_post`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: UploadView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
 ## auth
 
 ### `POST /api/v1/auth/login`
@@ -594,11 +689,17 @@ Responses:
 
 List Sessions.
 
-| Parameter      | Location | Required | Type / schema  | Constraints and default            |
-| -------------- | -------- | -------- | -------------- | ---------------------------------- |
-| `workspace_id` | path     | true     | string         | —                                  |
-| `limit`        | query    | false    | integer        | minimum=1; maximum=200; default=50 |
-| `cursor`       | query    | false    | string or null | —                                  |
+| Parameter        | Location | Required | Type / schema       | Constraints and default            |
+| ---------------- | -------- | -------- | ------------------- | ---------------------------------- |
+| `workspace_id`   | path     | true     | string              | —                                  |
+| `q`              | query    | false    | string or null      | —                                  |
+| `agent_id`       | query    | false    | string or null      | —                                  |
+| `status`         | query    | false    | array of RunStatus  | maxItems=6; default=[]             |
+| `trigger`        | query    | false    | array of RunTrigger | maxItems=5; default=[]             |
+| `updated_after`  | query    | false    | string or null      | —                                  |
+| `updated_before` | query    | false    | string or null      | —                                  |
+| `limit`          | query    | false    | integer             | minimum=1; maximum=200; default=50 |
+| `cursor`         | query    | false    | string or null      | —                                  |
 
 Responses:
 
@@ -693,7 +794,7 @@ Append Input.
 
 Request body: required.
 
-- `application/json`: `Submission`.
+- `application/json`: `Submission or FeedbackSubmission`.
 
 Responses:
 

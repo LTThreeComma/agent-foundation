@@ -24,6 +24,7 @@ class SessionRow(Stamped, Base):
     __tablename__ = "sessions"
     __table_args__ = (
         Index("ix_sessions_workspace_created", "workspace_id", "created_at", "id"),
+        Index("ix_sessions_workspace_activity", "workspace_id", "updated_at", "id"),
         UniqueConstraint("workspace_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
     )
@@ -186,6 +187,7 @@ class RunRow(Stamped, Base):
     __tablename__ = "runs"
     __table_args__ = (
         Index("ix_runs_thread_created", "thread_id", "created_at", "id"),
+        Index("ix_runs_workspace_session_created", "workspace_id", "session_id", "created_at", "id"),
         UniqueConstraint("thread_id", "id"),
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("workspace_id", "session_id", "id"),

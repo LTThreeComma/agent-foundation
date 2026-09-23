@@ -8,10 +8,10 @@ from fastapi.responses import StreamingResponse
 from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.http import etag
-from a13n_service.runs import collections, delivery, input_views, usage, views, wakeups
+from a13n_service.runs import collections, delivery, input_views, session_views, usage, views, wakeups
 from a13n_service.runs.acceptance import submit
 from a13n_service.runs.interrupt import interrupt
-from a13n_service.runs.schemas import InboxPage, NewThread, RunView, Submission, Submitted
+from a13n_service.runs.schemas import InboxPage, InboxSubmission, NewThread, RunView, Submitted
 from a13n_service.runs.tables import RunRow, ThreadRow
 from a13n_service.tenancy.authorize import Principal
 from a13n_service.tenancy.grants import workspace_scope
@@ -21,7 +21,12 @@ router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}", tags=["runs"])
 
 
 async def submit_request(
-    request: Request, response: Response, actor: Principal, workspace_id: str, body: Submission, thread_id: str | None
+    request: Request,
+    response: Response,
+    actor: Principal,
+    workspace_id: str,
+    body: InboxSubmission,
+    thread_id: str | None,
 ) -> Submitted:
     config = request.app.state.settings
     result = await submit(
@@ -60,7 +65,7 @@ async def append_input(
     response: Response,
     workspace_id: str,
     thread_id: str,
-    body: Submission,
+    body: InboxSubmission,
     actor: Annotated[Principal, Depends(current_principal)],
 ) -> Submitted:
     return await submit_request(request, response, actor, workspace_id, body, thread_id)
@@ -200,27 +205,26 @@ async def get_usage(
     return await usage.view(request.app.state.storage, actor, workspace_id, run_id)
 
 
-@router.get("/sessions", response_model=collections.SessionPage)
+@router.get("/sessions", response_model=session_views.SessionPage)
 async def list_sessions(
     request: Request,
+    query: Annotated[session_views.SessionQuery, Query()],
     workspace_id: str,
     actor: Annotated[Principal, Depends(current_principal)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: str | None = None,
-) -> collections.SessionPage:
-    return await collections.list_sessions(request.app.state.storage, actor, workspace_id, limit=limit, cursor=cursor)
+) -> session_views.SessionPage:
+    return await session_views.list_sessions(
+        request.app.state.storage, actor, workspace_id, limit=query.limit, cursor=query.cursor, filters=query.filters()
+    )
 
 
-@router.get("/sessions/{identity}", response_model=collections.SessionView)
+@router.get("/sessions/{identity}", response_model=session_views.SessionView)
 async def get_session(
     request: Request,
-    response: Response,
     workspace_id: str,
     identity: str,
     actor: Annotated[Principal, Depends(current_principal)],
-) -> collections.SessionView:
-    result = await collections.get_session(request.app.state.storage, actor, workspace_id, identity)
-    response.headers["ETag"] = etag(result.id, result.version)
+) -> session_views.SessionView:
+    result = await session_views.get_session(request.app.state.storage, actor, workspace_id, identity)
     return result
 
 

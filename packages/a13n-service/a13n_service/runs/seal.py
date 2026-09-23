@@ -49,7 +49,7 @@ async def verify_final(
         or display.format != display_ref.format
         or checkpoint.attempt_id != checkpoint_ref.attempt_id
         or display.attempt_id != display_ref.attempt_id
-        or checkpoint.candidate != "completed"
+        or checkpoint.candidate not in {"completed", "waiting"}
         or not checkpoint.receipts
         or checkpoint.display_cut.sequence > display.sequence
         or not any(
@@ -62,7 +62,7 @@ async def verify_final(
     return checkpoint
 
 
-async def completed(
+async def continuation(
     storage: Storage,
     objects: LocalObjects,
     claim: AttemptClaim,
@@ -72,6 +72,7 @@ async def completed(
     timeout: float = 5,
 ) -> RunView:
     checkpoint = await verify_final(objects, claim, checkpoint_ref, display_ref, timeout=timeout)
+    assert checkpoint.candidate is not None
     try:
         async with transaction(storage) as session:
             thread = await lock_thread(session, claim)
@@ -87,8 +88,10 @@ async def completed(
                     .with_for_update()
                 )
             ).all()
-            run.status = "completed"
-            run.output = {"text": checkpoint.output}
+            run.status = checkpoint.candidate
+            run.output = {"text": checkpoint.output} if checkpoint.candidate == "completed" else None
+            run.wait_reason = checkpoint.waiting.reason if checkpoint.waiting is not None else None
+            run.pending = checkpoint.waiting.model_dump(mode="json") if checkpoint.waiting is not None else None
             run.sealed_checkpoint = checkpoint_ref.model_dump(mode="json")
             run.sealed_display = display_ref.model_dump(mode="json")
             run.sealed_at = now
@@ -113,7 +116,7 @@ async def completed(
             run = await session.get(RunRow, claim.run_id)
             if (
                 run is not None
-                and run.status == "completed"
+                and run.status == checkpoint.candidate
                 and run.sealed_checkpoint == checkpoint_ref.model_dump(mode="json")
                 and run.sealed_display == display_ref.model_dump(mode="json")
             ):

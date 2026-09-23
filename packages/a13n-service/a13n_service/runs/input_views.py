@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.cursors import decode, encode
 from a13n_service.infra.errors import ServiceError
+from a13n_service.runs.feedback import FeedbackPayload
 from a13n_service.runs.schemas import EntryView, MessagePayload
 from a13n_service.runs.tables import InboxEntryRow
 from a13n_service.settings import MAX_INBOX_BYTES
@@ -22,8 +23,11 @@ def project(entry: InboxEntryRow) -> EntryView:
             "assigned_run_id": entry.assigned_run_id,
             "incorporated_checkpoint_seq": entry.incorporated_checkpoint_seq,
             "failure": entry.failure,
+            "waiting_run_id": entry.waiting_run_id,
             "payload": MessagePayload.model_validate(entry.payload)
             if entry.kind == "message" and entry.payload is not None
+            else FeedbackPayload.model_validate(entry.payload)
+            if entry.kind == "feedback"
             else None,
         }
     )

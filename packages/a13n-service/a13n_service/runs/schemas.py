@@ -1,17 +1,22 @@
 """Public inputs and detached execution selections; no live credentials in state."""
 
+import json
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from a13n_harness import HarnessState
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from a13n_service.infra.ids import ObjectId
 from a13n_service.resources.agents.schemas import AgentConfig, Label
 from a13n_service.resources.connections.headers import normalize_headers
+from a13n_service.runs.feedback import FeedbackPayload, FeedbackSubmission
+from a13n_service.runs.waiting import PendingItem, Waiting, WaitReason
 from a13n_service.tenancy.authorize import ExecutionAuthority
 
 type RunStatus = Literal["accepted", "running", "waiting", "completed", "failed", "cancelled"]
+type RunTrigger = Literal["input", "queued", "feedback", "child_result", "spawned"]
 
 
 class TextInput(BaseModel):
@@ -20,9 +25,76 @@ class TextInput(BaseModel):
     text: str = Field(min_length=1, max_length=65536)
 
 
+class AssetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["asset"]
+    asset_id: ObjectId
+
+    @field_validator("asset_id")
+    @classmethod
+    def asset_kind(cls, value: str) -> str:
+        if not value.startswith("ast_"):
+            raise ValueError("Asset input requires an Asset ID")
+        return value
+
+
+class UrlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["url"]
+    url: str = Field(min_length=8, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def http_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise ValueError("URL input requires a plain HTTP(S) URL")
+        return value
+
+
+class EnvironmentPathInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["environment_path"]
+    mount: str = Field(min_length=1, max_length=64)
+    path: str = Field(min_length=1, max_length=4096)
+
+
+class JsonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: Literal["json"]
+    value: JsonValue
+
+    @field_validator("value")
+    @classmethod
+    def bounded_json(cls, value: JsonValue) -> JsonValue:
+        def depth(item: JsonValue, level: int) -> None:
+            if level > 32:
+                raise ValueError("Structured input nesting exceeds its limit")
+            if isinstance(item, dict):
+                for nested in item.values():
+                    depth(nested, level + 1)
+            elif isinstance(item, list):
+                for nested in item:
+                    depth(nested, level + 1)
+
+        depth(value, 0)
+        if len(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()) > 65536:
+            raise ValueError("Structured input exceeds its byte limit")
+        return value
+
+
 class MessagePayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    content: tuple[TextInput, ...] = Field(min_length=1, max_length=32)
+    content: tuple[
+        Annotated[TextInput | AssetInput | UrlInput | EnvironmentPathInput | JsonInput, Field(discriminator="type")],
+        ...,
+    ] = Field(min_length=1, max_length=32)
 
 
 class UsageLimit(BaseModel):
@@ -55,6 +127,9 @@ class Submission(BaseModel):
     options: RunOptions = Field(default_factory=RunOptions)
 
 
+type InboxSubmission = Annotated[Submission | FeedbackSubmission, Field(discriminator="kind")]
+
+
 class NewThread(Submission):
     session_id: ObjectId | None = None
 
@@ -70,7 +145,8 @@ class EntryView(BaseModel):
     assigned_run_id: str | None
     incorporated_checkpoint_seq: int | None
     failure: dict | None
-    payload: MessagePayload | None
+    payload: MessagePayload | FeedbackPayload | None
+    waiting_run_id: str | None = None
 
 
 class InboxPage(BaseModel):
@@ -86,6 +162,9 @@ class RunView(BaseModel):
     agent_id: str
     agent_revision_id: str
     status: RunStatus
+    trigger: RunTrigger
+    wait_reason: WaitReason | None = None
+    pending: tuple[PendingItem, ...] | None = None
     current_attempt_id: str | None
     parent_run_id: str | None
     source_entry_id: str
@@ -96,6 +175,11 @@ class RunView(BaseModel):
     created_at: datetime
     sealed_at: datetime | None
     cancel_requested_at: datetime | None
+
+    @field_validator("pending", mode="before")
+    @classmethod
+    def project_pending(cls, value):
+        return Waiting.model_validate(value).items() if isinstance(value, dict) else value
 
 
 class Submitted(BaseModel):
@@ -134,6 +218,7 @@ class ExecutionSelection(BaseModel):
     authority: ExecutionAuthority
     options: RunOptions
     parent_checkpoint: dict | None
+    parent_waiting: Waiting | None = None
 
 
 class DisplayCut(BaseModel):
@@ -159,6 +244,15 @@ class Checkpoint(BaseModel):
     display_cut: DisplayCut
     candidate: Literal["completed", "waiting"] | None = None
     output: str | None = None
+    waiting: Waiting | None = None
+
+    @model_validator(mode="after")
+    def waiting_candidate(self):
+        if (self.candidate == "waiting") != (self.waiting is not None):
+            raise ValueError("Waiting candidates require their exact pending batch")
+        if self.candidate == "waiting" and self.output is not None:
+            raise ValueError("Waiting candidates have no completed output")
+        return self
 
 
 class SnapshotRef(BaseModel):

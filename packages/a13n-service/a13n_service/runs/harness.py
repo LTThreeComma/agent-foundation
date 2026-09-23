@@ -7,25 +7,14 @@ from typing import Any
 from a13n_harness import AgentContext, HarnessState
 from pydantic_ai import Agent, AgentRunResult, RunContext
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, ValidatedToolArgs, WrapRunHandler
-from pydantic_ai.messages import ModelMessage, ModelRequest, TextContent, ToolCallPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
-INPUT_PROVENANCE = "a13n.service.input"
+from a13n_service.infra.errors import ServiceError
+from a13n_service.runs.input_frames import PreparedInputs
+
 type PublishCheckpoint = Callable[[HarnessState, tuple[str, ...], AgentContext], Awaitable[None]]
-
-
-def entry_input(run_id: str, entry_id: str, content: str) -> list[TextContent]:
-    return [
-        TextContent(
-            content,
-            metadata={
-                "display": False,
-                "source_id": entry_id,
-                INPUT_PROVENANCE: {"run_id": run_id, "entry_id": entry_id},
-            },
-        )
-    ]
 
 
 @cache
@@ -46,9 +35,19 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
 
     id = "a13n.service.checkpoint"
 
-    def __init__(self, run_id: str, publish: PublishCheckpoint, *, receipts: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        run_id: str,
+        publish: PublishCheckpoint,
+        *,
+        prepared: PreparedInputs,
+        receipts: tuple[str, ...] = (),
+        feedback_entry_id: str | None = None,
+    ):
         self.run_id = run_id
         self.receipts = list(receipts)
+        self.prepared = prepared
+        self.feedback_entry_id = feedback_entry_id
         self._publish = publish
         self._native_run_id: str | None = None
 
@@ -66,30 +65,32 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
             if primary:
                 self._native_run_id = None
 
-    def _incorporate(self, messages: Sequence[ModelMessage]) -> None:
-        for message in messages:
-            if not isinstance(message, ModelRequest):
-                continue
-            for part in message.parts:
-                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
-                    continue
-                for content in part.content:
-                    if not isinstance(content, TextContent):
-                        continue
-                    provenance = (content.metadata or {}).get(INPUT_PROVENANCE)
-                    if not isinstance(provenance, dict) or provenance.get("run_id") != self.run_id:
-                        continue
-                    entry_id = provenance.get("entry_id")
-                    if isinstance(entry_id, str) and entry_id not in self.receipts:
-                        self.receipts.append(entry_id)
+    def _incorporate(self, state: HarnessState) -> None:
+        found = self.prepared.incorporated(state.message_history)
+        new = [entry_id for entry_id in found if entry_id not in self.receipts]
+        remaining = [entry_id for entry_id in self.prepared.expected if entry_id not in self.receipts]
+        if new != remaining[: len(new)]:
+            raise ServiceError("conflict", "Native input frames are not an offered FIFO prefix")
+        self.receipts.extend(new)
+
+    def incorporate_feedback(self) -> None:
+        if self.feedback_entry_id is not None and self.feedback_entry_id not in self.receipts:
+            self.receipts.append(self.feedback_entry_id)
+
+    async def _publish_boundary(self, ctx: RunContext[AgentContext], messages: Sequence[ModelMessage]) -> None:
+        state = await ctx.deps.export_state(messages)
+        # Native deferred activation precedes this hook. Receipts use the exact
+        # detached state being published, never the mutable source messages.
+        self._incorporate(state)
+        self.incorporate_feedback()
+        await self._publish(state, tuple(self.receipts), ctx.deps)
+        self.prepared.confirm(self.receipts)
 
     async def before_model_request(
         self, ctx: RunContext[AgentContext], request_context: ModelRequestContext
     ) -> ModelRequestContext:
         if ctx.run_id == self._native_run_id:
-            self._incorporate(request_context.messages)
-            state = await ctx.deps.export_state(request_context.messages)
-            await self._publish(state, tuple(self.receipts), ctx.deps)
+            await self._publish_boundary(ctx, request_context.messages)
         return request_context
 
     async def before_tool_execute(
@@ -102,6 +103,5 @@ class CheckpointCapability(AbstractCapability[AgentContext]):
     ) -> ValidatedToolArgs:
         if ctx.run_id == self._native_run_id:
             # The response with pending calls is in canonical history before this awaited hook.
-            state = await ctx.deps.export_state(ctx.messages)
-            await self._publish(state, tuple(self.receipts), ctx.deps)
+            await self._publish_boundary(ctx, ctx.messages)
         return args

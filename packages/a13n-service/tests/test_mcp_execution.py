@@ -8,6 +8,7 @@ import pytest
 from a13n_service.runs.attempts import claim_run
 from a13n_service.settings import Worker as WorkerSettings
 
+from dev.fixtures.database import db_http_probe as db_http_probe
 from dev.fixtures.service_mcp import configure_mcp, execute_claim
 
 pytestmark = pytest.mark.anyio
@@ -15,7 +16,7 @@ pytestmark = pytest.mark.anyio
 
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
 @pytest.mark.parametrize("auth", ["none", "bearer", "headers"])
-async def test_public_connection_discovers_and_calls_real_mcp(public_service, mcp_url, model_url, auth):
+async def test_public_connection_discovers_and_calls_real_mcp(public_service, mcp_url, model_url, auth, db_http_probe):
     svc = public_service
     app, client, path = svc.app, svc.client, svc.workspace_path
     connection_id = await configure_mcp(svc, mcp_url, model_url, auth=auth)
@@ -42,7 +43,13 @@ async def test_public_connection_discovers_and_calls_real_mcp(public_service, mc
     assert state["effects"] == 1 and len(state["calls"]) == 1
     assert json.loads(state["calls"][0]["context"])["conversation"] == auth
     assert state["calls"][0]["operation"]
-    assert app.state.storage.engine.pool.checkedout() == 0
+    # The control role may be scanning concurrently. Verify ownership instead of
+    # treating a legitimate maintenance checkout as a leaked execution session.
+    db_http_probe.assert_finished_tasks_released()
+    assert all(task in app.state.background for _, task in db_http_probe.active.values()), [
+        facts for facts, _ in db_http_probe.active.values()
+    ]
+    assert any(request["kind"] == "mcp" for request in db_http_probe.requests)
 
 
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)

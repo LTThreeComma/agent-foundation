@@ -13,6 +13,7 @@ from a13n_harness import AgentContext
 from a13n_harness.providers.catalog import ProviderCatalog, ProviderNotSelected
 from a13n_harness.providers.connector import ConnectorProviderDefinition
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
+from a13n_harness.tools.identity import identify_tool, tool_identity
 from a13n_harness.tools.metadata import RECOVERY_RETRY_SAFE_METADATA_KEY
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
@@ -36,11 +37,17 @@ from a13n_service.providers.tools import (
 from a13n_service.resources.agents.schemas import AgentConfig
 from a13n_service.resources.connections import cache, oauth_access
 from a13n_service.resources.connections.schemas import ConnectionSelection, ConnectionTest, recovery_tools
-from a13n_service.resources.connections.scope import check_collisions, connection_scope, validate_tools
+from a13n_service.resources.connections.scope import (
+    check_collisions,
+    connection_scope,
+    validate_approval_target,
+    validate_tools,
+)
 from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
 from a13n_service.runs.attempts import lock_authority
 from a13n_service.runs.policy import CallCheck, authorize_execution
 from a13n_service.runs.schemas import AttemptClaim, RunOptions
+from a13n_service.runs.waiting import ToolTarget
 from a13n_service.settings import OAuth
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope
 
@@ -70,6 +77,7 @@ class ConnectionTools(WrapperToolset[AgentContext]):
                         name=name,
                         description=tool.tool_def.description,
                         input_schema=tool.tool_def.parameters_json_schema,
+                        permission_id=tool_identity(identify_tool(tool).tool_def).tool_id,
                     )
                     for name, tool in tools.items()
                 ],
@@ -128,25 +136,32 @@ async def open_connections(
     catalog: ProviderCatalog[ConnectionProvider],
     check: CallCheck,
     oauth_settings: OAuth,
-) -> list[AbstractCapability[AgentContext]]:
+    expected_targets: dict[str, ToolTarget] | None = None,
+) -> tuple[list[AbstractCapability[AgentContext]], dict[str, ToolTarget]]:
     capabilities: list[AbstractCapability[AgentContext]] = []
+    targets: dict[str, ToolTarget] = {}
     for selection in connection_scope(config).values():
-        capabilities.append(
-            await _open_connection(
-                stack,
-                storage,
-                claim,
-                selection,
-                options,
-                redis=redis,
-                keys=keys,
-                policy=policy,
-                catalog=catalog,
-                check=check,
-                oauth_settings=oauth_settings,
-            )
+        capability, target = await _open_connection(
+            stack,
+            storage,
+            claim,
+            selection,
+            options,
+            redis=redis,
+            keys=keys,
+            policy=policy,
+            catalog=catalog,
+            check=check,
+            oauth_settings=oauth_settings,
+            expected=tuple(
+                (expected_targets or {})[alias]
+                for name in selection.tools
+                if (alias := tool_alias(selection.connection_id, name)) in (expected_targets or {})
+            ),
         )
-    return capabilities
+        capabilities.append(capability)
+        targets.update({tool_alias(selection.connection_id, name): target for name in selection.tools})
+    return capabilities, targets
 
 
 async def _open_connection(
@@ -162,7 +177,8 @@ async def _open_connection(
     catalog: ProviderCatalog[ConnectionProvider],
     check: CallCheck,
     oauth_settings: OAuth,
-) -> AbstractCapability[AgentContext]:
+    expected: tuple[ToolTarget, ...],
+) -> tuple[AbstractCapability[AgentContext], ToolTarget]:
     async def current() -> tuple[ResolvedConnection, Principal, ExecutionAuthority]:
         async with transaction(storage) as session:
             run, _, _ = await lock_authority(session, claim)
@@ -200,6 +216,7 @@ async def _open_connection(
             current=current,
             wrapper=wrapper,
             run_id=claim.run_id,
+            expected=expected,
         )
     oauth_token = (
         await oauth_access.access(
@@ -208,6 +225,13 @@ async def _open_connection(
         if selected.auth == "oauth"
         else None
     )
+    target = ToolTarget(
+        connection_id=selected.id,
+        version=selected.version,
+        authorization_id=oauth_token.authorization_id if oauth_token is not None else None,
+        authorization_generation=oauth_token.generation if oauth_token is not None else None,
+    )
+    validate_approval_target(target, expected)
     context_headers = dict(options.mcp_headers.get(selected.id, {}))
     check_collisions(selected, context_headers, keys)
     try:
@@ -256,4 +280,4 @@ async def _open_connection(
     assert isinstance(definition, ToolSourceDefinition)
     source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
 
-    return source.open(lambda context: context_headers, wrapper, run_id=claim.run_id)
+    return source.open(lambda context: context_headers, wrapper, run_id=claim.run_id), target

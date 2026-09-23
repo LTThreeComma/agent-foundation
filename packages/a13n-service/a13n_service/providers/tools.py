@@ -23,6 +23,7 @@ class ToolInfo(BaseModel):
     name: str
     description: str | None
     input_schema: dict[str, JsonValue]
+    permission_id: str | None = None
 
 
 class ToolsetWrapper(Protocol):

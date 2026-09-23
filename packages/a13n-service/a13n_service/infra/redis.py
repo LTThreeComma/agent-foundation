@@ -19,6 +19,6 @@ async def rate_limit(client: Redis, identity: str, *, limit: int, window_seconds
     try:
         count, remaining = await client.eval(_RATE_LIMIT, 1, key, window_seconds)
     except RedisError:
-        raise ServiceError("unavailable", "Authentication limiter unavailable", {"dependency": "redis"}) from None
+        raise ServiceError("unavailable", "Request limiter unavailable", {"dependency": "redis"}) from None
     if count > limit:
         raise ServiceError("rate_limited", "Too many requests", {"retry_after": max(1, remaining)})
