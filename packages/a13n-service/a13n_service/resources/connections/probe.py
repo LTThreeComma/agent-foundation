@@ -12,9 +12,10 @@ from a13n_service.infra.db import Storage, short_session
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.outbound import open_http
 from a13n_service.providers.tools import INITIALIZATION_SECONDS, MAX_TOOLS, RESPONSE_BYTES, ToolSourceDefinition
-from a13n_service.resources.connections import cache
+from a13n_service.resources.connections import cache, oauth_access
 from a13n_service.resources.connections.schemas import ConnectionTest
 from a13n_service.resources.connections.service import authentication_headers, get_row, resolve
+from a13n_service.settings import OAuth
 from a13n_service.tenancy.authorize import Principal
 from a13n_service.tenancy.grants import workspace_scope
 
@@ -30,10 +31,16 @@ async def test_connection(
     keys: KeyRing,
     policy: EndpointPolicy,
     catalog: ProviderCatalog[ToolSourceDefinition],
+    oauth_settings: OAuth,
 ) -> ConnectionTest:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write" if refresh else "read")
         selected = await resolve(session, actor, scope, connection_id, verb="read")
+    oauth_token = (
+        await oauth_access.access(storage, actor, selected, keys=keys, policy=policy, settings=oauth_settings)
+        if selected.auth == "oauth"
+        else None
+    )
     if not refresh:
         cached = await cache.read(redis, selected)
         if cached is not None:
@@ -48,13 +55,26 @@ async def test_connection(
             current = await get_row(session, selected.workspace_id, selected.id)
             if current.version != selected.version or not current.enabled:
                 raise ServiceError("conflict", "Connection changed during its test")
-        request.headers.update(authentication_headers(selected, keys))
+        if oauth_token is not None:
+            await oauth_access.check_session(storage, oauth_token, principal_id=actor.id, connection_id=selected.id)
+            request.headers["authorization"] = "Bearer " + oauth_token.token
+        else:
+            request.headers.update(authentication_headers(selected, keys))
+
+    async def check_response(response: httpx2.Response) -> None:
+        if oauth_token is not None and response.status_code in {401, 403}:
+            await oauth_access.rejected(storage, oauth_token)
+            raise oauth_access.required("access_token_rejected")
 
     try:
         async with (
             asyncio.timeout(INITIALIZATION_SECONDS),
             open_http(
-                policy, timeout=INITIALIZATION_SECONDS, max_bytes=RESPONSE_BYTES, before_request=authorize_request
+                policy,
+                timeout=INITIALIZATION_SECONDS,
+                max_bytes=RESPONSE_BYTES,
+                before_request=authorize_request,
+                after_response=check_response,
             ) as client,
         ):
             source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
@@ -64,6 +84,8 @@ async def test_connection(
     except ServiceError:
         raise
     except Exception:
+        if oauth_token is not None:
+            await oauth_access.check_session(storage, oauth_token, principal_id=actor.id, connection_id=selected.id)
         raise ServiceError("unavailable", "MCP discovery failed; check endpoint and authentication") from None
     async with short_session(storage) as session:
         current = await get_row(session, selected.workspace_id, selected.id)

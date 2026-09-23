@@ -41,6 +41,16 @@ The complete machine-readable validation schema, including named enum/union defi
 | `auth.login_limit`          | `A13N_AUTH__LOGIN_LIMIT`          | integer        | minimum=1; maximum=1000; default=10       |
 | `auth.login_window_seconds` | `A13N_AUTH__LOGIN_WINDOW_SECONDS` | integer        | minimum=1; maximum=3600; default=60       |
 
+## `oauth`
+
+| Setting                   | Environment variable            | Type / choices  | Constraints and default                   |
+| ------------------------- | ------------------------------- | --------------- | ----------------------------------------- |
+| `oauth.callback_url`      | `A13N_OAUTH__CALLBACK_URL`      | string or null  | default=null                              |
+| `oauth.return_urls`       | `A13N_OAUTH__RETURN_URLS`       | array of string | default=[]                                |
+| `oauth.flow_seconds`      | `A13N_OAUTH__FLOW_SECONDS`      | integer         | minimum=30; maximum=1800; default=600     |
+| `oauth.operation_seconds` | `A13N_OAUTH__OPERATION_SECONDS` | number          | minimum=2; maximum=30; default=8          |
+| `oauth.scan_seconds`      | `A13N_OAUTH__SCAN_SECONDS`      | number          | maximum=30; exclusiveMinimum=0; default=1 |
+
 ## `redis`
 
 | Setting         | Environment variable  | Type / choices | Constraints and default                           |

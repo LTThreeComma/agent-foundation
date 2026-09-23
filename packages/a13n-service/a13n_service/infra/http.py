@@ -27,7 +27,7 @@ _STATUS: dict[ErrorCode, int] = {
 async def service_error_response(request: Request, error: Exception) -> JSONResponse:
     if not isinstance(error, ServiceError):
         raise error
-    headers = {}
+    headers = {"Referrer-Policy": "no-referrer"}
     if error.code == "rate_limited":
         headers["Retry-After"] = str(error.details.get("retry_after", 1))
     return JSONResponse(
@@ -47,6 +47,7 @@ async def validation_error_response(request: Request, error: Exception) -> JSONR
     return JSONResponse(
         {"error": {"code": "invalid_argument", "message": "Request validation failed", "details": {"fields": fields}}},
         status_code=400,
+        headers={"Referrer-Policy": "no-referrer"},
     )
 
 

@@ -9,16 +9,19 @@ from a13n_service.infra.errors import ServiceError
 from a13n_service.runs.tables import RunRow
 from a13n_service.runs.worker import Worker
 from a13n_service.tenancy.tables import GrantRow
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
+from dev.fixtures.database import db_http_probe as db_http_probe
 from dev.fixtures.service_mcp import configure_mcp
 
-pytestmark = pytest.mark.anyio
+pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("db_http_probe")]
 
 
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
 @pytest.mark.parametrize("change", ["cancel", "grant", "admission"])
-async def test_worker_rechecks_authority_and_cancels_actual_mcp_io(public_service, mcp_url, model_url, change):
+async def test_worker_rechecks_authority_and_cancels_actual_mcp_io(
+    public_service, mcp_url, model_url, change, tmp_path, db_http_probe
+):
     svc = public_service
     app, client, path = svc.app, svc.client, svc.workspace_path
     await configure_mcp(svc, mcp_url, model_url)
@@ -69,15 +72,12 @@ async def test_worker_rechecks_authority_and_cancels_actual_mcp_io(public_servic
                     while (await peer.get(mcp_url + "/fixture/state")).json()["effects"] != 1:
                         assert not active.done()
                         await asyncio.sleep(0.025)
-                async with short_session(app.state.storage) as session:
-                    assert (
-                        await session.scalar(
-                            text(
-                                "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='idle in transaction'"
-                            )
-                        )
-                        == 0
-                    )
+                import json
+
+                from dev.fixtures.database import transactions
+
+                observed = await transactions(app.state.storage)
+                (tmp_path / "mcp-barrier-transactions.json").write_text(json.dumps(observed, default=str, indent=2))
                 if change == "grant":
                     async with transaction(app.state.storage) as session:
                         await session.execute(
@@ -106,7 +106,7 @@ async def test_worker_rechecks_authority_and_cancels_actual_mcp_io(public_servic
     finally:
         active.cancel()
         await asyncio.gather(active, return_exceptions=True)
-    assert app.state.storage.engine.pool.checkedout() == 0
+    db_http_probe.assert_finished_tasks_released()
 
 
 async def test_discovery_cache_is_versioned_and_disabled_resource_stays_unavailable(public_service, mcp_url, model_url):

@@ -32,14 +32,15 @@ from a13n_service.providers.tools import (
     ToolSourceDefinition,
 )
 from a13n_service.resources.agents.schemas import AgentConfig
-from a13n_service.resources.connections import cache
+from a13n_service.resources.connections import cache, oauth_access
 from a13n_service.resources.connections.schemas import ConnectionSelection, ConnectionTest
 from a13n_service.resources.connections.scope import check_collisions, connection_scope, validate_tools
 from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
 from a13n_service.runs.attempts import lock_authority
 from a13n_service.runs.policy import CallCheck, authorize_execution
 from a13n_service.runs.schemas import AttemptClaim, RunOptions
-from a13n_service.tenancy.authorize import ExecutionAuthority, Scope
+from a13n_service.settings import OAuth
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope
 
 
 @dataclass
@@ -124,6 +125,7 @@ async def open_connections(
     policy: EndpointPolicy,
     catalog: ProviderCatalog[ToolSourceDefinition],
     check: CallCheck,
+    oauth_settings: OAuth,
 ) -> list[AbstractCapability[AgentContext]]:
     capabilities: list[AbstractCapability[AgentContext]] = []
     for selection in connection_scope(config).values():
@@ -139,6 +141,7 @@ async def open_connections(
                 policy=policy,
                 catalog=catalog,
                 check=check,
+                oauth_settings=oauth_settings,
             )
         )
     return capabilities
@@ -156,8 +159,9 @@ async def _open_connection(
     policy: EndpointPolicy,
     catalog: ProviderCatalog[ToolSourceDefinition],
     check: CallCheck,
+    oauth_settings: OAuth,
 ) -> AbstractCapability[AgentContext]:
-    async def current() -> ResolvedConnection:
+    async def current() -> tuple[ResolvedConnection, Principal, ExecutionAuthority]:
         async with transaction(storage) as session:
             run, _, _ = await lock_authority(session, claim)
             principal = await authorize_execution(session, run)
@@ -170,9 +174,16 @@ async def _open_connection(
                 authority=ExecutionAuthority.model_validate(run.authority),
             )
             validate_tools(selected, selection)
-        return selected
+        return selected, principal, ExecutionAuthority.model_validate(run.authority)
 
-    selected = await current()
+    selected, principal, authority = await current()
+    oauth_token = (
+        await oauth_access.access(
+            storage, principal, selected, keys=keys, policy=policy, settings=oauth_settings, authority=authority
+        )
+        if selected.auth == "oauth"
+        else None
+    )
     context_headers = dict(options.mcp_headers.get(selected.id, {}))
     check_collisions(selected, context_headers, keys)
     try:
@@ -183,11 +194,18 @@ async def _open_connection(
 
     async def before_request(request: httpx2.Request) -> None:
         # Closing an already-owned remote session needs no new execution authority.
-        active = selected if request.method == "DELETE" else await current()
+        active = selected if request.method == "DELETE" else (await current())[0]
         check_collisions(active, context_headers, keys)
         if active.version != selected.version:
             raise ServiceError("disabled", "Connection changed during execution; use a fresh run")
-        request.headers.update(authentication_headers(active, keys))
+        if oauth_token is not None:
+            if request.method != "DELETE":
+                await oauth_access.check_session(
+                    storage, oauth_token, principal_id=principal.id, connection_id=selected.id
+                )
+            request.headers["authorization"] = "Bearer " + oauth_token.token
+        else:
+            request.headers.update(authentication_headers(active, keys))
         if request.method == "POST":
             value = json.loads(await request.aread())
             if value.get("method") == "tools/call":
@@ -197,8 +215,19 @@ async def _open_connection(
                     raise ServiceError("conflict", "MCP transport attempted an untracked or repeated dispatch")
                 dispatched.add(operation)
 
+    async def check_response(response: httpx2.Response) -> None:
+        if oauth_token is not None and response.status_code in {401, 403}:
+            await oauth_access.rejected(storage, oauth_token)
+            raise oauth_access.required("access_token_rejected")
+
     client = await stack.enter_async_context(
-        open_http(policy, timeout=CALL_SECONDS, max_bytes=RESPONSE_BYTES, before_request=before_request)
+        open_http(
+            policy,
+            timeout=CALL_SECONDS,
+            max_bytes=RESPONSE_BYTES,
+            before_request=before_request,
+            after_response=check_response,
+        )
     )
     source = definition.bind(selected.config.model_dump(mode="json"), source_id=selected.id, client=client)
 

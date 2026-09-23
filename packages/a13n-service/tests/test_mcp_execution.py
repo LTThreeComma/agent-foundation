@@ -6,6 +6,7 @@ import json
 import httpx2
 import pytest
 from a13n_service.runs.attempts import claim_run
+from a13n_service.settings import Worker as WorkerSettings
 
 from dev.fixtures.service_mcp import configure_mcp, execute_claim
 
@@ -80,6 +81,7 @@ async def test_production_worker_death_after_external_effect(
         svc, mcp_url, model_url, tool=tool, safe=safe, auth="bearer" if mutation == "credential" else "none"
     )
     settings = app.state.settings
+    lease_seconds = WorkerSettings().lease_seconds
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -103,7 +105,7 @@ active_key_id = "test"
 test = {json.dumps(base64.b64encode(bytes(range(32))).decode())}
 [worker]
 slots = 1
-lease_seconds = 3
+lease_seconds = {lease_seconds}
 scan_seconds = 0.1
 authority_seconds = 0.2
 """)
@@ -153,6 +155,21 @@ authority_seconds = 0.2
                     if counted["barriers"]:
                         break
                     assert first_worker.returncode is None, (tmp_path / "worker-0.log").read_text()
+                    view = await client.get(path + f"/runs/{run_id}/items")
+                    if view.json()["status"] in {"completed", "failed", "cancelled"}:
+                        origins = []
+                        for line in (tmp_path / "worker-0.log").read_text().splitlines():
+                            if line.startswith("{"):
+                                item = json.loads(line)
+                                if item.get("run_id") == run_id and item.get("error_type"):
+                                    origins.append(
+                                        {
+                                            key: item[key]
+                                            for key in ("error_type", "exception_details", "harness_failure")
+                                            if key in item
+                                        }
+                                    )
+                        pytest.fail(f"Run became {view.json()['status']} before effect barrier: {origins}")
                     await asyncio.sleep(0.025)
             assert counted["effects"] == 0 and counted["calls"] == []
             original = json.loads(counted["barriers"][0]["context"])
@@ -203,7 +220,7 @@ authority_seconds = 0.2
                 updated = await client.patch(resource, headers={"If-Match": current.headers["etag"]}, json=change)
                 assert updated.status_code == 200, updated.text
             replacement = await start_worker()
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(lease_seconds + 30):
                 while True:
                     view = await client.get(path + f"/runs/{run_id}/items")
                     if view.json()["status"] in {"completed", "failed", "cancelled"}:
@@ -265,6 +282,9 @@ authority_seconds = 0.2
                         "revoked": revoke,
                         "mutation": mutation,
                         "signal": first_worker.returncode,
+                        "lease_seconds": lease_seconds,
+                        "first_attempt_failure": attempts[0].failure["code"],
+                        "natural_lease_expiry": True,
                         "pending_checkpoint_verified_before_permitting_effect": True,
                         "original": original,
                         "effects": counted["effects"],

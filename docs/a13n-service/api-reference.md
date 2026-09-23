@@ -212,6 +212,22 @@ Responses:
 
 ## connections
 
+### `GET /api/v1/oauth/callback`
+
+Oauth Callback.
+
+| Parameter | Location | Required | Type / schema  | Constraints and default     |
+| --------- | -------- | -------- | -------------- | --------------------------- |
+| `state`   | query    | true     | string         | minLength=32; maxLength=256 |
+| `code`    | query    | false    | string or null | —                           |
+| `error`   | query    | false    | string or null | —                           |
+| `iss`     | query    | false    | string or null | —                           |
+
+Responses:
+
+- **200** — Successful Response (`application/json: schema-defined value`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
 ### `GET /api/v1/workspaces/{workspace_id}/connections`
 
 List Connections.
@@ -274,6 +290,52 @@ Request body: required.
 Responses:
 
 - **200** — Successful Response (`application/json: ConnectionView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorization`
+
+Authorization Status.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AuthorizationView`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize`
+
+Authorize Connection.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Request body: required.
+
+- `application/json`: `AuthorizeRequest`.
+
+Responses:
+
+- **200** — Successful Response (`application/json: AuthorizationStart`).
+- **422** — Validation Error (`application/json: HTTPValidationError`).
+
+### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke`
+
+Revoke Authorization.
+
+| Parameter       | Location | Required | Type / schema | Constraints and default |
+| --------------- | -------- | -------- | ------------- | ----------------------- |
+| `workspace_id`  | path     | true     | string        | —                       |
+| `connection_id` | path     | true     | string        | —                       |
+
+Responses:
+
+- **200** — Successful Response (`application/json: AuthorizationView`).
 - **422** — Validation Error (`application/json: HTTPValidationError`).
 
 ### `POST /api/v1/workspaces/{workspace_id}/connections/{connection_id}/test`

@@ -62,7 +62,12 @@ async def test_display_ahead_of_state_remains_interrupted_after_recovery(public_
 
     task = asyncio.create_task(run(first))
     try:
-        await asyncio.wait_for(reached.wait(), 10)
+        try:
+            await asyncio.wait_for(reached.wait(), 10)
+        except TimeoutError:
+            if task.done():
+                task.result()
+            raise
         if fault == "failed_checkpoint":
             with pytest.raises(OSError):
                 await task
@@ -158,7 +163,12 @@ async def test_dispatched_checkpoint_finishes_after_terminal_without_reviving_in
         )
     )
     try:
-        await asyncio.wait_for(reached.wait(), 10)
+        try:
+            await asyncio.wait_for(reached.wait(), 10)
+        except TimeoutError:
+            if task.done():
+                task.result()
+            raise
         if terminal == "cancelled":
             response = await service.client.post(f"{service.workspace_path}/runs/{first.run_id}/interrupt")
             assert response.status_code == 200

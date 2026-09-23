@@ -346,6 +346,125 @@
         "title": "AuthenticationCase",
         "type": "object"
       },
+      "AuthorizationStart": {
+        "properties": {
+          "authorization": {
+            "$ref": "#/components/schemas/AuthorizationView"
+          },
+          "redirect_url": {
+            "title": "Redirect Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization",
+          "redirect_url"
+        ],
+        "title": "AuthorizationStart",
+        "type": "object"
+      },
+      "AuthorizationView": {
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "operation_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exchange",
+                  "refresh"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Kind"
+          },
+          "status": {
+            "enum": [
+              "not_authorized",
+              "pending",
+              "active",
+              "revoked",
+              "reauthorization_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "connection_id",
+          "status",
+          "expires_at",
+          "generation",
+          "operation_kind",
+          "failure"
+        ],
+        "title": "AuthorizationView",
+        "type": "object"
+      },
+      "AuthorizeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "return_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Return Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "return_url"
+        ],
+        "title": "AuthorizeRequest",
+        "type": "object"
+      },
       "BearerCredential": {
         "additionalProperties": false,
         "properties": {
@@ -368,7 +487,8 @@
         "enum": [
           "none",
           "bearer",
-          "headers"
+          "headers",
+          "oauth"
         ],
         "type": "string"
       },
@@ -618,6 +738,9 @@
           },
           {
             "$ref": "#/components/schemas/HeadersCredential"
+          },
+          {
+            "$ref": "#/components/schemas/OAuthClientCredential"
           }
         ]
       },
@@ -908,6 +1031,16 @@
       "MCPConfig": {
         "additionalProperties": false,
         "properties": {
+          "oauth": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OAuthConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recovery_retry_safe_tools": {
             "default": [],
             "items": {
@@ -1463,6 +1596,66 @@
           "agent_id"
         ],
         "title": "NewThread",
+        "type": "object"
+      },
+      "OAuthClientCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "client_secret": {
+            "format": "password",
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Client Secret",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "client_secret"
+        ],
+        "title": "OAuthClientCredential",
+        "type": "object"
+      },
+      "OAuthConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Client Id",
+            "type": "string"
+          },
+          "issuer": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issuer",
+            "type": "string"
+          },
+          "scopes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Scopes",
+            "type": "array"
+          },
+          "token_endpoint_auth_method": {
+            "default": "none",
+            "enum": [
+              "none",
+              "client_secret_basic",
+              "client_secret_post"
+            ],
+            "title": "Token Endpoint Auth Method",
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "client_id"
+        ],
+        "title": "OAuthConfig",
         "type": "object"
       },
       "PriceComponent-Input": {
@@ -3026,6 +3219,99 @@
         ]
       }
     },
+    "/api/v1/oauth/callback": {
+      "get": {
+        "operationId": "oauth_callback_api_v1_oauth_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 32,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8192,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          },
+          {
+            "in": "query",
+            "name": "iss",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Iss"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Oauth Callback",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/organizations/{organization_id}/model-providers": {
       "get": {
         "operationId": "list_providers_api_v1_organizations__organization_id__model_providers_get",
@@ -4355,6 +4641,169 @@
           }
         },
         "summary": "Update Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorization": {
+      "get": {
+        "operationId": "authorization_status_api_v1_workspaces__workspace_id__connections__connection_id__authorization_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Authorization Status",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize": {
+      "post": {
+        "operationId": "authorize_connection_api_v1_workspaces__workspace_id__connections__connection_id__authorize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationStart"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Authorize Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke": {
+      "post": {
+        "operationId": "revoke_authorization_api_v1_workspaces__workspace_id__connections__connection_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Authorization",
         "tags": [
           "connections"
         ]

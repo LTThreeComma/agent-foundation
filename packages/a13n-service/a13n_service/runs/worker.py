@@ -3,10 +3,11 @@
 import asyncio
 from importlib.metadata import version
 
+from a13n_harness.errors import RunError
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from a13n_harness.providers.model import ModelProviderDefinition
-from a13n_logging import get_logger
+from a13n_logging import exception_details, get_logger
 from redis.asyncio import Redis
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -95,9 +96,23 @@ class Worker:
             await asyncio.gather(*tasks, return_exceptions=True)
         if error is not None and not isinstance(error, attempts.LeaseLost):
             # Cancellation stops supported I/O before failure; unknown external effects are never replayed here.
+            harness_failure = {}
+            if isinstance(error, RunError):
+                kind = error.details.get("exception_type")
+                status = error.details.get("status_code")
+                if isinstance(kind, str) and len(kind) <= 128 and kind.isascii() and kind.isidentifier():
+                    harness_failure["exception_type"] = kind
+                if type(status) is int and 100 <= status <= 599:
+                    harness_failure["status_code"] = status
             logger.warning(
                 "Run execution stopped",
-                extra={"run_id": claim.run_id, "attempt_id": claim.attempt_id, "error_type": type(error).__name__},
+                extra={
+                    "run_id": claim.run_id,
+                    "attempt_id": claim.attempt_id,
+                    "error_type": type(error).__name__,
+                    "exception_details": exception_details(error),
+                    "harness_failure": harness_failure,
+                },
             )
             code = error.code if isinstance(error, ServiceError) else "execution_failed"
             message = (

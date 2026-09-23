@@ -149,6 +149,7 @@ async def execute(
                     policy=endpoint_policy,
                     catalog=tool_catalog,
                     check=check,
+                    oauth_settings=config.oauth,
                 )
             )
             async with open_model(

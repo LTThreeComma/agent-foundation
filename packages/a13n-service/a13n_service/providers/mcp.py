@@ -12,6 +12,7 @@ from pydantic_ai import RunContext
 from pydantic_ai.mcp import CallToolFunc, MCPToolset, ProcessToolCallback, ToolResult
 from pydantic_ai.toolsets import AbstractToolset
 
+from a13n_service.providers.oauth import OAuthConfig
 from a13n_service.providers.tools import (
     CALL_SECONDS,
     INITIALIZATION_SECONDS,
@@ -27,6 +28,7 @@ ToolName = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 class MCPConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     url: str = Field(min_length=1, max_length=2048)
+    oauth: OAuthConfig | None = None
     tools: tuple[ToolName, ...] | None = Field(default=None, max_length=MAX_TOOLS)
     recovery_retry_safe_tools: tuple[ToolName, ...] = Field(default=(), max_length=MAX_TOOLS)
 

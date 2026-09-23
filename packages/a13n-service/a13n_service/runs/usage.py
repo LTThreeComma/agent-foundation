@@ -67,6 +67,16 @@ async def ingest(
         raise ServiceError("payload_too_large", "Usage record exceeds its byte limit")
     digest = hashlib.sha256(encoded).hexdigest()
     async with transaction(storage) as session:
+        # FK checks also lock the attempt: take the Run lock first, as authority writers do.
+        await session.execute(
+            select(RunRow.id)
+            .where(
+                RunRow.id == claim.run_id,
+                RunRow.organization_id == claim.organization_id,
+                RunRow.workspace_id == claim.workspace_id,
+            )
+            .with_for_update(read=True, key_share=True)
+        )
         attempt = await session.get(AttemptRow, claim.attempt_id)
         if (
             attempt is None

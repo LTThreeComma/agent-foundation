@@ -12,6 +12,7 @@ import {
   type HeaderDraft,
 } from "../../shared/forms";
 import { ToolSelection } from "./tool-selection";
+import { emptyOAuth, OAuthFields, OAuthAuthorization } from "./oauth";
 import styles from "./connections.module.css";
 
 type Connection = components["schemas"]["ConnectionView"];
@@ -87,6 +88,7 @@ function ConnectionForm({
   const [url, setUrl] = useState(initial?.config.url ?? "");
   const [auth, setAuth] = useState<Auth>(initial?.auth ?? "none");
   const [replace, setReplace] = useState(!initial?.credential_configured);
+  const [oauth, setOAuth] = useState(initial?.config.oauth ?? emptyOAuth);
   const [token, setToken] = useState("");
   const [headers, setHeaders] = useState<HeaderDraft[]>([]);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
@@ -104,10 +106,15 @@ function ConnectionForm({
     !!initial &&
     (url !== initial.config.url ||
       auth !== initial.auth ||
-      (replace && auth !== "none"));
+      (auth === "oauth" &&
+        JSON.stringify(oauth) !== JSON.stringify(initial.config.oauth)) ||
+      (replace &&
+        auth !== "none" &&
+        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none")));
   const [reaffirm, setReaffirm] = useState(false);
   const canTest =
     !!initial &&
+    !identityChanged &&
     !pending &&
     url === initial.config.url &&
     auth === initial.auth &&
@@ -124,9 +131,14 @@ function ConnectionForm({
         try {
           let credential:
             components["schemas"]["ConnectionCreate"]["credential"] | undefined;
-          if (auth === "none") credential = null;
+          if (
+            auth === "none" ||
+            (auth === "oauth" && oauth.token_endpoint_auth_method === "none")
+          )
+            credential = null;
           else if (replace || auth !== initial?.auth) {
             if (auth === "bearer") credential = { token };
+            else if (auth === "oauth") credential = { client_secret: token };
             else {
               const values = serializeHeaders(headers, []);
               credential = {
@@ -140,6 +152,7 @@ function ConnectionForm({
           }
           const config = {
             url,
+            oauth: auth === "oauth" ? oauth : null,
             tools,
             recovery_retry_safe_tools: identityChanged && !reaffirm ? [] : safe,
           };
@@ -227,6 +240,7 @@ function ConnectionForm({
           { value: "none", label: t("None") },
           { value: "bearer", label: t("Bearer token") },
           { value: "headers", label: t("Headers") },
+          { value: "oauth", label: t("OAuth (personal account)") },
         ]}
         onValueChange={(value) => {
           setAuth(value as Auth);
@@ -236,55 +250,78 @@ function ConnectionForm({
           setReaffirm(false);
         }}
       />
-      {auth !== "none" && !replace && (
-        <div className={styles.row}>
-          <span>{t("Credential saved")}</span>
-          {editable && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setReplace(true)}
-            >
-              {t("Replace credential")}
-            </Button>
-          )}
-        </div>
+      {auth === "oauth" && (
+        <OAuthFields
+          value={oauth}
+          disabled={!editable || pending}
+          onChange={(value) => {
+            setOAuth(value);
+            setReaffirm(false);
+            if (
+              value.token_endpoint_auth_method !==
+              oauth.token_endpoint_auth_method
+            ) {
+              setReplace(true);
+              setToken("");
+            }
+          }}
+        />
       )}
-      {auth !== "none" && replace && (
-        <>
-          {auth === "bearer" ? (
-            <FormField label={t("Bearer token")}>
-              <Input
-                type="password"
-                required
-                value={token}
-                autoComplete="new-password"
+      {auth !== "none" &&
+        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none") &&
+        !replace && (
+          <div className={styles.row}>
+            <span>{t("Credential saved")}</span>
+            {editable && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setReplace(true)}
+              >
+                {t("Replace credential")}
+              </Button>
+            )}
+          </div>
+        )}
+      {auth !== "none" &&
+        !(auth === "oauth" && oauth.token_endpoint_auth_method === "none") &&
+        replace && (
+          <>
+            {auth === "bearer" || auth === "oauth" ? (
+              <FormField
+                label={t(auth === "oauth" ? "Client secret" : "Bearer token")}
+              >
+                <Input
+                  type="password"
+                  required
+                  value={token}
+                  autoComplete="new-password"
+                  disabled={!editable || pending}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+              </FormField>
+            ) : (
+              <HeaderFields
+                rows={headers}
+                onChange={setHeaders}
                 disabled={!editable || pending}
-                onChange={(event) => setToken(event.target.value)}
               />
-            </FormField>
-          ) : (
-            <HeaderFields
-              rows={headers}
-              onChange={setHeaders}
-              disabled={!editable || pending}
-            />
-          )}
-          {initial?.credential_configured && auth === initial.auth && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setReplace(false);
-                setToken("");
-                setHeaders([]);
-              }}
-            >
-              {t("Keep saved credential")}
-            </Button>
-          )}
-        </>
-      )}
+            )}
+            {initial?.credential_configured && auth === initial.auth && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setReplace(false);
+                  setToken("");
+                  setHeaders([]);
+                }}
+              >
+                {t("Keep saved credential")}
+              </Button>
+            )}
+          </>
+        )}
       {initial && (
         <label className={styles.row}>
           <span>{t("Enabled")}</span>
@@ -324,6 +361,14 @@ function ConnectionForm({
               } catch (failure) {
                 setError(failure);
               } finally {
+                if (initial.auth === "oauth")
+                  await queries.invalidateQueries({
+                    queryKey: [
+                      ...cache,
+                      "connection-authorization",
+                      initial.id,
+                    ],
+                  });
                 setPending(false);
               }
             }}
@@ -368,6 +413,21 @@ function ConnectionForm({
           !editable || (auth === "headers" && replace && headers.length === 0)
         }
       />
+      {initial?.auth === "oauth" && (
+        <OAuthAuthorization
+          connectionId={initial.id}
+          draftChanged={
+            pending ||
+            identityChanged ||
+            name !== initial.name ||
+            enabled !== initial.enabled ||
+            JSON.stringify(tools) !==
+              JSON.stringify(initial.config.tools ?? null) ||
+            JSON.stringify(safe) !==
+              JSON.stringify(initial.config.recovery_retry_safe_tools ?? [])
+          }
+        />
+      )}
     </form>
   );
 }

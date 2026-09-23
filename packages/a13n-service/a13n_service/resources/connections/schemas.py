@@ -40,9 +40,14 @@ class HeadersCredential(BaseModel):
         return {name: SecretStr(secret) for name, secret in normalized.items()}
 
 
-type Credential = BearerCredential | HeadersCredential
+class OAuthClientCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_secret: SecretStr = Field(min_length=1, max_length=8192)
 
-type ConnectionAuthentication = Literal["none", "bearer", "headers"]
+
+type Credential = BearerCredential | HeadersCredential | OAuthClientCredential
+
+type ConnectionAuthentication = Literal["none", "bearer", "headers", "oauth"]
 
 
 class ConnectionCreate(BaseModel):

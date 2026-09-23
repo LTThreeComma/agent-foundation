@@ -27,6 +27,7 @@ from a13n_service.resources.connections.schemas import (
     Credential,
     HeadersCredential,
     MCPConfig,
+    OAuthClientCredential,
 )
 from a13n_service.resources.connections.tables import ConnectionRow
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, authorize
@@ -83,6 +84,8 @@ def protect(
         value = {"token": credential.token.get_secret_value()}
     elif auth == "headers" and isinstance(credential, HeadersCredential):
         value = {"headers": {name: secret.get_secret_value() for name, secret in credential.headers.items()}}
+    elif auth == "oauth" and isinstance(credential, OAuthClientCredential):
+        value = {"client_secret": credential.client_secret.get_secret_value()}
     else:
         raise ServiceError("invalid_argument", "Credential does not match Connection authentication")
     return keys.protect(
@@ -91,6 +94,8 @@ def protect(
 
 
 def authentication_headers(selected: ResolvedConnection, keys: KeyRing) -> dict[str, str]:
+    if selected.auth == "oauth":
+        raise ServiceError("conflict", "OAuth requires the executing principal authorization")
     if selected.auth == "none":
         return {}
     if selected.credential is None:
@@ -132,6 +137,17 @@ async def resolve(
     )
 
 
+def validate_auth(config: MCPConfig, auth: ConnectionAuthentication, credential: dict | None) -> None:
+    if (auth == "oauth") != (config.oauth is not None):
+        raise ServiceError("invalid_argument", "OAuth authentication and configuration must be selected together")
+    if auth == "none" and credential is not None:
+        raise ServiceError("invalid_argument", "Anonymous Connections cannot contain credentials")
+    if config.oauth is not None:
+        confidential = config.oauth.token_endpoint_auth_method != "none"
+        if confidential != (credential is not None):
+            raise ServiceError("invalid_argument", "OAuth client credential does not match its authentication method")
+
+
 async def create(
     storage: Storage,
     actor: Principal,
@@ -151,10 +167,13 @@ async def create(
         raise ServiceError("invalid_argument", "Connection provider is unavailable") from None
     try:
         await policy.validate(body.config.url)
+        if body.config.oauth is not None:
+            await policy.validate(body.config.oauth.issuer)
     except ValueError:
         raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None
     connection_id = new_object_id("conn")
     credential = protect(keys, scope.organization_id, connection_id, body.auth, body.credential)
+    validate_auth(body.config, body.auth, credential)
     async with transaction(storage) as session:
         row = ConnectionRow(
             id=connection_id,
@@ -235,10 +254,15 @@ async def update(
     if body.config is not None:
         try:
             await policy.validate(body.config.url)
+            if body.config.oauth is not None:
+                await policy.validate(body.config.oauth.issuer)
         except ValueError:
             raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None
     async with transaction(storage) as session:
         row = await get_row(session, scope.workspace_id, connection_id, lock=True)
+        from a13n_service.resources.connections.oauth_state import identity, invalidate_connection
+
+        previous_identity = identity(row)
         require_match(if_match, row.id, row.version)
         auth = body.auth or row.auth
         if auth != row.auth and "credential" not in fields:
@@ -249,7 +273,13 @@ async def update(
         if "credential" in fields:
             row.credential = protect(keys, row.organization_id, row.id, auth, body.credential)
         config = body.config or MCPConfig.model_validate(row.config)
-        identity_changed = config.url != row.config["url"] or auth != row.auth or "credential" in fields
+        validate_auth(config, auth, row.credential)
+        identity_changed = (
+            config.url != row.config["url"]
+            or config.model_dump(mode="json").get("oauth") != row.config.get("oauth")
+            or auth != row.auth
+            or "credential" in fields
+        )
         if identity_changed and (
             body.config is None or "recovery_retry_safe_tools" not in body.config.model_fields_set
         ):
@@ -260,6 +290,8 @@ async def update(
             row.name = body.name
         if body.enabled is not None:
             row.enabled = body.enabled
+        if identity(row) != previous_identity or not row.enabled:
+            await invalidate_connection(session, row.id)
         row.updated_by_id = actor.id
         record(
             session,

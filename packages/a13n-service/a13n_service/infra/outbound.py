@@ -33,6 +33,7 @@ async def open_http(
     timeout: float,
     max_bytes: int,
     before_request: Callable[[httpx2.Request], Awaitable[None]] | None = None,
+    after_response: Callable[[httpx2.Response], Awaitable[None]] | None = None,
 ) -> AsyncIterator[httpx2.AsyncClient]:
     async def check_request(request: httpx2.Request) -> None:
         await policy.validate(str(request.url), resolve_dns=True)
@@ -40,6 +41,8 @@ async def open_http(
             await before_request(request)
 
     async def bound_response(response: httpx2.Response) -> None:
+        if after_response is not None:
+            await after_response(response)
         if response.headers.get("content-encoding", "identity") != "identity":
             await response.aclose()
             raise ServiceError("unavailable", "Provider response used unsupported compression")

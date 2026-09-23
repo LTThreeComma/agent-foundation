@@ -56,7 +56,9 @@ export function ConnectionsPage() {
                     ? "None"
                     : item.auth === "bearer"
                       ? "Bearer token"
-                      : "Headers",
+                      : item.auth === "oauth"
+                        ? "OAuth (personal account)"
+                        : "Headers",
                 ),
             },
             {

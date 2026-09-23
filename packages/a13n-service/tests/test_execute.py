@@ -1,23 +1,26 @@
 """Actual HTTP model, Harness, usage and sealed continuation across public inputs."""
 
+import asyncio
+import json
+
 import pytest
 from a13n_harness.usage import ModelUsageRecord
-from a13n_service.infra.db import short_session
+from a13n_service.infra.db import short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.runs import usage
 from a13n_service.runs.advance import advance_one
 from a13n_service.runs.attempts import claim_run
 from a13n_service.runs.execute import execute
-from a13n_service.runs.tables import RunRow, ThreadRow
+from a13n_service.runs.tables import AttemptRow, RunRow, ThreadRow
 from a13n_service.runs.usage import UsageRow
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 pytestmark = pytest.mark.anyio
 
 
 @pytest.mark.parametrize("replay_count", [1, 512])
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
-async def test_public_inputs_execute_real_model_and_continue_sealed_head(public_service, replay_count):
+async def test_public_inputs_execute_real_model_and_continue_sealed_head(public_service, replay_count, tmp_path):
     service = public_service
     app, client, path = service.app, service.client, service.workspace_path
     config = app.state.settings.model_copy(
@@ -104,6 +107,55 @@ async def test_public_inputs_execute_real_model_and_continue_sealed_head(public_
     assert current.status_code == 200, current.text
     assert current.json()["current"]["requests"] == 2
     assert current.json()["at_seal"]["requests"] == 1
+    # Reproduce the publisher/usage FK lock inversion with actual late usage ingestion.
+    contended = late.model_copy(update={"record_id": "usage_contended"})
+    report = None
+    try:
+        async with transaction(app.state.storage) as session:
+            await session.execute(select(RunRow).where(RunRow.id == run_id).with_for_update())
+            owner_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+            report = asyncio.create_task(
+                usage.ingest(app.state.storage, claim, contended, model_id=records[0].model_id, price_snapshot=None)
+            )
+            async with asyncio.timeout(10):
+                while not await session.scalar(
+                    text("SELECT count(*) FROM pg_stat_activity WHERE :owner = ANY(pg_blocking_pids(pid))"),
+                    {"owner": owner_pid},
+                ):
+                    if report.done():
+                        report.result()
+                        pytest.fail("Usage did not wait for the held Run lock")
+                    await asyncio.sleep(0.01)
+            await session.execute(text("SELECT pg_stat_clear_snapshot()"))
+            waiting = list(
+                await session.scalars(
+                    text("SELECT query FROM pg_stat_activity WHERE :owner = ANY(pg_blocking_pids(pid))"),
+                    {"owner": owner_pid},
+                )
+            )
+            # This fails immediately if the waiting INSERT already acquired its Attempt FK lock.
+            await session.execute(
+                select(AttemptRow).where(AttemptRow.id == claim.attempt_id).with_for_update(nowait=True)
+            )
+        await report
+        assert any(query.startswith("SELECT") and "FOR KEY SHARE" in query for query in waiting), waiting
+        async with short_session(app.state.storage) as session:
+            assert await session.get(UsageRow, contended.record_id) is not None
+        (tmp_path / "usage-lock-order-proof.json").write_text(
+            json.dumps(
+                {
+                    "ingest_waited_for_run_key_share": True,
+                    "canonical_holder_acquired_attempt_nowait": True,
+                    "late_usage_committed_after_release": True,
+                    "deduplication_and_immutable_conflict_checked": True,
+                },
+                indent=2,
+            )
+        )
+    finally:
+        if report is not None:
+            report.cancel()
+            await asyncio.gather(report, return_exceptions=True)
     assert app.state.storage.engine.pool.checkedout() == 0
 
 

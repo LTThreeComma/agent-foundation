@@ -50,6 +50,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/oauth/callback": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Oauth Callback */
+    get: operations["oauth_callback_api_v1_oauth_callback_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/organizations/{organization_id}/model-providers": {
     parameters: {
       query?: never;
@@ -343,6 +360,57 @@ export interface paths {
     head?: never;
     /** Update Connection */
     patch: operations["update_connection_api_v1_workspaces__workspace_id__connections__connection_id__patch"];
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorization": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Authorization Status */
+    get: operations["authorization_status_api_v1_workspaces__workspace_id__connections__connection_id__authorization_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Authorize Connection */
+    post: operations["authorize_connection_api_v1_workspaces__workspace_id__connections__connection_id__authorize_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Revoke Authorization */
+    post: operations["revoke_authorization_api_v1_workspaces__workspace_id__connections__connection_id__revoke_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/test": {
@@ -733,6 +801,44 @@ export interface components {
       field: string;
       mode: components["schemas"]["CredentialMode"];
     };
+    /** AuthorizationStart */
+    AuthorizationStart: {
+      authorization: components["schemas"]["AuthorizationView"];
+      /** Redirect Url */
+      redirect_url: string;
+    };
+    /** AuthorizationView */
+    AuthorizationView: {
+      /** Connection Id */
+      connection_id: string;
+      /** Expires At */
+      expires_at: string | null;
+      /** Failure */
+      failure: {
+        [key: string]: string;
+      } | null;
+      /** Generation */
+      generation: number;
+      /** Id */
+      id: string | null;
+      /** Operation Kind */
+      operation_kind: ("exchange" | "refresh") | null;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status:
+        | "not_authorized"
+        | "pending"
+        | "active"
+        | "revoked"
+        | "reauthorization_required";
+    };
+    /** AuthorizeRequest */
+    AuthorizeRequest: {
+      /** Return Url */
+      return_url: string;
+    };
     /** BearerCredential */
     BearerCredential: {
       /**
@@ -742,7 +848,7 @@ export interface components {
       token: string;
     };
     /** @enum {string} */
-    ConnectionAuthentication: "none" | "bearer" | "headers";
+    ConnectionAuthentication: "none" | "bearer" | "headers" | "oauth";
     /** ConnectionCreate */
     ConnectionCreate: {
       /** @default none */
@@ -813,7 +919,8 @@ export interface components {
     };
     Credential:
       | components["schemas"]["BearerCredential"]
-      | components["schemas"]["HeadersCredential"];
+      | components["schemas"]["HeadersCredential"]
+      | components["schemas"]["OAuthClientCredential"];
     /**
      * CredentialMode
      * @enum {string}
@@ -915,6 +1022,7 @@ export interface components {
     };
     /** MCPConfig */
     MCPConfig: {
+      oauth?: components["schemas"]["OAuthConfig"] | null;
       /**
        * Recovery Retry Safe Tools
        * @default []
@@ -1072,6 +1180,33 @@ export interface components {
       payload: components["schemas"]["MessagePayload"];
       /** Session Id */
       session_id?: string | null;
+    };
+    /** OAuthClientCredential */
+    OAuthClientCredential: {
+      /**
+       * Client Secret
+       * Format: password
+       */
+      client_secret: string;
+    };
+    /** OAuthConfig */
+    OAuthConfig: {
+      /** Client Id */
+      client_id: string;
+      /** Issuer */
+      issuer: string;
+      /**
+       * Scopes
+       * @default []
+       */
+      scopes?: string[];
+      /**
+       * Token Endpoint Auth Method
+       * @default none
+       * @enum {string}
+       */
+      token_endpoint_auth_method?:
+        "none" | "client_secret_basic" | "client_secret_post";
     };
     /**
      * PriceComponent
@@ -1634,6 +1769,40 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SessionProfile"];
+        };
+      };
+    };
+  };
+  oauth_callback_api_v1_oauth_callback_get: {
+    parameters: {
+      query: {
+        state: string;
+        code?: string | null;
+        error?: string | null;
+        iss?: string | null;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };
@@ -2386,6 +2555,106 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ConnectionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  authorization_status_api_v1_workspaces__workspace_id__connections__connection_id__authorization_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AuthorizationView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  authorize_connection_api_v1_workspaces__workspace_id__connections__connection_id__authorize_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthorizeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AuthorizationStart"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revoke_authorization_api_v1_workspaces__workspace_id__connections__connection_id__revoke_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        workspace_id: string;
+        connection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AuthorizationView"];
         };
       };
       /** @description Validation Error */

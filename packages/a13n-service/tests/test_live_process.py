@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import httpx2
 import pytest
 from a13n_service.runs.streams import AttemptStream, Bounds
+from a13n_service.settings import Worker as WorkerSettings
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -78,7 +79,8 @@ async def cli(config, *args, stdin=None):
 
 
 @pytest.fixture
-async def live_service(empty_database, redis_url, model_url, tmp_path, agent_configurator):
+async def live_service(empty_database, redis_url, model_url, tmp_path, agent_configurator, request):
+    lease_seconds = getattr(request, "param", 3)
     cert, key = certificate(tmp_path)
     processes, handles = [], []
     config_paths = []
@@ -102,7 +104,7 @@ private_cidrs = ["127.0.0.0/8"]
 http_origins = [{json.dumps(model_url.removesuffix("/v1"))}]
 [worker]
 slots = 1
-lease_seconds = 3
+lease_seconds = {lease_seconds}
 scan_seconds = 0.2
 authority_seconds = 0.2
 [control]
@@ -259,6 +261,7 @@ async def test_public_process_journey_with_two_workers_and_slow_model(live_servi
 
 @pytest.mark.parametrize("model_url", ["live"], indirect=True)
 @pytest.mark.parametrize("action", ["interrupt", "revoke"])
+@pytest.mark.parametrize("live_service", [WorkerSettings().lease_seconds], indirect=True)
 async def test_running_authority_changes_cancel_a_real_outstanding_request(live_service, empty_database, action):
     from a13n_service.infra.db import Storage, short_session, transaction
     from a13n_service.runs.tables import RunRow
@@ -385,3 +388,39 @@ async def test_steer_preserves_two_distinct_live_and_durable_responses(live_serv
     assert all(item["status"] == "consumed" for item in final["inputs"])
     reopened = (await client.get(items_url)).json()
     assert reopened["segments"] == final["segments"] and reopened["inputs"] == final["inputs"]
+
+
+@pytest.mark.parametrize("model_url", ["live"], indirect=True)
+async def test_cli_worker_emits_safe_structured_failure_origin(live_service):
+    service = live_service
+    marker = "private-input-must-not-enter-worker-log"
+    submitted = await service.client.post(
+        service.workspace_path + "/threads",
+        headers={"Idempotency-Key": "diagnostic-proof"},
+        json={
+            "kind": "message",
+            "agent_id": service.agent_id,
+            "payload": {"content": [{"type": "text", "text": "[fail] " + marker}]},
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    run_id = submitted.json()["run"]["id"]
+    async with asyncio.timeout(20):
+        while True:
+            response = await service.client.get(service.workspace_path + f"/runs/{run_id}/items")
+            if response.json()["complete"]:
+                break
+            await asyncio.sleep(0.025)
+    assert response.json()["status"] == "failed", response.text
+    logs = "\n".join((service.directory / f"role-{index}.log").read_text() for index in (1, 2))
+    records = [json.loads(line) for line in logs.splitlines() if line.startswith("{")]
+    record = next(
+        item for item in records if item.get("message") == "Run execution stopped" and item.get("run_id") == run_id
+    )
+    assert record["logger"] == "a13n_service.runs.worker" and record["error_type"]
+    assert record["harness_failure"] == {"exception_type": "ModelHTTPError", "status_code": 400}
+    assert any(item["logger"] == "a13n_harness.execution" for item in records)
+    assert all(item["type"] and item["frames"] for item in record["exception_details"])
+    assert marker not in logs and "Intentional local model failure" not in logs
+    assert all("message" not in item and "locals" not in item for item in record["exception_details"])
+    (service.directory / "cli-diagnostic-proof.json").write_text(json.dumps(record, indent=2))

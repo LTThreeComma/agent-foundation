@@ -106,6 +106,7 @@ async def test_connection(
         keys=request.app.state.key_ring,
         policy=request.app.state.endpoint_policy,
         catalog=request.app.state.tool_catalog,
+        oauth_settings=request.app.state.settings.oauth,
     )
 
 
@@ -128,4 +129,5 @@ async def connection_tools(
         keys=request.app.state.key_ring,
         policy=request.app.state.endpoint_policy,
         catalog=request.app.state.tool_catalog,
+        oauth_settings=request.app.state.settings.oauth,
     )

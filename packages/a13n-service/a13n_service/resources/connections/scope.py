@@ -24,7 +24,8 @@ def validate_tools(selected: ResolvedConnection, selection: ConnectionSelection)
 
 
 def check_collisions(selected: ResolvedConnection, headers: Mapping[str, str], keys: KeyRing) -> None:
-    if set(headers) & authentication_headers(selected, keys).keys():
+    reserved = {"authorization"} if selected.auth == "oauth" else authentication_headers(selected, keys).keys()
+    if set(headers) & reserved:
         raise ServiceError(
             "invalid_argument", "Caller headers collide with Connection authentication", {"connection_id": selected.id}
         )

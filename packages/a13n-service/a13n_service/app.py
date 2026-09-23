@@ -24,6 +24,7 @@ from a13n_service.infra.http import service_error_response, validation_error_res
 from a13n_service.infra.ingress import BodyLimit
 from a13n_service.infra.objects.local import LocalObjects
 from a13n_service.migrations.runner import heads, upgrade
+from a13n_service.resources.connections.oauth_maintenance import maintain_authorizations
 from a13n_service.runs.maintenance import maintain
 from a13n_service.runs.worker import Worker
 from a13n_service.settings import ProcessRole, Settings
@@ -85,6 +86,9 @@ def build_app(
             async with asyncio.timeout(config.server.readiness_timeout):
                 await check_schema(storage, expected)
             if role in {"all", "control"}:
+                background.append(
+                    asyncio.create_task(maintain_authorizations(storage, config.oauth), name="oauth-maintenance")
+                )
                 background.append(
                     asyncio.create_task(
                         maintain(storage, redis, config=config, policy=distribution.admission), name="run-maintenance"
