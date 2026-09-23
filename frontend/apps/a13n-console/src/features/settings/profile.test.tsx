@@ -66,14 +66,17 @@ it("opens image selection from the avatar and preserves the upload version and m
   const file = new File(["image"], "avatar.png", { type: "image/png" });
   await user.upload(input, file);
   await waitFor(() => expect(http.PUT).toHaveBeenCalledOnce());
-  expect(http.PUT).toHaveBeenCalledWith("/api/v1/workspaces/{workspace}/icon", {
-    headers: { "If-Match": '"v1"', "Content-Type": "image/png" },
-    params: {
-      header: { "If-Match": '"v1"', "Content-Type": "image/png" },
-      path: { workspace: "ws_preview" },
+  expect(http.PUT).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace_id}/icon",
+    {
+      headers: { "If-Match": '"v1"', "Content-Type": "image/png" },
+      params: {
+        header: { "If-Match": '"v1"', "Content-Type": "image/png" },
+        path: { workspace_id: "ws_preview" },
+      },
+      body: file,
     },
-    body: file,
-  });
+  );
   expect(input.value).toBe("");
   await screen.findByRole("button", { name: "Remove image" });
 });
@@ -110,12 +113,12 @@ it("changes a workspace key independently and navigates to its new address", asy
     ),
   );
   expect(http.PATCH).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace}",
+    "/api/v1/workspaces/{workspace_id}",
     expect.objectContaining({
       body: { name: "Product workspace", key: "research" },
       params: {
         header: { "If-Match": '\"v1\"' },
-        path: { workspace: "ws_preview" },
+        path: { workspace_id: "ws_preview" },
       },
     }),
   );

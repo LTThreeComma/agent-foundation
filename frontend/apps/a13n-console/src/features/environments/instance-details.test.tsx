@@ -1,12 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Schema } from "../../shared/api";
 import { EnvironmentDetails } from "./instance-details";
 
-const http = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
-const access = vi.hoisted(() => ({ can: vi.fn((_action: string) => true) }));
+const http = vi.hoisted(() => ({
+  GET: vi.fn(),
+  POST: vi.fn(),
+  DELETE: vi.fn(),
+}));
+const access = vi.hoisted(() => ({ can: vi.fn((_verb: string) => true) }));
 vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({ workspace: { id: "ws_test" }, can: access.can }),
@@ -22,7 +26,6 @@ vi.mock("react-i18next", () => ({
 beforeEach(() => {
   access.can.mockImplementation(() => true);
 });
-const capabilities = { supports_stop: true, supports_destroy: true };
 
 /** Lifecycle commands live in the panel's overflow menu. */
 async function lifecycle(
@@ -36,65 +39,99 @@ async function lifecycle(
   await user.click(await screen.findByRole("menuitem", { name }));
 }
 
-const environment: Schema["Environment"] = {
+const environment: Schema["EnvironmentView"] = {
   id: "env_test",
   name: "Research files",
   organization_id: "org_test",
   workspace_id: "ws_test",
-  provider_id: "envp_test",
-  template_revision_id: "envrev_test",
-  ownership: "managed",
-
-  generation: 1,
-  status: "running",
-  retention_condition: "idle",
-  condition_since: "2026-09-18T00:00:00Z",
+  provider_id: "eprov_test",
+  template_id: "envtpl_test",
+  device_id: null,
+  owner_principal_id: null,
+  status: "ready",
+  operation_id: null,
+  operation_started_at: null,
+  failure: null,
+  last_used_at: "2026-09-18T00:00:00Z",
+  version: 1,
+  created_by_id: "usr_test",
   created_at: "2026-09-18T00:00:00Z",
   updated_at: "2026-09-18T00:00:00Z",
 };
+const template = {
+  id: "envtpl_test",
+  config: { recipe: {}, stop_after_seconds: null, delete_after_seconds: null },
+};
+const provider = { id: "eprov_test", name: "Docker", type: "docker" };
+/** Stop and destroy are capabilities of the provider's type. */
+function providerType(supports_stop: boolean, supports_destroy: boolean) {
+  return { type: provider.type, supports_stop, supports_destroy };
+}
+const failure = {
+  code: "environment_unavailable",
+  message: "Provider unreachable",
+  certainty: "unknown" as const,
+  permanent: false,
+  operation_id: "envoper_test",
+  at: "2026-09-18T00:00:00Z",
+};
+
+/** Reads answer from the current environment; the ETag follows its version. */
+function serve(
+  current: () => Schema["EnvironmentView"],
+  type = providerType(true, true),
+) {
+  http.GET.mockImplementation(async (path: string) => {
+    if (path === "/api/v1/provider-types/{kind}")
+      return { data: { items: [type], next_cursor: null } };
+    if (path.includes("environment-providers")) return { data: provider };
+    if (path.includes("environment-templates")) return { data: template };
+    const value = current();
+    return {
+      data: value,
+      response: new Response(null, {
+        headers: { ETag: `"env_test:${value.version}"` },
+      }),
+    };
+  });
+}
+
+function open(value: Schema["EnvironmentView"] = environment) {
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={cache}>
+      <EnvironmentDetails environment={value} />
+    </QueryClientProvider>,
+  );
+  return { cache, user };
+}
 
 it.each([
-  ["stop", "completed", "stopped"],
-  ["delete", "completed", "deleted"],
-  ["stop", "failed", "unavailable"],
+  ["stop", "stopping", "stopped"],
+  ["delete", "deleting", "deleted"],
+  ["stop", "stopping", "failed"],
 ] as const)(
-  "refreshes open details after a pending %s command becomes %s",
-  async (action, outcome, status) => {
-    let finished = false;
-    let detailReads = 0;
-    const receipt = () => ({
-      id: "envcmd_test",
-      status: finished ? outcome : "pending",
-    });
-    http.GET.mockImplementation(async (path: string) => {
-      if (path.includes("environment-commands")) return { data: receipt() };
-      if (path.includes("environment-providers"))
-        return {
-          data: { id: "envp_test", name: "Local", type: "direct_local" },
-        };
-      detailReads++;
-      return {
-        data: {
-          ...environment,
-          ...capabilities,
-          status: finished ? status : "running",
-          retention: { idle: { stop_after: 600, delete_after: null } },
-        },
-        response: new Response(null, { headers: { ETag: '"v1"' } }),
+  "refreshes open details while a %s operation reports %s until %s",
+  async (action, phase, outcome) => {
+    let current = environment;
+    serve(() => current);
+    const command = async () => {
+      current = {
+        ...current,
+        status: phase,
+        operation_id: "envoper_test",
+        version: 2,
       };
-    });
-    http.POST.mockImplementation(async () => ({ data: receipt() }));
-    const cache = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const user = userEvent.setup();
-    render(
-      <QueryClientProvider client={cache}>
-        <EnvironmentDetails environment={environment} />
-      </QueryClientProvider>,
-    );
+      return { data: current };
+    };
+    http.POST.mockReset().mockImplementation(command);
+    http.DELETE.mockReset().mockImplementation(command);
+    const { cache, user } = open();
     await user.click(screen.getByRole("button", { name: "Details" }));
-    await screen.findByText("running");
+    await screen.findByText("ready");
     await lifecycle(user, action === "stop" ? "Stop target" : "Delete target");
     await user.click(
       screen.getByRole("button", {
@@ -104,171 +141,58 @@ it.each([
             : "Delete environment target",
       }),
     );
-    await screen.findByText("pending");
-    await waitFor(() => expect(detailReads).toBeGreaterThan(1));
-    const before = detailReads;
-    expect(screen.getByText("running")).toBeTruthy();
-    finished = true;
-    await screen.findByText(status, {}, { timeout: 4000 });
-    expect(detailReads).toBeGreaterThan(before);
-    expect(screen.getByText(outcome)).toBeTruthy();
+    const request = {
+      params: { path: { workspace_id: "ws_test", environment_id: "env_test" } },
+      headers: { "If-Match": '"env_test:1"' },
+    };
+    if (action === "stop")
+      expect(http.POST).toHaveBeenCalledWith(
+        "/api/v1/workspaces/{workspace_id}/environments/{environment_id}/stop",
+        request,
+      );
+    else
+      expect(http.DELETE).toHaveBeenCalledWith(
+        "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
+        request,
+      );
+    await screen.findByText(phase);
+    expect(screen.getByText("pending")).toBeTruthy();
+    expect(screen.getByText("envoper_test")).toBeTruthy();
+    current =
+      outcome === "failed"
+        ? { ...current, failure, version: 3 }
+        : { ...current, status: outcome, operation_id: null, version: 3 };
+    await screen.findByText(outcome, {}, { timeout: 4000 });
     cache.clear();
   },
 );
 
 it.each([
-  ["managed", { idle: { stop_after: null, delete_after: null } }],
+  ["managed", "envtpl_test"],
   ["external", null],
 ] as const)(
-  "explains %s retention without fetching the template",
-  async (ownership, retention) => {
+  "explains %s retention from the template's current idle policy",
+  async (ownership, templateId) => {
     http.GET.mockClear();
-    http.GET.mockImplementation(async (path: string) => ({
-      data: path.includes("environment-providers")
-        ? { id: "envp_test", name: "Local", type: "direct_local" }
-        : {
-            ...environment,
-            ownership,
-            retention,
-            supports_stop: ownership === "managed",
-            supports_destroy: ownership === "managed",
-          },
-      response: new Response(null, { headers: { ETag: '"v1"' } }),
-    }));
-    const cache = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    render(
-      <QueryClientProvider client={cache}>
-        <EnvironmentDetails environment={{ ...environment, ownership }} />
-      </QueryClientProvider>,
-    );
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Details" }));
+    const value = { ...environment, template_id: templateId };
+    serve(() => value);
+    const { cache, user } = open(value);
+    await user.click(screen.getByRole("button", { name: "Details" }));
     await screen.findByText("Effective retention policy");
+    const templateRead = http.GET.mock.calls.some(([path]) =>
+      path.includes("environment-templates"),
+    );
     if (ownership === "managed") {
       expect(screen.getAllByText("Disabled")).toHaveLength(2);
-      expect(
-        screen.getByText(
-          "Frozen at allocation. Later template changes do not affect this environment.",
-        ),
-      ).toBeTruthy();
+      expect(templateRead).toBe(true);
     } else {
       expect(
         screen.getByText(
           "Externally owned: Service does not automatically stop or delete this target.",
         ),
       ).toBeTruthy();
-      expect(
-        screen.queryByRole("button", { name: "Environment actions" }),
-      ).toBeNull();
+      expect(templateRead).toBe(false);
     }
-    expect(
-      http.GET.mock.calls.some(([path]) => path.includes("template")),
-    ).toBe(false);
-    cache.clear();
-  },
-);
-
-it.each([false, true])(
-  "starts a new acknowledged stop and preserves lost-acknowledgement retry identity (%s)",
-  async (loseAcknowledgement) => {
-    http.POST.mockClear();
-    let status = "running";
-    let loseNext = loseAcknowledgement;
-    const receipts = new Map<string, { id: string; status: string }>();
-    http.POST.mockImplementation(
-      async (
-        _path: string,
-        options: { params: { header: { "Idempotency-Key": string } } },
-      ) => {
-        const key = options.params.header["Idempotency-Key"];
-        if (!receipts.has(key))
-          receipts.set(key, {
-            id: `envcmd_${receipts.size + 1}`,
-            status: "completed",
-          });
-        status = "stopped";
-        if (loseNext) {
-          loseNext = false;
-          throw new Error("Acknowledgement lost");
-        }
-        return { data: receipts.get(key) };
-      },
-    );
-    http.GET.mockImplementation(
-      async (
-        path: string,
-        options: { params: { path: { command_id?: string } } },
-      ) => {
-        if (path.includes("environment-commands"))
-          return {
-            data: [...receipts.values()].find(
-              (receipt) => receipt.id === options.params.path.command_id,
-            ),
-          };
-        if (path.includes("environment-providers"))
-          return {
-            data: { id: "envp_test", name: "Local", type: "direct_local" },
-          };
-        return {
-          data: {
-            ...environment,
-            ...capabilities,
-            status,
-            retention: { idle: { stop_after: null, delete_after: null } },
-          },
-          response: new Response(null, { headers: { ETag: '"v1"' } }),
-        };
-      },
-    );
-    const cache = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const user = userEvent.setup();
-    render(
-      <QueryClientProvider client={cache}>
-        <EnvironmentDetails environment={environment} />
-      </QueryClientProvider>,
-    );
-    await user.click(screen.getByRole("button", { name: "Details" }));
-    await screen.findByText("running");
-    await lifecycle(user, "Stop target");
-    await user.click(
-      screen.getByRole("button", { name: "Stop environment target" }),
-    );
-    if (loseAcknowledgement) {
-      await screen.findByText("Acknowledgement lost");
-      await user.click(
-        screen.getByRole("button", { name: "Stop environment target" }),
-      );
-      expect(http.POST.mock.calls[0][1].params.header["Idempotency-Key"]).toBe(
-        http.POST.mock.calls[1][1].params.header["Idempotency-Key"],
-      );
-    }
-    await screen.findByText("envcmd_1");
-    await screen.findByText("stopped");
-    await user.click(
-      within(
-        screen.getByRole("complementary", { name: "Environment details" }),
-      ).getByRole("button", { name: "Close" }),
-    );
-    // Another Run resumes the same target while this component stays mounted.
-    status = "running";
-    await user.click(screen.getByRole("button", { name: "Details" }));
-    await screen.findByText("running");
-    await lifecycle(user, "Stop target");
-    await user.click(
-      screen.getByRole("button", { name: "Stop environment target" }),
-    );
-    await screen.findByText("envcmd_2");
-    await screen.findByText("stopped");
-    expect(receipts.size).toBe(2);
-    expect(
-      http.POST.mock.calls.at(-1)![1].params.header["Idempotency-Key"],
-    ).not.toBe(http.POST.mock.calls[0][1].params.header["Idempotency-Key"]);
-    expect(http.POST).toHaveBeenCalledTimes(loseAcknowledgement ? 3 : 2);
     cache.clear();
   },
 );
@@ -278,121 +202,69 @@ it.each([
   [true, false],
   [false, false],
 ])(
-  "shows only supported lifecycle actions without provider-read access (stop=%s, destroy=%s)",
+  "shows only the lifecycle actions a managed environment's provider type supports (stop=%s, destroy=%s)",
   async (supports_stop, supports_destroy) => {
-    access.can.mockImplementation(
-      (action: string) => action !== "environment_provider.read",
-    );
-    http.GET.mockClear();
-    http.GET.mockResolvedValue({
-      data: {
-        ...environment,
-        supports_stop,
-        supports_destroy,
-        retention: { idle: { stop_after: null, delete_after: null } },
-      },
-      response: new Response(null, { headers: { ETag: '"v1"' } }),
-    });
-    const cache = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const user = userEvent.setup();
-    render(
-      <QueryClientProvider client={cache}>
-        <EnvironmentDetails environment={environment} />
-      </QueryClientProvider>,
-    );
+    serve(() => environment, providerType(supports_stop, supports_destroy));
+    const { cache, user } = open();
     await user.click(screen.getByRole("button", { name: "Details" }));
     await screen.findByText("Effective retention policy");
-    const actions = screen.queryByRole("button", {
-      name: "Environment actions",
-    });
-    expect(!!actions).toBe(supports_stop || supports_destroy);
+    await waitFor(() =>
+      expect(http.GET).toHaveBeenCalledWith(
+        "/api/v1/provider-types/{kind}",
+        expect.anything(),
+      ),
+    );
+    const actions = supports_stop || supports_destroy;
     if (actions) {
-      await user.click(actions);
+      await user.click(
+        await screen.findByRole("button", { name: "Environment actions" }),
+      );
       await screen.findByRole("menu");
-    }
+    } else
+      expect(
+        screen.queryByRole("button", { name: "Environment actions" }),
+      ).toBeNull();
     expect(!!screen.queryByRole("menuitem", { name: "Stop target" })).toBe(
       supports_stop,
     );
     expect(!!screen.queryByRole("menuitem", { name: "Delete target" })).toBe(
       supports_destroy,
     );
-    expect(
-      http.GET.mock.calls.every(
-        ([path]) => !path.includes("environment-provider"),
-      ),
-    ).toBe(true);
     cache.clear();
   },
 );
 
-it("shows revocation for a paired external device without stop or destroy capabilities", async () => {
-  let revoked = false;
+it("shows a registered device's ID and retires it without stop", async () => {
   const device = {
     ...environment,
-    ownership: "external" as const,
-    template_revision_id: null,
+    template_id: null,
     device_id: "work-laptop",
-    device_registration: "paired" as const,
   };
-  http.GET.mockImplementation(async (path: string) => ({
-    data: path.includes("environment-providers")
-      ? {
-          id: "envp_test",
-          name: "Connected devices",
-          type: "websocket_envd",
-        }
-      : path.endsWith("/connection")
-        ? { status: revoked ? "offline" : "online" }
-        : {
-            ...device,
-            device_registration: revoked ? "revoked" : "paired",
-            retention: null,
-            supports_stop: false,
-            supports_destroy: false,
-          },
-    response: new Response(null, { headers: { ETag: '"v1"' } }),
-  }));
-  http.POST.mockReset().mockImplementation(async () => {
-    revoked = true;
-    return { data: { ...device, device_registration: "revoked" } };
-  });
-  const cache = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const user = userEvent.setup();
-  render(
-    <QueryClientProvider client={cache}>
-      <EnvironmentDetails environment={device} />
-    </QueryClientProvider>,
-  );
+  serve(() => device, providerType(false, false));
+  const { cache, user } = open(device);
   await user.click(screen.getByRole("button", { name: "Details" }));
-  expect(await screen.findAllByText("online")).toHaveLength(2);
-  expect(screen.queryByText("unavailable")).toBeNull();
-  await lifecycle(user, "Revoke connection");
-  expect(screen.queryByRole("menuitem", { name: "Stop target" })).toBeNull();
-  expect(
-    screen.getByText(
-      /Files, the operating-system process, and Environment history are not deleted/,
-    ),
-  ).toBeTruthy();
+  expect(await screen.findByText("Device ID")).toBeTruthy();
+  expect(screen.getByText("work-laptop")).toBeTruthy();
   await user.click(
-    screen.getByRole("button", { name: "Revoke device connection" }),
+    await screen.findByRole("button", { name: "Environment actions" }),
   );
+  await screen.findByRole("menu");
+  expect(screen.queryByRole("menuitem", { name: "Stop target" })).toBeNull();
+  expect(screen.getByRole("menuitem", { name: "Delete target" })).toBeTruthy();
+  cache.clear();
+});
+
+it("hides lifecycle commands and renaming without write access", async () => {
+  access.can.mockImplementation((verb: string) => verb !== "write");
+  serve(() => environment);
+  const { cache, user } = open();
+  await user.click(screen.getByRole("button", { name: "Details" }));
+  await screen.findByText("Effective retention policy");
   await waitFor(() =>
-    expect(http.POST).toHaveBeenCalledWith(
-      "/api/v1/environments/{environment_id}/revoke-device",
-      {
-        params: { path: { environment_id: environment.id } },
-      },
-    ),
+    expect(
+      screen.queryByRole("button", { name: "Environment actions" }),
+    ).toBeNull(),
   );
-  await waitFor(() =>
-    expect(screen.getAllByText("revoked").length).toBeGreaterThan(0),
-  );
-  expect(
-    screen.queryByRole("button", { name: "Environment actions" }),
-  ).toBeNull();
+  expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
   cache.clear();
 });

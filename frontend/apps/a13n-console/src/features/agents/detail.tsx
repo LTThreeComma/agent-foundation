@@ -1,11 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  MenuItem,
-  MenuSeparator,
-  ModalFrame,
-  StatusPill,
-} from "a13n-ui";
+import { Button, MenuItem, MenuSeparator, ModalFrame } from "a13n-ui";
 import {
   DownloadSimpleIcon,
   PencilSimpleIcon,
@@ -17,21 +11,15 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import {
-  allPages,
-  commandHeaders,
-  data,
-  representation,
-  workspaceHeaders,
-} from "../../shared/api";
+import { allPages, data, ifMatch, representation } from "../../shared/api";
 import {
   ErrorNotice,
+  ErrorToast,
   Loading,
   StatePill,
   Timestamp,
 } from "../../shared/feedback";
 import { CopyButton } from "../../shared/identity";
-import { useIdempotency } from "../../shared/idempotency";
 import {
   DetailHeader,
   DetailPage,
@@ -41,10 +29,13 @@ import {
   useTabParam,
 } from "../../shared/page";
 import { isResourceKey } from "../../shared/paths";
+import { environmentTemplates } from "../environments/api";
+import { useConfigurationAssistant } from "./assistant";
 import { AgentAvatar } from "./avatar";
 import type { AgentConfig } from "./configuration";
 import { AgentEditor, type AgentDraftSummary } from "./editor";
 import { ExportAgent } from "./export";
+import { editableAgent } from "./queries";
 import { AgentActions, AgentDetails } from "./settings";
 import { AgentVersions } from "./versions";
 import styles from "./agents.module.css";
@@ -58,7 +49,7 @@ export function AgentDetail() {
     { workspace, can, basePath } = useWorkspace(),
     navigate = useNavigate(),
     cache = useQueryClient(),
-    idempotency = useIdempotency();
+    assistant = useConfigurationAssistant();
   const [tab, setTab] = useTabParam(["configuration", "versions"]);
   const [generation, setGeneration] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -67,22 +58,32 @@ export function AgentDetail() {
     enabled: isResourceKey(agentKey),
     queryFn: async ({ signal }) => {
       const resource = representation(
-        await client.http.GET("/api/v1/workspaces/{workspace}/agents/{agent}", {
-          params: { path: { workspace: workspace.id, agent: agentKey } },
-          headers: workspaceHeaders(workspace.id),
-          signal,
-        }),
+        await client.http.GET(
+          "/api/v1/workspaces/{workspace_id}/agents/{agent_id}",
+          {
+            params: {
+              path: { workspace_id: workspace.id, agent_id: agentKey },
+            },
+            signal,
+          },
+        ),
       );
       if (!resource.value.default_revision_id)
         throw new Error(t("Agent configuration is unavailable."));
       const revision = data(
-        await client.http.GET("/api/v1/agent-revisions/{agent_revision_id}", {
-          params: {
-            path: { agent_revision_id: resource.value.default_revision_id },
+        await client.http.GET(
+          "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}",
+          {
+            params: {
+              path: {
+                workspace_id: workspace.id,
+                agent_id: resource.value.id,
+                revision_id: resource.value.default_revision_id,
+              },
+            },
+            signal,
           },
-          headers: workspaceHeaders(workspace.id),
-          signal,
-        }),
+        ),
       );
       return { ...resource, revision };
     },
@@ -91,22 +92,14 @@ export function AgentDetail() {
     queryKey: ["environment-template-choices", workspace.id],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        client.http
-          .GET("/api/v1/workspaces/{workspace}/environment-templates", {
-            params: {
-              path: { workspace: workspace.id },
-              query: { cursor, limit: 100 },
-            },
-            signal,
-          })
-          .then(data),
+        environmentTemplates(client, workspace.id, signal, cursor),
       ),
   });
   const save = useMutation({
     mutationFn: async (body: {
       config: AgentConfig;
       etag?: string;
-      change_summary?: string | null;
+      note?: string | null;
     }) => {
       if (!body.etag)
         throw new Error(
@@ -114,20 +107,14 @@ export function AgentDetail() {
         );
       const { etag, ...requestBody } = body;
       return client.http
-        .POST("/api/v1/workspaces/{workspace}/agents/{agent}/revisions", {
-          params: {
-            path: { workspace: workspace.id, agent: agentKey },
-            header: {
-              ...commandHeaders(workspace.id, idempotency.forBody(requestBody)),
-              "If-Match": etag,
-            },
-          },
+        .POST("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions", {
+          params: { path: { workspace_id: workspace.id, agent_id: agentKey } },
+          headers: ifMatch(etag),
           body: requestBody,
         })
         .then(data);
     },
     onSuccess: async () => {
-      idempotency.reset();
       await cache.invalidateQueries({
         queryKey: ["agent", workspace.id, agentKey],
       });
@@ -152,11 +139,8 @@ export function AgentDetail() {
     save.reset();
     setGeneration((value) => value + 1);
   };
-  const state = agent.archived_at
-    ? "archived"
-    : agent.enabled
-      ? "enabled"
-      : "disabled";
+  const state = agent.archived_at ? "archived" : "enabled";
+  const editable = can("write") && editableAgent(agent);
   const rail = (summary: AgentDraftSummary): ReactNode => {
     const environment = summary.environmentId
       ? (templates.data?.find((item) => item.id === summary.environmentId)
@@ -174,11 +158,11 @@ export function AgentDetail() {
               className={styles.railLink}
               onClick={() => setTab("versions")}
             >
-              v{revision.version}
+              v{revision.number}
             </button>
             {summary.dirty && (
               <span className="text-muted-foreground">
-                → v{revision.version + 1}
+                → v{revision.number + 1}
               </span>
             )}
           </RailRow>
@@ -231,7 +215,7 @@ export function AgentDetail() {
         {
           value: "versions",
           label: t("Versions"),
-          count: `v${revision.version}`,
+          count: `v${revision.number}`,
         },
       ]}
       tab={tab}
@@ -251,7 +235,7 @@ export function AgentDetail() {
           resourceKey={agent.key}
           description={agent.description}
           edit={
-            can("agent.update") && (
+            editable && (
               <ModalFrame
                 open={detailsOpen}
                 onOpenChange={setDetailsOpen}
@@ -285,21 +269,20 @@ export function AgentDetail() {
           }
           actions={
             <>
-              {can("agent.update") && (
+              {assistant.available && (
                 <Button
                   variant="outline"
-                  onClick={() =>
-                    navigate(`${basePath}/configuration/new?agent=${agent.id}`)
-                  }
+                  loading={assistant.pending}
+                  onClick={() => assistant.start({ agent, revision })}
                 >
                   <SparkleIcon size={15} aria-hidden="true" />
                   {t("Configure with assistant")}
                 </Button>
               )}
-              {can("agent.invoke") && (
+              {can("run") && (
                 <Button
                   variant="default"
-                  disabled={!agent.enabled || !!agent.archived_at}
+                  disabled={!!agent.archived_at}
                   onClick={() =>
                     navigate(`${basePath}/sessions/new?agent=${agent.id}`)
                   }
@@ -318,7 +301,7 @@ export function AgentDetail() {
                     <ExportAgent
                       agent={agent}
                       config={revision.config}
-                      version={revision.version}
+                      version={revision.number}
                       trigger={
                         <MenuItem closeOnClick={false}>
                           <DownloadSimpleIcon size={14} />
@@ -340,14 +323,12 @@ export function AgentDetail() {
           key={editorKey}
           agentId={agent.id}
           initial={revision.config}
-          version={revision.version}
+          version={revision.number}
           etag={query.data.etag}
           pending={save.isPending}
           error={save.error}
-          readonly={!can("agent.revision.create")}
-          submit={(config, etag, note) =>
-            save.mutate({ config, etag, change_summary: note })
-          }
+          readonly={!editable}
+          submit={(config, etag, note) => save.mutate({ config, etag, note })}
           discard={() => void reload()}
           rail={rail}
         />
@@ -358,6 +339,7 @@ export function AgentDetail() {
           onDefaultChanged={reload}
         />
       )}
+      <ErrorToast error={assistant.error} />
     </DetailPage>
   );
 }

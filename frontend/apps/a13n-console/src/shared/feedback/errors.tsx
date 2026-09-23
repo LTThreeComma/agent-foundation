@@ -8,28 +8,48 @@ import {
 } from "a13n-ui";
 import { WarningCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { ApiError } from "../../service-client";
 import styles from "./feedback.module.css";
 
-function errorDetails(error: unknown, t: (value: string) => string) {
-  const conflict =
-    error instanceof ApiError &&
-    (error.status === 412 ||
-      [
-        "version_conflict",
-        "thread_version_conflict",
-        "queue_version_conflict",
-      ].includes(error.code));
+/**
+ * A refusal whose Service message carries identifiers or numbers reads from
+ * its stable `details.reason` instead.
+ */
+function reasonCopy(error: ApiError, t: TFunction) {
+  if (error.code !== "conflict") return undefined;
+  const { reason, limit } = error.details;
+  switch (reason) {
+    case "mount_limit":
+      return t(
+        "A thread can mount at most {{limit}} environments. Remove one before adding another.",
+        { limit },
+      );
+    case "environment_limit":
+      return t(
+        "This workspace has reached its limit of {{limit}} managed environments. Delete one it no longer needs, then try again.",
+        { limit },
+      );
+    case "idempotency_key_reused":
+      return t(
+        "This request was already sent with different content. Send it again as a new request.",
+      );
+  }
+  return undefined;
+}
+
+function errorDetails(error: unknown, t: TFunction) {
+  const conflict = error instanceof ApiError && error.status === 412;
   return {
-    conflict,
     title: t(conflict ? "This resource changed" : "Something went wrong"),
     description: conflict
       ? t(
           "Your draft is preserved. Reload the latest version before trying again.",
         )
       : error instanceof Error
-        ? t(error.message)
+        ? (error instanceof ApiError && reasonCopy(error, t)) ||
+          t(error.message)
         : t("The request could not be completed."),
     requestId:
       error instanceof ApiError && error.requestId

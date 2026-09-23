@@ -1,6 +1,6 @@
 import { SearchPicker } from "a13n-ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Navigate,
   Outlet,
@@ -13,16 +13,22 @@ import { ChatIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { allPages, commandHeaders, data } from "../../shared/api";
+import { allPages, commandHeaders, data, type Schema } from "../../shared/api";
 import { Empty } from "../../shared/collection";
 import { ErrorNotice, Loading } from "../../shared/feedback";
 import { IconTile } from "../../shared/identity";
 import { useIdempotency } from "../../shared/idempotency";
 import { AgentAvatar } from "../agents/avatar";
-import { conversationQueries, invalidateConversation, runPath } from "./api";
+import { createManagedEnvironment } from "../environments/api";
+import {
+  CONSOLE_SESSION_LABELS,
+  conversationQueries,
+  invalidateConversation,
+  runPath,
+} from "./api";
 import { Composer, RunOptions, useRunOptions } from "./composer";
+import type { EnvironmentChoice } from "./composer/options-dialog";
 import { SessionList } from "./list";
-import { useConversationNotifications } from "./notifications";
 import { SessionHeader } from "./session-header";
 import { RunCollapseProvider } from "./transcript/debug/collapse";
 import { ThreadQueue } from "./transcript/queue";
@@ -32,22 +38,17 @@ export function ConversationsPage() {
   const { sessionId } = useParams();
   const location = useLocation();
   const nested = !!sessionId || /\/sessions\/new\/?$/.test(location.pathname);
-  const notifications = useConversationNotifications();
   return nested ? (
     <div className={`${styles.sessionStage} a13n-scrollbar`}>
-      <ErrorNotice
-        error={notifications.error}
-        retry={notifications.reconnect}
-      />
       <Outlet />
     </div>
   ) : (
-    <SessionList
-      notificationError={notifications.error}
-      reconnect={notifications.reconnect}
-    />
+    <SessionList />
   );
 }
+
+/** The mount a Thread's primary sandbox is known by. */
+const PRIMARY_MOUNT = "workspace";
 
 export function NewConversation() {
   const { t } = useTranslation(),
@@ -59,22 +60,52 @@ export function NewConversation() {
   const [agentId, setAgentId] = useState(search.get("agent") ?? ""),
     options = useRunOptions(),
     idempotency = useIdempotency();
+  // A link can prefill the first message, which the user still sends.
+  const message = search.get("message");
+  // What the first submission created before its Thread: a retry reuses it,
+  // so it replays that submission instead of leaving another one behind.
+  const prepared = useRef<{
+    session?: Schema["SessionView"];
+    environment?: Schema["EnvironmentView"];
+  }>({});
+  async function consoleSession() {
+    prepared.current.session ??= data(
+      await client.http.POST("/api/v1/workspaces/{workspace_id}/sessions", {
+        params: { path: { workspace_id: workspace.id } },
+        body: { labels: CONSOLE_SESSION_LABELS },
+      }),
+    );
+    return prepared.current.session;
+  }
+  /** A template choice reserves its environment first, then mounts it. */
+  async function primaryMount(
+    choice: EnvironmentChoice,
+  ): Promise<Schema["MountCreate"]> {
+    if (!("template_id" in choice)) return { name: PRIMARY_MOUNT, ...choice };
+    const reserved = prepared.current.environment;
+    const environment =
+      reserved?.template_id === choice.template_id
+        ? reserved
+        : await createManagedEnvironment(client, workspace.id, choice);
+    prepared.current.environment = environment;
+    return { name: PRIMARY_MOUNT, environment_id: environment.id };
+  }
   const agents = useQuery({
     queryKey: ["agent-picker", workspace.id],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
         client.http
-          .GET("/api/v1/workspaces/{workspace}/agents", {
+          .GET("/api/v1/workspaces/{workspace_id}/agents", {
             params: {
-              path: { workspace: workspace.id },
-              query: { cursor, limit: 100 },
+              path: { workspace_id: workspace.id },
+              query: { cursor, limit: 100, archived: false },
             },
             signal,
           })
           .then(data),
       ),
   });
-  const enabled = (agents.data ?? []).filter((agent) => agent.enabled);
+  const enabled = agents.data ?? [];
   const selected = enabled.find((agent) => agent.id === agentId);
   return (
     <div className={styles.startPage}>
@@ -113,34 +144,49 @@ export function NewConversation() {
           ]}
         />
         <Composer
-          disabled={!can("agent.invoke") || !agentId}
+          initial={
+            message ? { content: [{ type: "text", text: message }] } : undefined
+          }
+          disabled={!can("run") || !agentId}
           agentName={selected?.name}
           options={<RunOptions options={options} showAgent={false} />}
-          submit={async (input) => {
+          submit={async (payload) => {
+            const { environment, ...choice } = options.build();
             const body = {
-              ...options.build(),
+              ...choice,
               agent_id: agentId,
-              input,
-              session_purpose: "debug" as const,
+              payload,
+              session_id: (await consoleSession()).id,
+              environments: environment
+                ? [await primaryMount(environment)]
+                : [],
             };
-            const receipt = data(
-              await client.http.POST("/api/v1/workspaces/{workspace}/runs", {
-                params: {
-                  path: { workspace: workspace.id },
-                  header: commandHeaders(
-                    workspace.id,
-                    idempotency.forBody(body),
-                  ),
+            const { thread, run } = data(
+              await client.http.POST(
+                "/api/v1/workspaces/{workspace_id}/threads",
+                {
+                  params: {
+                    path: { workspace_id: workspace.id },
+                    header: commandHeaders(idempotency.forBody(body)),
+                  },
+                  body,
                 },
-                body,
-              }),
+              ),
             );
             void invalidateConversation(cache, workspace.id, {
-              sessionId: receipt.session_id,
-              threadId: receipt.thread_id,
-              runId: receipt.run_id,
+              sessionId: thread.session_id,
+              threadId: thread.id,
+              runId: run?.id,
             });
-            navigate(runPath(basePath, receipt));
+            navigate(
+              run
+                ? runPath(basePath, {
+                    session_id: run.session_id,
+                    thread_id: run.thread_id,
+                    run_id: run.id,
+                  })
+                : `${basePath}/sessions/${thread.session_id}/threads/${thread.id}`,
+            );
           }}
         />
       </div>
@@ -194,20 +240,14 @@ export function SessionLayout() {
 export function ThreadLayout() {
   const { t } = useTranslation(),
     { sessionId = "", threadId = "", runId } = useParams(),
-    { workspace, basePath } = useWorkspace(),
+    { workspace } = useWorkspace(),
     { search } = useLocation(),
     client = useClient(),
     queries = conversationQueries(client, workspace.id);
   const thread = useQuery(queries.thread(threadId));
-  if (thread.data?.configuration_draft_id)
-    return (
-      <Navigate
-        to={`${basePath}/configuration-threads/${threadId}${runId ? `?run=${runId}` : ""}`}
-        replace
-      />
-    );
+  // The latest Run: the active one, else the one sealed last.
   const selected =
-    runId ?? thread.data?.current_run_id ?? thread.data?.head_run_id;
+    runId ?? thread.data?.current_run_id ?? thread.data?.last_run_id;
   if (thread.data && thread.data.session_id !== sessionId)
     return (
       <ErrorNotice
@@ -237,7 +277,7 @@ export function ThreadLayout() {
               title={t("No runs yet")}
               description={t("This thread has not started a run.")}
             />
-            <ThreadQueue thread={thread.data} canConsume />
+            <ThreadQueue thread={thread.data} />
           </div>
         )
       )}

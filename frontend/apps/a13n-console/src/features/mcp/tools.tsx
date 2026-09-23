@@ -16,6 +16,7 @@ import { data, type Schema } from "../../shared/api";
 import { Empty } from "../../shared/collection";
 import { ErrorNotice } from "../../shared/feedback";
 import { JsonView } from "../../shared/forms";
+import { connectionPath } from "../connections/api";
 import styles from "./mcp.module.css";
 
 export function MCPTools({ connection }: { connection: Schema["Connection"] }) {
@@ -26,10 +27,12 @@ export function MCPTools({ connection }: { connection: Schema["Connection"] }) {
   const discovery = useMutation({
     mutationFn: () =>
       client.http
-        .POST("/api/v1/connections/{connection_id}/mcp/discover", {
-          params: { path: { connection_id: connection.id } },
-          body: { expected_version: connection.version },
-        })
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools",
+          {
+            params: { path: connectionPath(connection) },
+          },
+        )
         .then(data),
   });
   const tools =

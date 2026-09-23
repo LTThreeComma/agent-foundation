@@ -15,7 +15,7 @@ it("reuses the catalog logo for a saved remote MCP connection", async () => {
       items: [
         {
           key: "zoom",
-          endpoint_url: "https://mcp.zoom.us/mcp/zoom/streamable",
+          url: "https://mcp.zoom.us/mcp/zoom/streamable",
           logo_url: "https://cdn.simpleicons.org/zoom",
         },
       ],

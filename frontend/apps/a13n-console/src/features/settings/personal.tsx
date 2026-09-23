@@ -45,9 +45,9 @@ export function PersonalSettings() {
 }
 
 /**
- * Browsers holding a session for this account. The service records when a
- * session began and when it expires; it does not record the device or the
- * place it signed in from, so neither is shown.
+ * Browsers holding an active session for this account. The service records
+ * when a session began and when it expires; it does not record the device or
+ * the place it signed in from, so neither is shown.
  */
 function BrowserSessions() {
   const { t } = useTranslation(),
@@ -58,7 +58,7 @@ function BrowserSessions() {
     queryKey: ["browser-sessions", page.cursor],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/users/me/auth-sessions", {
+        .GET("/api/v1/users/me/login-sessions", {
           signal,
           params: { query: { cursor: page.cursor, limit: 30 } },
         })
@@ -88,29 +88,27 @@ function BrowserSessions() {
         items={items}
         caption={t("Browser sessions")}
         rowMenuLabel={t("Session actions")}
-        rowMenu={(item) =>
-          item.revoked_at ? null : (
-            <Confirm
-              subject={item.id}
-              title={t("Revoke session")}
-              description={t("This browser will need to sign in again.")}
-              triggerElement={
-                <MenuItem closeOnClick={false} variant="destructive">
-                  <SignOutIcon size={14} />
-                  {t("Revoke")}
-                </MenuItem>
-              }
-              danger
-              action={async () => {
-                await client.http.DELETE(
-                  "/api/v1/users/me/auth-sessions/{session_id}",
-                  { params: { path: { session_id: item.id } } },
-                );
-                await cache.invalidateQueries({ queryKey: ["identity"] });
-              }}
-            />
-          )
-        }
+        rowMenu={(item) => (
+          <Confirm
+            subject={item.id}
+            title={t("Revoke session")}
+            description={t("This browser will need to sign in again.")}
+            triggerElement={
+              <MenuItem closeOnClick={false} variant="destructive">
+                <SignOutIcon size={14} />
+                {t("Revoke")}
+              </MenuItem>
+            }
+            danger
+            action={async () => {
+              await client.http.DELETE(
+                "/api/v1/users/me/login-sessions/{session_id}",
+                { params: { path: { session_id: item.id } } },
+              );
+              await cache.invalidateQueries({ queryKey: ["identity"] });
+            }}
+          />
+        )}
         columns={[
           {
             label: t("Session"),
@@ -135,9 +133,7 @@ function BrowserSessions() {
           },
           {
             label: t("Status"),
-            render: (item) => (
-              <StatePill state={item.revoked_at ? "revoked" : "active"} />
-            ),
+            render: () => <StatePill state="active" />,
           },
         ]}
       />

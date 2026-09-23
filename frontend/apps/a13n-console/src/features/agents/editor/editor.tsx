@@ -2,8 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError } from "../../../service-client";
 import { ErrorToast } from "../../../shared/feedback";
-import { DetailLayout, SaveBar, Section } from "../../../shared/page";
-import { MemoryPresets } from "../../memory/presets";
+import { DetailLayout, SaveBar } from "../../../shared/page";
 import { ModelIcon } from "../../models/model-icon";
 import { useModelProviderDefinitions } from "../../models/provider-definitions";
 import { useAgentChoices } from "../choices";
@@ -12,7 +11,7 @@ import { AgentEnvironment } from "../environment";
 import { AgentToolsets } from "../toolsets";
 import { AdvancedSection } from "./advanced";
 import { ConnectionsSection, SkillsSection } from "./capabilities";
-import { buildDraftConfig, useAgentDraft } from "./draft";
+import { buildDraftConfig, thinkingEfforts, useAgentDraft } from "./draft";
 import { InstructionsSection } from "./instructions";
 import { ModelSection } from "./model";
 
@@ -45,6 +44,7 @@ export function AgentEditor({
   saveLabel,
   saveDisabled = false,
 }: {
+  /** The agent a save publishes a version of; none while creating. */
   agentId?: string;
   initial: AgentConfig;
   /** Omitted while creating: there is no published version yet. */
@@ -56,7 +56,7 @@ export function AgentEditor({
   submit: (config: AgentConfig, etag?: string, note?: string | null) => void;
   discard?: () => void;
   rail?: (summary: AgentDraftSummary) => ReactNode;
-  /** Name, description, and avatar fields shown while creating. */
+  /** Name and description fields shown while creating. */
   identity?: ReactNode;
   saveLabel?: string;
   saveDisabled?: boolean;
@@ -72,33 +72,28 @@ export function AgentEditor({
   const choices = useAgentChoices();
   const definitions = useModelProviderDefinitions();
   const selectedModel = choices.data?.models.find(
-    (item) => item.key === draft.model,
+    (item) => item.id === draft.model,
   );
-  const settingsSchema = definitions.data?.items.find(
-    (definition) =>
-      selectedModel?.model_api &&
-      definition.settings_schemas[selectedModel.model_api],
-  )?.settings_schemas[selectedModel?.model_api ?? ""];
-  const thinkingEfforts = (
-    (
-      (settingsSchema?.properties as Record<string, unknown> | undefined)
-        ?.thinking as { anyOf?: { enum?: unknown[] }[] } | undefined
-    )?.anyOf ?? []
-  )
-    .flatMap((variant) => variant.enum ?? [])
-    .filter((value): value is string => typeof value === "string");
+  const modelApi = selectedModel?.config.model_api;
+  const settingsSchema = modelApi
+    ? definitions.data?.items
+        .map((definition) => definition.settings_schemas?.[modelApi])
+        .find((schema) => schema !== undefined)
+    : undefined;
+  const efforts = thinkingEfforts(settingsSchema);
   const thinkingOptions = [
     { value: "true", label: t("On (default effort)") },
     { value: "false", label: t("Off") },
-    ...thinkingEfforts.map((value) => ({
+    ...efforts.map((value) => ({
       value,
       label: t(value.charAt(0).toUpperCase() + value.slice(1)),
     })),
     ...(draft.thinking &&
-    !["true", "false", ...thinkingEfforts].includes(draft.thinking)
+    !["true", "false", ...efforts].includes(draft.thinking)
       ? [{ value: draft.thinking, label: draft.thinking }]
       : []),
   ];
+  const built = buildDraftConfig(draft, settingsSchema, t);
   const invalidResponse =
     error instanceof ApiError && [400, 422].includes(error.status);
   const dirty = creating || draft.dirty;
@@ -107,21 +102,20 @@ export function AgentEditor({
   function save(event: FormEvent) {
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
-    const result = buildDraftConfig(draft, settingsSchema, t);
-    if (!result.ok) {
-      if (result.stage === "model") {
-        setModelValidation(result.error);
+    if (!built.ok) {
+      if (built.stage === "model") {
+        setModelValidation(built.error);
         setModelExpanded(true);
       } else {
         setModelValidation(undefined);
-        setValidation(result.error);
+        setValidation(built.error);
         setAdvancedExpanded(true);
       }
       return;
     }
     setModelValidation(undefined);
     setValidation(undefined);
-    submit(result.config, etag, note.trim() || null);
+    submit(built.config, etag, note.trim() || null);
   }
 
   return (
@@ -130,11 +124,7 @@ export function AgentEditor({
         rail={rail?.({
           modelName: selectedModel?.name ?? draft.model,
           modelIcon: selectedModel && (
-            <ModelIcon
-              upstream={selectedModel.upstream_model}
-              catalogRef={selectedModel.catalog_ref}
-              size={16}
-            />
+            <ModelIcon upstream={selectedModel.config.model_name} size={16} />
           ),
           environmentId: draft.environmentTemplateId,
           skillCount: draft.skills.length,
@@ -163,7 +153,8 @@ export function AgentEditor({
           <AgentToolsets
             value={draft.toolsets}
             onChange={draft.setToolsets}
-            reviewer={initial.reviewer}
+            config={built.ok ? built.config : undefined}
+            agentId={agentId}
             readOnly={readonly}
           />
           <AgentEnvironment
@@ -171,24 +162,6 @@ export function AgentEditor({
             onChange={draft.setEnvironmentTemplateId}
             disabled={readonly || pending}
           />
-          <Section
-            title={t("Memory")}
-            description={t(
-              "Help the agent understand people and build on past work.",
-            )}
-          >
-            <MemoryPresets
-              agentId={agentId}
-              savedProviderId={
-                initial.memory && "provider_id" in initial.memory
-                  ? initial.memory.provider_id
-                  : undefined
-              }
-              readOnly={readonly}
-              value={draft.memory}
-              onChange={draft.setMemory}
-            />
-          </Section>
           <AdvancedSection
             draft={draft}
             readOnly={readonly}

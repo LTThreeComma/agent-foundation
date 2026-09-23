@@ -24,7 +24,7 @@ it("retains the draft and original precondition until an explicit conflict reloa
       <QueryClientProvider client={cache}>
         <EnvironmentNameEditor
           key={key}
-          environment={{ id: "env_test", name }}
+          environment={{ id: "env_test", name, workspace_id: "ws_test" }}
           etag={etag}
           reload={reload}
         />
@@ -40,7 +40,7 @@ it("retains the draft and original precondition until an explicit conflict reloa
   expect(
     (screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value,
   ).toBe("My draft");
-  expect(http.PATCH.mock.calls[0][1].params.header).toEqual({
+  expect(http.PATCH.mock.calls[0][1].headers).toEqual({
     "If-Match": '"old"',
   });
   expect(reload).not.toHaveBeenCalled();
@@ -56,10 +56,8 @@ it("retains the draft and original precondition until an explicit conflict reloa
   await user.click(screen.getByRole("button", { name: "Save name" }));
   await waitFor(() => expect(reload).toHaveBeenCalledTimes(2));
   expect(http.PATCH.mock.calls[1][1]).toEqual({
-    params: {
-      path: { environment_id: "env_test" },
-      header: { "If-Match": '"fresh"' },
-    },
+    params: { path: { workspace_id: "ws_test", environment_id: "env_test" } },
+    headers: { "If-Match": '"fresh"' },
     body: { name: "My draft" },
   });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["environments"] });

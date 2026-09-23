@@ -11,6 +11,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
+import { ApiError } from "../../service-client";
 import { allPages, data, type Schema } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { webProviderApi } from "../web/api";
@@ -29,12 +30,14 @@ const names: Record<Definition["key"], string> = {
   shell: "Terminal",
   web: "Web",
   assets: "Assets",
+  configuration: "Configuration",
 };
 const groupDescriptions: Record<Definition["key"], string> = {
   files: "Read, write, and organize files.",
   shell: "Run commands and manage processes.",
   web: "Search and retrieve online content.",
   assets: "Publish files as agent assets.",
+  configuration: "Find resources and create agents and versions.",
 };
 const toolDescriptions: Record<string, Record<string, string>> = {
   files: {
@@ -64,29 +67,40 @@ const toolDescriptions: Record<string, Record<string, string>> = {
     download: "Download a resource",
   },
   assets: { publish: "Publish an asset" },
+  configuration: {
+    find: "Find workspace resources",
+    read: "Read a resource",
+    describe: "Describe the configuration schema",
+    create_agent: "Create an agent",
+    create_revision: "Publish an agent version",
+  },
 };
 
 export function AgentToolsets({
   value,
   onChange,
-  reviewer,
+  config,
+  agentId,
   readOnly = false,
 }: {
   value: Toolsets;
   onChange: Dispatch<SetStateAction<Toolsets>>;
-  reviewer: AgentConfig["reviewer"];
+  /** The whole configuration a save would publish, once the draft builds. */
+  config?: AgentConfig;
+  /** The agent the configuration would become a version of; none while creating. */
+  agentId?: string;
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const client = useClient();
-  const { workspace } = useWorkspace();
+  const { workspace, organization } = useWorkspace();
   const [selected, setSelected] = useState<Definition["key"] | null>(null);
   const catalog = useQuery({
     queryKey: ["toolset-catalog", workspace.id],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/toolsets", {
-          params: { path: { workspace: workspace.id } },
+        .GET("/api/v1/workspaces/{workspace_id}/toolsets", {
+          params: { path: { workspace_id: workspace.id } },
           signal,
         })
         .then(data),
@@ -95,7 +109,7 @@ export function AgentToolsets({
     queryKey: ["web-providers", workspace.id, "choices"],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        webProviderApi(client, {
+        webProviderApi(client, organization.id, {
           kind: "workspace",
           id: workspace.id,
         }).providers(signal, cursor),
@@ -104,34 +118,61 @@ export function AgentToolsets({
   const webProviderTypes = useQuery({
     queryKey: ["web-provider-types"],
     queryFn: ({ signal }) =>
-      client.http.GET("/api/v1/web-provider-types", { signal }).then(data),
-  });
-  const providers = webProviders.data ?? [];
-  const providerTypes = webProviderTypes.data?.items ?? [];
-  const [candidate, setCandidate] = useState<{
-    toolsets: Toolsets;
-    reviewer: AgentConfig["reviewer"];
-  } | null>(null);
-  useEffect(() => {
-    if (readOnly || !catalog.data) return;
-    const timer = window.setTimeout(
-      () => setCandidate({ toolsets: value, reviewer }),
-      350,
-    );
-    return () => window.clearTimeout(timer);
-  }, [value, reviewer, readOnly, catalog.data]);
-  const validation = useQuery({
-    queryKey: ["toolset-candidate", workspace.id, candidate],
-    enabled: !!candidate,
-    queryFn: ({ signal }) =>
       client.http
-        .POST("/api/v1/workspaces/{workspace}/toolsets/validate", {
-          params: { path: { workspace: workspace.id } },
-          body: candidate!,
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "web" } },
           signal,
         })
         .then(data),
   });
+  const providers = webProviders.data ?? [];
+  const providerTypes = webProviderTypes.data?.items ?? [];
+  // The draft rebuilds its configuration on every render; the text identifies it.
+  const configText = config?.model.model_id
+    ? JSON.stringify(config)
+    : undefined;
+  const [candidate, setCandidate] = useState<{
+    text: string;
+    config: AgentConfig;
+  } | null>(null);
+  useEffect(() => {
+    if (readOnly || !catalog.data || !config || !configText) return;
+    const timer = window.setTimeout(
+      () => setCandidate({ text: configText, config }),
+      350,
+    );
+    return () => window.clearTimeout(timer);
+  }, [configText, readOnly, catalog.data]);
+  const validation = useQuery({
+    queryKey: [
+      "agent-config-validation",
+      workspace.id,
+      agentId,
+      candidate?.text,
+    ],
+    enabled: !!candidate,
+    retry: false,
+    queryFn: async ({ signal }) => {
+      if (candidate)
+        await client.http.POST(
+          "/api/v1/workspaces/{workspace_id}/agents/validate",
+          {
+            params: { path: { workspace_id: workspace.id } },
+            body: { config: candidate.config, agent_id: agentId },
+            signal,
+          },
+        );
+      return null;
+    },
+  });
+  // A refusal names the field it concerns; any other failure is a request error.
+  const refusal =
+    validation.error instanceof ApiError &&
+    validation.error.code === "invalid_argument"
+      ? validation.error
+      : undefined;
+  const refusedField =
+    typeof refusal?.details.field === "string" ? refusal.details.field : "";
   function updateGroup(group: Definition, enabled: boolean) {
     onChange((previous) => ({
       ...previous,
@@ -431,43 +472,36 @@ export function AgentToolsets({
         })}
       </div>
       <ErrorNotice error={catalog.error} />
-      {validation.error && <ErrorNotice error={validation.error} />}
-      {candidate &&
-        JSON.stringify(candidate) ===
-          JSON.stringify({ toolsets: value, reviewer }) &&
-        validation.data?.errors.map((error, index) => (
-          <p
-            role="alert"
-            key={`${error.path}-${index}`}
-            className="text-sm text-destructive"
-          >
-            {error.path}: {t(error.code)}
-            {error.setup_destination?.kind === "web_provider" && (
-              <>
-                {" "}
-                ·{" "}
-                <a
-                  href={providersPath("web", "workspace", workspace.key)}
-                  className="underline"
-                >
-                  {t("Manage Web Providers")}
-                </a>
-              </>
-            )}
-            {error.setup_destination?.kind === "reviewer" && (
-              <>
-                {" "}
-                ·{" "}
-                <a
-                  href={`/workspace/${encodeURIComponent(workspace.key)}/models`}
-                  className="underline"
-                >
-                  {t("Manage models")}
-                </a>
-              </>
-            )}
-          </p>
-        ))}
+      {validation.error && !refusal && <ErrorNotice error={validation.error} />}
+      {refusal && candidate?.text === configText && (
+        <p role="alert" className="text-sm text-destructive">
+          {refusal.message}
+          {refusedField.startsWith("toolsets.web") && (
+            <>
+              {" "}
+              ·{" "}
+              <a
+                href={providersPath("web", "workspace", workspace.key)}
+                className="underline"
+              >
+                {t("Manage Web Providers")}
+              </a>
+            </>
+          )}
+          {/^(model|reviewer|media_understanding)\b/.test(refusedField) && (
+            <>
+              {" "}
+              ·{" "}
+              <a
+                href={`/workspace/${encodeURIComponent(workspace.key)}/models`}
+                className="underline"
+              >
+                {t("Manage models")}
+              </a>
+            </>
+          )}
+        </p>
+      )}
     </Section>
   );
 }

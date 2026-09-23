@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { ApiError } from "../../service-client";
-import { representation } from "../../shared/api";
+import { ifMatch, representation } from "../../shared/api";
 import { ErrorNotice, InlineLoading } from "../../shared/feedback";
 import { mediaDefaultsQuery } from "./api";
 import {
@@ -34,11 +34,9 @@ export function MediaUnderstandingDefaults() {
       selection: MediaSelection;
     }) =>
       client.http
-        .PUT("/api/v1/workspaces/{workspace}/media-understanding-defaults", {
-          params: {
-            path: { workspace: workspace.id },
-            header: { "If-Match": change.etag },
-          },
+        .PUT("/api/v1/workspaces/{workspace_id}/media-understanding-defaults", {
+          params: { path: { workspace_id: workspace.id } },
+          headers: ifMatch(change.etag),
           body: change.selection,
         })
         .then(representation),
@@ -80,9 +78,7 @@ export function MediaUnderstandingDefaults() {
           <MediaUnderstandingFields
             value={value}
             inherit={{ label: t("Not configured") }}
-            disabled={
-              !can("models.manage") || !query.data?.etag || save.isPending
-            }
+            disabled={!can("admin") || !query.data?.etag || save.isPending}
             pendingKind={inFlight?.kind}
             onChange={(selection, kind) => {
               const etag = query.data?.etag;

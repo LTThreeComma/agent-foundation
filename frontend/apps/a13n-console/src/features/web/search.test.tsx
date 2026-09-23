@@ -17,7 +17,8 @@ const http = vi.hoisted(() => ({
 }));
 vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
-  useWorkspace: () => ({
+  useAccess: () => ({
+    organization: { id: "org_test" },
     workspace: { id: "ws_test", key: "research" },
     can: () => true,
   }),
@@ -34,7 +35,7 @@ const provider = {
   workspace_id: "ws_test",
   organization_id: "org_test",
   credential_configured: true,
-  configuration: {},
+  config: {},
   version: 1,
 };
 const definition = {
@@ -79,7 +80,7 @@ beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = () => {};
   http.GET.mockImplementation(async (path: string) =>
     response(
-      path.endsWith("web-provider-types")
+      path === "/api/v1/provider-types/{kind}"
         ? { items: [definition] }
         : path.endsWith("{provider_id}")
           ? provider
@@ -135,7 +136,7 @@ it("creates a credential-free DuckDuckGo provider without an API key", async () 
   };
   http.GET.mockImplementation(async (path: string) =>
     response(
-      path.endsWith("web-provider-types")
+      path === "/api/v1/provider-types/{kind}"
         ? { items: [definition, keylessDefinition] }
         : { items: [], next_cursor: null },
     ),
@@ -147,9 +148,9 @@ it("creates a credential-free DuckDuckGo provider without an API key", async () 
   expect(screen.queryByLabelText("API key")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Add provider" }));
   await waitFor(() => expect(http.POST).toHaveBeenCalledOnce());
-  expect(http.POST.mock.calls[0][1].body).toMatchObject({
-    type: "duckduckgo",
-    name: "DuckDuckGo",
+  expect(http.POST.mock.calls[0][1]).toMatchObject({
+    params: { path: { organization_id: "org_test" } },
+    body: { workspace_id: "ws_test", type: "duckduckgo", name: "DuckDuckGo" },
   });
   expect(http.POST.mock.calls[0][1].body).not.toHaveProperty("credential");
 });
@@ -175,7 +176,7 @@ it("keeps the existing credential write-only and sends If-Match for edits", asyn
   await waitFor(() => expect(http.PATCH).toHaveBeenCalledOnce());
   expect(http.PATCH.mock.calls[0][1].body).not.toHaveProperty("credential");
   expect(http.PATCH.mock.calls[0][1].body.enabled).toBe(false);
-  expect(http.PATCH.mock.calls[0][1].params.header).toEqual({
+  expect(http.PATCH.mock.calls[0][1].headers).toEqual({
     "If-Match": '"v1"',
   });
 });
@@ -242,7 +243,7 @@ it("retains the provider draft across a stale ETag and requires loading the curr
   );
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(http.PATCH).toHaveBeenCalledTimes(2));
-  expect(http.PATCH.mock.calls[1][1].params.header).toEqual({
+  expect(http.PATCH.mock.calls[1][1].headers).toEqual({
     "If-Match": '\"v2\"',
   });
   expect(http.PATCH.mock.calls[1][1].body).toMatchObject({
@@ -312,7 +313,7 @@ it("submits an external provider's declared configuration and token", async () =
   await waitFor(() => expect(http.POST).toHaveBeenCalledOnce());
   expect(http.POST.mock.calls[0][1].body).toMatchObject({
     type: "acme_web",
-    configuration: { index: "guides", limit: 7, details: { enabled: true } },
+    config: { index: "guides", limit: 7, details: { enabled: true } },
     credential: { token: "external-secret" },
   });
 });
@@ -341,7 +342,7 @@ it("retains a saved nested credential when only ordinary fields change", async (
   };
   http.GET.mockImplementation(async (path: string) =>
     response(
-      path.endsWith("web-provider-types")
+      path === "/api/v1/provider-types/{kind}"
         ? { items: [nestedDefinition] }
         : provider,
     ),

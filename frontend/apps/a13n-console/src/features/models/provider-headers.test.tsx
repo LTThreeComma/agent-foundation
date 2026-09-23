@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
-import { serializeHeaders, type HeaderDraft } from "./provider-headers";
+import {
+  newHeaders,
+  serializeHeaders,
+  type HeaderDraft,
+} from "./provider-headers";
 
 it("retains saved values while rotating and deleting headers", () => {
   const rows: HeaderDraft[] = [
@@ -29,4 +33,15 @@ it("rejects case-insensitive duplicate headers", () => {
       [],
     ),
   ).toThrow("unique");
+});
+it("sends every header of a new provider with its value", () => {
+  expect(
+    newHeaders([
+      { id: "1", name: " X-Tenant ", value: "acme" },
+      { id: "2", name: "x-region", value: "eu" },
+    ]),
+  ).toEqual({ "x-tenant": "acme", "x-region": "eu" });
+  expect(() => newHeaders([{ id: "1", name: "x-tenant", value: "" }])).toThrow(
+    "Enter a value",
+  );
 });

@@ -51,11 +51,10 @@ export function ModelsPage() {
 /** The models collection, also embedded in organization settings. */
 export function Models({ scope }: { scope: ModelScope }) {
   const { t } = useTranslation(),
-    { can, organization, organizationAdmin } = useAccess(),
+    { can, organization, organizationCan } = useAccess(),
     client = useClient(),
-    page = useCursor(),
     [searchParams, setSearchParams] = useSearchParams();
-  const api = modelApi(client, scope);
+  const api = modelApi(client, organization.id, scope);
   const committedQuery = searchParams.get("q") ?? "";
   const [search, setSearch] = useState(committedQuery);
   useEffect(() => setSearch(committedQuery), [committedQuery]);
@@ -74,6 +73,7 @@ export function Models({ scope }: { scope: ModelScope }) {
   const enabled =
     status === "enabled" ? true : status === "disabled" ? false : undefined;
   const hasFilters = FILTER_KEYS.some((key) => searchParams.has(key));
+  const page = useCursor({ committedQuery, providerId, enabled, ownerScope });
   const updateFilters = (patch: Record<string, string>) => {
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
@@ -83,7 +83,6 @@ export function Models({ scope }: { scope: ModelScope }) {
       }
       return next;
     });
-    page.reset();
   };
   const query = useQuery({
     queryKey: [
@@ -120,7 +119,7 @@ export function Models({ scope }: { scope: ModelScope }) {
   const { selected } = rows;
   const providerById = new Map(providers.data?.map((item) => [item.id, item]));
   const manage =
-    scope.kind === "organization" ? organizationAdmin : can("models.manage");
+    scope.kind === "organization" ? organizationCan("write") : can("write");
   const items = query.data?.items ?? [];
   return (
     <div className={styles.list}>
@@ -237,7 +236,7 @@ export function Models({ scope }: { scope: ModelScope }) {
             caption={t("Models")}
             items={items}
             canActivateRow={(item) =>
-              item.workspace_id ? manage : organizationAdmin
+              item.workspace_id ? manage : organizationCan("write")
             }
             onRowActivate={rows.activate}
             columns={[
@@ -251,8 +250,7 @@ export function Models({ scope }: { scope: ModelScope }) {
                     resourceKey={item.key}
                     icon={
                       <ModelIcon
-                        upstream={item.upstream_model}
-                        catalogRef={item.catalog_ref}
+                        upstream={item.config.model_name}
                         provider={providerById.get(item.provider_id)?.type}
                         size={20}
                       />
@@ -291,9 +289,9 @@ export function Models({ scope }: { scope: ModelScope }) {
               {
                 label: t("Capabilities"),
                 render: (item) => {
-                  const labels = capabilityLabels(item.declarations);
+                  const labels = capabilityLabels(item.config.characteristics);
                   const roles = mediaDefaultBadges(
-                    item.key,
+                    item.id,
                     mediaDefaults.data?.value,
                   );
                   if (!labels.length && !roles.length)
@@ -358,12 +356,12 @@ export function Models({ scope }: { scope: ModelScope }) {
   );
 }
 
-/** At most three neutral chips; the rest of the declarations stay in the editor. */
-function capabilityLabels(declarations?: Schema["ModelDeclarations-Output"]) {
+/** Neutral chips; the rest of the characteristics stay in the editor. */
+function capabilityLabels(
+  characteristics?: Schema["HarnessModelCharacteristics-Output"],
+) {
   const labels: string[] = [];
-  if (declarations?.supports_tools) labels.push("Tools");
-  if (declarations?.capabilities?.includes("image_understanding"))
+  if (characteristics?.capabilities?.includes("image_understanding"))
     labels.push("Vision");
-  if (declarations?.structured_output) labels.push("Structured");
   return labels;
 }

@@ -11,23 +11,29 @@ import { AddWebProvider, WebProviderEditor } from "./editor";
 
 export function WebProviders({ scope }: { scope: WebProviderScope }) {
   const client = useClient(),
-    { can, organizationAdmin } = useAccess(),
+    { can, organizationCan, organization } = useAccess(),
     page = useCursor();
-  const rows = useResourceRows<Schema["WebProvider"]>();
+  const rows = useResourceRows<Schema["Provider"]>();
   const query = useQuery({
     queryKey: ["web-providers", scope.kind, scope.id, page.cursor],
     queryFn: ({ signal }) =>
-      webProviderApi(client, scope).providers(signal, page.cursor),
+      webProviderApi(client, organization.id, scope).providers(
+        signal,
+        page.cursor,
+      ),
   });
   const definitions = useQuery({
     queryKey: ["web-provider-types"],
     queryFn: ({ signal }) =>
-      client.http.GET("/api/v1/web-provider-types", { signal }).then(data),
+      client.http
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "web" } },
+          signal,
+        })
+        .then(data),
   });
   const manage =
-    scope.kind === "organization"
-      ? organizationAdmin
-      : can("web_provider.manage");
+    scope.kind === "organization" ? organizationCan("write") : can("write");
   const add = manage ? <AddWebProvider scope={scope} /> : undefined;
   const definitionFor = (type: string) =>
     definitions.data?.items.find((item) => item.type === type);
@@ -64,8 +70,7 @@ export function WebProviders({ scope }: { scope: WebProviderScope }) {
           definition: definitionFor(item.type)?.display_name,
           workspaceId: item.workspace_id,
           credentials:
-            credentialMode(definitionFor(item.type), item.configuration) !==
-            "required"
+            credentialMode(definitionFor(item.type), item.config) !== "required"
               ? "not_required"
               : item.credential_configured
                 ? "configured"

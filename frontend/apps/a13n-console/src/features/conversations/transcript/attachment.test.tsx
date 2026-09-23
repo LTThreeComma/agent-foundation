@@ -54,10 +54,11 @@ it("loads file identity but downloads authenticated content only on request", as
           })
         : Response.json({
             id: "ast_fixture",
-            filename: "review.md",
-            media_type: "text/markdown",
-            size_bytes: 14,
-            deleted_at: null,
+            name: "review.md",
+            content_type: "text/markdown",
+            size: 14,
+            digest: "sha256:fixture",
+            retired_at: null,
           });
     },
   });
@@ -67,7 +68,9 @@ it("loads file identity but downloads authenticated content only on request", as
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Download review.md" }));
   await waitFor(() => expect(downloadBlob).toHaveBeenCalledOnce());
-  expect(requests[1]?.headers.get("X-A13N-Workspace-ID")).toBe("workspace");
+  expect(new URL(requests[1]!.url).pathname).toBe(
+    "/api/v1/workspaces/workspace/assets/ast_fixture/content",
+  );
   expect(vi.mocked(downloadBlob).mock.calls[0]?.[1]).toBe("review.md");
 });
 

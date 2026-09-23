@@ -3,25 +3,116 @@ import { useTranslation } from "react-i18next";
 import type { Schema } from "../../shared/api";
 import styles from "./models.module.css";
 
-type Pricing = Schema["TokenPricing-Input"];
-type Rates = Schema["TokenRates-Input"];
+type Entry = Schema["ModelPricingEntry-Output"];
 const rateFields = [
-  ["input", "Input"],
-  ["output", "Output"],
-  ["cache_read", "Cache read"],
-  ["cache_write", "Cache write"],
+  ["input_mtok", "Input"],
+  ["output_mtok", "Output"],
+  ["cache_read_mtok", "Cache read"],
+  ["cache_write_mtok", "Cache write"],
 ] as const;
+type RateKey = (typeof rateFields)[number][0];
+const isRate = (key: string) => rateFields.some(([rate]) => rate === key);
+/** The editor's view of a price entry: a base row, then one row per input-length threshold. */
+export type PriceTable = {
+  tiers: {
+    above: number | null;
+    rates: Partial<Record<RateKey, string | null>>;
+  }[];
+};
+
+/** What an ordinary request pays: the last rule without a date or time condition. */
+function standardRule(entry: Entry) {
+  return entry.rules.findLast(
+    (rule) => (rule.constraint?.kind ?? "always") === "always",
+  );
+}
+
+/** The token prices an entry declares, as the editor shows them. */
+export function priceTable(entry: Entry | null): PriceTable | null {
+  const rule = entry && standardRule(entry);
+  if (!rule) return null;
+  const prices = rule.prices.filter((price) => isRate(price.price_key));
+  const starts = [
+    ...new Set(
+      prices.flatMap((price) => price.tiers?.map((tier) => tier.start) ?? []),
+    ),
+  ].sort((a, b) => a - b);
+  const rates = (
+    read: (price: (typeof prices)[number]) => string | undefined,
+  ) =>
+    Object.fromEntries(
+      prices.flatMap((price) => {
+        const value = read(price);
+        return value === undefined ? [] : [[price.price_key, value]];
+      }),
+    );
+  return {
+    tiers: [
+      { above: null, rates: rates((price) => price.price) },
+      ...starts.map((start) => ({
+        above: start,
+        rates: rates(
+          (price) => price.tiers?.find((tier) => tier.start === start)?.price,
+        ),
+      })),
+    ],
+  };
+}
+
+/**
+ * The entry an edited table saves: the standard rule's token prices replaced,
+ * every other price and rule the entry declares kept, the model it prices
+ * named, and the Console named as the source of the prices.
+ */
+export function priceEntry(
+  table: PriceTable | null,
+  base: Entry | null,
+  identity: { provider: string; model: string },
+): Schema["ModelPricingEntry-Input"] | null {
+  if (!table) return null;
+  const [first, ...rest] = table.tiers;
+  const edited = rateFields.flatMap(([key]) => {
+    const price = first?.rates[key];
+    if (!price) return [];
+    const tiers = rest.flatMap(({ above, rates }) => {
+      const tier = rates[key];
+      return above === null || !tier ? [] : [{ start: above, price: tier }];
+    });
+    return [{ price_key: key, price, tiers }];
+  });
+  const rule = base && standardRule(base);
+  const prices = [
+    ...(rule?.prices.filter((price) => !isRate(price.price_key)) ?? []),
+    ...edited,
+  ];
+  if (!prices.length) return null;
+  const standard = {
+    rule_id: rule?.rule_id ?? "standard",
+    constraint: rule?.constraint,
+    prices,
+  };
+  return {
+    provider: base?.provider ?? identity.provider,
+    model: identity.model,
+    context_window: base?.context_window,
+    source: "console",
+    source_revision: "manual",
+    rules: base
+      ? base.rules.map((item) => (item === rule ? standard : item))
+      : [standard],
+  };
+}
 
 export function ModelPricing({
   value,
   onChange,
 }: {
-  value: Pricing | null;
-  onChange: (value: Pricing | null) => void;
+  value: PriceTable | null;
+  onChange: (value: PriceTable | null) => void;
 }) {
   const { t } = useTranslation();
   const tiers = value?.tiers ?? [{ above: null, rates: {} }];
-  function rates(index: number, key: keyof Rates, price: string) {
+  function rates(index: number, key: RateKey, price: string) {
     onChange({
       ...value,
       tiers: tiers.map((tier, i) =>

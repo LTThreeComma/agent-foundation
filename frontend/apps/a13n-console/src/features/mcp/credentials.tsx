@@ -10,7 +10,7 @@ export function MCPCredentialFields({
   headers,
   onHeaders,
 }: {
-  mode: Schema["MCPSource"]["auth_mode"];
+  mode: Schema["ConnectionAuth"];
   names: readonly string[];
   bearer: string;
   onBearer: (value: string) => void;
@@ -30,7 +30,7 @@ export function MCPCredentialFields({
         />
       </FormField>
     );
-  if (mode !== "static_headers") return null;
+  if (mode !== "headers") return null;
   return names.map((name) => (
     <FormField label={name} key={name}>
       <Input

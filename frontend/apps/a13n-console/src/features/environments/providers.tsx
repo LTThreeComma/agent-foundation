@@ -1,15 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SettingsRow } from "a13n-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useAccess } from "../../layout/workspace";
-import {
-  data,
-  representation,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
+import { data, ifMatch, representation, type Schema } from "../../shared/api";
 import { useCursor } from "../../shared/collection";
 import {
   CatalogStep,
@@ -17,7 +11,7 @@ import {
   useResourceRows,
   type ResourceEditorControl,
 } from "../../shared/dialogs";
-import { ErrorNotice, StatePill } from "../../shared/feedback";
+import { ErrorNotice } from "../../shared/feedback";
 import { useCredentialSection } from "../../shared/use-credential-section";
 import {
   FormActions,
@@ -29,6 +23,7 @@ import {
 } from "../../shared/forms";
 import {
   AddProviderDialog,
+  ConnectionTest,
   CredentialRow,
   EditProviderDialog,
   ProviderConnectFields,
@@ -36,31 +31,27 @@ import {
   ProviderFacts,
   ProviderGroup,
   ProviderName,
-  ProviderReadOnly,
   ProviderTable,
   credentialDescription,
   credentialHint,
   credentialLabel,
   providerKeyLink,
   providerStyles,
+  providerTestResult,
 } from "../providers";
 import { environmentApi, type EnvironmentScope } from "./api";
 
-type Definition = Schema["EnvironmentProviderMetadata"];
+type Definition = Schema["ProviderType"];
 
-/** A provider the running Service owns: readable here, changed by the operator. */
-const deploymentNote =
-  "Connection settings come from the running Service and cannot be edited here.";
-
-export function useEnvironmentTypes() {
-  const client = useClient(),
-    { workspace } = useAccess();
+export function useEnvironmentTypes(enabled = true) {
+  const client = useClient();
   return useQuery({
-    queryKey: ["environment-types", workspace?.id],
+    queryKey: ["environment-types"],
+    enabled,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/environment-provider-types", {
-          headers: workspace ? workspaceHeaders(workspace.id) : undefined,
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "environment" } },
           signal,
         })
         .then(data),
@@ -75,11 +66,11 @@ function schema(value: unknown): Record<string, unknown> {
 export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
   const providerTypes = useEnvironmentTypes();
   const client = useClient(),
-    { can, organizationAdmin } = useAccess(),
+    { can, organizationCan, organization } = useAccess(),
     { t } = useTranslation(),
     page = useCursor(),
-    api = environmentApi(client, scope);
-  const rows = useResourceRows<Schema["EnvironmentProviderAccount"]>();
+    api = environmentApi(client, organization.id, scope);
+  const rows = useResourceRows<Schema["Provider"]>();
   const query = useQuery({
     queryKey: [
       "environment-providers",
@@ -91,12 +82,8 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
     queryFn: ({ signal }) => api.providers(signal, page.cursor),
   });
   const manage =
-    scope.kind === "organization"
-      ? organizationAdmin
-      : can("environment_provider.manage");
-  const connectable = (providerTypes.data?.items ?? []).filter(
-    (type) => !type.deployment_managed,
-  );
+    scope.kind === "organization" ? organizationCan("write") : can("write");
+  const connectable = providerTypes.data?.items ?? [];
   const add =
     manage && connectable.length ? (
       <AddEnvironmentProvider scope={scope} definitions={connectable} />
@@ -126,8 +113,7 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
         nextCursor={query.data?.next_cursor}
         action={add}
         canActivateRow={(item) =>
-          item.configuration_source === "deployment" ||
-          (item.workspace_id ? manage : organizationAdmin)
+          item.workspace_id ? manage : organizationCan("write")
         }
         onRowActivate={rows.activate}
         notice={
@@ -141,10 +127,7 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
           id: item.id,
           name: item.name,
           type: item.type,
-          definition:
-            item.configuration_source === "deployment"
-              ? t("Configured by deployment")
-              : (definitionFor(item.type)?.display_name ?? item.type),
+          definition: definitionFor(item.type)?.display_name ?? item.type,
           workspaceId: item.workspace_id,
           credentials:
             definitionFor(item.type)?.credential_schema == null
@@ -153,10 +136,6 @@ export function EnvironmentProviders({ scope }: { scope: EnvironmentScope }) {
                 ? ("configured" as const)
                 : ("not_configured" as const),
           state: item.enabled ? "enabled" : "disabled",
-          editLabel:
-            item.configuration_source === "deployment"
-              ? t("View details")
-              : undefined,
         })}
       />
     </>
@@ -216,10 +195,9 @@ function EditEnvironmentProvider({
   finalFocus,
 }: ResourceEditorControl & {
   scope: EnvironmentScope;
-  provider: Schema["EnvironmentProviderAccount"];
+  provider: Schema["Provider"];
 }) {
   const client = useClient(),
-    { t } = useTranslation(),
     [generation, setGeneration] = useState(0),
     definitions = useEnvironmentTypes();
   const state = useResourceEditorState({ controlledOpen, onClose, finalFocus });
@@ -234,10 +212,18 @@ function EditEnvironmentProvider({
     enabled: state.open,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/environment-providers/{resource_id}", {
-          params: { path: { resource_id: provider.id } },
-          signal,
-        })
+        .GET(
+          "/api/v1/organizations/{organization_id}/environment-providers/{provider_id}",
+          {
+            params: {
+              path: {
+                organization_id: provider.organization_id,
+                provider_id: provider.id,
+              },
+            },
+            signal,
+          },
+        )
         .then(representation),
   });
   const definition = definitions.data?.items.find(
@@ -252,12 +238,6 @@ function EditEnvironmentProvider({
       type={provider.type}
       definition={definition?.display_name}
       scope={provider.workspace_id ? "workspace" : "organization"}
-      readOnly={provider.configuration_source === "deployment"}
-      description={
-        provider.configuration_source === "deployment"
-          ? t(deploymentNote)
-          : undefined
-      }
       loading={definitions.isPending || query.isPending}
       error={definitions.error ?? query.error}
     >
@@ -287,9 +267,7 @@ function ProviderForm({
   reload,
 }: {
   scope: EnvironmentScope;
-  initial?: ReturnType<
-    typeof representation<Schema["EnvironmentProviderAccount"]>
-  >;
+  initial?: ReturnType<typeof representation<Schema["Provider"]>>;
   definition?: Definition;
   definitions: Definition[];
   close: () => void;
@@ -298,6 +276,7 @@ function ProviderForm({
   const client = useClient(),
     cache = useQueryClient(),
     { t } = useTranslation(),
+    { organization } = useAccess(),
     [basis] = useState(initial),
     [name, setName] = useState(
       initial?.value.name ?? chosen?.display_name ?? "",
@@ -305,24 +284,13 @@ function ProviderForm({
     type = initial?.value.type ?? chosen?.type ?? "",
     [enabled, setEnabled] = useState(initial?.value.enabled ?? true),
     [configuration, setConfiguration] = useState<Record<string, unknown>>(
-      initial?.value.configuration ?? {},
+      initial?.value.config ?? {},
     ),
     [advancedOpen, setAdvancedOpen] = useState(false);
-  const deployment = basis?.value.configuration_source === "deployment";
-  const definition = definitions.find((item) => item.type === type) ?? chosen,
+  const api = environmentApi(client, organization.id, scope),
+    definition = definitions.find((item) => item.type === type) ?? chosen,
     configSchema = schema(definition?.configuration_schema),
     section = useCredentialSection(definition, configuration, basis?.value);
-  const connectivity = useQuery({
-    queryKey: ["environment-provider-connectivity", basis?.value.id],
-    enabled: basis?.value.type === "docker",
-    refetchInterval: 5000,
-    queryFn: () =>
-      client.http
-        .GET("/api/v1/environment-providers/{provider_id}/connectivity", {
-          params: { path: { provider_id: basis!.value.id } },
-        })
-        .then(data),
-  });
   function done() {
     void cache.invalidateQueries({ queryKey: ["environment-providers"] });
     close();
@@ -333,31 +301,37 @@ function ProviderForm({
       if (credential) validateSettings(section.schema, credential);
       if (basis) {
         return client.http
-          .PATCH("/api/v1/environment-providers/{provider_id}", {
-            params: {
-              path: { provider_id: basis.value.id },
-              header: { "If-Match": basis.etag ?? "" },
+          .PATCH(
+            "/api/v1/organizations/{organization_id}/environment-providers/{provider_id}",
+            {
+              params: {
+                path: {
+                  organization_id: basis.value.organization_id,
+                  provider_id: basis.value.id,
+                },
+              },
+              headers: ifMatch(basis.etag),
+              body: {
+                name,
+                enabled,
+                ...(credential === undefined
+                  ? {}
+                  : {
+                      credential:
+                        credential === null
+                          ? null
+                          : jsonObject(JSON.stringify(credential)),
+                    }),
+              },
             },
-            body: {
-              name,
-              enabled,
-              ...(credential === undefined
-                ? {}
-                : {
-                    credential:
-                      credential === null
-                        ? null
-                        : jsonObject(JSON.stringify(credential)),
-                  }),
-            },
-          })
+          )
           .then(data);
       }
       validateSettings(configSchema, configuration);
-      return environmentApi(client, scope).createProvider({
+      return api.createProvider({
         name,
         type,
-        configuration: jsonObject(JSON.stringify(configuration)),
+        config: jsonObject(JSON.stringify(configuration)),
         ...(credential
           ? { credential: jsonObject(JSON.stringify(credential)) }
           : {}),
@@ -397,36 +371,6 @@ function ProviderForm({
         />
       </form>
     );
-  const engine = basis.value.type === "docker" && (
-    <SettingsRow stackOnNarrow={false} label={t("Engine")}>
-      <span className={providerStyles.fact} role="status">
-        {connectivity.data?.error && (
-          <span className={providerStyles.factValue}>
-            {connectivity.data.error}
-          </span>
-        )}
-        <StatePill state={connectivity.data?.status ?? "unknown"} />
-      </span>
-    </SettingsRow>
-  );
-  const credentials =
-    section.mode !== "required"
-      ? ("not_required" as const)
-      : basis.value.credential_configured
-        ? ("configured" as const)
-        : ("not_configured" as const);
-  if (deployment)
-    return (
-      <ProviderReadOnly
-        hideDefaults
-        enabled={basis.value.enabled}
-        credentials={credentials}
-        configuration={configuration}
-        schema={configSchema}
-        facts={engine}
-        onClose={close}
-      />
-    );
   return (
     <ProviderEditor
       onSubmit={(event) => {
@@ -462,7 +406,22 @@ function ProviderForm({
             )}
           </CredentialRow>
         )}
-        {engine}
+        {definition?.supports_test && (
+          <ConnectionTest
+            action={async () =>
+              providerTestResult(await api.testProvider(basis.value.id))
+            }
+            description="Reads from the provider without creating or starting anything."
+            dirty={
+              save.isPending ||
+              name !== basis.value.name ||
+              enabled !== basis.value.enabled ||
+              Object.keys(section.credential).length > 0 ||
+              section.removing
+            }
+            retry={() => void reload()}
+          />
+        )}
         <ProviderFacts
           hideDefaults
           configuration={configuration}

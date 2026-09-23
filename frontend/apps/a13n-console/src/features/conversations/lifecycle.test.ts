@@ -22,17 +22,16 @@ function fact(type: string, fields: Partial<EventEntry> = {}): EventEntry {
   };
 }
 
-const run = (overrides: Partial<Schema["RunResource"]>) =>
+const run = (overrides: Partial<Schema["RunView"]>) =>
   ({
     id: "run_1",
     status: "completed",
     failure: null,
     wait_reason: null,
-    completed_at: "2026-09-20T10:00:12.000Z",
-    waiting_at: null,
+    sealed_at: "2026-09-20T10:00:12.000Z",
     updated_at: "2026-09-20T10:00:12.000Z",
     ...overrides,
-  }) as Schema["RunResource"];
+  }) as Schema["RunView"];
 
 it("says nothing about the facts every run reports", () => {
   expect(lifecycleNotice(fact("run.accepted"))).toBe(null);
@@ -124,8 +123,7 @@ it("reads the run's own outcome, and only when it has one to report", () => {
       run({
         status: "waiting",
         wait_reason: "approval",
-        completed_at: null,
-        waiting_at: "2026-09-20T10:00:05.000Z",
+        sealed_at: "2026-09-20T10:00:05.000Z",
       }),
     ),
   ).toMatchObject({

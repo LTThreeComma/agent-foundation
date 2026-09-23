@@ -202,10 +202,13 @@ function ObservationRow({
 }) {
   const { t } = useTranslation();
   const { observation, childCount } = row;
-  const model = observation.model?.response ?? observation.model?.requested;
   const orphan =
     observation.parent_id !== null && !loaded.has(observation.parent_id);
-  const meta = [observation.type, model, orphan && t("Parent not loaded")]
+  const meta = [
+    observation.kind,
+    observation.model,
+    orphan && t("Parent not loaded"),
+  ]
     .filter(Boolean)
     .join(" · ");
   return (
@@ -250,7 +253,7 @@ function Bar({
   start,
   duration,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
   start: number;
   duration: number;
 }) {

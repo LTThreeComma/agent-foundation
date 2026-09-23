@@ -1,6 +1,6 @@
 import { Button, DisclosureSection } from "a13n-ui";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { ArrowDownIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
@@ -12,24 +12,20 @@ import { JsonView } from "../../../shared/forms";
 import { useAgent } from "../../agents/queries";
 import { conversationQueries, isActiveRun, type ViewLevel } from "../api";
 import { useRunStream } from "../run-stream";
-import { useRun } from "../queries";
+import { useRun, useSession } from "../queries";
+import { runResubmission, type Resubmission } from "../resubmit";
 import { runTimeline } from "../timeline";
 import { WorkingRow } from "./assistant-message";
 import { DebugRunSection } from "./debug/run-section";
+import { DroppedItems } from "./dropped-items";
 import { RunNavigator } from "./debug/run-navigator";
 import { useThreadRuns } from "./thread-runs";
 import { useViewLevel } from "./debug/view";
-import { EarlierMessages } from "./earlier-messages";
 import { FailureNotice } from "./failure-notice";
 import { HistoryTranscript } from "./history";
 import { RunBlock } from "./run-block";
 import { RunDock } from "./run-dock";
-import {
-  isInteractive,
-  useRetryRun,
-  useRunAcceptance,
-  type ConfigurationBridge,
-} from "./run-actions";
+import { isInteractive } from "./run-actions";
 import { useTranscriptScroll } from "./use-transcript-scroll";
 import debug from "./debug/debug.module.css";
 import styles from "./transcript.module.css";
@@ -48,19 +44,16 @@ export function RunPage() {
 
 /**
  * The run being followed, with its ancestors above it and the controls that act
- * on it below. The configuration assistant embeds the same transcript at the
- * Chat level and keeps its own composer.
+ * on it below.
  */
 export function RunContent({
   runId,
   threadId,
   sessionId,
-  configuration,
 }: {
   runId: string;
   threadId: string;
   sessionId: string;
-  configuration?: ConfigurationBridge;
 }) {
   const { t } = useTranslation(),
     client = useClient(),
@@ -71,12 +64,14 @@ export function RunContent({
     ...queries.thread(threadId),
     enabled: !!threadId,
   });
+  const session = useSession(sessionId);
   const run = runQuery.data;
   const thread = threadQuery.data;
-  const agent = useAgent(configuration ? undefined : run?.agent_id);
-  const { level } = useViewLevel(thread, { chatOnly: !!configuration });
+  const agent = useAgent(run?.agent_id);
+  const { level } = useViewLevel(thread, session.data);
 
-  if (runQuery.isPending || threadQuery.isPending)
+  // The Session decides the level a Thread opens at, so it is read first.
+  if (runQuery.isPending || threadQuery.isPending || session.isPending)
     return <Loading variant="detail" />;
   if (!run || !thread)
     return (
@@ -99,11 +94,8 @@ export function RunContent({
       run={run}
       thread={thread}
       level={level}
-      agentName={
-        configuration ? t("Configuration assistant") : agent.data?.name
-      }
+      agentName={agent.data?.name}
       agentImageUrl={agent.data?.image_url}
-      configuration={configuration}
       error={runQuery.error ?? threadQuery.error}
     />
   );
@@ -115,23 +107,19 @@ function RunBody({
   level,
   agentName,
   agentImageUrl,
-  configuration,
   error,
 }: {
-  run: Schema["RunResource"];
-  thread: Schema["ThreadResource"];
+  run: Schema["RunView"];
+  thread: Schema["ThreadView"];
   level: ViewLevel;
   agentName?: string;
   agentImageUrl?: string | null;
-  configuration?: ConfigurationBridge;
   error: unknown;
 }) {
   const { t } = useTranslation();
   const { can } = useWorkspace();
   const transcript = useRef<HTMLDivElement>(null);
-  // Only an origin replay observes a complete execution history, and only
-  // Debug renders one; Chat keeps the cheaper snapshot attachment.
-  const live = useRunStream(run.id, { replay: level === "debug" });
+  const live = useRunStream(run.id, { live: true });
   const scroll = useTranscriptScroll(transcript, true);
   const { number } = useThreadRuns(level === "debug" ? thread.id : "");
   // One reading of the run for both levels: Chat and Debug present the same
@@ -146,12 +134,24 @@ function RunBody({
       }),
     [run, live.items, live.execution],
   );
-  const { accepted, refresh } = useRunAcceptance(run, thread, configuration);
-  const retry = useRetryRun(run, thread, accepted, refresh);
   const active = isActiveRun(run.status);
   const stopped = ["failed", "cancelled"].includes(run.status);
-  const canRetry =
-    isInteractive(thread, configuration) && stopped && can("run.retry");
+  // A stopped Run is asked again from the dock, while it is still the
+  // Thread's latest: its message is prefilled there to be sent again.
+  const [resubmit, setResubmit] = useState<Resubmission | null>(null);
+  const resubmission =
+    stopped &&
+    isInteractive(thread) &&
+    can("run") &&
+    (thread.current_run_id ?? thread.last_run_id) === run.id
+      ? runResubmission(run)
+      : null;
+  const prefill = resubmission
+    ? () => {
+        setResubmit(resubmission);
+        scroll.jumpToLatest();
+      }
+    : undefined;
   return (
     <div className={styles.run}>
       <ErrorNotice error={error} />
@@ -175,23 +175,19 @@ function RunBody({
       {level === "debug" && <RunNavigator thread={thread} runId={run.id} />}
       {level === "debug" ? (
         <div className={debug.sections} ref={transcript}>
-          {!live.hasEarlier && (
-            <HistoryTranscript runId={run.id} thread={thread} level={level} />
-          )}
-          <EarlierMessages {...live} />
+          <HistoryTranscript runId={run.id} thread={thread} level={level} />
+          <DroppedItems count={live.dropped} />
           <DebugRunSection
             run={run}
             thread={thread}
             timeline={timeline}
             index={number(run.id)}
-            runNumber={number}
+            resubmit={prefill}
           />
         </div>
       ) : (
         <div className={styles.transcript} ref={transcript}>
-          {!live.hasEarlier && (
-            <HistoryTranscript runId={run.id} thread={thread} level={level} />
-          )}
+          <HistoryTranscript runId={run.id} thread={thread} level={level} />
           <div className={debug.runAnchor} data-run={run.id}>
             <RunBlock
               run={run}
@@ -199,7 +195,7 @@ function RunBody({
               timeline={timeline}
               agentName={agentName}
               agentImageUrl={agentImageUrl}
-              earlier={<EarlierMessages {...live} />}
+              earlier={<DroppedItems count={live.dropped} />}
             >
               {active && <WorkingRow connected={live.state === "connected"} />}
               {(run.failure != null || stopped) && (
@@ -207,20 +203,15 @@ function RunBody({
                   failure={run.failure}
                   cancelled={run.status === "cancelled"}
                   action={
-                    canRetry ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        loading={retry.isPending}
-                        onClick={() => retry.mutate()}
-                      >
-                        {t("Retry run")}
+                    prefill && (
+                      <Button size="sm" variant="outline" onClick={prefill}>
+                        {t("Resubmit")}
                       </Button>
-                    ) : undefined
+                    )
                   }
                 />
               )}
-              {run.output != null && run.output !== run.output_text && (
+              {run.output != null && typeof run.output !== "string" && (
                 <DisclosureSection
                   className={styles.structuredOutput}
                   defaultOpen
@@ -237,7 +228,8 @@ function RunBody({
         run={run}
         thread={thread}
         agentName={agentName}
-        configuration={configuration}
+        resubmit={resubmit}
+        onResubmitted={() => setResubmit(null)}
         above={
           !scroll.following && (
             <Button

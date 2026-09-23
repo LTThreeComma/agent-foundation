@@ -97,7 +97,7 @@ const TERMINAL_TYPES: Record<string, string | undefined> = {
  * the Run rather than from the stream, so a Run whose events were never
  * replayed still says how it ended, and the stream's copy never repeats it.
  */
-export function runOutcome(run: Schema["RunResource"]): EventEntry | null {
+export function runOutcome(run: Schema["RunView"]): EventEntry | null {
   const type = TERMINAL_TYPES[run.status];
   if (!type) return null;
   const waiting = run.status === "waiting";
@@ -109,7 +109,7 @@ export function runOutcome(run: Schema["RunResource"]): EventEntry | null {
       : run.failure != null
         ? resultExcerpt(run.failure, 160)
         : null;
-  const at = run.completed_at ?? run.waiting_at ?? run.updated_at;
+  const at = run.sealed_at ?? run.updated_at;
   return {
     kind: "event",
     id: `${run.id}:outcome`,

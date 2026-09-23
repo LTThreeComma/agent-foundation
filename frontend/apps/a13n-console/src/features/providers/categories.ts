@@ -1,6 +1,5 @@
 import {
   CubeIcon,
-  DatabaseIcon,
   GlobeIcon,
   MonitorIcon,
   PlugIcon,
@@ -28,14 +27,6 @@ export const providerCategories = [
     description:
       "Connect search and scrape services for your agents' web tools.",
     empty: "Add a search or scrape service, then select it in your agent.",
-  },
-  {
-    value: "memory",
-    label: "Memory",
-    emptyTitle: "No memory providers yet",
-    icon: DatabaseIcon,
-    description: "Connect memory backends and manage their credentials.",
-    empty: "Add a memory backend, then select it in your agent.",
   },
   {
     value: "environments",

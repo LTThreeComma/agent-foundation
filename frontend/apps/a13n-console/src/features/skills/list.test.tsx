@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -12,7 +18,10 @@ vi.mock("../../layout/workspace", () => ({
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    t: (key: string, options?: { count?: number }) =>
+      options?.count === undefined
+        ? key
+        : key.replace("{{count}}", String(options.count)),
     i18n: { resolvedLanguage: "en" },
   }),
 }));
@@ -21,32 +30,24 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-it("searches the server by name or key from the first page and links by key", async () => {
+const skill = (name: string, key: string) => ({
+  id: `sk_${key}`,
+  workspace_id: "ws_test",
+  name,
+  key,
+  version: 1,
+  default_revision_id: `skr_${key}`,
+  default_revision: {
+    id: `skr_${key}`,
+    number: 3,
+    source: { kind: "github", repository: "example/skills" },
+  },
+  updated_at: "2026-09-09T00:00:00Z",
+});
+
+function renderList() {
   const cache = new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
-  const user = userEvent.setup();
-  const skill = (name: string, key: string) => ({
-    id: `sk_${key}`,
-    name,
-    key,
-    version: 1,
-    default_version: 1,
-    source_kind: "github",
-    updated_at: "2026-09-09T00:00:00Z",
-  });
-  http.GET.mockImplementation(async (_path, options) => {
-    const { q, cursor } = options.params.query;
-    const response = q
-      ? {
-          items:
-            q === "review" ? [skill("Document helper", "review-docs")] : [],
-          next_cursor: null,
-        }
-      : cursor
-        ? { items: [skill("Second skill", "second")], next_cursor: null }
-        : { items: [skill("First skill", "first")], next_cursor: "page-two" };
-    return { data: response, response: new Response() };
   });
   render(
     <QueryClientProvider client={cache}>
@@ -61,7 +62,33 @@ it("searches the server by name or key from the first page and links by key", as
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  await screen.findByRole("link", { name: /First skill/ });
+  return { cache, user: userEvent.setup() };
+}
+
+it("searches the server by name or key from the first page and links by key", async () => {
+  http.GET.mockImplementation(async (path: string, options) => {
+    const { q, cursor } = options.params.query;
+    const response = path.endsWith("/agents")
+      ? { items: [], next_cursor: null }
+      : q
+        ? {
+            items:
+              q === "review" ? [skill("Document helper", "review-docs")] : [],
+            next_cursor: null,
+          }
+        : cursor
+          ? { items: [skill("Second skill", "second")], next_cursor: null }
+          : {
+              items: [skill("First skill", "first")],
+              next_cursor: "page-two",
+            };
+    return { data: response, response: new Response() };
+  });
+  const { cache, user } = renderList();
+  const first = await screen.findByRole("link", { name: /First skill/ });
+  const row = first.closest("tr")!;
+  expect(within(row).getByText("GitHub")).toBeTruthy();
+  expect(within(row).getByText("v3")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Next" }));
   await screen.findByRole("link", { name: /Second skill/ });
   const search = screen.getByRole("searchbox", { name: "Search skills" });
@@ -71,15 +98,17 @@ it("searches the server by name or key from the first page and links by key", as
   await user.click(await screen.findByRole("option", { name: "GitHub" }));
   await waitFor(() =>
     expect(http.GET).toHaveBeenCalledWith(
-      expect.any(String),
+      "/api/v1/workspaces/{workspace_id}/skills",
       expect.objectContaining({
-        params: expect.objectContaining({
-          query: expect.objectContaining({
+        params: {
+          path: { workspace_id: "ws_test" },
+          query: {
             q: "review",
-            source_kind: "github",
+            source: "github",
+            archived: false,
             cursor: undefined,
-          }),
-        }),
+          },
+        },
       }),
     ),
   );
@@ -104,5 +133,46 @@ it("searches the server by name or key from the first page and links by key", as
   await waitFor(() =>
     expect(screen.getByText("Readable skill detail")).toBeTruthy(),
   );
+  cache.clear();
+});
+
+it("counts the unarchived agents using each skill and adds archived skills on request", async () => {
+  http.GET.mockImplementation(async (path: string, options) => {
+    const query = options.params.query;
+    const response = path.endsWith("/agents")
+      ? query.skill_id === "sk_used"
+        ? { items: [{ id: "ap_one" }, { id: "ap_two" }], next_cursor: "more" }
+        : { items: [], next_cursor: null }
+      : {
+          items: [
+            skill("Used skill", "used"),
+            skill("Idle skill", "idle"),
+            ...(query.archived === false ? [] : [skill("Old skill", "old")]),
+          ],
+          next_cursor: null,
+        };
+    return { data: response, response: new Response() };
+  });
+  const { cache, user } = renderList();
+  const used = (
+    await screen.findByRole("link", { name: /Used skill/ })
+  ).closest("tr")!;
+  expect(await within(used).findByText("2+ agents")).toBeTruthy();
+  const idle = screen.getByRole("link", { name: /Idle skill/ }).closest("tr")!;
+  expect(await within(idle).findByText("Unused")).toBeTruthy();
+  expect(http.GET).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace_id}/agents",
+    expect.objectContaining({
+      params: {
+        path: { workspace_id: "ws_test" },
+        query: { skill_id: "sk_used", archived: false, cursor: undefined },
+      },
+    }),
+  );
+  const archived = screen.getByRole("button", { name: "Archived" });
+  await user.click(archived);
+  expect(archived.getAttribute("aria-pressed")).toBe("true");
+  await screen.findByRole("link", { name: /Old skill/ });
+  expect(screen.getByRole("link", { name: /Used skill/ })).toBeTruthy();
   cache.clear();
 });

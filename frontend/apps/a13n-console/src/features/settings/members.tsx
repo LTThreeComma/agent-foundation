@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactElement } from "react";
 import { PageActions } from "../../shared/page";
 
-import { ApiError } from "../../service-client";
+import { ApiError, type Client } from "../../service-client";
 import {
   PlusIcon,
   UserMinusIcon,
@@ -22,7 +22,7 @@ import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { UserAvatar } from "../../layout/avatar";
 import { useAccess } from "../../layout/workspace";
-import { allPages, data, representation, type Schema } from "../../shared/api";
+import { allPages, data, type Schema } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -37,112 +37,49 @@ import { FormActions } from "../../shared/forms";
 import styles from "../../shared/shared.module.css";
 import settings from "./settings.module.css";
 import { InvitationEditor } from "./invitations";
-import { roleOptions, roles, type MembershipScope, type Role } from "./roles";
+import { roles, type MembershipScope, type Role } from "./roles";
 
 export type { MembershipScope };
-export { roleOptions };
+
+/** One page of the grants held at exactly this scope, each naming its principal. */
+function grants(
+  client: Client,
+  scope: MembershipScope,
+  query: { cursor?: string; limit: number },
+  signal?: AbortSignal,
+) {
+  return scope.kind === "organization"
+    ? client.http
+        .GET("/api/v1/organizations/{organization_id}/grants", {
+          params: { path: { organization_id: scope.id }, query },
+          signal,
+        })
+        .then(data)
+    : client.http
+        .GET("/api/v1/workspaces/{workspace_id}/grants", {
+          params: { path: { workspace_id: scope.id }, query },
+          signal,
+        })
+        .then(data);
+}
+function roleOf(grant: Schema["GrantView"]): Role {
+  return roles.find((role) => role === grant.role) ?? "viewer";
+}
 
 export function Members({ scope }: { scope: MembershipScope }) {
   const { t } = useTranslation(),
     client = useClient(),
-    { organization, organizationAdmin, can } = useAccess(),
+    { organization, organizationCan } = useAccess(),
     page = useCursor();
-  const members = useQuery({
-    queryKey: ["members", scope.kind, scope.id],
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        scope.kind === "organization"
-          ? client.http
-              .GET("/api/v1/organizations/{organization}/users", {
-                params: {
-                  path: { organization: scope.id },
-                  query: { cursor, limit: 100 },
-                },
-                signal,
-              })
-              .then(data)
-          : client.http
-              .GET("/api/v1/workspaces/{workspace}/members", {
-                params: {
-                  path: { workspace: scope.id },
-                  query: { cursor, limit: 100 },
-                },
-                signal,
-              })
-              .then(data),
-      ),
-  });
   const bindings = useQuery({
     queryKey: ["bindings", scope.kind, scope.id, page.cursor],
     queryFn: ({ signal }) =>
-      scope.kind === "organization"
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/role-bindings", {
-              params: {
-                path: { organization: scope.id },
-                query: { cursor: page.cursor, limit: 30 },
-              },
-              signal,
-            })
-            .then(data)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/role-bindings", {
-              params: {
-                path: { workspace: scope.id },
-                query: { cursor: page.cursor, limit: 30 },
-              },
-              signal,
-            })
-            .then(data),
+      grants(client, scope, { cursor: page.cursor, limit: 30 }, signal),
   });
-  /* A role binding is only safe to change from the version the reader saw. */
-  const readVersion = async (item: Schema["RoleBinding"]) => {
-    const latest = representation(
-      await client.http.GET("/api/v1/role-bindings/{binding_id}", {
-        params: { path: { binding_id: item.id } },
-      }),
-    );
-    if (latest.value.updated_at !== item.updated_at || !latest.etag)
-      throw new ApiError(
-        412,
-        "precondition_failed",
-        t("The member's role changed. Reload before continuing."),
-        {},
-        null,
-      );
-    return latest.etag;
-  };
-  /* A workspace also grants roles to service accounts; name those too. */
-  const accounts = useQuery({
-    queryKey: ["service-account-directory", scope.id],
-    enabled: scope.kind === "workspace" && can("service_account.manage"),
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        client.http
-          .GET("/api/v1/workspaces/{workspace}/service-accounts", {
-            params: {
-              path: { workspace: scope.id },
-              query: { cursor, limit: 100 },
-            },
-            signal,
-          })
-          .then(data),
-      ),
-  });
-  const person = (item: Schema["RoleBinding"]) => {
-    const user = members.data?.find((user) => user.id === item.principal_id);
-    if (user)
-      return { name: user.name, secondary: user.email, image: user.image_url };
-    const account = accounts.data?.find(
-      (account) => account.id === item.principal_id,
-    );
-    if (account) return { name: account.name, secondary: t("Service account") };
-    return { name: item.principal_id, secondary: item.principal_type };
-  };
   const items = bindings.data?.items ?? [];
   const action =
     scope.kind === "workspace" ? (
-      organizationAdmin && (
+      organizationCan("admin") && (
         <AddMember scope={scope} organizationId={organization.id} />
       )
     ) : (
@@ -151,10 +88,10 @@ export function Members({ scope }: { scope: MembershipScope }) {
   return (
     <div className={styles.stack}>
       <PageActions>{action}</PageActions>
-      {members.isPending || bindings.isPending ? (
+      {bindings.isPending ? (
         <Loading variant="table" columns={3} rows={5} />
-      ) : members.error || bindings.error ? (
-        <ErrorNotice error={members.error ?? bindings.error} />
+      ) : bindings.error ? (
+        <ErrorNotice error={bindings.error} />
       ) : items.length ? (
         <>
           <ResourceTable
@@ -166,7 +103,6 @@ export function Members({ scope }: { scope: MembershipScope }) {
                 <ChangeRole
                   item={item}
                   scope={scope}
-                  readVersion={readVersion}
                   triggerElement={
                     <MenuItem closeOnClick={false}>
                       <UserSwitchIcon size={14} />
@@ -175,16 +111,21 @@ export function Members({ scope }: { scope: MembershipScope }) {
                   }
                 />
                 <Confirm
-                  subject={`${person(item).name} · ${t(
-                    `role.${item.role_key}`,
-                    {
-                      defaultValue: item.role_key,
-                    },
-                  )}`}
+                  subject={`${item.principal.name} · ${t(`role.${item.role}`, {
+                    defaultValue: item.role,
+                  })}`}
                   title={t("Remove member")}
-                  description={t(
-                    "This removes the selected role. Other explicit grants may still allow access.",
-                  )}
+                  description={
+                    // A service account is granted only in its home workspace,
+                    // so this is its last grant.
+                    item.principal.kind === "service_account"
+                      ? t(
+                          "This removes the service account's only role, which disables it and revokes its keys.",
+                        )
+                      : t(
+                          "This removes the selected role. Other explicit grants may still allow access.",
+                        )
+                  }
                   triggerElement={
                     <MenuItem closeOnClick={false} variant="destructive">
                       <UserMinusIcon size={14} />
@@ -192,18 +133,31 @@ export function Members({ scope }: { scope: MembershipScope }) {
                     </MenuItem>
                   }
                   danger
-                  action={async () => {
-                    const etag = await readVersion(item);
-                    await client.http.DELETE(
-                      "/api/v1/role-bindings/{binding_id}",
-                      {
-                        params: {
-                          path: { binding_id: item.id },
-                          header: { "If-Match": etag },
-                        },
-                      },
-                    );
-                  }}
+                  action={() =>
+                    scope.kind === "organization"
+                      ? client.http.DELETE(
+                          "/api/v1/organizations/{organization_id}/grants/{grant_id}",
+                          {
+                            params: {
+                              path: {
+                                organization_id: scope.id,
+                                grant_id: item.id,
+                              },
+                            },
+                          },
+                        )
+                      : client.http.DELETE(
+                          "/api/v1/workspaces/{workspace_id}/grants/{grant_id}",
+                          {
+                            params: {
+                              path: {
+                                workspace_id: scope.id,
+                                grant_id: item.id,
+                              },
+                            },
+                          },
+                        )
+                  }
                 />
               </>
             )}
@@ -211,31 +165,32 @@ export function Members({ scope }: { scope: MembershipScope }) {
               {
                 label: t("Member"),
                 tone: "primary",
-                render: (item) => {
-                  const identity = person(item);
-                  return (
-                    <ResourceIdentity
-                      icon={
-                        <UserAvatar
-                          name={identity.name}
-                          id={item.principal_id}
-                          url={identity.image}
-                          className="size-8 rounded-[8px]"
-                        />
-                      }
-                      name={identity.name}
-                      description={identity.secondary}
-                      resourceId={item.principal_id}
-                    />
-                  );
-                },
+                render: (item) => (
+                  <ResourceIdentity
+                    icon={
+                      <UserAvatar
+                        name={item.principal.name}
+                        id={item.principal.id}
+                        url={item.principal.image_url}
+                        className="size-8 rounded-[8px]"
+                      />
+                    }
+                    name={item.principal.name}
+                    description={
+                      item.principal.kind === "service_account"
+                        ? t("Service account")
+                        : (item.principal.email ?? undefined)
+                    }
+                    resourceId={item.principal.id}
+                  />
+                ),
               },
               {
                 label: t("Role"),
                 render: (item) => (
                   <span className={settings.chip}>
-                    {t(`role.${item.role_key}`, {
-                      defaultValue: item.role_key,
+                    {t(`role.${item.role}`, {
+                      defaultValue: item.role,
                     })}
                   </span>
                 ),
@@ -266,63 +221,79 @@ export function Members({ scope }: { scope: MembershipScope }) {
     </div>
   );
 }
+/**
+ * A role change replaces the grant, so its ID is the version the reader saw:
+ * a grant someone replaced or removed meanwhile is `not_found`.
+ */
 function ChangeRole({
   item,
   scope,
-  readVersion,
   triggerElement,
 }: {
-  item: Schema["RoleBinding"];
+  item: Schema["GrantView"];
   scope: MembershipScope;
-  readVersion: (basis: Schema["RoleBinding"]) => Promise<string>;
   triggerElement?: ReactElement;
 }) {
   const { t } = useTranslation(),
     client = useClient(),
     cache = useQueryClient();
   const [basis, setBasis] = useState(item),
-    [role, setRole] = useState<Role>(
-      roles.find((role) => role === item.role_key) ?? "viewer",
-    ),
+    [role, setRole] = useState<Role>(roleOf(item)),
     [open, setOpen] = useState(false);
   const change = useMutation({
-    mutationFn: async () => {
-      const etag = await readVersion(basis);
-      await client.http.PATCH("/api/v1/role-bindings/{binding_id}", {
-        params: { path: { binding_id: item.id }, header: { "If-Match": etag } },
-        body: { role },
-      });
-    },
+    mutationFn: () =>
+      scope.kind === "organization"
+        ? client.http.PATCH(
+            "/api/v1/organizations/{organization_id}/grants/{grant_id}",
+            {
+              params: {
+                path: { organization_id: scope.id, grant_id: basis.id },
+              },
+              body: { role },
+            },
+          )
+        : client.http.PATCH(
+            "/api/v1/workspaces/{workspace_id}/grants/{grant_id}",
+            {
+              params: { path: { workspace_id: scope.id, grant_id: basis.id } },
+              body: { role },
+            },
+          ),
     onSuccess: () => {
       void cache.invalidateQueries();
       setOpen(false);
     },
   });
+  /* The member's current grant at this scope, under whatever ID it now has. */
   const reload = useMutation({
-    mutationFn: () =>
-      client.http
-        .GET("/api/v1/role-bindings/{binding_id}", {
-          params: { path: { binding_id: item.id } },
-        })
-        .then(data),
+    mutationFn: async () => {
+      const latest = (
+        await allPages((cursor) =>
+          grants(client, scope, { cursor, limit: 100 }),
+        )
+      ).find((grant) => grant.principal.id === basis.principal.id);
+      if (!latest) throw new Error(t("This member no longer has a role here."));
+      return latest;
+    },
     onSuccess: (latest) => {
       setBasis(latest);
-      setRole(roles.find((role) => role === latest.role_key) ?? "viewer");
+      setRole(roleOf(latest));
       change.reset();
     },
   });
   const conflict =
-    change.error instanceof ApiError && change.error.status === 412;
+    change.error instanceof ApiError && change.error.code === "not_found";
   return (
     <ModalFrame
       onOpenChange={(value) => {
         if (!change.isPending) {
           if (value) {
             setBasis(item);
-            setRole(roles.find((role) => role === item.role_key) ?? "viewer");
+            setRole(roleOf(item));
           }
           setOpen(value);
           change.reset();
+          reload.reset();
         }
       }}
       trigger={
@@ -353,12 +324,12 @@ function ChangeRole({
             if (role) setRole(role);
           }}
           label={t("Role")}
-          options={roleOptions(scope.kind).map((value) => ({
+          options={roles.map((value) => ({
             value,
             label: t(`role.${value}`, { defaultValue: value }),
           }))}
         />
-        {conflict ? (
+        {conflict && !reload.error ? (
           <ConflictNotice
             title={t("This member changed")}
             description={t(
@@ -403,10 +374,10 @@ function AddMember({
     queryFn: ({ signal }) =>
       allPages((cursor) =>
         client.http
-          .GET("/api/v1/organizations/{organization}/users", {
+          .GET("/api/v1/organizations/{organization_id}/members", {
             params: {
-              path: { organization: organizationId },
-              query: { cursor, limit: 100 },
+              path: { organization_id: organizationId },
+              query: { kind: "user", cursor, limit: 100 },
             },
             signal,
           })
@@ -415,8 +386,8 @@ function AddMember({
   });
   const add = useMutation({
     mutationFn: () =>
-      client.http.POST("/api/v1/workspaces/{workspace}/role-bindings", {
-        params: { path: { workspace: scope.id } },
+      client.http.POST("/api/v1/workspaces/{workspace_id}/grants", {
+        params: { path: { workspace_id: scope.id } },
         body: { principal_id: userId, role },
       }),
     onSuccess: () => {
@@ -461,7 +432,7 @@ function AddMember({
                   users.data?.map((user) => ({
                     value: user.id,
                     label: user.name,
-                    description: user.email,
+                    description: user.email ?? undefined,
                   })) ?? [],
               },
             ]}
@@ -477,7 +448,7 @@ function AddMember({
             if (role) setRole(role);
           }}
           label={t("Role")}
-          options={roleOptions(scope.kind).map((value) => ({
+          options={roles.map((value) => ({
             value,
             label: t(`role.${value}`, { defaultValue: value }),
           }))}

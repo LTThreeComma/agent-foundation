@@ -2,30 +2,24 @@ import { expect, it } from "vitest";
 import type { Schema } from "../../shared/api";
 import { runRequest } from "./request";
 
-const run = (overrides: Partial<Schema["RunResource"]>) =>
+const run = (overrides: Partial<Schema["RunView"]>) =>
   ({
     id: "run_1",
-    input_kind: "agent_input",
+    trigger: "input",
     input: null,
-    input_text: null,
+    resume: null,
     ...overrides,
-  }) as Schema["RunResource"];
+  }) as Schema["RunView"];
 
-const thread = (role: string) =>
-  ({ id: "thr_1", role }) as Schema["ThreadResource"];
+const thread = (origin: Schema["ThreadView"]["origin"]) =>
+  ({ id: "thr_1", origin }) as Schema["ThreadView"];
 
-const message = (text: string) => ({
-  schema_version: "2",
-  content: [{ type: "text", text }],
-});
+const message = (text: string) => ({ content: [{ type: "text", text }] });
 
 it("reads ordinary input as the message a person sent", () => {
   const request = runRequest(
-    run({
-      input: message("Review the release"),
-      input_text: "Review the release",
-    }),
-    thread("root"),
+    run({ input: message("Review the release") }),
+    thread("new"),
   );
   expect(request).toMatchObject({
     kind: "message",
@@ -33,51 +27,28 @@ it("reads ordinary input as the message a person sent", () => {
   });
 });
 
-it("keeps a waiting resolution as feedback and its input alongside", () => {
-  const input = {
-    schema_version: "1",
-    waiting_run_id: "run_0",
-    resolutions: [{ action: "approve", call_id: "call_1" }],
+it("keeps the answers that resumed a wait as feedback", () => {
+  const resume = {
+    answers: [{ action: "approve" as const, tool_call_id: "call_1" }],
   };
   expect(
-    runRequest(run({ input_kind: "waiting_feedback", input }), thread("root")),
-  ).toMatchObject({ kind: "feedback", input });
-});
-
-it("reads a default continuation as the message it carried", () => {
-  const request = runRequest(
-    run({
-      input_kind: "waiting_continue",
-      input: {
-        schema_version: "1",
-        waiting_run_id: "run_0",
-        resolutions: [],
-        input: message("Carry on without it"),
-      },
-    }),
-    thread("root"),
-  );
-  expect(request).toMatchObject({
-    kind: "continue",
-    text: "Carry on without it",
-  });
+    runRequest(run({ trigger: "resume", resume }), thread("new")),
+  ).toMatchObject({ kind: "feedback", input: resume });
 });
 
 it("reads an asynchronous child's result as prose, not as its envelope", () => {
   const request = runRequest(
     run({
-      input_kind: "async_subagent_result",
+      trigger: "child_result",
       input: {
-        schema_version: "1",
-        relationship_id: "crr_1",
-        subagent_name: "reviewer",
-        child_thread_id: "thr_child",
         child_run_id: "run_child",
-        terminal_status: "completed",
-        result_payload: "**INC-118** matches this fold.",
+        subagent: "reviewer",
+        status: "completed",
+        output: "**INC-118** matches this fold.",
+        failure: null,
       },
     }),
-    thread("root"),
+    thread("new"),
   );
   expect(request).toEqual({
     kind: "subagent_result",
@@ -91,8 +62,8 @@ it("reports an unsuccessful child result without inventing a payload", () => {
   expect(
     runRequest(
       run({
-        input_kind: "async_subagent_result",
-        input: { terminal_status: "failed", result_payload: null },
+        trigger: "child_result",
+        input: { status: "failed", output: null },
       }),
     ),
   ).toEqual({
@@ -144,7 +115,7 @@ it("shows a structured delegated task compactly and keeps plain text a message",
   expect(
     runRequest(
       run({ input: message('{"delegated_task":"x"}') }),
-      thread("root"),
+      thread("new"),
     ),
   ).toMatchObject({ kind: "message" });
 });

@@ -1,5 +1,5 @@
-import { DisclosureSection } from "a13n-ui";
-import { useQuery } from "@tanstack/react-query";
+import { Button, DisclosureSection } from "a13n-ui";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -22,12 +22,11 @@ import { conversationQueries, runPath } from "../../api";
 import { RunEnvironmentMounts } from "../../environment-mounts";
 import { useRun } from "../../queries";
 import { formatDuration } from "../../format";
-import { RunEvents } from "./run-events";
 import styles from "./details.module.css";
 
 /**
  * Everything the heading does not say: identifiers, configuration evidence,
- * attempts, lifecycle events and the trace of this exact Run.
+ * attempts and the trace of this exact Run.
  */
 export function RunDetails({ runId }: { runId: string }) {
   const { t } = useTranslation(),
@@ -36,9 +35,10 @@ export function RunDetails({ runId }: { runId: string }) {
     queries = conversationQueries(client, workspace.id);
   const runQuery = useRun(runId);
   const attempts = useQuery(queries.attempts(runId));
-  const lineage = useQuery(queries.lineage(runId));
+  const lineage = useInfiniteQuery(queries.lineage(runId));
+  const related = lineage.data?.pages.flatMap((page) => page.items);
   const run = runQuery.data;
-  const agent = useAgent(run?.agent_revision_id ? run.agent_id : undefined);
+  const agent = useAgent(run?.agent_id);
   if (runQuery.isPending)
     return (
       <div className={styles.details}>
@@ -55,8 +55,8 @@ export function RunDetails({ runId }: { runId: string }) {
       </div>
     );
   const duration =
-    run.started_at && run.completed_at
-      ? Date.parse(run.completed_at) - Date.parse(run.started_at)
+    run.started_at && run.sealed_at
+      ? Date.parse(run.sealed_at) - Date.parse(run.started_at)
       : null;
   return (
     <div className={styles.details}>
@@ -68,9 +68,7 @@ export function RunDetails({ runId }: { runId: string }) {
             [t("Thread"), <CopyableId key="thread" value={run.thread_id} />],
             [
               t("Trigger source"),
-              t(`trigger.${run.trigger_type}`, {
-                defaultValue: run.trigger_type,
-              }),
+              t(`trigger.${run.trigger}`, { defaultValue: run.trigger }),
             ],
             [
               t("Started"),
@@ -78,11 +76,7 @@ export function RunDetails({ runId }: { runId: string }) {
             ],
             [
               t("Completed"),
-              run.completed_at ? (
-                <Timestamp value={run.completed_at} />
-              ) : (
-                UNKNOWN
-              ),
+              run.sealed_at ? <Timestamp value={run.sealed_at} /> : UNKNOWN,
             ],
             [t("Duration"), formatDuration(duration)],
           ]}
@@ -92,36 +86,21 @@ export function RunDetails({ runId }: { runId: string }) {
           rows={[
             [
               t("Agent"),
-              run.agent_revision_id ? (
-                <AgentLink key="agent" agentId={run.agent_id}>
-                  {agent.data?.name ?? run.agent_id}
-                </AgentLink>
-              ) : (
-                t("Configuration assistant")
-              ),
+              <AgentLink key="agent" agentId={run.agent_id}>
+                {agent.data?.name ?? run.agent_id}
+              </AgentLink>,
             ],
             [
               t("Agent revision"),
-              run.agent_revision_id ? (
-                <CopyableId key="revision" value={run.agent_revision_id} />
-              ) : (
-                t("None")
-              ),
+              <CopyableId key="revision" value={run.agent_revision_id} />,
             ],
-            [
-              t("Effective configuration digest"),
-              <CopyableId
-                key="digest"
-                value={run.effective_agent_config_digest}
-              />,
-            ],
-            ...(can("trace.read")
+            ...(can("read")
               ? [
                   [
                     t("Traces"),
                     <Link
                       key="traces"
-                      to={`${basePath}/traces?run_id=${run.id}&from=${encodeURIComponent(run.created_at)}&to=${encodeURIComponent(new Date(new Date(run.completed_at ?? Date.now()).getTime() + 1_000).toISOString())}`}
+                      to={`${basePath}/traces?run_id=${run.id}&from=${encodeURIComponent(run.created_at)}&to=${encodeURIComponent(new Date(new Date(run.sealed_at ?? Date.now()).getTime() + 1_000).toISOString())}`}
                     >
                       {t("Open run traces")}
                     </Link>,
@@ -133,15 +112,20 @@ export function RunDetails({ runId }: { runId: string }) {
       </div>
       <div className={styles.detailBlock}>
         <span className={styles.detailLabel}>{t("Environment")}</span>
-        {run.environment_id ? (
-          <EnvironmentReference id={run.environment_id} />
-        ) : (
+        {!run.environment_mounts.length ? (
           <p className={styles.detailNote}>{t("None")}</p>
-        )}
-        {run.environment_working_directory && (
-          <code className={styles.detailPath}>
-            {run.environment_working_directory}
-          </code>
+        ) : (
+          run.environment_mounts.map((mount) => (
+            <div key={mount.name}>
+              <strong>{mount.name}</strong>
+              <EnvironmentReference id={mount.environment_id} />
+              {mount.working_directory && (
+                <code className={styles.detailPath}>
+                  {mount.working_directory}
+                </code>
+              )}
+            </div>
+          ))
         )}
       </div>
       <div className={styles.detailColumns}>
@@ -160,23 +144,28 @@ export function RunDetails({ runId }: { runId: string }) {
             </ol>
           )}
         </div>
-        <RunEvents runId={runId} />
       </div>
       <div className={styles.detailBlock}>
         <span className={styles.detailLabel}>{t("Lineage")}</span>
         <ErrorNotice error={lineage.error} />
-        {lineage.data &&
-          (!lineage.data.items.length ? (
+        {related &&
+          (!related.length ? (
             <p className={styles.detailNote}>{t("No related runs.")}</p>
           ) : (
             <ol className={styles.lineageList}>
-              {lineage.data.items.map((entry) => (
-                <li key={entry.run_id}>
-                  <Link to={runPath(basePath, entry, "debug")}>
+              {related.map((entry) => (
+                <li key={entry.id}>
+                  <Link
+                    to={runPath(
+                      basePath,
+                      { ...entry, run_id: entry.id },
+                      "debug",
+                    )}
+                  >
                     {t(
-                      entry.lineage_kind === "fork"
+                      entry.lineage === "fork"
                         ? "Branch run"
-                        : entry.lineage_kind === "continue"
+                        : entry.lineage === "continue"
                           ? "Continued run"
                           : "Initial run",
                     )}
@@ -187,6 +176,17 @@ export function RunDetails({ runId }: { runId: string }) {
               ))}
             </ol>
           ))}
+        {lineage.hasNextPage && (
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={lineage.isFetchingNextPage}
+            onClick={() => void lineage.fetchNextPage()}
+            type="button"
+          >
+            {t("Load earlier runs")}
+          </Button>
+        )}
       </div>
       <RunEnvironmentMounts key={run.id} run={run} />
       <DisclosureSection
@@ -221,14 +221,12 @@ function Facts({
   );
 }
 
-function Attempt({ attempt }: { attempt: Schema["RunAttemptResource"] }) {
+function Attempt({ attempt }: { attempt: Schema["AttemptView"] }) {
   const { t } = useTranslation();
   return (
     <li className={styles.attempt}>
       <span className={styles.attemptHead}>
-        <strong>
-          {t("Attempt {{attempt}}", { attempt: attempt.attempt_number })}
-        </strong>
+        <strong>{t("Attempt {{attempt}}", { attempt: attempt.number })}</strong>
         <StatePill state={attempt.status} />
       </span>
       <span className={styles.attemptSpan}>

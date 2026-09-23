@@ -8,23 +8,13 @@ import {
   MenuPopup,
   MenuTrigger,
 } from "a13n-ui";
-import {
-  ArchiveIcon,
-  CopyIcon,
-  DotsThreeIcon,
-  PowerIcon,
-} from "@phosphor-icons/react";
+import { ArchiveIcon, CopyIcon, DotsThreeIcon } from "@phosphor-icons/react";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import {
-  commandHeaders,
-  data,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
+import { data, ifMatch, type Schema } from "../../shared/api";
 import { changeAgentImage } from "./images";
 import { AgentAvatar } from "./avatar";
 import { ImagePicker, MAX_IMAGE_BYTES } from "../../shared/forms";
@@ -32,7 +22,7 @@ import { ResourceKeyField } from "../../shared/identity";
 import { ErrorNotice } from "../../shared/feedback";
 import { Confirm } from "../../shared/dialogs";
 import { FormActions } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
+import { createWithKey } from "../../shared/keys";
 import styles from "../../shared/shared.module.css";
 
 export function AgentDetails({
@@ -55,7 +45,7 @@ export function AgentDetails({
     navigate = useNavigate();
   const [name, setName] = useState(agent.name),
     [key, setKey] = useState(agent.key),
-    [description, setDescription] = useState(agent.description ?? "");
+    [description, setDescription] = useState(agent.description);
   const save = useMutation({
     mutationFn: async () => {
       if (!etag)
@@ -63,17 +53,12 @@ export function AgentDetails({
           t("Version information is unavailable. Reload this page."),
         );
       return client.http
-        .PATCH("/api/v1/workspaces/{workspace}/agents/{agent}", {
+        .PATCH("/api/v1/workspaces/{workspace_id}/agents/{agent_id}", {
           params: {
-            path: { workspace: workspace.id, agent: agent.id },
-            header: { "If-Match": etag },
+            path: { workspace_id: workspace.id, agent_id: agent.id },
           },
-          headers: workspaceHeaders(workspace.id),
-          body: {
-            name,
-            key,
-            description: description || null,
-          },
+          headers: ifMatch(etag),
+          body: { name, key, description },
         })
         .then(data);
     },
@@ -82,6 +67,7 @@ export function AgentDetails({
       await cache.invalidateQueries({
         queryKey: ["agent-by-id", workspace.id],
       });
+      // Links with the old key stop resolving, so the page follows the new one.
       if (result.key !== agent.key) {
         cache.removeQueries({ queryKey: ["agent", workspace.id, agent.key] });
         navigate(`${basePath}/agents/${result.key}`, { replace: true });
@@ -121,13 +107,13 @@ export function AgentDetails({
       >
         <fieldset
           className="fieldset-reset"
-          disabled={save.isPending || image.isPending || !can("agent.update")}
+          disabled={save.isPending || image.isPending || !can("write")}
         >
           <div className={styles.stack}>
             <div className="mb-2">
               <ImagePicker
                 hasImage={!!agent.image_url}
-                editable={can("agent.update")}
+                editable={can("write")}
                 pending={save.isPending || image.isPending}
                 onChange={(file) => image.mutate(file)}
                 description={
@@ -173,7 +159,7 @@ export function AgentDetails({
             disabled={
               name === agent.name &&
               key === agent.key &&
-              description === (agent.description ?? "")
+              description === agent.description
             }
           />
         </fieldset>
@@ -199,31 +185,21 @@ export function AgentActions({
     { t } = useTranslation(),
     { workspace, can, basePath } = useWorkspace(),
     cache = useQueryClient(),
-    navigate = useNavigate(),
-    idempotency = useIdempotency();
-  const action = async (
-    action: "enable" | "disable" | "archive" | "unarchive",
-  ) => {
+    navigate = useNavigate();
+  const path = { workspace_id: workspace.id, agent_id: agent.id };
+  const archive = async () => {
     if (!etag)
       throw new Error(
         t("Version information is unavailable. Reload this page."),
       );
-    await client.http.POST(
-      "/api/v1/workspaces/{workspace}/agents/{agent}/{action}",
-      {
-        params: {
-          path: { workspace: workspace.id, agent: agent.id, action },
-          header: {
-            ...commandHeaders(
-              workspace.id,
-              idempotency.forBody({ action, etag }),
-            ),
-            "If-Match": etag,
-          },
-        },
-      },
-    );
-    idempotency.reset();
+    await client.http
+      .POST(
+        agent.archived_at
+          ? "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/unarchive"
+          : "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/archive",
+        { params: { path }, headers: ifMatch(etag) },
+      )
+      .then(data);
     reload();
   };
   return (
@@ -242,41 +218,27 @@ export function AgentActions({
       </MenuTrigger>
       <MenuPopup align="end">
         {leading}
-        {can("agent.lifecycle") && (
-          <>
-            <Confirm
-              subject={agent.name}
-              title={t(agent.enabled ? "Disable agent" : "Enable agent")}
-              description={t("This changes whether new runs can start.")}
-              triggerElement={
-                <MenuItem closeOnClick={false}>
-                  <PowerIcon size={14} />
-                  {t(agent.enabled ? "Disable" : "Enable")}
-                </MenuItem>
-              }
-              action={() => action(agent.enabled ? "disable" : "enable")}
-            />
-            <Confirm
-              subject={agent.name}
-              title={t(agent.archived_at ? "Unarchive agent" : "Archive agent")}
-              description={t(
-                "Archived agents leave the default list. Their history remains available.",
-              )}
-              triggerElement={
-                <MenuItem
-                  closeOnClick={false}
-                  variant={agent.archived_at ? "default" : "destructive"}
-                >
-                  <ArchiveIcon size={14} />
-                  {t(agent.archived_at ? "Unarchive" : "Archive")}
-                </MenuItem>
-              }
-              danger={!agent.archived_at}
-              action={() => action(agent.archived_at ? "unarchive" : "archive")}
-            />
-          </>
+        {can("write") && agent.source === "custom" && (
+          <Confirm
+            subject={agent.name}
+            title={t(agent.archived_at ? "Unarchive agent" : "Archive agent")}
+            description={t(
+              "Archived agents leave the default list. Their history remains available.",
+            )}
+            triggerElement={
+              <MenuItem
+                closeOnClick={false}
+                variant={agent.archived_at ? "default" : "destructive"}
+              >
+                <ArchiveIcon size={14} />
+                {t(agent.archived_at ? "Unarchive" : "Archive")}
+              </MenuItem>
+            }
+            danger={!agent.archived_at}
+            action={archive}
+          />
         )}
-        {can("agent.duplicate") && (
+        {can("write") && !agent.archived_at && (
           <Confirm
             subject={agent.name}
             title={t("Duplicate agent")}
@@ -288,32 +250,18 @@ export function AgentActions({
               </MenuItem>
             }
             action={async () => {
-              const body = {
-                name: `${agent.name} (${t("copy")})`,
-              };
-              if (!etag)
-                throw new Error(
-                  t("Version information is unavailable. Reload this page."),
-                );
-              const result = data(
-                await client.http.POST(
-                  "/api/v1/workspaces/{workspace}/agents/{agent}/duplicate",
-                  {
-                    params: {
-                      path: { workspace: workspace.id, agent: agent.id },
-                      header: {
-                        ...commandHeaders(
-                          workspace.id,
-                          idempotency.forBody(body),
-                        ),
-                        "If-Match": etag,
-                      },
-                    },
-                    body,
-                  },
-                ),
+              const name = `${agent.name} (${t("copy")})`;
+              const result = await createWithKey(
+                `${agent.key}-copy`,
+                "agent",
+                (key) =>
+                  client.http
+                    .POST(
+                      "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/duplicate",
+                      { params: { path }, body: { key, name } },
+                    )
+                    .then(data),
               );
-              idempotency.reset();
               void cache.invalidateQueries();
               navigate(`${basePath}/agents/${result.key}`);
             }}

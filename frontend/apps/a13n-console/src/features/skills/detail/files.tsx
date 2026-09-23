@@ -30,10 +30,10 @@ export function SkillFiles({
   const { t } = useTranslation();
   const [selected, setSelected] = useState("SKILL.md");
   const nodes = useMemo(
-    () => fileTree(revision.manifest.files),
-    [revision.manifest.files],
+    () => fileTree(revision.config.files),
+    [revision.config.files],
   );
-  const file = revision.manifest.files.find((item) => item.path === selected);
+  const file = revision.config.files.find((item) => item.path === selected);
   return (
     <div className={styles.browser}>
       <nav
@@ -41,7 +41,7 @@ export function SkillFiles({
         aria-label={t("Package files")}
       >
         <p className={styles.treeHeading}>
-          {t("Files")} <span>{revision.manifest.files.length}</span>
+          {t("Files")} <span>{revision.config.files.length}</span>
         </p>
         <FileTree nodes={nodes} selected={selected} select={setSelected} />
       </nav>
@@ -106,13 +106,13 @@ function FileContent({
   file,
   revision,
 }: {
-  file: Schema["SkillPackageFile"];
+  file: Schema["SkillFile"];
   revision: Schema["SkillRevision"];
 }) {
   const client = useClient(),
     { t } = useTranslation();
   const [view, setView] = useState("preview");
-  const large = file.size_bytes > previewLimit;
+  const large = file.size > previewLimit;
   const archive = useQuery({
     ...archiveQuery(client, revision),
     enabled: !large,
@@ -120,11 +120,11 @@ function FileContent({
   const preview = useMemo(() => {
     if (!archive.data || large) return {};
     try {
-      return { text: readTextFile(archive.data, file) };
+      return { text: readTextFile(archive.data, revision.config.root, file) };
     } catch (error) {
       return { error };
     }
-  }, [archive.data, file, large]);
+  }, [archive.data, file, large, revision.config.root]);
   const readable = typeof preview.text === "string";
   const markdown = /\.md$/i.test(file.path) && !large;
   return (
@@ -133,7 +133,7 @@ function FileContent({
         <span className={styles.documentPath}>
           <span title={file.path}>{file.path}</span>
           <small>
-            {t("{{size}} bytes", { size: file.size_bytes.toLocaleString() })}
+            {t("{{size}} bytes", { size: file.size.toLocaleString() })}
           </small>
         </span>
         {markdown && (

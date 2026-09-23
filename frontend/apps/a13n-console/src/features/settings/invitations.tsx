@@ -18,7 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
-import { data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -37,7 +37,7 @@ import { Confirm } from "../../shared/dialogs";
 import { FormActions, SecretReveal } from "../../shared/forms";
 import styles from "../../shared/shared.module.css";
 import settings from "./settings.module.css";
-import { roleOptions, type MembershipScope } from "./roles";
+import { roles, type MembershipScope, type Role } from "./roles";
 
 function invitationState(item: Schema["Invitation"]) {
   if (item.accepted_at) return "accepted";
@@ -55,19 +55,19 @@ export function Invitations({ scope }: { scope: MembershipScope }) {
     queryFn: ({ signal }) =>
       scope.kind === "workspace"
         ? client.http
-            .GET("/api/v1/workspaces/{workspace}/invitations", {
+            .GET("/api/v1/workspaces/{workspace_id}/invitations", {
               signal,
               params: {
-                path: { workspace: scope.id },
+                path: { workspace_id: scope.id },
                 query: { cursor: page.cursor, limit: 30 },
               },
             })
             .then(data)
         : client.http
-            .GET("/api/v1/organizations/{organization}/invitations", {
+            .GET("/api/v1/organizations/{organization_id}/invitations", {
               signal,
               params: {
-                path: { organization: scope.id },
+                path: { organization_id: scope.id },
                 query: { cursor: page.cursor, limit: 30 },
               },
             })
@@ -113,13 +113,31 @@ export function Invitations({ scope }: { scope: MembershipScope }) {
                     }
                     danger
                     action={() =>
-                      client.http.POST(
-                        "/api/v1/invitations/{invitation_id}/revoke",
-                        {
-                          params: { path: { invitation_id: item.id } },
-                          body: { expected_version: item.version },
-                        },
-                      )
+                      scope.kind === "workspace"
+                        ? client.http.POST(
+                            "/api/v1/workspaces/{workspace_id}/invitations/{invitation_id}/revoke",
+                            {
+                              params: {
+                                path: {
+                                  workspace_id: scope.id,
+                                  invitation_id: item.id,
+                                },
+                              },
+                              headers: ifMatch(rowTag(item)),
+                            },
+                          )
+                        : client.http.POST(
+                            "/api/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke",
+                            {
+                              params: {
+                                path: {
+                                  organization_id: scope.id,
+                                  invitation_id: item.id,
+                                },
+                              },
+                              headers: ifMatch(rowTag(item)),
+                            },
+                          )
                     }
                   />
                 </>
@@ -141,13 +159,7 @@ export function Invitations({ scope }: { scope: MembershipScope }) {
                 label: t("Role"),
                 render: (item) => (
                   <span className={settings.chip}>
-                    {item.grants
-                      .map((grant) =>
-                        t(`role.${grant.role_key}`, {
-                          defaultValue: grant.role_key,
-                        }),
-                      )
-                      .join(", ")}
+                    {t(`role.${item.role}`, { defaultValue: item.role })}
                   </span>
                 ),
               },
@@ -205,41 +217,51 @@ export function InvitationEditor({
     cache = useQueryClient();
   const [open, setOpen] = useState(false),
     [email, setEmail] = useState(""),
-    [role, setRole] = useState<Schema["ChangeRoleRequest"]["role"]>(
-      scope.kind === "organization" ? "member" : "viewer",
-    );
+    [role, setRole] = useState<Role>("viewer");
   const mutation = useMutation({
     gcTime: 0,
     mutationFn: async () => {
       if (invitation)
+        return scope.kind === "workspace"
+          ? client.http
+              .POST(
+                "/api/v1/workspaces/{workspace_id}/invitations/{invitation_id}/resend",
+                {
+                  params: {
+                    path: {
+                      workspace_id: scope.id,
+                      invitation_id: invitation.id,
+                    },
+                  },
+                  headers: ifMatch(rowTag(invitation)),
+                },
+              )
+              .then(data)
+          : client.http
+              .POST(
+                "/api/v1/organizations/{organization_id}/invitations/{invitation_id}/resend",
+                {
+                  params: {
+                    path: {
+                      organization_id: scope.id,
+                      invitation_id: invitation.id,
+                    },
+                  },
+                  headers: ifMatch(rowTag(invitation)),
+                },
+              )
+              .then(data);
+      if (scope.kind === "workspace")
         return client.http
-          .POST("/api/v1/invitations/{invitation_id}/resend", {
-            params: { path: { invitation_id: invitation.id } },
-            body: { expected_version: invitation.version },
-          })
-          .then(data);
-      if (scope.kind === "workspace") {
-        if (role === "member") throw new Error("Invalid workspace role");
-        return client.http
-          .POST("/api/v1/workspaces/{workspace}/invitations", {
-            params: { path: { workspace: scope.id } },
+          .POST("/api/v1/workspaces/{workspace_id}/invitations", {
+            params: { path: { workspace_id: scope.id } },
             body: { email, role },
           })
           .then(data);
-      }
       return client.http
-        .POST("/api/v1/organizations/{organization}/invitations", {
-          params: { path: { organization: scope.id } },
-          body: {
-            email,
-            grants: [
-              {
-                resource_type: "organization",
-                resource_id: scope.id,
-                role_key: role,
-              },
-            ],
-          },
+        .POST("/api/v1/organizations/{organization_id}/invitations", {
+          params: { path: { organization_id: scope.id } },
+          body: { email, role },
         })
         .then(data);
     },
@@ -289,13 +311,7 @@ export function InvitationEditor({
           ) : (
             <>
               <StatePill state={mutation.data.delivery} />
-              <p className={settings.note}>
-                {t(
-                  mutation.data.delivery === "sent"
-                    ? "Invitation sent"
-                    : "Email delivery failed. Retry when delivery is available.",
-                )}
-              </p>
+              <p className={settings.note}>{t("Invitation sent")}</p>
             </>
           )}
           <footer className={styles.formActions}>
@@ -327,13 +343,11 @@ export function InvitationEditor({
                 value={role}
                 className="min-w-0"
                 onValueChange={(value) => {
-                  const role = roleOptions(scope.kind).find(
-                    (role) => role === value,
-                  );
+                  const role = roles.find((role) => role === value);
                   if (role) setRole(role);
                 }}
                 label={t("Role")}
-                options={roleOptions(scope.kind).map((value) => ({
+                options={roles.map((value) => ({
                   value,
                   label: t(`role.${value}`, { defaultValue: value }),
                 }))}

@@ -3,7 +3,6 @@ import {
   IdentificationBadgeIcon,
   RobotIcon,
   ClipboardTextIcon,
-  TerminalWindowIcon,
   CubeIcon,
   KeyIcon,
   StackIcon,
@@ -19,6 +18,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { workspacePath } from "../../shared/paths";
+import type { Schema } from "../../shared/api";
 import { useAccess } from "../../layout/workspace";
 
 export type SettingsScope = "personal" | "workspace" | "organization";
@@ -38,7 +38,7 @@ export type SettingsSectionDefinition = {
   /** Forms keep the 760px column; collections need room for their table. */
   layout?: "form" | "collection";
   icon: Icon;
-  permission?: string;
+  permission?: Schema["Verb"];
 };
 
 const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
@@ -97,21 +97,21 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       description:
         "Models that read images, video and audio for agents whose model cannot.",
       icon: EyeIcon,
-      permission: "models.read",
+      permission: "read",
     },
     {
       value: "members",
       label: "Members",
       description: "Manage the people who can access this workspace.",
       icon: UsersIcon,
-      permission: "role_binding.manage",
+      permission: "admin",
     },
     {
       value: "invitations",
       label: "Invitations",
       description: "Invite people and manage pending invitations.",
       icon: EnvelopeIcon,
-      permission: "invitation.manage",
+      permission: "admin",
     },
     {
       value: "api-keys",
@@ -125,21 +125,21 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       label: "Member keys",
       description: "Review and revoke workspace members’ API keys.",
       icon: IdentificationBadgeIcon,
-      permission: "api_key.manage",
+      permission: "admin",
     },
     {
       value: "service-accounts",
       label: "Service accounts",
       description: "Dedicated identities for applications and automation.",
       icon: RobotIcon,
-      permission: "service_account.manage",
+      permission: "admin",
     },
     {
       value: "audit",
       label: "Audit",
       description: "Review changes to access and account security.",
       icon: ClipboardTextIcon,
-      permission: "security_audit.read",
+      permission: "admin",
     },
   ],
   organization: [
@@ -167,12 +167,6 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       label: "Models",
       description: "Models available across your organization.",
       icon: CubeIcon,
-    },
-    {
-      value: "environments",
-      label: "Environment templates",
-      description: "Shared templates for agent execution.",
-      icon: TerminalWindowIcon,
     },
     {
       value: "providers",
@@ -237,7 +231,7 @@ export function resolveSection(
 }
 
 export function useSettingsNavigation() {
-  const { workspace, organization, can, organizationAdmin } = useAccess();
+  const { workspace, organization, can, organizationCan } = useAccess();
   return [
     {
       scope: "personal" as const,
@@ -259,7 +253,7 @@ export function useSettingsNavigation() {
           },
         ]
       : []),
-    ...(organizationAdmin
+    ...(organizationCan("admin")
       ? [
           {
             scope: "organization" as const,

@@ -10,22 +10,24 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Security } from "./security";
 
-const auth = vi.hoisted(() => ({ refresh: vi.fn(), navigate: vi.fn() }));
-const client = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
+const client = vi.hoisted(() => ({
+  GET: vi.fn(),
+  POST: vi.fn(),
+  PATCH: vi.fn(),
+}));
 vi.mock("../../auth/context", () => ({
   useAuth: () => ({
-    data: { user: { value: { email: "alex@example.com" } } },
-    refresh: auth.refresh,
+    data: { user: { value: { email: "alex@example.com" }, etag: '"v1"' } },
   }),
   useClient: () => ({ http: client }),
 }));
-vi.mock("react-router", () => ({ useNavigate: () => auth.navigate }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 beforeEach(() => {
   client.GET.mockResolvedValue({ data: { email_delivery: true } });
   client.POST.mockResolvedValue({});
+  client.PATCH.mockResolvedValue({});
 });
 afterEach(() => {
   cleanup();
@@ -85,18 +87,16 @@ it("reveals email editing inline and submits only the email form", async () => {
     section.getByRole("button", { name: "Send verification email" }),
   );
   await screen.findByRole("status");
-  expect(client.POST).toHaveBeenCalledExactlyOnceWith(
-    "/api/v1/users/me/email-change",
-    {
-      body: { email: "new@example.com", current_password: "preview-password" },
-    },
-  );
+  expect(client.PATCH).toHaveBeenCalledExactlyOnceWith("/api/v1/users/me", {
+    headers: { "If-Match": '"v1"' },
+    body: { email: "new@example.com", current_password: "preview-password" },
+  });
   expect(section.queryByLabelText("New email address")).toBeNull();
   expect(section.getByText("alex@example.com")).toBeTruthy();
 });
 
 it("preserves the email draft after a recoverable request failure", async () => {
-  client.POST.mockRejectedValue(
+  client.PATCH.mockRejectedValue(
     new Error("Email verification is temporarily unavailable."),
   );
   const user = setup();
@@ -150,7 +150,7 @@ it("opens password fields only in a dialog and clears a cancelled draft", async 
     (screen.getByLabelText("New password") as HTMLInputElement).value,
   ).toBe("");
 });
-it("submits password changes from the dialog and returns to sign-in", async () => {
+it("submits password changes from the dialog and keeps this session", async () => {
   const user = setup();
   await user.click(screen.getByRole("button", { name: "Change password" }));
   const dialog = within(
@@ -159,12 +159,11 @@ it("submits password changes from the dialog and returns to sign-in", async () =
   await user.type(dialog.getByLabelText("Current password"), "old-password");
   await user.type(dialog.getByLabelText("New password"), "new-long-password");
   await user.click(dialog.getByRole("button", { name: "Change password" }));
-  await waitFor(() => expect(auth.navigate).toHaveBeenCalledWith("/login"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(client.POST).toHaveBeenCalledExactlyOnceWith(
     "/api/v1/users/me/password",
     {
       body: { current_password: "old-password", password: "new-long-password" },
     },
   );
-  expect(auth.refresh).toHaveBeenCalledOnce();
 });

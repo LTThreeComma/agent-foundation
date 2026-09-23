@@ -5,11 +5,21 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../../shared/api";
+import {
+  data,
+  uploadFile as createUpload,
+  type Schema,
+} from "../../../shared/api";
 import { ErrorNotice } from "../../../shared/feedback";
 import { AttachmentChip } from "../transcript/attachment";
 import { AttachDialog } from "./attach-dialog";
 import styles from "./composer.module.css";
+
+/** What the composer attaches beside the text, and how its chip names it. */
+interface Attachment {
+  part: Schema["AssetPart"] | Schema["UrlPart"];
+  label: string;
+}
 
 /**
  * The composer floats over the end of the transcript: a borderless text area,
@@ -27,8 +37,9 @@ export function Composer({
   stop,
   stopping = false,
 }: {
-  initial?: Schema["AgentInput"];
-  submit: (input: Schema["AgentInput"], key: string) => Promise<unknown>;
+  /** A message to start from, such as one being submitted again. */
+  initial?: Schema["MessagePayload"];
+  submit: (payload: Schema["MessagePayload"], key: string) => Promise<unknown>;
   /** Names the action: Send, Send guidance, Run next step. */
   label?: string;
   placeholder?: string;
@@ -45,8 +56,7 @@ export function Composer({
     { workspace } = useWorkspace();
   const [text, setText] = useState(
     initial?.content
-      ?.filter((block) => block.type === "text")
-      .map((block) => block.text)
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
       .join("\n\n") ?? "",
   );
   const messageInput = useRef<HTMLTextAreaElement>(null);
@@ -57,39 +67,44 @@ export function Composer({
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
   }, [text]);
-  const [attachments, setAttachments] = useState<Schema["BinaryContent"][]>(
-    initial?.content?.filter((block) => block.type === "binary") ?? [],
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    initial?.content.flatMap((part): Attachment[] =>
+      part.type === "asset"
+        ? [{ part, label: part.asset_id }]
+        : part.type === "url"
+          ? [{ part, label: part.url }]
+          : [],
+    ) ?? [],
   );
-  const [structured, setStructured] = useState(
-    initial?.structured_content == null
-      ? ""
-      : JSON.stringify(initial.structured_content, null, 2),
-  );
+  const [structured, setStructured] = useState(() => {
+    const json = initial?.content.find(
+      (part): part is Schema["JsonPart"] => part.type === "json",
+    );
+    return json ? JSON.stringify(json.value, null, 2) : "";
+  });
   const [key, setKey] = useState(crypto.randomUUID()),
     [uploadFile, setUploadFile] = useState<{ file: File; key: string }>();
   const changed = () => setKey(crypto.randomUUID());
   const upload = useMutation({
-    mutationFn: async (selection: { file: File; key: string }) =>
-      client.http
-        .POST("/api/v1/workspaces/{workspace}/assets", {
-          params: {
-            path: { workspace: workspace.id },
-            query: {
-              filename: selection.file.name,
-              media_type: selection.file.type || "application/octet-stream",
-            },
-            header: commandHeaders(workspace.id, selection.key),
-          },
-          headers: { "Content-Type": "application/octet-stream" },
-          body: selection.file,
-        })
-        .then(data),
+    mutationFn: async (selection: { file: File; key: string }) => {
+      const upload = await createUpload(
+        client,
+        workspace.id,
+        selection.file,
+        selection.key,
+      );
+      // One asset per upload: repeating the call returns the asset it created.
+      return data(
+        await client.http.POST("/api/v1/workspaces/{workspace_id}/assets", {
+          params: { path: { workspace_id: workspace.id } },
+          body: { upload_id: upload.upload_id, name: upload.filename },
+        }),
+      );
+    },
     onSuccess: (asset) => {
       attach({
-        type: "binary",
-        source: { type: "asset", asset_id: asset.id },
-        filename: asset.filename,
-        media_type: asset.media_type,
+        part: { type: "asset", asset_id: asset.id },
+        label: asset.name,
       });
       setUploadFile(undefined);
     },
@@ -112,13 +127,13 @@ export function Composer({
         throw new Error(t("Write a message or attach content first."));
       await submit(
         {
-          ...initial,
-          schema_version: "2",
           content: [
             ...(text.trim() ? [{ type: "text" as const, text }] : []),
-            ...attachments,
+            ...attachments.map((attachment) => attachment.part),
+            ...(structuredContent === undefined
+              ? []
+              : [{ type: "json" as const, value: structuredContent }]),
           ],
-          structured_content: structuredContent ?? null,
         },
         key,
       );
@@ -134,7 +149,7 @@ export function Composer({
         stage.scrollTo({ top: stage.scrollHeight, behavior: "smooth" });
     },
   });
-  function attach(attachment: Schema["BinaryContent"]) {
+  function attach(attachment: Attachment) {
     setAttachments((previous) => [...previous, attachment]);
     changed();
   }
@@ -191,14 +206,7 @@ export function Composer({
             {attachments.map((attachment, index) => (
               <AttachmentChip
                 key={index}
-                label={
-                  attachment.filename ||
-                  (attachment.source.type === "url"
-                    ? attachment.source.url
-                    : attachment.source.type === "asset"
-                      ? attachment.source.asset_id
-                      : attachment.source.path)
-                }
+                label={attachment.label}
                 actions={
                   <Button
                     type="button"

@@ -1,49 +1,33 @@
 import type { Client } from "../../service-client";
 import { data, type Schema } from "../../shared/api";
 export type ConnectorScope = { kind: "workspace" | "organization"; id: string };
-export function connectorApi(client: Client, scope: ConnectorScope) {
-  const organization_id = scope.id,
-    workspace_id = scope.id;
+/**
+ * Providers live in the organization collection: a workspace lists its own and
+ * the shared ones and creates its own; the organization creates shared ones.
+ */
+export function connectorApi(
+  client: Client,
+  organizationId: string,
+  scope: ConnectorScope,
+) {
+  const workspace_id = scope.kind === "workspace" ? scope.id : null;
   return {
     providers: (signal: AbortSignal, cursor?: string) =>
-      scope.kind === "organization"
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/connector-providers", {
-              params: {
-                path: { organization: organization_id },
-                query: { cursor, limit: 100 },
-              },
-              signal,
-            })
-            .then(data)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/connector-providers", {
-              params: {
-                path: { workspace: workspace_id },
-                query: { cursor, limit: 100 },
-              },
-              signal,
-            })
-            .then(data),
-    create: (body: Schema["CreateConnectorProviderRequest"], key: string) =>
-      scope.kind === "organization"
-        ? client.http
-            .POST("/api/v1/organizations/{organization}/connector-providers", {
-              params: {
-                path: { organization: organization_id },
-                header: { "Idempotency-Key": key },
-              },
-              body,
-            })
-            .then(data)
-        : client.http
-            .POST("/api/v1/workspaces/{workspace}/connector-providers", {
-              params: {
-                path: { workspace: workspace_id },
-                header: { "Idempotency-Key": key },
-              },
-              body,
-            })
-            .then(data),
+      client.http
+        .GET("/api/v1/organizations/{organization_id}/connector-providers", {
+          params: {
+            path: { organization_id: organizationId },
+            query: { workspace_id, cursor, limit: 100 },
+          },
+          signal,
+        })
+        .then(data),
+    create: (body: Omit<Schema["ProviderCreate"], "workspace_id">) =>
+      client.http
+        .POST("/api/v1/organizations/{organization_id}/connector-providers", {
+          params: { path: { organization_id: organizationId } },
+          body: { ...body, workspace_id },
+        })
+        .then(data),
   };
 }

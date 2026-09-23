@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  ChoiceField,
-  DisclosureSection,
-  FormField,
-  Input,
-} from "a13n-ui";
+import { Button, DisclosureSection, FormField, Input } from "a13n-ui";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
-import { allPages, data, type Schema } from "../../shared/api";
+import { useAccess } from "../../layout/workspace";
+import { ApiError } from "../../service-client";
+import {
+  allPages,
+  data,
+  ifMatch,
+  type representation,
+  type Schema,
+} from "../../shared/api";
 import { CatalogStep, CatalogTile, CatalogTiles } from "../../shared/dialogs";
 import { ErrorNotice, InlineLoading } from "../../shared/feedback";
 import {
@@ -19,36 +21,33 @@ import {
   validateSettings,
 } from "../../shared/forms";
 import { IconTile, ProviderIcon } from "../../shared/identity";
-import { useIdempotency } from "../../shared/idempotency";
 import styles from "../../shared/shared.module.css";
-import { environmentApi, type EnvironmentScope } from "./api";
+import { environmentApi, type WorkspaceScope } from "./api";
 import editorStyles from "./environments.module.css";
 import { ProviderConfiguration } from "./provider-configuration";
 import { useEnvironmentTypes } from "./providers";
 
 export interface ChosenProvider {
-  provider: Schema["EnvironmentProviderAccount"];
-  definition?: Schema["EnvironmentProviderMetadata"];
+  provider: Schema["Provider"];
+  definition?: Schema["ProviderType"];
 }
 
 /**
- * One revision of a template: the provider that runs it and the configuration
- * that provider understands. Creation starts at the provider catalog; editing
- * opens on the current revision with a way back to the catalog.
+ * A template's configuration: the provider that runs it and the recipe that
+ * provider understands. Creation starts at the provider catalog; editing
+ * opens on the current configuration with a way back to the catalog.
  */
 export function TemplateConfig({
   scope,
   template,
-  revision,
   close,
   reload,
   readOnly = false,
   onProviderChange,
 }: {
   readOnly?: boolean;
-  scope: EnvironmentScope;
-  template?: Schema["EnvironmentTemplate"];
-  revision?: Schema["EnvironmentTemplateRevision"];
+  scope: WorkspaceScope;
+  template?: ReturnType<typeof representation<Schema["Template"]>>;
   close: () => void;
   reload?: () => Promise<void>;
   /** Lets the dialog carry the chosen provider in its title. */
@@ -57,53 +56,49 @@ export function TemplateConfig({
   const client = useClient(),
     cache = useQueryClient(),
     { t } = useTranslation(),
-    key = useIdempotency(),
+    { organization } = useAccess(),
     [basis] = useState(template),
     types = useEnvironmentTypes();
   const providers = useQuery({
     queryKey: ["environment-provider-options", scope.kind, scope.id],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        environmentApi(client, scope).providers(signal, cursor),
+        environmentApi(client, organization.id, scope).providers(
+          signal,
+          cursor,
+        ),
       ),
   });
-  const [name, setName] = useState(""),
+  const saved = template?.value;
+  const [key, setKey] = useState(""),
+    [name, setName] = useState(""),
     [description, setDescription] = useState(""),
-    [providerId, setProviderId] = useState(revision?.provider_id ?? ""),
-    [choosing, setChoosing] = useState(!revision?.provider_id),
-    [preparation, setPreparation] = useState<"on_run" | "on_use">(
-      revision?.preparation ?? "on_run",
-    );
+    [providerId, setProviderId] = useState(saved?.provider_id ?? ""),
+    [choosing, setChoosing] = useState(!saved?.provider_id);
   const [configurations, setConfigurations] = useState<Record<string, string>>({
-    [revision?.provider_id ?? ""]: JSON.stringify(
-      revision?.configuration ?? {},
+    [saved?.provider_id ?? ""]: JSON.stringify(
+      saved?.config.recipe ?? {},
       null,
       2,
     ),
   });
   const [configurationError, setConfigurationError] = useState<string>();
-  const activeImageTest = useRef<{
-    controller: AbortController;
-    requestId: string;
-    providerId: string;
-  } | null>(null);
   const configuration = configurations[providerId] ?? "{}";
   function setConfiguration(value: string) {
     setConfigurations((current) => ({ ...current, [providerId]: value }));
     setConfigurationError(undefined);
-    cancelImageTest();
   }
   const [stop, setStop] = useState(
-      revision?.retention.idle.stop_after?.toString() ?? "",
+      saved?.config.stop_after_seconds?.toString() ?? "",
     ),
     [destroy, setDestroy] = useState(
-      revision?.retention.idle.delete_after?.toString() ?? "",
+      saved?.config.delete_after_seconds?.toString() ?? "",
     );
   const provider = providers.data?.find((item) => item.id === providerId);
   const definition = types.data?.items.find(
     (item) => item.type === provider?.type,
   );
-  const configurationSchema = definition?.template_configuration_schema;
+  const configurationSchema = definition?.environment_schema ?? undefined;
   const report = useRef(onProviderChange);
   report.current = onProviderChange;
   useEffect(() => {
@@ -111,60 +106,9 @@ export function TemplateConfig({
       choosing || !provider ? undefined : { provider, definition },
     );
   }, [choosing, provider, definition]);
-  const imageTest = useMutation({
-    mutationFn: async () => {
-      const parsed = jsonObject(configuration);
-      if (configurationSchema) validateSettings(configurationSchema, parsed);
-      const controller = new AbortController();
-      const requestId = `envtest_${crypto.randomUUID().replaceAll("-", "")}`;
-      activeImageTest.current = { controller, requestId, providerId };
-      try {
-        return await client.http
-          .POST("/api/v1/environment-providers/{provider_id}/test-image", {
-            params: { path: { provider_id: providerId } },
-            body: {
-              request_id: requestId,
-              configuration: parsed,
-              workspace_id: scope.kind === "workspace" ? scope.id : null,
-            },
-            signal: controller.signal,
-          })
-          .then(data);
-      } finally {
-        if (activeImageTest.current?.controller === controller)
-          activeImageTest.current = null;
-      }
-    },
-  });
-  function cancelActiveImageTest() {
-    const active = activeImageTest.current;
-    if (!active) return;
-    activeImageTest.current = null;
-    active.controller.abort();
-    void client.http
-      .POST(
-        "/api/v1/environment-providers/{provider_id}/test-image/{request_id}/cancel",
-        {
-          params: {
-            path: {
-              provider_id: active.providerId,
-              request_id: active.requestId,
-            },
-          },
-          body: { workspace_id: scope.kind === "workspace" ? scope.id : null },
-        },
-      )
-      .catch(() => undefined);
-  }
-  function cancelImageTest() {
-    cancelActiveImageTest();
-    imageTest.reset();
-  }
-  useEffect(() => () => cancelActiveImageTest(), []);
   function chooseProvider(id: string) {
     setProviderId(id);
     setConfigurationError(undefined);
-    cancelImageTest();
     setChoosing(false);
   }
   const save = useMutation({
@@ -183,40 +127,53 @@ export function TemplateConfig({
       }
       const templateConfig = {
         provider_id: providerId,
-        configuration: parsedConfiguration,
-        preparation,
-        retention: {
-          idle: {
-            stop_after: stop === "" ? null : Number(stop),
-            delete_after: destroy === "" ? null : Number(destroy),
-          },
+        config: {
+          recipe: parsedConfiguration,
+          stop_after_seconds: stop === "" ? null : Number(stop),
+          delete_after_seconds: destroy === "" ? null : Number(destroy),
         },
       };
       if (basis)
         return client.http
-          .POST("/api/v1/environment-templates/{template_id}/revisions", {
-            params: { path: { template_id: basis.id } },
-            body: { ...templateConfig, expected_version: basis.version },
-          })
+          .PATCH(
+            "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
+            {
+              params: {
+                path: {
+                  workspace_id: basis.value.workspace_id,
+                  template_id: basis.value.id,
+                },
+              },
+              headers: ifMatch(basis.etag),
+              body: templateConfig,
+            },
+          )
           .then(data);
-      const body = {
-        ...templateConfig,
-        name,
-        description: description || null,
-      };
-      return environmentApi(client, scope).createTemplate(
-        body,
-        key.forBody(body),
-      );
+      return client.http
+        .POST("/api/v1/workspaces/{workspace_id}/environment-templates", {
+          params: { path: { workspace_id: scope.id } },
+          body: {
+            ...templateConfig,
+            key,
+            name,
+            description: description || null,
+          },
+        })
+        .then(data);
     },
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: ["environment-templates"] });
-      void cache.invalidateQueries({
-        queryKey: ["environment-template-history"],
-      });
       close();
     },
   });
+  // The Service refuses a recipe its provider will not run, such as a host
+  // mount outside the operator's directories; the refusal reads beside it.
+  const recipeRefusal =
+    save.error instanceof ApiError &&
+    save.error.code === "invalid_argument" &&
+    save.error.details.field === "config.recipe"
+      ? save.error.message
+      : undefined;
   const loadError = providers.error ?? types.error;
   if (choosing)
     return (
@@ -262,6 +219,16 @@ export function TemplateConfig({
                 maxLength={128}
               />
             </FormField>
+            <FormField className="min-w-0 w-full" label={t("Key")}>
+              <Input
+                readOnly={readOnly}
+                required={true}
+                value={key}
+                onChange={(event) => setKey(event.target.value)}
+                pattern="[a-z0-9][a-z0-9_\-]{0,127}"
+                maxLength={128}
+              />
+            </FormField>
             <FormField
               className="min-w-0 w-full"
               label={t("Description")}
@@ -271,7 +238,7 @@ export function TemplateConfig({
                 readOnly={readOnly}
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
-                maxLength={4096}
+                maxLength={2048}
               />
             </FormField>
           </FormSection>
@@ -293,7 +260,7 @@ export function TemplateConfig({
           schema={configurationSchema}
           text={configuration}
           onChange={setConfiguration}
-          error={configurationError}
+          error={configurationError ?? recipeRefusal}
           note={
             definition?.type === "direct_local"
               ? t(
@@ -302,16 +269,6 @@ export function TemplateConfig({
               : undefined
           }
           variant={definition?.type === "docker" ? "docker" : "default"}
-          imageTest={
-            definition?.type === "docker" && !readOnly
-              ? {
-                  run: () => imageTest.mutate(),
-                  pending: imageTest.isPending,
-                  result: imageTest.data,
-                  error: imageTest.error,
-                }
-              : undefined
-          }
         />
         <FormSection divider={false}>
           <DisclosureSection
@@ -319,22 +276,6 @@ export function TemplateConfig({
             title={t("Lifecycle")}
           >
             <div className={editorStyles.advancedBody}>
-              <div className={styles.twoColumns}>
-                <ChoiceField
-                  readOnly={readOnly}
-                  placeholder={t("Select timing")}
-                  value={preparation}
-                  className="min-w-0"
-                  onValueChange={(value) =>
-                    setPreparation(value === "on_use" ? "on_use" : "on_run")
-                  }
-                  label={t("Prepare environment")}
-                  options={[
-                    { value: "on_run", label: t("When a run starts") },
-                    { value: "on_use", label: t("On first use") },
-                  ]}
-                />
-              </div>
               <div className={styles.twoColumns}>
                 <FormField
                   className="min-w-0 w-full"
@@ -345,7 +286,7 @@ export function TemplateConfig({
                   <Input
                     readOnly={readOnly}
                     type="number"
-                    min={0}
+                    min={60}
                     step={1}
                     value={stop}
                     onChange={(event) => setStop(event.target.value)}
@@ -362,7 +303,7 @@ export function TemplateConfig({
                   <Input
                     readOnly={readOnly}
                     type="number"
-                    min={0}
+                    min={60}
                     step={1}
                     value={destroy}
                     onChange={(event) => setDestroy(event.target.value)}
@@ -372,15 +313,8 @@ export function TemplateConfig({
             </div>
           </DisclosureSection>
         </FormSection>
-        {basis && !readOnly && (
-          <p className={editorStyles.revisionNote}>
-            {t(
-              "New revisions apply to newly allocated environments. Existing environments keep their original template configuration.",
-            )}
-          </p>
-        )}
         <ErrorNotice
-          error={save.error}
+          error={recipeRefusal ? undefined : save.error}
           retry={reload ? () => void reload() : undefined}
         />
         {!readOnly && (
@@ -394,7 +328,7 @@ export function TemplateConfig({
               {t("Cancel")}
             </Button>
             <Button type="submit" variant="default" loading={save.isPending}>
-              {t(basis ? "Publish revision" : "Create template")}
+              {t(basis ? "Save changes" : "Create template")}
             </Button>
           </div>
         )}
@@ -420,8 +354,8 @@ function ProviderCatalog({
   loading,
   onChoose,
 }: {
-  providers?: Schema["EnvironmentProviderAccount"][];
-  definitions?: Schema["EnvironmentProviderMetadata"][];
+  providers?: Schema["Provider"][];
+  definitions?: Schema["ProviderType"][];
   loading: boolean;
   onChoose: (id: string) => void;
 }) {
@@ -466,15 +400,15 @@ function ProviderCatalog({
   );
 }
 
-/** The provider this revision runs on, with a way back to the catalog. */
+/** The provider this template runs on, with a way back to the catalog. */
 function ChosenProviderRow({
   provider,
   definition,
   pending,
   onChange,
 }: {
-  provider?: Schema["EnvironmentProviderAccount"];
-  definition?: Schema["EnvironmentProviderMetadata"];
+  provider?: Schema["Provider"];
+  definition?: Schema["ProviderType"];
   pending: boolean;
   onChange?: () => void;
 }) {

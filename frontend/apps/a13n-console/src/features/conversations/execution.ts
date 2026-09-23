@@ -1,4 +1,4 @@
-import type { RunEvent } from "../../service-client";
+import type { RunEvent } from "./display";
 import {
   applyRunEvent,
   compareCursors,
@@ -35,7 +35,7 @@ export interface ExecutionStep {
   items: string[];
   /** Cursor and timestamps of the creating and terminal observations. */
   cursor: string;
-  startedAt: string;
+  startedAt: string | null;
   endedAt: string | null;
   callId?: string;
   parentId?: string;
@@ -64,7 +64,7 @@ export interface ExecutionStep {
 export interface ExecutionObservation {
   id: string;
   name: string;
-  occurredAt: string;
+  occurredAt: string | null;
   detail: unknown;
 }
 /** One Run or RunAttempt lifecycle fact observed on the stream. */
@@ -72,7 +72,7 @@ export interface ExecutionEvent {
   id: string;
   type: string;
   cursor: string;
-  occurredAt: string;
+  occurredAt: string | null;
   code: string | null;
   message: string | null;
   attempt: number | null;

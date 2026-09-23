@@ -18,7 +18,9 @@ import { useWorkspace } from "../../../layout/workspace";
 import { allPages, data, type Schema } from "../../../shared/api";
 import { ErrorNotice } from "../../../shared/feedback";
 import { jsonObject, runOverride, TextAreaField } from "../../../shared/forms";
+import { environmentTemplates } from "../../environments/api";
 import { DeviceDirectory } from "../../environments/device-directory";
+import { modelApi } from "../../models/api";
 import {
   InheritIcon,
   MediaUnderstandingFields,
@@ -44,54 +46,36 @@ export function optionFieldId(field: OptionField) {
     : `run-option-${field}`;
 }
 
-type Options = Omit<Schema["ThreadRunSubmissionIntent-Input"], "input">;
+/**
+ * The environment a new Thread mounts as its primary one: a new environment
+ * reserved from a template, or an existing one. Without a choice the agent's
+ * own template is reserved when its first Run is accepted.
+ */
+export type EnvironmentChoice =
+  Schema["ManagedEnvironmentCreate"] | Omit<Schema["MountCreate"], "name">;
+
+/** What a message chooses for the Run it starts, beside its payload. */
+type Options = Pick<Schema["NewThread"], "agent_revision_id" | "options"> & {
+  agent_id?: string;
+  environment?: EnvironmentChoice;
+};
 
 /** Overrides with their own controls; advanced JSON must not restate them. */
-const dedicatedOverrides = [
-  "model",
-  "instructions",
-  "plugins",
-  "media_understanding",
-];
+const dedicatedOverrides = ["model", "instructions", "media_understanding"];
 
 /** The next run's overrides, held beside the message they will be sent with. */
-export function useRunOptions(initial: Options = {}) {
-  const [original] = useState(initial),
-    [agent, setAgent] = useState(initial.agent_id ?? ""),
-    [revision, setRevision] = useState(initial.agent_revision_id ?? ""),
-    [model, setModel] = useState(
-      initial.config_override?.model?.model_key ?? "",
-    );
-  const [mediaUnderstanding, setMediaUnderstanding] = useState(
-    initial.config_override?.media_understanding ?? {},
-  );
-  const [settings, setSettings] = useState(
-      initial.config_override?.model?.settings
-        ? JSON.stringify(initial.config_override.model.settings, null, 2)
-        : "",
-    ),
-    [instructions, setInstructions] = useState(
-      initial.config_override?.instructions ?? "",
-    );
-  const [overrideInstructions, setOverrideInstructions] = useState(
-    initial.config_override?.instructions !== undefined,
-  );
-  const [environment, setEnvironment] = useState(
-    initial.environment === null
-      ? "none"
-      : initial.environment && "template_id" in initial.environment
-        ? `template:${initial.environment.template_id}`
-        : initial.environment
-          ? `instance:${initial.environment.environment_id}`
-          : "inherit",
-  );
-  const initialBinding =
-    initial.environment && "environment_id" in initial.environment
-      ? initial.environment
-      : undefined;
-  const [workingDirectory, setWorkingDirectory] = useState(
-    initialBinding?.working_directory ?? "",
-  );
+export function useRunOptions() {
+  const [agent, setAgent] = useState(""),
+    [revision, setRevision] = useState(""),
+    [model, setModel] = useState("");
+  const [mediaUnderstanding, setMediaUnderstanding] = useState<
+    Schema["MediaUnderstandingSelection"]
+  >({});
+  const [settings, setSettings] = useState(""),
+    [instructions, setInstructions] = useState("");
+  const [overrideInstructions, setOverrideInstructions] = useState(false);
+  const [environment, setEnvironment] = useState("inherit"),
+    [workingDirectory, setWorkingDirectory] = useState("");
   /** Chips name what was chosen, so the picked labels travel with the values. */
   const [labels, setLabels] = useState<{
     model?: string;
@@ -99,17 +83,7 @@ export function useRunOptions(initial: Options = {}) {
     agent?: string;
     media?: Partial<Record<MediaKind, string>>;
   }>({});
-  const [advanced, setAdvanced] = useState(
-    JSON.stringify(
-      Object.fromEntries(
-        Object.entries(initial.config_override ?? {}).filter(
-          ([key]) => !dedicatedOverrides.includes(key),
-        ),
-      ),
-      null,
-      2,
-    ),
-  );
+  const [advanced, setAdvanced] = useState("{}");
   return {
     mediaUnderstanding,
     setMediaUnderstanding,
@@ -145,21 +119,10 @@ export function useRunOptions(initial: Options = {}) {
           );
       const override = runOverride({
         ...extra,
-        ...(original.config_override?.plugins
-          ? { plugins: original.config_override.plugins }
-          : {}),
-        ...(model ||
-        settings.trim() ||
-        original.config_override?.model?.characteristics
+        ...(model || settings.trim()
           ? {
               model: {
-                ...(original.config_override?.model?.characteristics
-                  ? {
-                      characteristics:
-                        original.config_override.model.characteristics,
-                    }
-                  : {}),
-                ...(model ? { model_key: model } : {}),
+                ...(model ? { model_id: model } : {}),
                 ...(settings.trim() ? { settings: jsonObject(settings) } : {}),
               },
             }
@@ -170,24 +133,22 @@ export function useRunOptions(initial: Options = {}) {
         ...(overrideInstructions ? { instructions } : {}),
       });
       return {
-        ...original,
         agent_id: agent || undefined,
         agent_revision_id: revision || undefined,
-        config_override: Object.keys(override).length ? override : undefined,
+        ...(Object.keys(override).length
+          ? { options: { overrides: override } }
+          : {}),
         ...(environment === "inherit"
-          ? { environment: undefined }
+          ? {}
           : {
-              environment:
-                environment === "none"
-                  ? null
-                  : environment.startsWith("template:")
-                    ? { template_id: environment.slice(9) }
-                    : {
-                        environment_id: environment.slice(9),
-                        ...(workingDirectory
-                          ? { working_directory: workingDirectory }
-                          : {}),
-                      },
+              environment: environment.startsWith("template:")
+                ? { template_id: environment.slice(9) }
+                : {
+                    environment_id: environment.slice(9),
+                    ...(workingDirectory
+                      ? { working_directory: workingDirectory }
+                      : {}),
+                  },
             }),
       };
     },
@@ -211,40 +172,34 @@ export function RunOptionsDialog({
 }) {
   const { t } = useTranslation(),
     client = useClient(),
-    { workspace } = useWorkspace();
+    { workspace, organization } = useWorkspace();
   const choices = useQuery({
     queryKey: ["run-options", workspace.id],
     enabled: open,
     queryFn: async ({ signal }) => {
-      const path = { workspace: workspace.id };
+      const api = modelApi(client, organization.id, {
+        kind: "workspace",
+        id: workspace.id,
+      });
+      const path = { workspace_id: workspace.id };
       const [agents, models, templates, environments] = await Promise.all([
         allPages((cursor) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/agents", {
-              params: { path, query: { cursor } },
+            .GET("/api/v1/workspaces/{workspace_id}/agents", {
+              params: { path, query: { cursor, archived: false } },
               signal,
             })
             .then(data),
         ),
         allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace}/models", {
-              params: { path, query: { cursor, enabled: true } },
-              signal,
-            })
-            .then(data),
+          api.models(signal, cursor, undefined, undefined, true),
+        ),
+        allPages((cursor) =>
+          environmentTemplates(client, workspace.id, signal, cursor),
         ),
         allPages((cursor) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/environment-templates", {
-              params: { path, query: { cursor } },
-              signal,
-            })
-            .then(data),
-        ),
-        allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace}/environments", {
+            .GET("/api/v1/workspaces/{workspace_id}/environments", {
               params: { path, query: { cursor } },
               signal,
             })
@@ -267,15 +222,17 @@ export function RunOptionsDialog({
   }, [open, focus]);
   const environmentOptions = [
     { value: "inherit", label: t("Inherit") },
-    { value: "none", label: t("No environment") },
     ...(choices.data?.templates ?? []).map((template) => ({
       value: `template:${template.id}`,
       label: `${t("Create from template")}: ${template.name}`,
     })),
-    ...(choices.data?.environments ?? []).map((environment) => ({
-      value: `instance:${environment.id}`,
-      label: `${t("Reuse existing")}: ${environment.name} (${environment.id})`,
-    })),
+    // A deleted environment is never mounted again.
+    ...(choices.data?.environments ?? [])
+      .filter((item) => item.status !== "deleting" && item.status !== "deleted")
+      .map((item) => ({
+        value: `instance:${item.id}`,
+        label: `${t("Reuse existing")}: ${item.name} (${item.id})`,
+      })),
   ];
   return (
     <ModalFrame
@@ -312,9 +269,10 @@ export function RunOptionsDialog({
             label={t("Agent")}
             options={[
               { value: "inherit", label: t("Inherit") },
-              ...(choices.data?.agents ?? [])
-                .filter((agent) => agent.enabled)
-                .map((agent) => ({ value: agent.id, label: agent.name })),
+              ...(choices.data?.agents ?? []).map((agent) => ({
+                value: agent.id,
+                label: agent.name,
+              })),
             ]}
           />
         )}
@@ -338,14 +296,13 @@ export function RunOptionsDialog({
           }}
           label={t("Environment")}
           description={t(
-            "Create from template allocates a new environment. Reuse existing keeps the same environment and its retained files, including across sessions. A stopped managed target resumes; a deleted managed target is recreated without old files.",
+            "Create from template allocates a new environment. Reuse existing keeps the same environment and its retained files, including across sessions. A stopped environment starts again when the run needs it.",
           )}
           options={environmentOptions}
         />
         {selectedEnvironment?.device_id && open && (
           <DeviceDirectory
             key={selectedEnvironment.id}
-            environmentId={selectedEnvironment.id}
             value={options.workingDirectory}
             onChange={options.setWorkingDirectory}
           />
@@ -458,7 +415,7 @@ function ModelOptions({
             options.setModel(value === "inherit" ? "" : value);
             options.setLabels((previous) => ({
               ...previous,
-              model: models?.find((item) => item.key === value)?.name,
+              model: models?.find((item) => item.id === value)?.name,
             }));
           }}
         />

@@ -15,23 +15,22 @@ import {
 } from "@tanstack/react-query";
 import {
   createClient,
-  ReplayGapError,
   type Client,
-  type RunEvent,
+  type ThreadFrame,
 } from "../../service-client";
-import {
-  conversationKeys,
-  conversationQueries,
-  invalidateConversation,
-} from "./api";
+import type { Schema } from "../../shared/api";
+import { conversationQueries, invalidateConversation } from "./api";
 import { useRunStream } from "./run-stream";
+import { fixtureRun, fixtureThread } from "./transcript/fixture";
 
 let client: Client;
 let cache: QueryClient;
 let requests: Request[];
 let read: (request: Request) => Promise<Response>;
-let status = "running";
-let version = 1;
+let display: Schema["RunItems"];
+let attempts: number[];
+let thread: Schema["ThreadView"];
+let frames: ReturnType<typeof channel>;
 vi.mock("../../auth/context", () => ({
   useClient: () => client,
   revalidateSession: vi.fn(),
@@ -44,106 +43,148 @@ vi.mock("../../layout/workspace", () => ({
   }),
 }));
 
-function response(request: Request) {
-  const path = new URL(request.url).pathname;
-  if (path.endsWith("/items"))
-    return Response.json({
-      items: [],
-      next_cursor: null,
-      snapshot_version: version,
-      projection_cursor: null,
-      complete: true,
-      incomplete_reason: null,
-      finalized: status === "completed",
-    });
-  if (path.endsWith("/pending-actions"))
-    return Response.json({ items: [], next_cursor: null });
-  if (path.includes("/threads/"))
-    return Response.json({
-      id: "thread_one",
-      session_id: "session_one",
-      version,
-    });
-  return Response.json({
+const run = (fields: Partial<Schema["RunView"]> = {}) =>
+  fixtureRun({
     id: "run_one",
     thread_id: "thread_one",
     session_id: "session_one",
-    status,
-    version,
+    status: "running",
+    sealed_at: null,
+    ...fields,
   });
-}
-function event(cursor: string, text: string): RunEvent {
+
+function message(
+  text: string,
+  first: string,
+  last = first,
+  state: Schema["ItemState"] = "in_progress",
+): Schema["Item"] {
   return {
-    cursor,
-    event: {
-      schema_version: "1",
-      event_id: `event_${cursor}`,
-      run_id: "run_one",
-      thread_id: "thread_one",
-      occurred_at: "2026-09-09T00:00:00Z",
-      event_type: "agui.text_message_content",
-      item_id: "item_one",
-      payload: { item_kind: "text_message", delta: text },
+    id: `item_${first}`,
+    kind: "text_message",
+    state,
+    first_stream_id: first,
+    last_stream_id: last,
+    started_at: "2026-09-20T10:00:01.000Z",
+    ended_at:
+      state === "completed" || state === "failed"
+        ? "2026-09-20T10:00:03.000Z"
+        : null,
+    content: { messageId: `item_${first}`, role: "assistant", text },
+  };
+}
+
+function response(request: Request) {
+  const path = new URL(request.url).pathname;
+  if (path.endsWith("/items")) return Response.json(display);
+  if (path.endsWith("/attempts"))
+    return Response.json({
+      items: attempts.map((number) => ({
+        id: `att_${number}`,
+        run_id: "run_one",
+        number,
+        status: "running",
+        start_reason: number === 1 ? "initial" : "recovery",
+        yield_reason: null,
+        failure: null,
+        harness_run_id: `harness_${number}`,
+        worker_build: "build",
+        replaces_attempt_id: null,
+        started_at: null,
+        finished_at: null,
+        created_at: "2026-09-20T10:00:00.000Z",
+      })),
+    });
+  if (path.endsWith("/threads/thread_one")) return Response.json(thread);
+  return Response.json(display.run);
+}
+
+/** The Thread stream the test feeds, frame by frame, until it detaches. */
+function channel() {
+  const queue: ThreadFrame[] = [];
+  let wake: (() => void) | undefined;
+  return {
+    push(...next: ThreadFrame[]) {
+      queue.push(...next);
+      wake?.();
+    },
+    async *stream(
+      _workspace: string,
+      _thread: string,
+      options: { signal?: AbortSignal } = {},
+    ): AsyncGenerator<ThreadFrame> {
+      const { signal } = options;
+      while (!signal?.aborted) {
+        const next = queue.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
     },
   };
 }
-async function* waitingStream(
-  _runId: string,
-  options: { signal?: AbortSignal } = {},
-) {
-  yield event("1-0", "Hello");
-  await new Promise<void>((resolve) => {
-    if (options.signal?.aborted) resolve();
-    else
-      options.signal?.addEventListener("abort", () => resolve(), {
-        once: true,
-      });
-  });
-}
+
+const delta = (
+  attempt: number,
+  sequence: number,
+  text: string,
+  item = "item_1-0",
+): ThreadFrame => ({
+  type: "delta",
+  cursor: `c${attempt}-${sequence}`,
+  delta: {
+    run_id: "run_one",
+    attempt,
+    sequence,
+    event: { type: "TEXT_MESSAGE_CONTENT", messageId: item, delta: text },
+    item: { id: item, kind: "text_message", state: "in_progress" },
+  },
+});
+const boundary = (attempt: number, sequence: number): ThreadFrame => ({
+  type: "boundary",
+  cursor: `c${attempt}-${sequence}`,
+  run_id: "run_one",
+  attempt,
+  sequence,
+});
+
 function Readers() {
   const queries = conversationQueries(client, "workspace");
-  const run = useQuery(queries.run("run_one"));
-  useQuery(queries.pending("run_one"));
+  const current = useQuery(queries.run("run_one"));
   useQuery(queries.thread("thread_one"));
-  return <output data-testid="version">{run.data?.version}</output>;
+  return <output data-testid="status">{current.data?.status}</output>;
 }
-function Live({ replay = false }: { replay?: boolean }) {
-  const live = useRunStream("run_one", { replay });
+function Live({ live }: { live: boolean }) {
+  const stream = useRunStream("run_one", { live });
   return (
     <>
-      <output data-testid="live">{live.state}</output>
+      <output data-testid="live">{stream.state}</output>
       <output data-testid="items">
-        {live.items.map((item) => item.text).join("")}
+        {stream.items.map((item) => item.text).join("|")}
       </output>
-      <output data-testid="coverage">{live.execution.coverage}</output>
-      <output data-testid="steps">{live.execution.steps.length}</output>
-      <output data-testid="gap">{String(live.gap)}</output>
-      <button onClick={live.reconnect}>Reconnect</button>
-      {live.hasEarlier && (
-        <button
-          disabled={live.loadingEarlier}
-          onClick={() => void live.loadEarlier()}
-        >
-          Earlier
-        </button>
-      )}
-      <output data-testid="earlier-error">
-        {live.earlierError ? "failed" : ""}
+      <output data-testid="times">
+        {stream.items
+          .map((item) => `${item.startedAt} → ${item.endedAt}`)
+          .join("|")}
       </output>
+      <output data-testid="coverage">{stream.execution.coverage}</output>
+      <output data-testid="gap">{String(stream.gap)}</output>
+      <output data-testid="incomplete">{String(stream.incomplete)}</output>
+      <output data-testid="dropped">{stream.dropped}</output>
+      <button onClick={stream.reconnect}>Reconnect</button>
     </>
   );
 }
-function View({
-  live = true,
-  replay = false,
-}: {
-  live?: boolean;
-  replay?: boolean;
-}) {
+function View({ live = true, mounted = true }) {
   return (
     <QueryClientProvider client={cache}>
       <Readers />
-      {live && <Live replay={replay} />}
+      {mounted && <Live live={live} />}
     </QueryClientProvider>
   );
 }
@@ -152,11 +193,23 @@ function pathRequests(suffix: string) {
     new URL(request.url).pathname.endsWith(suffix),
   );
 }
+const text = () => screen.getByTestId("items").textContent;
 
 beforeEach(() => {
   requests = [];
-  status = "running";
-  version = 1;
+  attempts = [1];
+  display = {
+    run: run(),
+    items: [message("Hello", "1-0", "1-1")],
+    position: "1-1",
+    complete: false,
+    dropped: 0,
+  };
+  thread = fixtureThread({
+    id: "thread_one",
+    session_id: "session_one",
+    current_run_id: "run_one",
+  });
   cache = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
@@ -166,8 +219,7 @@ beforeEach(() => {
     auth: { type: "session" },
     fetch: async (input, init) => {
       // Keep the caller's Request: a re-wrapped Request follows its source's
-      // abort signal only weakly, so it may stop following once the source is
-      // garbage collected mid-test.
+      // abort signal only weakly.
       const request =
         input instanceof Request && init === undefined
           ? input
@@ -176,7 +228,8 @@ beforeEach(() => {
       return read(request);
     },
   });
-  client.streamRun = vi.fn(waitingStream);
+  frames = channel();
+  client.streamThread = vi.fn(frames.stream);
 });
 afterEach(() => {
   cleanup();
@@ -184,625 +237,225 @@ afterEach(() => {
   client.close();
 });
 
-it("shares initial Run and pending-action reads between the view and live attachment", async () => {
-  let finish!: () => void;
-  const wait = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
-  read = async (request) => {
-    await wait;
-    return response(request);
-  };
+it("continues the committed display with the Thread's later deltas", async () => {
   render(<View />);
-  await waitFor(() => expect(pathRequests("/pending-actions")).toHaveLength(1));
-  expect(pathRequests("/runs/run_one")).toHaveLength(1);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  // The stream replays what the display already covers before what it does not.
   await act(async () => {
-    finish();
+    frames.push(delta(1, 1, "Hello"), delta(1, 2, " world"));
   });
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("connected"),
+  await waitFor(() => expect(text()).toBe("Hello world"));
+  expect(screen.getByTestId("live").textContent).toBe("connected");
+  expect(screen.getByTestId("coverage").textContent).toBe("complete");
+  // The display's Run is the Run every reader shares.
+  expect(screen.getByTestId("status").textContent).toBe("running");
+  expect(client.streamThread).toHaveBeenCalledWith(
+    "workspace",
+    "thread_one",
+    expect.objectContaining({ signal: expect.any(AbortSignal) }),
   );
-  expect(pathRequests("/runs/run_one")).toHaveLength(1);
-  expect(pathRequests("/pending-actions")).toHaveLength(1);
 });
 
-it("keeps shared resource reads alive when only the live consumer detaches", async () => {
-  let finish!: () => void;
-  const wait = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
-  read = async (request) => {
-    await wait;
-    return response(request);
+it("reads a Run without following its Thread when not live", async () => {
+  display = { ...display, run: run({ status: "completed" }), complete: true };
+  render(<View live={false} />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  expect(screen.getByTestId("live").textContent).toBe("closed");
+  expect(client.streamThread).not.toHaveBeenCalled();
+});
+
+it("times a reloaded Run's Items from its display", async () => {
+  display = {
+    ...display,
+    run: run({ status: "completed" }),
+    items: [message("Hello", "1-0", "1-1", "completed")],
+    complete: true,
+    dropped: 0,
   };
-  const view = render(<View />);
-  await waitFor(() => expect(pathRequests("/runs/run_one")).toHaveLength(1));
-  view.rerender(<View live={false} />);
-  expect(pathRequests("/runs/run_one")[0]!.signal.aborted).toBe(false);
-  await act(async () => {
-    finish();
-  });
+  render(<View live={false} />);
   await waitFor(() =>
-    expect(screen.getByTestId("version").textContent).toBe("1"),
+    expect(screen.getByTestId("times").textContent).toBe(
+      "2026-09-20T10:00:01.000Z → 2026-09-20T10:00:03.000Z",
+    ),
   );
-  expect(client.streamRun).not.toHaveBeenCalled();
-  expect(requests.every((request) => request.method === "GET")).toBe(true);
 });
 
-it("closes delivery without interrupting the Run or starting recovery reads after detachment", async () => {
+it("closes delivery without interrupting the Run after detachment", async () => {
   const view = render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("connected"),
-  );
+  await waitFor(() => expect(client.streamThread).toHaveBeenCalled());
+  const signal = vi.mocked(client.streamThread).mock.calls[0]![2]!.signal!;
   const count = requests.length;
-  const signal = vi.mocked(client.streamRun).mock.calls[0]![1]!.signal!;
   await act(async () => {
-    view.rerender(<View live={false} />);
+    view.rerender(<View mounted={false} />);
   });
   expect(signal.aborted).toBe(true);
   expect(requests).toHaveLength(count);
   expect(requests.every((request) => request.method === "GET")).toBe(true);
 });
 
-it.each(["slow", "forbidden"])(
-  "attaches the Run stream while the Thread read is %s",
-  async (failure) => {
-    let finish!: () => void;
-    const wait = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    read = async (request) => {
-      if (new URL(request.url).pathname.includes("/threads/")) {
-        if (failure === "slow") await wait;
-        return Response.json(
-          { error: { code: "forbidden", message: "Unavailable" } },
-          { status: 403 },
-        );
-      }
-      return response(request);
-    };
-    render(<View />);
-    await waitFor(() =>
-      expect(screen.getByTestId("live").textContent).toBe("connected"),
-    );
-    await act(async () => {
-      finish();
-    });
-    expect(requests.every((request) => request.method === "GET")).toBe(true);
-  },
-);
-
-it("explicit reconnect reads current snapshots even when cached resources remain fresh", async () => {
-  client.streamRun = vi.fn(async function* () {
-    throw new Error("Disconnected");
+it("discards provisional output when the Run changes attempt", async () => {
+  render(<View />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  await act(async () => {
+    frames.push(delta(1, 2, " world"));
   });
+  await waitFor(() => expect(text()).toBe("Hello world"));
+  attempts = [1, 2];
+  display = {
+    ...display,
+    items: [
+      message("Hello", "1-0", "1-1", "interrupted"),
+      message("Retry", "2-1"),
+    ],
+    position: "2-1",
+  };
+  await act(async () => {
+    frames.push({ type: "reset", run_id: "run_one" });
+  });
+  await waitFor(() => expect(text()).toBe("Hello|Retry"));
+  await act(async () => {
+    frames.push(delta(2, 2, " again", "item_2-1"));
+  });
+  await waitFor(() => expect(text()).toBe("Hello|Retry again"));
+});
+
+it("reports partial history after a gap until a boundary's display covers it", async () => {
+  render(<View />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  await act(async () => {
+    frames.push({ type: "gap", run_id: "run_one" });
+  });
+  await waitFor(() =>
+    expect(screen.getByTestId("coverage").textContent).toBe("partial"),
+  );
+  expect(screen.getByTestId("gap").textContent).toBe("true");
+  display = {
+    ...display,
+    items: [message("Hello there", "1-0", "1-6")],
+    position: "1-6",
+  };
+  await act(async () => {
+    frames.push(boundary(1, 6));
+  });
+  await waitFor(() =>
+    expect(screen.getByTestId("coverage").textContent).toBe("complete"),
+  );
+  expect(text()).toBe("Hello there");
+  expect(screen.getByTestId("gap").textContent).toBe("false");
+});
+
+it("reports content the display omitted as incomplete", async () => {
+  display = {
+    ...display,
+    items: [{ ...message("", "1-0"), content: { omitted: true } }],
+  };
   render(<View />);
   await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("disconnected"),
+    expect(screen.getByTestId("coverage").textContent).toBe("partial"),
   );
-  version = 2;
-  status = "completed";
-  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  expect(screen.getByTestId("incomplete").textContent).toBe("true");
+  expect(screen.getByTestId("gap").textContent).toBe("true");
+});
+
+it("counts the Items the display dropped without calling its content incomplete", async () => {
+  display = { ...display, dropped: 12 };
+  render(<View />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  expect(screen.getByTestId("dropped").textContent).toBe("12");
+  // The execution facts of dropped Items are gone with them.
+  expect(screen.getByTestId("coverage").textContent).toBe("partial");
+  expect(screen.getByTestId("incomplete").textContent).toBe("false");
+  expect(screen.getByTestId("gap").textContent).toBe("false");
+});
+
+it("learns a new attempt's identity once before folding its deltas", async () => {
+  render(<View />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  expect(pathRequests("/attempts")).toHaveLength(1);
+  attempts = [1, 2];
+  await act(async () => {
+    frames.push(
+      delta(2, 1, "Second", "item_2-1"),
+      delta(2, 2, " try", "item_2-1"),
+    );
+  });
+  await waitFor(() => expect(text()).toBe("Hello|Second try"));
+  expect(pathRequests("/attempts")).toHaveLength(2);
+});
+
+it("reconciles the sealed display once the Thread's current Run moves on", async () => {
+  render(<View />);
+  await waitFor(() => expect(text()).toBe("Hello"));
+  thread = { ...thread, current_run_id: null, version: 5 };
+  display = {
+    run: run({ status: "completed", sealed_at: "2026-09-20T10:00:09.000Z" }),
+    items: [message("Hello", "1-0", "1-2", "completed")],
+    position: "1-2",
+    complete: true,
+    dropped: 0,
+  };
+  await act(async () => {
+    frames.push({ type: "changed", version: 5 });
+  });
   await waitFor(() =>
     expect(screen.getByTestId("live").textContent).toBe("closed"),
   );
-  expect(screen.getByTestId("version").textContent).toBe("2");
-  expect(pathRequests("/runs/run_one")).toHaveLength(2);
-  expect(pathRequests("/pending-actions")).toHaveLength(2);
-  expect(pathRequests("/items")).toHaveLength(2);
+  expect(screen.getByTestId("status").textContent).toBe("completed");
 });
 
-it("joins replacement reads when a notification cancels terminal reconciliation", async () => {
-  let complete!: () => void;
-  const terminal = new Promise<void>((resolve) => {
-    complete = resolve;
-  });
-  client.streamRun = vi.fn(async function* () {
-    yield event("1-0", "Hello");
-    await terminal;
-  });
+it("joins replacement reads when a Thread change cancels reconciliation", async () => {
   render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("connected"),
-  );
+  await waitFor(() => expect(text()).toBe("Hello"));
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
     release = resolve;
   });
   let blocked = false;
   read = async (request) => {
-    if (!blocked && new URL(request.url).pathname.endsWith("/runs/run_one")) {
+    if (
+      !blocked &&
+      new URL(request.url).pathname.endsWith("/threads/thread_one")
+    ) {
       blocked = true;
       await pending;
     }
     return response(request);
   };
-  status = "completed";
-  version = 2;
+  thread = { ...thread, current_run_id: null, version: 5 };
+  display = { ...display, run: run({ status: "completed" }), complete: true };
   await act(async () => {
-    complete();
+    frames.push({ type: "changed", version: 5 });
   });
   await waitFor(() => expect(blocked).toBe(true));
   await act(async () => {
-    await invalidateConversation(cache, "workspace", { runId: "run_one" });
+    await invalidateConversation(cache, "workspace", {
+      threadId: "thread_one",
+    });
     release();
   });
   await waitFor(() =>
     expect(screen.getByTestId("live").textContent).toBe("closed"),
   );
-  expect(screen.getByTestId("version").textContent).toBe("2");
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("Hello"),
-  );
-  expect(client.streamRun).toHaveBeenCalledTimes(1);
 });
 
-it("reconciles replay gaps and deduplicates retained content before resuming delivery", async () => {
-  let attachments = 0;
-  client.streamRun = vi.fn(async function* (_id, options) {
-    if (attachments++ === 0) {
-      yield event("1-0", "Hello");
-      throw new ReplayGapError(
-        409,
-        "run_stream_replay_gap",
-        "Reconcile",
-        {},
-        null,
-      );
-    }
-    expect(options?.after).toBe("1-0");
-    yield event("2-0", " world");
-    await new Promise<void>((resolve) =>
-      options?.signal?.addEventListener("abort", () => resolve(), {
-        once: true,
-      }),
-    );
-  });
-  read = async (request) => {
-    if (attachments && new URL(request.url).pathname.endsWith("/items"))
-      return Response.json({
-        items: [
-          {
-            id: "item_one",
-            kind: "text_message",
-            state: "in_progress",
-            parent_item_id: null,
-            first_stream_id: "1-0",
-            last_stream_id: "1-0",
-            content: { text: "Hello" },
-          },
-        ],
-        next_cursor: null,
-        snapshot_version: 2,
-        projection_cursor: "1-0",
-        complete: true,
-        incomplete_reason: null,
-        finalized: false,
-      });
-    return response(request);
-  };
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("Hello world"),
-  );
-  expect(screen.getByTestId("gap").textContent).toBe("true");
-  expect(pathRequests("/runs/run_one")).toHaveLength(2);
-  expect(
-    cache.getQueryData(conversationKeys("workspace").pending("run_one")),
-  ).toBeDefined();
-});
-
-it("shows incomplete finalized history without opening a raw stream", async () => {
-  status = "completed";
-  read = async (request) => {
-    if (new URL(request.url).pathname.endsWith("/items"))
-      return Response.json({
-        items: [],
-        next_cursor: null,
-        snapshot_version: 2,
-        projection_cursor: "1-0",
-        complete: false,
-        incomplete_reason: "source_discontinuity",
-        finalized: true,
-      });
-    return response(request);
-  };
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("closed"),
-  );
-  expect(screen.getByTestId("gap").textContent).toBe("true");
-  expect(client.streamRun).not.toHaveBeenCalled();
-});
-
-it.each(["partial", "missing"])(
-  "stops reconnecting after recovery expires with %s history",
-  async (history) => {
-    status = "failed";
-    read = async (request) => {
-      if (new URL(request.url).pathname.endsWith("/items")) {
-        if (history === "missing")
-          return Response.json(
-            {
-              error: {
-                code: "items_unavailable",
-                message: "Unavailable",
-                details: { recovery_exhausted: true },
-              },
-            },
-            { status: 409 },
-          );
-        return Response.json({
-          ...(await displayPage(
-            [displayItem("saved", "Saved prefix", "1-0")],
-            null,
-          ).json()),
-          recovery_exhausted: true,
-        });
-      }
-      return response(request);
-    };
-    render(<View />);
-    await waitFor(() =>
-      expect(screen.getByTestId("live").textContent).toBe("closed"),
-    );
-    expect(screen.getByTestId("gap").textContent).toBe("true");
-    if (history === "partial")
-      await waitFor(() =>
-        expect(screen.getByTestId("items").textContent).toBe("Saved prefix"),
-      );
-    expect(client.streamRun).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText("Reconnect"));
-    await waitFor(() => expect(pathRequests("/items").length).toBe(2));
-    expect(client.streamRun).not.toHaveBeenCalled();
-  },
-);
-
-it("waits for display finalization after a terminal Run observation", async () => {
-  let snapshots = 0;
-  read = async (request) => {
-    if (new URL(request.url).pathname.endsWith("/items"))
-      return Response.json({
-        items: [],
-        next_cursor: null,
-        snapshot_version: ++snapshots,
-        projection_cursor: "1-0",
-        complete: true,
-        incomplete_reason: null,
-        finalized: snapshots >= 3,
-      });
-    return response(request);
-  };
-  client.streamRun = vi.fn(async function* () {
-    status = "completed";
-    const terminal = event("2-0", "");
-    terminal.event.event_type = "run.completed";
-    terminal.event.item_id = null;
-    yield terminal;
+it("re-reads the display on reconnect even when cached reads remain fresh", async () => {
+  client.streamThread = vi.fn(async function* (): AsyncGenerator<ThreadFrame> {
+    throw new Error("Disconnected");
   });
   render(<View />);
   await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("closed"),
+    expect(screen.getByTestId("live").textContent).toBe("disconnected"),
   );
-  expect(snapshots).toBe(3);
-  expect(client.streamRun).toHaveBeenCalledTimes(2);
-});
-
-function displayItem(id: string, text: string, first: string, last = first) {
-  return {
-    id,
-    kind: "text_message",
-    state: "in_progress",
-    parent_item_id: null,
-    first_stream_id: first,
-    last_stream_id: last,
-    content: { text },
-  };
-}
-function displayPage(
-  items: ReturnType<typeof displayItem>[],
-  next: string | null,
-  cursor = "3-0",
-  finalized = false,
-) {
-  return Response.json({
-    items,
-    next_cursor: next,
-    snapshot_version: Number(cursor.split("-")[0]),
-    projection_cursor: cursor,
+  display = {
+    ...display,
+    run: run({ status: "completed" }),
+    items: [message("Hello again", "1-0", "1-3", "completed")],
+    position: "1-3",
     complete: true,
-    incomplete_reason: null,
-    finalized,
-  });
-}
-
-it("loads older messages only on request and retries failures without discarding the current page", async () => {
-  status = "completed";
-  let fail = true;
-  read = async (request) => {
-    const url = new URL(request.url);
-    if (!url.pathname.endsWith("/items")) return response(request);
-    expect(url.searchParams.get("order")).toBe("desc");
-    expect(url.searchParams.get("limit")).toBe("50");
-    if (url.searchParams.get("cursor")) {
-      expect(url.searchParams.get("cursor")).toBe("older");
-      if (fail)
-        return Response.json(
-          { error: { code: "items_unavailable", message: "Retry" } },
-          { status: 409 },
-        );
-      return displayPage(
-        [displayItem("old", "old-", "1-0")],
-        null,
-        "4-0",
-        true,
-      );
-    }
-    return displayPage(
-      [
-        displayItem("new", "new", "3-0"),
-        displayItem("middle", "middle-", "2-0"),
-      ],
-      "older",
-      "3-0",
-      true,
-    );
+    dropped: 0,
   };
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("closed"),
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("middle-new"),
-  );
-  expect(pathRequests("/items")).toHaveLength(1);
-  fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-  await waitFor(() =>
-    expect(screen.getByTestId("earlier-error").textContent).toBe("failed"),
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("middle-new"),
-  );
-  fail = false;
-  fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("old-middle-new"),
-  );
-  expect(screen.queryByRole("button", { name: "Earlier" })).toBeNull();
-  expect(pathRequests("/items")).toHaveLength(3);
-  expect(client.streamRun).not.toHaveBeenCalled();
-});
-
-it("merges older pages without advancing the live cursor or duplicating covered deltas", async () => {
-  let release!: () => void;
-  const proceed = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let attachments = 0;
-  client.streamRun = vi.fn(async function* (_id, options) {
-    if (attachments++ === 0) {
-      expect(options?.after).toBe("3-0");
-      await proceed;
-      const old = event("5-0", "duplicate");
-      old.event.item_id = "old";
-      yield old;
-      const recent = event("6-0", "!");
-      recent.event.item_id = "new";
-      yield recent;
-    } else {
-      expect(options?.after).toBe("6-0");
-      await new Promise<void>((resolve) =>
-        options?.signal?.addEventListener("abort", () => resolve(), {
-          once: true,
-        }),
-      );
-    }
-  });
-  read = async (request) => {
-    const url = new URL(request.url);
-    if (!url.pathname.endsWith("/items")) return response(request);
-    if (url.searchParams.has("cursor"))
-      return displayPage(
-        [displayItem("old", "full-old-", "1-0", "10-0")],
-        null,
-        "10-0",
-      );
-    return displayPage([displayItem("new", "new", "3-0")], "older");
-  };
-  render(<View />);
-  await waitFor(() => expect(client.streamRun).toHaveBeenCalledTimes(1));
-  fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("full-old-new"),
-  );
-  expect(client.streamRun).toHaveBeenCalledTimes(1);
-  await act(async () => {
-    release();
-  });
-  await waitFor(() => expect(client.streamRun).toHaveBeenCalledTimes(2));
-  expect(screen.getByTestId("items").textContent).toBe("full-old-new!");
-});
-
-it("hides unloaded Item fragments while admitting new Items from the live stream", async () => {
-  client.streamRun = vi.fn(async function* (_id, options) {
-    const hidden = event("4-0", "orphaned suffix");
-    hidden.event.item_id = "old";
-    yield hidden;
-    const start = event("5-0", "");
-    start.event.item_id = "fresh";
-    start.event.event_type = "agui.text_message_start";
-    yield start;
-    const content = event("6-0", "fresh");
-    content.event.item_id = "fresh";
-    yield content;
-    await new Promise<void>((resolve) =>
-      options?.signal?.addEventListener("abort", () => resolve(), {
-        once: true,
-      }),
-    );
-  });
-  read = async (request) => {
-    if (new URL(request.url).pathname.endsWith("/items"))
-      return displayPage([displayItem("new", "new-", "3-0")], "older");
-    return response(request);
-  };
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("new-fresh"),
-  );
-  expect(pathRequests("/items")).toHaveLength(1);
-});
-
-it("cancels an in-flight earlier page when reconnecting to a new window", async () => {
-  status = "completed";
-  let release!: () => void;
-  const pending = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let oldRequest: Request | undefined;
-  read = async (request) => {
-    const url = new URL(request.url);
-    if (!url.pathname.endsWith("/items")) return response(request);
-    if (url.searchParams.has("cursor")) {
-      oldRequest = request;
-      await pending;
-      return displayPage(
-        [displayItem("old", "obsolete", "1-0")],
-        null,
-        "3-0",
-        true,
-      );
-    }
-    return displayPage(
-      [displayItem("new", "new", "3-0")],
-      "older",
-      "3-0",
-      true,
-    );
-  };
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("live").textContent).toBe("closed"),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-  await waitFor(() => expect(oldRequest).toBeDefined());
   fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-  await waitFor(() => expect(oldRequest!.signal.aborted).toBe(true));
-  await act(async () => {
-    release();
-  });
-  await waitFor(() =>
-    expect(screen.getByTestId("items").textContent).toBe("new"),
-  );
-});
-
-function modelRequest(cursor: string, type: string): RunEvent {
-  const entry = event(cursor, "");
-  entry.event.event_type = "agui.custom";
-  entry.event.item_id = null;
-  entry.event.run_attempt_id = "attempt";
-  entry.event.harness_run_id = "harness";
-  entry.event.payload = {
-    name: "a13n.harness.lifecycle",
-    value: { event: { payload: { type, request_id: "model-request-1" } } },
-  };
-  return entry;
-}
-function completed(cursor: string): RunEvent {
-  const entry = event(cursor, "");
-  entry.event.event_type = "run.completed";
-  entry.event.item_id = null;
-  entry.event.payload = {};
-  return entry;
-}
-
-it("replays from the stream origin and reports a complete execution history", async () => {
-  status = "completed";
-  client.streamRun = vi.fn(async function* (_id, options) {
-    expect(options?.after).toBeUndefined();
-    yield modelRequest("1-0", "model_request_started");
-    yield event("2-0", "Hello");
-    yield modelRequest("3-0", "model_request_completed");
-    yield completed("4-0");
-  });
-  render(<View replay />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("complete"),
-  );
-  expect(screen.getByTestId("live").textContent).toBe("closed");
-  expect(screen.getByTestId("steps").textContent).toBe("1");
-  expect(screen.getByTestId("items").textContent).toBe("Hello");
-  expect(client.streamRun).toHaveBeenCalledTimes(1);
-});
-
-it("attaching after the snapshot cursor is partial history, never a complete one", async () => {
-  render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("partial"),
-  );
-  expect(screen.getByTestId("live").textContent).toBe("connected");
-});
-
-it("falls back to the snapshot path and reports lost history after a replay gap", async () => {
-  status = "completed";
-  client.streamRun = vi.fn(async function* () {
-    throw new ReplayGapError(
-      409,
-      "run_stream_replay_gap",
-      "Reconcile",
-      {},
-      null,
-    );
-  });
-  render(<View replay />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("unavailable"),
-  );
-  expect(screen.getByTestId("live").textContent).toBe("closed");
-  expect(screen.getByTestId("gap").textContent).toBe("true");
-});
-
-it("does not claim a complete history when the replay ends without a terminal event", async () => {
-  status = "completed";
-  client.streamRun = vi.fn(async function* () {
-    yield modelRequest("1-0", "model_request_started");
-  });
-  render(<View replay />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("unavailable"),
-  );
-  expect(screen.getByTestId("live").textContent).toBe("closed");
-  expect(screen.getByTestId("steps").textContent).toBe("1");
-});
-
-it("switches into replay by re-attaching from the origin without dropping live Items", async () => {
-  let attachments = 0;
-  client.streamRun = vi.fn(async function* (_id, options) {
-    if (attachments++ === 0) {
-      yield event("2-0", "Hello");
-      await new Promise<void>((resolve) =>
-        options?.signal?.addEventListener("abort", () => resolve(), {
-          once: true,
-        }),
-      );
-      return;
-    }
-    expect(options?.after).toBeUndefined();
-    yield modelRequest("1-0", "model_request_started");
-    yield event("2-0", "Hello");
-    yield event("3-0", " world");
-    yield modelRequest("4-0", "model_request_completed");
-    status = "completed";
-    yield completed("5-0");
-  });
-  const view = render(<View />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("partial"),
-  );
-  view.rerender(<View replay />);
-  await waitFor(() =>
-    expect(screen.getByTestId("coverage").textContent).toBe("complete"),
-  );
-  expect(screen.getByTestId("items").textContent).toBe("Hello world");
-  expect(screen.getByTestId("steps").textContent).toBe("1");
+  await waitFor(() => expect(text()).toBe("Hello again"));
+  expect(pathRequests("/items")).toHaveLength(2);
+  expect(screen.getByTestId("status").textContent).toBe("completed");
 });

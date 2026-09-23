@@ -5,44 +5,46 @@ import { PlusIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import {
-  allPages,
-  commandHeaders,
-  data,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
-import { ErrorNotice, Loading, StatePill } from "../../shared/feedback";
+import { allPages, data, ifMatch, rowTag, type Schema } from "../../shared/api";
+import { ErrorNotice, Loading } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
 import { DeviceDirectory } from "../environments/device-directory";
 import { EnvironmentReference } from "../environments/reference";
-import { conversationQueries } from "./api";
+import {
+  conversationKeys,
+  conversationQueries,
+  invalidateConversation,
+} from "./api";
+import { isInteractive } from "./transcript/run-actions";
 
-export function RunEnvironmentMounts({ run }: { run: Schema["RunResource"] }) {
+/** The environments the Run's Thread mounts for its later Runs. */
+export function RunEnvironmentMounts({ run }: { run: Schema["RunView"] }) {
   const { t } = useTranslation();
   const client = useClient();
   const { workspace, can } = useWorkspace();
   const [open, setOpen] = useState(false);
-  const active = run.status === "accepted" || run.status === "running";
-  const mayAdd = can("run.steer") && can("environment.use");
-  const thread = useQuery({
-    ...conversationQueries(client, workspace.id).thread(run.thread_id),
-    enabled: active && mayAdd,
-  });
+  const thread = useQuery(
+    conversationQueries(client, workspace.id).thread(run.thread_id),
+  );
   const mounts = useQuery({
-    queryKey: ["run-environment-mounts", run.id, run.status],
+    // Mount edits change the Thread, so they refresh with it.
+    queryKey: [
+      ...conversationKeys(workspace.id).thread(run.thread_id),
+      "environments",
+    ],
     queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        client.http
-          .GET("/api/v1/runs/{run_id}/environment-mounts", {
-            params: { path: { run_id: run.id }, query: { cursor } },
-            headers: workspaceHeaders(workspace.id),
+      client.http
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/environments",
+          {
+            params: {
+              path: { workspace_id: workspace.id, thread_id: run.thread_id },
+            },
             signal,
-          })
-          .then(data),
-      ),
-    refetchInterval: active ? 3000 : false,
+          },
+        )
+        .then(data)
+        .then((page) => page.items),
   });
   return (
     <section
@@ -51,13 +53,13 @@ export function RunEnvironmentMounts({ run }: { run: Schema["RunResource"] }) {
     >
       <div className="flex items-center justify-between gap-2">
         <h3>{t("Additional environments")}</h3>
-        {active && mayAdd && thread.data?.current_run_id === run.id && (
+        {can("run") && thread.data && isInteractive(thread.data) && (
           <ModalFrame
             open={open}
             onOpenChange={setOpen}
             title={t("Add environment")}
             description={t(
-              "Accepted additions load before a later model request. The primary environment does not change.",
+              "Mounted environments apply to this thread's later runs. A run keeps the environments it started with.",
             )}
             closeLabel={t("Close")}
             trigger={
@@ -68,7 +70,7 @@ export function RunEnvironmentMounts({ run }: { run: Schema["RunResource"] }) {
             }
           >
             {open && (
-              <AddMountForm runId={run.id} close={() => setOpen(false)} />
+              <AddMountForm thread={thread.data} close={() => setOpen(false)} />
             )}
           </ModalFrame>
         )}
@@ -80,15 +82,11 @@ export function RunEnvironmentMounts({ run }: { run: Schema["RunResource"] }) {
         <ul className="flex flex-col gap-3">
           {mounts.data.map((mount) => (
             <li key={mount.name} className="flex flex-col gap-1 text-sm">
-              <div className="flex items-center justify-between gap-2">
-                <strong>{mount.name}</strong>
-                <StatePill state={mount.application_status ?? "pending"} />
-              </div>
+              <strong>{mount.name}</strong>
               <EnvironmentReference id={mount.environment_id} />
               {mount.working_directory && (
                 <span className="break-all">{mount.working_directory}</span>
               )}
-              {mount.error && <p role="alert">{mount.error.message}</p>}
             </li>
           ))}
         </ul>
@@ -103,12 +101,17 @@ export function RunEnvironmentMounts({ run }: { run: Schema["RunResource"] }) {
   );
 }
 
-function AddMountForm({ runId, close }: { runId: string; close: () => void }) {
+function AddMountForm({
+  thread,
+  close,
+}: {
+  thread: Schema["ThreadView"];
+  close: () => void;
+}) {
   const { t } = useTranslation();
   const client = useClient();
   const { workspace } = useWorkspace();
   const cache = useQueryClient();
-  const key = useIdempotency();
   const [environmentId, setEnvironmentId] = useState("");
   const [name, setName] = useState("");
   const [directory, setDirectory] = useState("");
@@ -117,8 +120,11 @@ function AddMountForm({ runId, close }: { runId: string; close: () => void }) {
     queryFn: ({ signal }) =>
       allPages((cursor) =>
         client.http
-          .GET("/api/v1/workspaces/{workspace}/environments", {
-            params: { path: { workspace: workspace.id }, query: { cursor } },
+          .GET("/api/v1/workspaces/{workspace_id}/environments", {
+            params: {
+              path: { workspace_id: workspace.id },
+              query: { cursor },
+            },
             signal,
           })
           .then(data),
@@ -126,25 +132,28 @@ function AddMountForm({ runId, close }: { runId: string; close: () => void }) {
   });
   const selected = environments.data?.find((item) => item.id === environmentId);
   const save = useMutation({
-    mutationFn: () => {
-      const body = {
-        name,
-        environment_id: environmentId,
-        ...(directory ? { working_directory: directory } : {}),
-      };
-      return client.http
-        .POST("/api/v1/runs/{run_id}/environment-mounts", {
-          params: {
-            path: { run_id: runId },
-            header: commandHeaders(workspace.id, key.forBody(body)),
+    mutationFn: () =>
+      client.http
+        .POST(
+          "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/environments",
+          {
+            params: {
+              path: { workspace_id: workspace.id, thread_id: thread.id },
+            },
+            // The mount changes the Thread the reader saw.
+            headers: ifMatch(rowTag(thread)),
+            body: {
+              name,
+              environment_id: environmentId,
+              ...(directory ? { working_directory: directory } : {}),
+            },
           },
-          body,
-        })
-        .then(data);
-    },
+        )
+        .then(data),
     onSuccess: () => {
-      void cache.invalidateQueries({
-        queryKey: ["run-environment-mounts", runId],
+      void invalidateConversation(cache, workspace.id, {
+        sessionId: thread.session_id,
+        threadId: thread.id,
       });
       close();
     },
@@ -186,19 +195,13 @@ function AddMountForm({ runId, close }: { runId: string; close: () => void }) {
           maxLength={63}
         />
       </FormField>
-      {selected?.device_id && (
+      {selected && !selected.template_id && (
         <DeviceDirectory
           key={selected.id}
-          environmentId={selected.id}
           value={directory}
           onChange={setDirectory}
         />
       )}
-      <p className="text-sm text-muted-foreground">
-        {t(
-          "Once accepted, this addition cannot be removed or changed for this Run.",
-        )}
-      </p>
       <ErrorNotice error={save.error} />
       <FormActions
         pending={save.isPending}

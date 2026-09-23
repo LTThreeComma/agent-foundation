@@ -15,8 +15,8 @@ import {
 } from "../thread-runs";
 import { runSection } from "./view";
 
-type Run = Schema["RunResource"];
-type Thread = Schema["ThreadResource"];
+type Run = Schema["RunView"];
+type Thread = Schema["ThreadView"];
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 /** One Run, and the Threads that branched from it. */
@@ -143,8 +143,8 @@ function groupLabel(
   agentName: (agentId: string) => string | undefined,
   t: Translate,
 ) {
-  if (branch.thread.role === "root") return t("Root thread");
-  if (branch.thread.origin_kind === "fork") return t("Fork");
+  if (branch.thread.origin === "new") return t("Root thread");
+  if (branch.thread.origin === "fork") return t("Fork");
   const agentId = branch.runs[0]?.agent_id;
   const named = agentId && agentId !== parentAgentId && agentName(agentId);
   return named || t("Child thread");

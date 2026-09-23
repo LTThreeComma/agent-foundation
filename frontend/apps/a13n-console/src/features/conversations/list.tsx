@@ -1,7 +1,6 @@
 import { Button } from "a13n-ui";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { PlusIcon } from "@phosphor-icons/react";
-import { useEffect, useRef } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
@@ -27,13 +26,10 @@ import { conversationQueries, type SessionFilters } from "./api";
 import { SessionFilterBar, readSessionFilters } from "./filters";
 import styles from "./conversations.module.css";
 
-export function SessionList({
-  notificationError,
-  reconnect,
-}: {
-  notificationError: unknown;
-  reconnect: () => void;
-}) {
+/** Without workspace notifications, the list refreshes itself this often. */
+const REFRESH_MS = 15_000;
+
+export function SessionList() {
   const { t } = useTranslation();
   const { can, basePath } = useWorkspace();
   const [search, setSearch] = useSearchParams();
@@ -43,7 +39,7 @@ export function SessionList({
       title={t("Sessions")}
       description={t("Every conversation your workspace has run, and why.")}
       actions={
-        can("agent.invoke") && (
+        can("run") && (
           <Button render={<Link to={`${basePath}/sessions/new`} />}>
             <PlusIcon size={14} aria-hidden="true" />
             {t("New session")}
@@ -52,7 +48,6 @@ export function SessionList({
       }
       toolbar={<SessionFilterBar search={search} setSearch={setSearch} />}
     >
-      <ErrorNotice error={notificationError} retry={reconnect} />
       <SessionResults filters={filters} />
     </Page>
   );
@@ -63,19 +58,12 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
     { workspace, basePath } = useWorkspace(),
     navigate = useNavigate(),
     client = useClient(),
-    page = useCursor();
+    page = useCursor(filters);
   const sessions = useQuery({
     ...conversationQueries(client, workspace.id).sessions(page.cursor, filters),
     placeholderData: keepPreviousData,
+    refetchInterval: REFRESH_MS,
   });
-  // A changed query starts a new result set, so its pagination starts over.
-  const signature = JSON.stringify(filters);
-  const applied = useRef(signature);
-  useEffect(() => {
-    if (applied.current === signature) return;
-    applied.current = signature;
-    page.reset();
-  }, [signature, page]);
   if (sessions.isPending) return <Loading variant="table" columns={4} />;
   if (!sessions.data)
     return (
@@ -129,7 +117,7 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
               label: t("Status"),
               render: (session) =>
                 session.preview ? (
-                  <StatePill state={session.preview.run_status} />
+                  <StatePill state={session.preview.status} />
                 ) : (
                   UNKNOWN
                 ),
@@ -139,8 +127,8 @@ function SessionResults({ filters }: { filters: SessionFilters }) {
               tone: "muted",
               render: (session) =>
                 session.preview
-                  ? t(`trigger.${session.preview.trigger_type}`, {
-                      defaultValue: session.preview.trigger_type,
+                  ? t(`trigger.${session.preview.trigger}`, {
+                      defaultValue: session.preview.trigger,
                     })
                   : UNKNOWN,
             },

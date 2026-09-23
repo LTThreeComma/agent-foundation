@@ -4,7 +4,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useAccess, useWorkspace } from "../../layout/workspace";
 import { Empty } from "../../shared/collection";
 import { Page } from "../../shared/page";
-import { EnvironmentTemplates } from "../environments/templates";
 import { ProvidersPage } from "../providers/page";
 import { MediaUnderstandingDefaults } from "../models/media-understanding";
 import { Models } from "../models/page";
@@ -18,8 +17,7 @@ import { Profile } from "./profile";
 import { DeleteWorkspace, Workspaces } from "./workspaces";
 
 export function WorkspaceSettings() {
-  const { workspace, can, basePath } = useWorkspace();
-  const { organizationAdmin } = useAccess();
+  const { workspace, can, organizationCan, basePath } = useWorkspace();
   const { accountId } = useParams();
   const navigate = useNavigate();
   const cache = useQueryClient();
@@ -33,9 +31,10 @@ export function WorkspaceSettings() {
         general: (
           <Profile
             target={scope}
-            editable={can("role_binding.manage")}
+            editable={can("admin")}
             danger={
-              organizationAdmin && (
+              organizationCan("admin") &&
+              !workspace.archived_at && (
                 <DeleteWorkspace
                   workspace={workspace}
                   onSuccess={() => {
@@ -67,9 +66,9 @@ export function WorkspaceSettings() {
 }
 export function OrganizationSettings() {
   const { t } = useTranslation(),
-    { organization, organizationAdmin } = useAccess();
+    { organization, organizationCan } = useAccess();
   const scope = { kind: "organization", id: organization.id } as const;
-  if (!organizationAdmin)
+  if (!organizationCan("admin"))
     return (
       <Page title={t("Organization settings")}>
         <Empty
@@ -88,7 +87,6 @@ export function OrganizationSettings() {
         members: <Members scope={scope} />,
         invitations: <Invitations scope={scope} />,
         models: <Models scope={scope} />,
-        environments: <EnvironmentTemplates scope={scope} />,
         workspaces: <Workspaces />,
         audit: <Audit scope={scope} />,
         providers: <ProvidersPage scope={scope} />,

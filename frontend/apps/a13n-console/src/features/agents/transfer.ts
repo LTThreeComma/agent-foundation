@@ -6,7 +6,6 @@ import {
   stringify,
   visit,
 } from "yaml";
-import type { Schema } from "../../shared/api";
 import {
   schemaErrors,
   validateAgentConfig,
@@ -14,21 +13,26 @@ import {
 import type { AgentConfig } from "./configuration";
 
 export const MAX_AGENT_FILE_BYTES = 1024 * 1024;
+/**
+ * Version 2 holds the configuration that names models, skills, and other
+ * resources by ID; version 1 files came from the earlier Service.
+ */
+export const AGENT_FILE_VERSION = 2;
 
 /** A saved Service configuration, without resource identity or resolved credentials. */
 export interface AgentFile {
-  schema_version: 1;
+  schema_version: typeof AGENT_FILE_VERSION;
   name: string;
   description: string | null;
   config: AgentConfig;
 }
 
 export function agentFile(
-  agent: Pick<Schema["Agent"], "name" | "description">,
+  agent: Pick<AgentFile, "name" | "description">,
   config: AgentConfig,
 ): AgentFile {
   return {
-    schema_version: 1,
+    schema_version: AGENT_FILE_VERSION,
     name: agent.name,
     description: agent.description,
     config,
@@ -71,9 +75,13 @@ export function parseAgentFile(source: string): AgentFile {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Enter an Agent YAML object.");
   const fields = value as Record<string, unknown>;
-  if (fields.schema_version !== 1)
+  if (fields.schema_version === 1)
     throw new Error(
-      "Unsupported Agent file version. Expected schema_version: 1.",
+      "This Agent file uses schema_version 1 from an earlier Console, which this Console cannot import. Export the agent again from a current Console.",
+    );
+  if (fields.schema_version !== AGENT_FILE_VERSION)
+    throw new Error(
+      "Unsupported Agent file version. Expected schema_version: 2.",
     );
   if (
     Object.keys(fields).some(
@@ -99,7 +107,7 @@ export function parseAgentFile(source: string): AgentFile {
     );
   if (!validateAgentConfig(fields.config)) throw new Error(schemaErrors());
   return {
-    schema_version: 1,
+    schema_version: AGENT_FILE_VERSION,
     name: fields.name.normalize("NFC"),
     description: (fields.description as string | null | undefined) ?? null,
     config: fields.config,

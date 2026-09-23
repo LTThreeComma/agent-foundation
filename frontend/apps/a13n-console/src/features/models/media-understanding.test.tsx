@@ -4,11 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "../../service-client";
+import type { Schema } from "../../shared/api";
 import { MediaUnderstandingDefaults } from "./media-understanding";
 import { MediaUnderstandingFields } from "./media-understanding-fields";
 
 const state = vi.hoisted(() => ({
-  manage: true,
+  admin: true,
   http: { GET: vi.fn(), PUT: vi.fn() },
 }));
 vi.mock("../../auth/context", () => ({
@@ -16,9 +17,10 @@ vi.mock("../../auth/context", () => ({
 }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
+    organization: { id: "org_test" },
     workspace: { id: "ws_test", key: "design" },
     basePath: "/workspace/design",
-    can: () => state.manage,
+    can: (verb: string) => verb !== "admin" || state.admin,
   }),
 }));
 vi.mock("react-i18next", () => ({
@@ -30,57 +32,43 @@ vi.mock("react-i18next", () => ({
       ),
   }),
 }));
-const initial: {
-  workspace_id: string;
-  version: number;
-  image: string | null;
-  video: string | null;
-  audio: string | null;
-} = {
-  workspace_id: "ws_test",
+const initial: Schema["MediaDefaults"] = {
+  id: "ws_test",
   version: 0,
   image: null,
   video: null,
   audio: null,
 };
-const response = (data: unknown, etag = '"v0"') => ({
+const response = (data: unknown, etag = '"ws_test:0"') => ({
   data,
   response: new Response(null, { status: 200, headers: { ETag: etag } }),
 });
+const model = (
+  id: string,
+  name: string,
+  capabilities: string[],
+  overrides: Record<string, unknown> = {},
+) => ({
+  id,
+  key: name.toLowerCase(),
+  name,
+  enabled: true,
+  provider_id: "provider",
+  config: { model_name: `${id}-upstream`, characteristics: { capabilities } },
+  ...overrides,
+});
 const models = [
-  {
-    key: "vision",
-    name: "Vision",
-    upstream_model: "claude-vision",
-    enabled: true,
-    provider_id: "provider",
-    declarations: { capabilities: ["image_understanding"] },
-  },
-  {
-    key: "text",
-    name: "Text",
-    upstream_model: "text-only",
-    enabled: true,
-    provider_id: "provider",
-    declarations: {},
-  },
-  {
-    key: "disabled",
-    name: "Disabled",
-    upstream_model: "disabled-model",
+  model("mdl_vision", "Vision", ["image_understanding"]),
+  model("mdl_text", "Text", []),
+  model("mdl_disabled", "Disabled", ["image_understanding"], {
     enabled: false,
-    provider_id: "provider",
-    declarations: { capabilities: ["image_understanding"] },
-  },
-  {
-    key: "offline",
-    name: "Offline",
-    upstream_model: "offline-model",
-    enabled: true,
+  }),
+  model("mdl_offline", "Offline", ["image_understanding"], {
     provider_id: "disabled",
-    declarations: { capabilities: ["image_understanding"] },
-  },
+  }),
 ];
+const defaultsPath =
+  "/api/v1/workspaces/{workspace_id}/media-understanding-defaults";
 function setup(content = <MediaUnderstandingDefaults />) {
   const cache = new QueryClient({
     defaultOptions: {
@@ -93,7 +81,6 @@ function setup(content = <MediaUnderstandingDefaults />) {
       <MemoryRouter>{content}</MemoryRouter>
     </QueryClientProvider>,
   );
-  return cache;
 }
 async function imageSelect() {
   const image = await screen.findByRole("combobox", {
@@ -110,12 +97,12 @@ async function chooseImage(user: ReturnType<typeof userEvent.setup>) {
 let saved = initial;
 beforeEach(() => {
   vi.resetAllMocks();
-  state.manage = true;
+  state.admin = true;
   saved = initial;
   HTMLElement.prototype.scrollIntoView = () => {};
   state.http.GET.mockImplementation(async (path: string) => {
-    if (path.endsWith("/media-understanding-defaults"))
-      return response(saved, `"v${saved.version}"`);
+    if (path === defaultsPath)
+      return response(saved, `"ws_test:${saved.version}"`);
     if (path.endsWith("/model-providers"))
       return response({
         items: [
@@ -127,7 +114,7 @@ beforeEach(() => {
     return response({ items: models, next_cursor: null });
   });
   state.http.PUT.mockResolvedValue(
-    response({ ...initial, version: 1, image: "vision" }, '"v1"'),
+    response({ ...initial, version: 1, image: "mdl_vision" }, '"ws_test:1"'),
   );
 });
 afterEach(cleanup);
@@ -142,16 +129,11 @@ it("offers only compatible enabled models and saves the whole selection on chang
   expect(screen.queryByRole("option", { name: /Offline/ })).toBeNull();
   await user.click(vision);
   await waitFor(() =>
-    expect(state.http.PUT).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace}/media-understanding-defaults",
-      {
-        params: {
-          path: { workspace: "ws_test" },
-          header: { "If-Match": '"v0"' },
-        },
-        body: { image: "vision", video: null, audio: null },
-      },
-    ),
+    expect(state.http.PUT).toHaveBeenCalledWith(defaultsPath, {
+      params: { path: { workspace_id: "ws_test" } },
+      headers: { "If-Match": '"ws_test:0"' },
+      body: { image: "mdl_vision", video: null, audio: null },
+    }),
   );
   await waitFor(() => expect(image.textContent).toContain("Vision"));
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
@@ -162,7 +144,12 @@ it("shows the row saving and keeps the other rows out of reach", async () => {
   state.http.PUT.mockReturnValue(
     new Promise((resolve) => {
       settle = () =>
-        resolve(response({ ...initial, version: 1, image: "vision" }, '"v1"'));
+        resolve(
+          response(
+            { ...initial, version: 1, image: "mdl_vision" },
+            '"ws_test:1"',
+          ),
+        );
     }),
   );
   setup();
@@ -189,19 +176,17 @@ it("reloads the saved selection when the defaults changed elsewhere", async () =
   await screen.findByText(/These defaults changed elsewhere/);
   await waitFor(() => expect(image.textContent).toContain("Not configured"));
   expect(
-    state.http.GET.mock.calls.filter((call) =>
-      String(call[0]).endsWith("/media-understanding-defaults"),
-    ),
+    state.http.GET.mock.calls.filter((call) => call[0] === defaultsPath),
   ).toHaveLength(2);
 });
 
 it("warns on the row whose saved model is no longer eligible", async () => {
-  saved = { ...initial, image: "retired" };
+  saved = { ...initial, image: "mdl_disabled" };
   setup();
   const image = await imageSelect();
-  expect(image.textContent).toContain("retired");
+  expect(image.textContent).toContain("Disabled");
   await screen.findByText(
-    /Saved model retired is disabled or no longer declares image understanding\./,
+    /Saved model disabled is disabled or no longer declares image understanding\./,
   );
 });
 
@@ -221,8 +206,8 @@ it("explains a kind that no enabled model declares", async () => {
   ).toBeNull();
 });
 
-it("shows defaults without edit controls to readers", async () => {
-  state.manage = false;
+it("shows defaults without edit controls to non-admins", async () => {
+  state.admin = false;
   setup();
   const image = await screen.findByRole("combobox", {
     name: "Image understanding",

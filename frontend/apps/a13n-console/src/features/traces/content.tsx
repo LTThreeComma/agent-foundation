@@ -8,15 +8,12 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { isRecord } from "../../service-client";
 import type { Schema } from "../../shared/api";
 import { CopyButton } from "../../shared/identity";
 import { MarkdownContent } from "../../shared/markdown";
 import { UNKNOWN } from "../../shared/unknown";
 import styles from "./traces.module.css";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Decode JSON containers without losing large integers in retained content. */
 export function decodeContent(value: unknown): unknown {
@@ -76,45 +73,19 @@ function TraceText({ text }: { text: string }) {
   return <MarkdownContent text={text} literalHtml />;
 }
 
-/** Compact view omits retained content, so it offers its own way back. */
-export function CompactNotice({
-  view,
-  onFull,
-}: {
-  view: Schema["TraceView"];
-  onFull: () => void;
-}) {
-  const { t } = useTranslation();
-  if (view !== "compact") return null;
-  return (
-    <p className={styles.providerNote}>
-      {t("Compact omits retained content and diagnostic attributes.")}{" "}
-      <Button variant="ghost" size="sm" type="button" onClick={onFull}>
-        {t("Show full content")}
-      </Button>
-    </p>
-  );
-}
-
+/** A span's retained input or output; null when the span recorded none. */
 export function TraceContent({
   content,
-  compact = false,
 }: {
-  content: Schema["Content"] | null;
-  compact?: boolean;
+  content: Schema["Span"]["input"];
 }) {
   const { t } = useTranslation();
   const [raw, setRaw] = useState(false);
-  if (content === null)
-    return (
-      <p className={styles.contentEmpty}>
-        {compact ? t("Content omitted in Compact view.") : UNKNOWN}
-      </p>
-    );
+  if (content === null) return <p className={styles.contentEmpty}>{UNKNOWN}</p>;
   return (
     <div className={styles.content}>
       <div className={styles.contentToolbar}>
-        <span>{content.media_type ?? t("Retained content")}</span>
+        <span>{t("Retained content")}</span>
         <div>
           <Button
             size="sm"
@@ -132,11 +103,7 @@ export function TraceContent({
         </div>
       </div>
       <div className={`${styles.contentBody} a13n-scrollbar`}>
-        {raw ? (
-          <TraceJson value={content} />
-        ) : (
-          <RichValue value={content.value} />
-        )}
+        {raw ? <TraceJson value={content} /> : <RichValue value={content} />}
       </div>
     </div>
   );

@@ -3,25 +3,24 @@ import { inputText } from "./input";
 import { isObject } from "./projection";
 
 /**
- * What a Run was asked to do, resolved once from its accepted input.
- * `input_kind` names the protocol that owns that value, and a Run of a child
- * Thread carries the delegation envelope its parent built. Chat, Debug and the
- * Run navigator all read this one answer, so the same request never reads as a
- * person's message on one surface and as raw JSON on another. This module
- * decides what the request is; the components only choose the words.
+ * What a Run was asked to do, resolved once from its source. `trigger` names
+ * the protocol that owns that value: a message's payload, the answers that
+ * resumed a wait, or a child Run's result; a Run of a child Thread carries the
+ * delegation envelope its parent built. Chat, Debug and the Run navigator all
+ * read this one answer, so the same request never reads as a person's message
+ * on one surface and as raw JSON on another. This module decides what the
+ * request is; the components only choose the words.
  */
 
-type Run = Schema["RunResource"];
-type Thread = Schema["ThreadResource"];
+type Run = Schema["RunView"];
+type Thread = Schema["ThreadView"];
 
 export type RunRequest =
-  /** Ordinary `agent_input`: what a person or an application sent. */
+  /** An ordinary message: what a person or an application sent. */
   | { kind: "message"; input: unknown; text: string }
-  /** `waiting_feedback`: the complete resolution of a waiting batch. */
+  /** `resume`: the complete answer to a waiting batch. */
   | { kind: "feedback"; input: unknown; text: string }
-  /** `waiting_continue`: that batch resolved by default, plus a new message. */
-  | { kind: "continue"; input: unknown; text: string }
-  /** `async_subagent_result`: an asynchronous child's terminal result. */
+  /** `child_result`: a child Run's terminal result. */
   | {
       kind: "subagent_result";
       subagent: string | null;
@@ -32,25 +31,14 @@ export type RunRequest =
   | { kind: "delegated_task"; text: string; parentTask: string | null };
 
 export function runRequest(run: Run, thread?: Thread | null): RunRequest {
-  const read = (input: unknown) => inputText(input, run.input_text);
-  if (run.input_kind === "async_subagent_result")
-    return subagentResult(run.input);
-  if (run.input_kind === "waiting_feedback")
-    return { kind: "feedback", input: run.input, text: read(run.input) };
-  if (run.input_kind === "waiting_continue") {
-    // The composite carries the normalized defaults and the accepted input;
-    // the message is the part the person actually wrote.
-    const input =
-      isObject(run.input) && run.input.input !== undefined
-        ? run.input.input
-        : run.input;
-    return { kind: "continue", input, text: read(input) };
-  }
+  if (run.trigger === "child_result") return subagentResult(run.input);
+  if (run.trigger === "resume")
+    return { kind: "feedback", input: run.resume, text: inputText(run.resume) };
   return (
-    (thread?.role === "child" ? delegatedTask(run, read) : null) ?? {
+    (thread?.origin === "child" ? delegatedTask(run) : null) ?? {
       kind: "message",
       input: run.input,
-      text: read(run.input),
+      text: inputText(run.input),
     }
   );
 }
@@ -63,9 +51,9 @@ function subagentResult(input: unknown): RunRequest {
   const payload = isObject(input) ? input : {};
   return {
     kind: "subagent_result",
-    subagent: text(payload.subagent_name),
-    status: text(payload.terminal_status),
-    text: value(payload.result_payload),
+    subagent: text(payload.subagent),
+    status: text(payload.status),
+    text: value(payload.output),
   };
 }
 
@@ -73,11 +61,8 @@ function subagentResult(input: unknown): RunRequest {
  * The Harness hands a child Run one JSON envelope as its text: the delegated
  * task, and the parent's own task when the subagent is allowed to see it.
  */
-function delegatedTask(
-  run: Run,
-  read: (input: unknown) => string,
-): RunRequest | null {
-  const envelope = parseObject(read(run.input));
+function delegatedTask(run: Run): RunRequest | null {
+  const envelope = parseObject(inputText(run.input));
   if (!envelope || envelope.delegated_task === undefined) return null;
   return {
     kind: "delegated_task",

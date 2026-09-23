@@ -21,7 +21,7 @@ import { ApiError } from "../../service-client";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { data, type Schema } from "../../shared/api";
+import { data } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -31,6 +31,7 @@ import {
 } from "../../shared/collection";
 import { ErrorNotice, Loading } from "../../shared/feedback";
 import { Page } from "../../shared/page";
+import { backendName, useTraceBackend, type TraceBackendType } from "./backend";
 import { TraceTable } from "./list-table";
 import type { ObservationSort } from "./sorting";
 import { useListCosts } from "./list-cost";
@@ -54,19 +55,9 @@ function metadataRow(entry?: string): MetadataRow {
   };
 }
 export function TracesPage() {
-  const client = useClient(),
-    { workspace } = useWorkspace(),
+  const { workspace } = useWorkspace(),
     { t } = useTranslation();
-  const descriptor = useQuery({
-    queryKey: ["trace-query", workspace.id],
-    queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace}/trace-query", {
-          params: { path: { workspace: workspace.id } },
-          signal,
-        })
-        .then(data),
-  });
+  const descriptor = useTraceBackend();
   if (descriptor.isPending) return <Loading variant="detail" page />;
   if (descriptor.error)
     return (
@@ -75,7 +66,7 @@ export function TracesPage() {
         retry={() => void descriptor.refetch()}
       />
     );
-  if (!descriptor.data?.enabled)
+  if (descriptor.data.type === null)
     return (
       <Page title={t("Traces")}>
         <Empty
@@ -88,26 +79,29 @@ export function TracesPage() {
     );
   return (
     <TraceBrowser
-      key={workspace.id + descriptor.data.provider}
-      descriptor={descriptor.data}
+      key={workspace.id + descriptor.data.type}
+      backend={descriptor.data.type}
+      queryableSince={descriptor.data.queryable_since}
     />
   );
 }
 function TraceBrowser({
-  descriptor,
+  backend,
+  queryableSince,
 }: {
-  descriptor: Schema["TraceQueryDescriptor"];
+  backend: TraceBackendType;
+  /** The earliest start the backend still finds; null when unbounded. */
+  queryableSince: string | null;
 }) {
   const { t, i18n } = useTranslation(),
-    [searchParams] = useSearchParams(),
-    page = useCursor();
+    [searchParams] = useSearchParams();
   const [from, setFrom] = useState(
       localTime(
         new Date(
           searchParams.get("from") ??
             Math.max(
               Date.now() - 86_400_000,
-              Date.parse(descriptor.history_from ?? "") || 0,
+              Date.parse(queryableSince ?? "") || 0,
             ),
         ),
       ),
@@ -129,7 +123,7 @@ function TraceBrowser({
       metadataRows
         .map((row) => [row.key.trim(), row.value.trim()])
         .filter(([key, value]) => key !== "" && value !== "")
-        .map(([key, value]) => `${key}=${value}`),
+        .map(([key, value]) => `${key}:${value}`),
     [metadataRows],
   );
   const [filters, setFilters] = useState({
@@ -139,6 +133,7 @@ function TraceBrowser({
       metadata: appliedMetadata,
     }),
     [error, setError] = useState<Error>();
+  const page = useCursor(filters);
   useEffect(() => {
     const timer = setTimeout(() => {
       const start = new Date(from),
@@ -147,21 +142,20 @@ function TraceBrowser({
         !Number.isFinite(start.getTime()) ||
         !Number.isFinite(end.getTime()) ||
         end <= start ||
-        (descriptor.history_from !== null &&
-          start < new Date(descriptor.history_from)) ||
+        (queryableSince !== null && start < new Date(queryableSince)) ||
         end.getTime() - start.getTime() > 31 * 86_400_000
       ) {
         setError(new Error(t("Choose a valid time range of up to 31 days.")));
         return;
       }
       setError(undefined);
-      page.reset();
-      setFilters({
+      const next = {
         from: start.toISOString(),
         to: end.toISOString(),
         ...idFilters(idQuery),
         metadata: appliedMetadata,
-      });
+      };
+      setFilters(next);
     }, 350);
     return () => clearTimeout(timer);
   }, [from, to, idQuery, appliedMetadata]);
@@ -173,13 +167,13 @@ function TraceBrowser({
         <span
           className={styles.providerChip}
           title={
-            descriptor.history_from
-              ? `${t("Queryable since")} ${new Date(descriptor.history_from).toLocaleDateString(i18n.resolvedLanguage, { dateStyle: "medium" })}`
+            queryableSince
+              ? `${t("Queryable since")} ${new Date(queryableSince).toLocaleDateString(i18n.resolvedLanguage, { dateStyle: "medium" })}`
               : undefined
           }
         >
-          {t("by")} <BrandIcon identity={descriptor.provider} size={13} />
-          {descriptor.provider === "langfuse" ? "Langfuse" : "Logfire"}
+          {t("by")} <BrandIcon identity={backend} size={13} />
+          {backendName(backend)}
         </span>
       }
       description={t(
@@ -196,7 +190,7 @@ function TraceBrowser({
               <TimeRangeFilter
                 from={from}
                 to={to}
-                historyFrom={descriptor.history_from}
+                queryableSince={queryableSince}
                 onChange={(nextFrom, nextTo) => {
                   setFrom(nextFrom);
                   setTo(nextTo);
@@ -226,11 +220,12 @@ function TraceBrowser({
     </Page>
   );
 }
+/** Session and run IDs carry their kind prefix; any other ID searches threads. */
 function idFilters(value: string) {
   const id = value.trim();
   return {
-    session_id: /^(sess|session)_/.test(id) ? id : "",
-    thread_id: id && !/^(sess|session|run)_/.test(id) ? id : "",
+    session_id: id.startsWith("sess_") ? id : "",
+    thread_id: id && !/^(sess|run)_/.test(id) ? id : "",
     run_id: id.startsWith("run_") ? id : "",
   };
 }
@@ -238,12 +233,12 @@ function idFilters(value: string) {
 function TimeRangeFilter({
   from,
   to,
-  historyFrom,
+  queryableSince,
   onChange,
 }: {
   from: string;
   to: string;
-  historyFrom?: string | null;
+  queryableSince: string | null;
   onChange: (from: string, to: string) => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -257,7 +252,7 @@ function TimeRangeFilter({
     !endDate ||
     startDate >= endDate ||
     endDate.getTime() - startDate.getTime() > 31 * 86_400_000 ||
-    (!!historyFrom && !!startDate && startDate < new Date(historyFrom));
+    (!!queryableSince && !!startDate && startDate < new Date(queryableSince));
   const fmt = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
     month: "short",
     day: "numeric",
@@ -429,7 +424,7 @@ function MetadataFilter({
           <div>
             <p className={styles.popoverTitle}>{t("Metadata")}</p>
             <p className={styles.popoverHint}>
-              {t("Exact key=value matches on run metadata.")}
+              {t("Exact key=value matches on root span attributes.")}
             </p>
           </div>
           <div className={styles.metadataRows}>
@@ -493,6 +488,7 @@ interface TraceListProps {
     session_id?: string;
     thread_id?: string;
     run_id?: string;
+    /** `key:value` selectors, each an exact root span attribute. */
     metadata?: string[];
   };
   page: ReturnType<typeof useCursor>;
@@ -509,17 +505,19 @@ export function TraceList({ filters, page }: TraceListProps) {
     queryKey: ["trace-list", workspace.id, filters, page.cursor],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/traces", {
+        .GET("/api/v1/workspaces/{workspace_id}/traces", {
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             query: {
-              ...filters,
+              started_after: filters.from,
+              started_before: filters.to,
               session_id: filters.session_id || undefined,
               thread_id: filters.thread_id || undefined,
               run_id: filters.run_id || undefined,
-              metadata: filters.metadata?.length ? filters.metadata : undefined,
+              attribute: filters.metadata?.length
+                ? filters.metadata
+                : undefined,
               cursor: page.cursor,
-              view: "compact",
               limit: 25,
             },
           },

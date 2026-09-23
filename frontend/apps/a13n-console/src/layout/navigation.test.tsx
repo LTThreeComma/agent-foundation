@@ -1,25 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SettingsLayout } from "../features/settings/layout";
 import { Shell } from "./shell";
 
-const memoryCatalog = vi.hoisted(() => ({
-  GET: vi.fn(async () => ({
-    data: { items: [], next_cursor: null },
-    response: new Response(),
-  })),
-}));
 vi.mock("../auth/context", () => ({
-  useClient: () => ({ http: memoryCatalog }),
   useAuth: () => ({
     data: { user: { value: { name: "Alex", email: "alex@example.com" } } },
     logout: vi.fn(),
@@ -32,7 +19,7 @@ vi.mock("./workspace", () => {
     workspace: { id: "workspace", key: "design", name: "Design" },
     organization: { key: "acme", name: "Organization" },
     workspaces: [{ id: "workspace", key: "design", name: "Design" }],
-    organizationAdmin: access.organizationAdmin,
+    organizationCan: () => access.organizationAdmin,
     can: () => true,
   });
   return { useWorkspace: useAccess, useAccess };
@@ -54,11 +41,6 @@ beforeEach(() =>
   ),
 );
 beforeEach(() => {
-  memoryCatalog.GET.mockReset();
-  memoryCatalog.GET.mockResolvedValue({
-    data: { items: [], next_cursor: null },
-    response: new Response(),
-  });
   Element.prototype.scrollIntoView = vi.fn();
 });
 afterEach(() => {
@@ -263,31 +245,4 @@ it("collapses the settings navigation after selecting a section", async () => {
   await user.click(screen.getByRole("link", { name: "Security" }));
   expect(toggle.getAttribute("aria-expanded")).toBe("false");
   expect(screen.getByText("Security form")).toBeTruthy();
-});
-
-it("hides Memories for an empty backend catalog while keeping other resources", async () => {
-  const cache = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={cache}>
-      <MemoryRouter initialEntries={["/workspace/design/agents"]}>
-        <Shell />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-  await waitFor(() => expect(memoryCatalog.GET).toHaveBeenCalled());
-  await waitFor(() =>
-    expect(
-      cache.getQueryState([
-        "memory-providers",
-        "workspace",
-        "workspace",
-        "choices",
-      ])?.status,
-    ).toBe("success"),
-  );
-  expect(screen.queryByRole("link", { name: "Memories" })).toBeNull();
-  expect(screen.getByRole("link", { name: "Bots" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Models" })).toBeTruthy();
 });

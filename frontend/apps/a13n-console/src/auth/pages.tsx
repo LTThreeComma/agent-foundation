@@ -31,7 +31,6 @@ import {
   useParams,
 } from "react-router";
 
-import { pairingSearch } from "../features/environments/pairing-link";
 import { ApiError } from "../service-client";
 import { data } from "../shared/api";
 import { Loading } from "../shared/feedback";
@@ -46,17 +45,25 @@ type Failure = { field?: boolean; message: string };
 const passwordFieldId = "auth-password";
 const passwordErrorId = `${passwordFieldId}-error`;
 
+/** Validation failures name each rejected location, such as `body.password`. */
 function rejectedFields(error: ApiError): string[] {
   const fields = error.details.fields;
   return Array.isArray(fields)
-    ? fields.filter((field): field is string => typeof field === "string")
+    ? fields.flatMap((item: unknown) =>
+        typeof item === "object" &&
+        item !== null &&
+        "field" in item &&
+        typeof item.field === "string"
+          ? [item.field.split(".").at(-1) ?? item.field]
+          : [],
+      )
     : [];
 }
 
 /**
  * The Service answers a wrong email or password with 401
- * `authentication_required`, and rejects a password below its 15 character
- * minimum with 400 `invalid_request` naming the field. A failed fetch reaches
+ * `unauthenticated`, and rejects a password below its 12 character minimum
+ * with 400 `invalid_argument` naming the field. A failed fetch reaches
  * the mutation as a `TypeError` with no response at all.
  */
 function readFailure(
@@ -79,7 +86,7 @@ function readFailure(
           : t("The request could not be completed."),
     };
   const rejected =
-    error.status === 400 && error.code === "invalid_request"
+    error.status === 400 && error.code === "invalid_argument"
       ? rejectedFields(error)
       : [];
   if (mode === "login" && (error.status === 401 || rejected.length > 0))
@@ -87,7 +94,7 @@ function readFailure(
   if (rejected.includes("password"))
     return {
       field: true,
-      message: t("Choose a password with at least 15 characters."),
+      message: t("Choose a password with at least 12 characters."),
     };
   return { message: error.message };
 }
@@ -150,13 +157,13 @@ export function AuthPage() {
         return;
       }
       if (mode === "reset") {
-        await client.http.POST("/api/v1/auth/password-reset/complete", {
+        await client.http.POST("/api/v1/auth/password-reset/confirm", {
           body: { token, password },
         });
         return;
       }
       if (mode === "email") {
-        await client.http.POST("/api/v1/users/me/email-change/complete", {
+        await client.http.POST("/api/v1/auth/email-change/confirm", {
           body: { token },
         });
         await auth.refresh();
@@ -179,7 +186,7 @@ export function AuthPage() {
               }),
             );
       auth.authenticated(result.csrf_token);
-      navigate(`/${pairingSearch(location.search)}`, { replace: true });
+      navigate("/", { replace: true });
     },
   });
   useEffect(() => {
@@ -217,7 +224,7 @@ export function AuthPage() {
     login: t("Build, run, and observe your agents."),
     invite: t("Create your account to accept this invitation."),
     forgot: t("We'll send a recovery link if your email is eligible."),
-    reset: t("Use at least 15 characters for your new password."),
+    reset: t("Use at least 12 characters for your new password."),
     email: t("Confirm this address while signed in to your account."),
   };
   const submitLabels: Record<Mode, string> = {
@@ -228,7 +235,7 @@ export function AuthPage() {
     email: t("Confirm email"),
   };
   if (mode === "login" && auth.data && !auth.anonymous)
-    return <Navigate to={`/${pairingSearch(location.search)}`} replace />;
+    return <Navigate to="/" replace />;
   function submit(event: FormEvent) {
     event.preventDefault();
     mutation.mutate();
@@ -328,7 +335,7 @@ export function AuthPage() {
               <FormField
                 label={t("Password")}
                 description={
-                  mode === "invite" ? t("At least 15 characters.") : undefined
+                  mode === "invite" ? t("At least 12 characters.") : undefined
                 }
                 error={fieldError}
               >
@@ -343,7 +350,7 @@ export function AuthPage() {
                   }
                   value={password}
                   onChange={edit(setPassword)}
-                  minLength={mode === "login" ? 1 : 15}
+                  minLength={mode === "login" ? 1 : 12}
                   maxLength={128}
                 />
               </FormField>

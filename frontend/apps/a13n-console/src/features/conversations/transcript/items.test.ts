@@ -12,7 +12,6 @@ function item(
     id,
     kind,
     state: "completed",
-    parentId: null,
     firstCursor: "1-0",
     lastCursor: "1-0",
     startedAt: null,

@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
-import { data, workspaceHeaders, type Schema } from "../../../shared/api";
+import type { Client } from "../../../service-client";
+import { data, type Schema } from "../../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -17,32 +18,37 @@ import shared from "../../../shared/shared.module.css";
 import { AgentAvatar } from "../../agents/avatar";
 import { SkillIcon } from "../source";
 
-/** Agents whose current configuration depends on this skill. */
+/**
+ * Unarchived agents with a revision that pins this skill, a page at a time.
+ * The list's usage count reads the same first page.
+ */
+export function usedByQuery(
+  client: Client,
+  skill: Pick<Schema["Skill"], "id" | "workspace_id">,
+  cursor?: string,
+) {
+  return queryOptions({
+    queryKey: ["skills", skill.workspace_id, skill.id, "used-by", cursor],
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/workspaces/{workspace_id}/agents", {
+          params: {
+            path: { workspace_id: skill.workspace_id },
+            query: { skill_id: skill.id, archived: false, cursor },
+          },
+          signal,
+        })
+        .then(data),
+  });
+}
+
+/** Agents whose configuration depends on this skill. */
 export function UsedByAgents({ skill }: { skill: Schema["Skill"] }) {
   const { basePath } = useWorkspace(),
     client = useClient(),
     { t } = useTranslation(),
     page = useCursor();
-  const query = useQuery({
-    queryKey: [
-      "skills",
-      skill.workspace_id,
-      skill.id,
-      "references",
-      page.cursor,
-    ],
-    queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/skills/{skill_id}/references", {
-          params: {
-            path: { skill_id: skill.id },
-            query: { cursor: page.cursor },
-          },
-          headers: workspaceHeaders(skill.workspace_id),
-          signal,
-        })
-        .then(data),
-  });
+  const query = useQuery(usedByQuery(client, skill, page.cursor));
   if (query.isPending) return <Loading variant="list" rows={3} />;
   if (!query.data)
     return (
@@ -58,28 +64,22 @@ export function UsedByAgents({ skill }: { skill: Schema["Skill"] }) {
     );
   return (
     <div className={shared.stack}>
-      <p className={shared.muted}>
-        {t(
-          "Current revisions of unarchived agents referencing this skill prevent deletion.",
-        )}
-      </p>
       <ListRows>
-        {query.data.items.map((reference) => (
+        {query.data.items.map((agent) => (
           <ListRow
-            key={reference.agent_id}
+            key={agent.id}
             icon={
               <AgentAvatar
-                name={reference.agent_name}
-                id={reference.agent_id}
+                name={agent.name}
+                id={agent.id}
+                url={agent.image_url}
                 className="size-8 rounded-[inherit]"
               />
             }
             name={
-              <Link to={`${basePath}/agents/${reference.agent_key}`}>
-                {reference.agent_name}
-              </Link>
+              <Link to={`${basePath}/agents/${agent.key}`}>{agent.name}</Link>
             }
-            secondary={reference.agent_key}
+            secondary={agent.key}
           />
         ))}
       </ListRows>

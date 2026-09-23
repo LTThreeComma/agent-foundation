@@ -1,4 +1,4 @@
-import type { RunEvent } from "../../service-client";
+import type { RunEvent } from "./display";
 import { isObject, type PresentedItem } from "./projection";
 import {
   addStep,

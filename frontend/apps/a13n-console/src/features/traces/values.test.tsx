@@ -1,7 +1,7 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Schema } from "../../shared/api";
-import { Duration, TelemetryStatus, TracePill } from "./values";
+import { Duration, TracePill } from "./values";
 import { UNKNOWN } from "../../shared/unknown";
 
 vi.mock("react-i18next", () => ({
@@ -23,7 +23,7 @@ it("always displays seconds, preserving short and zero durations and missing tim
           {
             started_at: "2026-09-11T00:00:00Z",
             ended_at: end,
-          } as Schema["Observation"]
+          } as Schema["Span"]
         }
       />,
     );
@@ -51,13 +51,6 @@ it("normalizes every known level label without rewriting raw or unfamiliar level
     expect(container.querySelector("[title]")?.getAttribute("title")).toBe(raw);
     unmount();
   }
-  const { container } = render(
-    <>
-      <TracePill level={null} />
-      <TelemetryStatus
-        observation={{ status: null } as Schema["Observation"]}
-      />
-    </>,
-  );
-  expect(container.textContent).toBe(`${UNKNOWN}${UNKNOWN}`);
+  const { container } = render(<TracePill level={null} />);
+  expect(container.textContent).toBe(UNKNOWN);
 });

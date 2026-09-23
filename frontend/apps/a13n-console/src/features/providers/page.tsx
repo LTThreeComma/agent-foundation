@@ -5,7 +5,6 @@ import { useAccess } from "../../layout/workspace";
 import { Empty } from "../../shared/collection";
 import { ConnectorProviders } from "../connectors/providers";
 import { EnvironmentProviders } from "../environments/providers";
-import { MemoryProviders } from "../memory/providers";
 import { Providers } from "../models/providers";
 import { WebProviders } from "../web/page";
 import { providerCategories, providerCategory } from "./categories";
@@ -14,7 +13,6 @@ import styles from "./providers.module.css";
 const components = {
   models: Providers,
   web: WebProviders,
-  memory: MemoryProviders,
   environments: EnvironmentProviders,
   connectors: ConnectorProviders,
 };
@@ -24,7 +22,7 @@ export function ProvidersPage({
   scope: { kind: "workspace" | "organization"; id: string };
 }) {
   const { t } = useTranslation();
-  const { organizationAdmin } = useAccess();
+  const { organizationCan } = useAccess();
   const [params, setParams] = useSearchParams();
   const category = providerCategory(params.get("category"));
   const kind = scope.kind;
@@ -52,7 +50,7 @@ export function ProvidersPage({
         const Component = components[value];
         return (
           <TabsPanel key={value} value={value} className={styles.panel}>
-            {kind === "organization" && !organizationAdmin ? (
+            {kind === "organization" && !organizationCan("write") ? (
               <Empty
                 title={t("Access unavailable")}
                 description={t(

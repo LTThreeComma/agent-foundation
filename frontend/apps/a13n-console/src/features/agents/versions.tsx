@@ -1,21 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, DisclosureSection } from "a13n-ui";
 import { useState } from "react";
-import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import {
-  commandHeaders,
-  data,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
+import { data, ifMatch, type Schema } from "../../shared/api";
 import { Pagination, ResourceTable, useCursor } from "../../shared/collection";
-import { ErrorNotice, Loading, Timestamp } from "../../shared/feedback";
+import {
+  ErrorNotice,
+  ErrorToast,
+  Loading,
+  Timestamp,
+} from "../../shared/feedback";
 import { Confirm } from "../../shared/dialogs";
 import { JsonView } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
+import { useConfigurationAssistant } from "./assistant";
+import { editableAgent, useModelsById } from "./queries";
 import styles from "../../shared/shared.module.css";
 
 export function AgentVersions({
@@ -29,21 +29,25 @@ export function AgentVersions({
 }) {
   const client = useClient(),
     { t } = useTranslation(),
-    { workspace, can, basePath } = useWorkspace(),
+    { workspace, can } = useWorkspace(),
     cache = useQueryClient(),
     page = useCursor(),
-    idempotency = useIdempotency();
+    assistant = useConfigurationAssistant(),
+    models = useModelsById();
   const [selected, setSelected] = useState<Schema["AgentRevision"]>();
+  // Revisions name their model by ID; versions show the model's key.
+  const modelKey = (revision: Schema["AgentRevision"]) =>
+    models.get(revision.config.model.model_id)?.key ??
+    revision.config.model.model_id;
   const query = useQuery({
     queryKey: ["agent-revisions", workspace.id, agent.id, page.cursor],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/agents/{agent}/revisions", {
+        .GET("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions", {
           params: {
-            path: { workspace: workspace.id, agent: agent.id },
+            path: { workspace_id: workspace.id, agent_id: agent.id },
             query: { cursor: page.cursor, limit: 20 },
           },
-          headers: workspaceHeaders(workspace.id),
           signal,
         })
         .then(data),
@@ -69,7 +73,7 @@ export function AgentVersions({
                 onClick={() => setSelected(item)}
                 type="button"
               >
-                v{item.version}{" "}
+                v{item.number}{" "}
                 {item.id === agent.default_revision_id && (
                   <span className="text-xs text-muted-foreground">
                     {t("Default version")}
@@ -78,10 +82,10 @@ export function AgentVersions({
               </Button>
             ),
           },
-          { label: t("Model"), render: (item) => item.config.model.model_key },
+          { label: t("Model"), render: modelKey },
           {
             label: t("Version note"),
-            render: (item) => item.change_summary || "—",
+            render: (item) => item.note || "—",
           },
           {
             label: t("Created"),
@@ -91,16 +95,17 @@ export function AgentVersions({
           {
             label: t("Created by"),
             tone: "muted",
-            render: (item) => item.created_by.principal_id,
+            render: (item) => item.created_by_id,
           },
           {
             label: t("Actions"),
             align: "right",
             render: (item) =>
-              can("agent.revision.create") &&
+              can("write") &&
+              editableAgent(agent) &&
               item.id !== agent.default_revision_id && (
                 <Confirm
-                  subject={`${agent.name} · v${item.version}`}
+                  subject={`${agent.name} · v${item.number}`}
                   triggerVariant="ghost"
                   title={t("Set as default")}
                   description={t(
@@ -116,27 +121,19 @@ export function AgentVersions({
                       );
                     await client.http
                       .POST(
-                        "/api/v1/workspaces/{workspace}/agents/{agent}/revisions/{revision_id}/default",
+                        "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}/set-default",
                         {
                           params: {
                             path: {
-                              workspace: workspace.id,
-                              agent: agent.id,
+                              workspace_id: workspace.id,
+                              agent_id: agent.id,
                               revision_id: item.id,
                             },
-                            header: {
-                              ...commandHeaders(
-                                workspace.id,
-                                idempotency.forBody({ revision: item.id }),
-                              ),
-                              "If-Match": etag,
-                            },
                           },
-                          body: {},
+                          headers: ifMatch(etag),
                         },
                       )
                       .then(data);
-                    idempotency.reset();
                     await onDefaultChanged();
                     await cache.invalidateQueries({
                       queryKey: ["agent-revisions", workspace.id, agent.id],
@@ -148,27 +145,31 @@ export function AgentVersions({
         ]}
       />
       <Pagination page={page} next={query.data.next_cursor} />
+      <ErrorToast error={assistant.error} />
       {selected && (
         <section>
-          {can("agent.revision.create") && (
-            <Link
-              to={`${basePath}/configuration/new?agent=${agent.id}&revision=${selected.id}`}
+          {assistant.available && (
+            <Button
+              type="button"
+              variant="link"
+              loading={assistant.pending}
+              onClick={() => assistant.start({ agent, revision: selected })}
             >
               {t("Configure from this version")}
-            </Link>
+            </Button>
           )}
           <h3>
-            {t("Version")} {selected.version}
+            {t("Version")} {selected.number}
           </h3>
           <dl className="grid gap-3 my-4">
             <div>
               <dt className={styles.muted}>{t("Model")}</dt>
-              <dd>{selected.config.model.model_key}</dd>
+              <dd>{modelKey(selected)}</dd>
             </div>
-            {selected.change_summary && (
+            {selected.note && (
               <div>
                 <dt className={styles.muted}>{t("Version note")}</dt>
-                <dd>{selected.change_summary}</dd>
+                <dd>{selected.note}</dd>
               </div>
             )}
             <div>

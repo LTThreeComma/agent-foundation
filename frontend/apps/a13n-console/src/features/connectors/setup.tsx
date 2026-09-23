@@ -4,61 +4,68 @@ import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import { ErrorNotice, Loading } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
 import { SchemaFields, withSchemaValues } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
+import { connectionPath } from "../connections/api";
 import { startBrowserAuthorization } from "../connections/authorization-context";
 import styles from "../../shared/shared.module.css";
 import { jsonObject, validateSettings } from "../../shared/forms";
+import { ConnectorToolPicker, MAX_TOOLS } from "./tool-picker";
 
 type SetupTarget =
-  | { connection: Schema["Connection"]; connector?: Schema["Connector"] }
-  | { connection?: undefined; connector: Schema["Connector"] };
+  | { connection: Schema["Connection"]; connector?: never; provider?: never }
+  | {
+      connection?: undefined;
+      connector: Schema["ConnectorApp"];
+      provider: Schema["Provider"];
+    };
 export function ConnectionSetup({
   connection,
   connector,
+  provider,
   onStarted,
 }: SetupTarget & { onStarted?: () => void }) {
   const client = useClient(),
     { workspace, basePath } = useWorkspace(),
     cache = useQueryClient(),
-    { t } = useTranslation(),
-    key = useIdempotency();
+    { t } = useTranslation();
   const created = useRef(connection);
+  const saved =
+    connection && "app" in connection.config ? connection.config : undefined;
   const [name, setName] = useState(connection?.name ?? connector?.name ?? ""),
-    [setup, setSetup] = useState<Record<string, unknown>>({});
-  const source = connection?.source;
-  const providerId =
-    source?.kind === "connector"
-      ? source.provider_id
-      : connector!.connector_provider_id;
-  const connectorKey =
-    source?.kind === "connector" ? source.connector_key : connector!.key;
+    [setup, setSetup] = useState<Record<string, unknown>>(saved?.setup ?? {}),
+    [picked, setPicked] = useState(saved?.actions);
+  const providerId = connection?.connector_provider_id ?? provider!.id;
+  const app = saved?.app ?? connector!.key;
+  const appPath = { workspace_id: workspace.id, provider_id: providerId, app };
   const definition = useQuery({
-    queryKey: [
-      "connector-setup-catalog",
-      workspace.id,
-      providerId,
-      connectorKey,
-    ],
+    queryKey: ["connector-setup-catalog", workspace.id, providerId, app],
     queryFn: ({ signal }) =>
       client.http
         .GET(
-          "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}",
-          {
-            params: {
-              path: {
-                connector_provider_id: providerId,
-                connector_key: connectorKey,
-              },
-            },
-            signal,
-          },
+          "/api/v1/workspaces/{workspace_id}/connector-providers/{provider_id}/apps/{app}",
+          { params: { path: appPath }, signal },
         )
         .then(data),
   });
+  const catalog = useQuery({
+    queryKey: ["connector-actions", workspace.id, providerId, app],
+    queryFn: ({ signal }) =>
+      client.http
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/connector-providers/{provider_id}/apps/{app}/actions",
+          { params: { path: appPath }, signal },
+        )
+        .then(data),
+  });
+  // A new connection offers every tool while they fit; a larger app needs a choice.
+  const tools =
+    picked ??
+    (catalog.data && catalog.data.items.length <= MAX_TOOLS
+      ? catalog.data.items.map((tool) => tool.name)
+      : []);
   const launch = useMutation({
     gcTime: 0,
     mutationFn: async () => {
@@ -74,41 +81,52 @@ export function ConnectionSetup({
         );
       const configured = withSchemaValues(selected.setup_schema, setup);
       validateSettings(selected.setup_schema, configured);
+      if (!tools.length) throw new Error(t("Select at least one tool."));
       onStarted?.();
+      const config = {
+        app,
+        actions: tools,
+        setup: jsonObject(JSON.stringify(configured)),
+      };
       let target = created.current;
       if (!target) {
-        const body: Schema["CreateConnectionRequest"] = {
-          name,
-          source: {
-            kind: "connector",
-            provider_id: providerId,
-            connector_key: connectorKey,
-          },
-        };
         target = data(
-          await client.http.POST("/api/v1/workspaces/{workspace}/connections", {
-            params: {
-              path: { workspace: workspace.id },
-              header: commandHeaders(workspace.id, key.forBody(body)),
+          await client.http.POST(
+            "/api/v1/workspaces/{workspace_id}/connections",
+            {
+              params: { path: { workspace_id: workspace.id } },
+              body: {
+                type: provider!.type,
+                name,
+                config,
+                auth: "account",
+                connector_provider_id: providerId,
+              },
             },
-            body,
-          }),
+          ),
         );
         created.current = target;
       } else {
+        const current = data(
+          await client.http.GET(
+            "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+            { params: { path: connectionPath(target) } },
+          ),
+        );
+        // Setup belongs to the configuration; an unchanged setup keeps the current account.
         target = data(
-          await client.http.GET("/api/v1/connections/{connection_id}", {
-            params: { path: { connection_id: target.id } },
-          }),
+          await client.http.PATCH(
+            "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+            {
+              params: { path: connectionPath(current) },
+              headers: ifMatch(rowTag(current)),
+              body: { config },
+            },
+          ),
         );
         created.current = target;
       }
-      return startBrowserAuthorization(
-        client,
-        target,
-        basePath,
-        jsonObject(JSON.stringify(configured)),
-      );
+      return startBrowserAuthorization(client, target, basePath);
     },
     onSettled: () => {
       void cache.invalidateQueries({ queryKey: ["connections"] });
@@ -142,13 +160,30 @@ export function ConnectionSetup({
             </FormField>
           )}
           {definition.data && !definition.data.unavailable_reason && (
-            <fieldset disabled={launch.isPending}>
-              <SchemaFields
-                schema={definition.data.setup_schema}
-                value={setup}
-                onChange={setSetup}
-              />
-            </fieldset>
+            <>
+              <fieldset disabled={launch.isPending}>
+                <SchemaFields
+                  schema={definition.data.setup_schema}
+                  value={setup}
+                  onChange={setSetup}
+                />
+              </fieldset>
+              {catalog.isPending ? (
+                <Loading variant="list" rows={3} />
+              ) : catalog.error ? (
+                <ErrorNotice
+                  error={catalog.error}
+                  retry={() => void catalog.refetch()}
+                />
+              ) : (
+                <ConnectorToolPicker
+                  catalog={catalog.data.items}
+                  value={tools}
+                  disabled={launch.isPending}
+                  onChange={setPicked}
+                />
+              )}
+            </>
           )}
           <Button
             type="button"

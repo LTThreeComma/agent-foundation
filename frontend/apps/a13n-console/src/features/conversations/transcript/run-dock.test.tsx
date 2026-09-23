@@ -10,6 +10,8 @@ import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createClient, type Client } from "../../../service-client";
 import type { Schema } from "../../../shared/api";
+import type { Resubmission } from "../resubmit";
+import { fixtureRun, fixtureThread } from "./fixture";
 import { RunDock } from "./run-dock";
 
 let client: Client;
@@ -35,76 +37,83 @@ afterEach(() => {
   cleanup();
   client.close();
 });
-const now = "2026-09-18T00:00:00Z";
-const run: Schema["RunResource"] = {
+const run = fixtureRun({
   id: "run",
-  version: 3,
   session_id: "session",
   thread_id: "thread",
-  labels: {},
-  parent_run_id: null,
-  retry_of_run_id: null,
-  lineage_kind: "root",
-  trigger_type: "user_input",
   agent_id: "agent",
-  agent_revision_id: "revision",
-  effective_agent_config_digest: "digest",
-  environment_id: null,
-  environment_working_directory: null,
-
-  status: "completed",
-  wait_reason: null,
-  input_kind: "agent_input",
-  input: null,
-  input_text: "Test",
-  output: null,
-  output_text: "Done",
-  failure: null,
-  pending: null,
-  created_at: now,
-  updated_at: now,
-  started_at: now,
-  waiting_at: null,
-  completed_at: now,
-  sealed_at: now,
-  sealed_state_digest_sha256: "digest",
-};
-const thread: Schema["ThreadResource"] = {
-  id: "thread",
-  session_id: "session",
-  session_purpose: "debug",
-  role: "root",
-  version: 7,
-  queue_version: 1,
-  origin_kind: "new",
-  origin_thread_id: null,
+});
+const entry = (id: string, text: string, fields = {}) => ({
+  id,
+  thread_id: "thread",
+  kind: "message",
+  delivery: "next_run",
+  status: "pending",
+  position: 1,
+  payload: { content: [{ type: "text", text }] },
+  agent_id: "agent",
+  agent_revision_id: null,
+  assigned_run_id: null,
+  child_run_id: null,
   origin_run_id: null,
-  head_run_id: "run",
-  current_run_id: "run",
-  default_environment_id: null,
-  default_environment_working_directory: null,
-  labels: {},
-  created_at: now,
-  updated_at: now,
-};
+  options: {},
+  principal_id: "usr_1",
+  failure: null,
+  incorporated_checkpoint_seq: null,
+  created_at: "2026-09-18T00:00:00Z",
+  finished_at: null,
+  ...fields,
+});
 function Location() {
   return <output data-testid="location">{useLocation().pathname}</output>;
 }
 function mount({
-  purpose = "debug",
   status = "completed",
   historical = false,
-  role = "root",
+  origin = "new",
   reject = false,
+  resubmit,
 }: {
-  purpose?: Schema["SessionPurpose"];
   status?: Schema["RunStatus"];
   historical?: boolean;
-  role?: string;
+  origin?: Schema["ThreadView"]["origin"];
   reject?: boolean;
+  resubmit?: Resubmission;
 } = {}) {
   const posts: { path: string; body: unknown; key: string | null }[] = [];
-  const current = { ...run, status };
+  const reads: string[] = [];
+  const active = status === "running" || status === "accepted";
+  const current = fixtureRun({
+    ...run,
+    status,
+    ...(status === "waiting"
+      ? {
+          wait_reason: "approval",
+          pending: {
+            items: [
+              {
+                tool_call_id: "call",
+                kind: "approval",
+                tool_name: "shell",
+                arguments: { command: "ls" },
+                presentation: null,
+              },
+            ],
+          },
+        }
+      : {}),
+  });
+  const thread = fixtureThread({
+    id: "thread",
+    session_id: "session",
+    origin,
+    current_run_id: active ? "run" : null,
+    head_run_id: "run",
+    last_run_id: historical ? "later" : "run",
+  });
+  let steered = false;
+  // A resumed Run is current, so a later message joins it instead.
+  let resumed = false;
   client = createClient({
     baseUrl: "https://service.example",
     auth: { type: "session", csrfToken: "csrf" },
@@ -112,9 +121,10 @@ function mount({
       const req = new Request(input, init),
         path = new URL(req.url).pathname;
       if (req.method === "POST") {
+        const text = await req.text();
         posts.push({
           path,
-          body: await req.json(),
+          body: text ? JSON.parse(text) : null,
           key: req.headers.get("Idempotency-Key"),
         });
         if (reject)
@@ -127,52 +137,43 @@ function mount({
             },
             { status: 409 },
           );
-        return Response.json(
-          path.endsWith("/steer")
-            ? {
-                run_id: "run",
-                thread_id: "thread",
-                session_id: "session",
-                steer_id: "steer",
-                delivery_sequence: 1,
-                accepted_at: now,
-              }
-            : { run_id: "next", thread_id: "thread", session_id: "session" },
-          { status: 202 },
-        );
+        if (path.endsWith("/resume")) {
+          resumed = true;
+          return Response.json(
+            fixtureRun({ ...run, id: "resumed", status: "accepted" }),
+            { status: 201 },
+          );
+        }
+        if (path.endsWith("/inbox")) {
+          steered = active;
+          return Response.json(
+            {
+              thread,
+              entry: entry("inb_new", "Sent", { delivery: "steer" }),
+              run:
+                active || resumed
+                  ? null
+                  : fixtureRun({ ...run, id: "next", status: "accepted" }),
+            },
+            { status: 201 },
+          );
+        }
+        return Response.json(current);
       }
-      if (path.endsWith("/pending-actions"))
+      reads.push(path);
+      if (path.endsWith("/inbox"))
         return Response.json({
-          items: [
-            {
-              call_id: "call",
-              kind: "approval",
-              tool_name: "shell",
-              provider_type: null,
-              presentation: null,
-            },
-          ],
-        });
-      if (path.includes("/steers/"))
-        return Response.json({ status: "consumed" });
-      if (path.endsWith("/queued-submissions"))
-        return Response.json({
-          items: [
-            {
-              queued_submission_id: "queued",
-              version: 1,
-              state: "queued",
-              created_at: now,
-              submission: {
-                input: {
-                  schema_version: "2",
-                  content: [{ type: "text", text: "Queued test" }],
-                },
-              },
-            },
-          ],
+          items: [entry("inb_queued", "Queued test")],
           next_cursor: null,
         });
+      // The Thread changed: its guidance entry reports where it went.
+      if (path.endsWith("/inbox/inb_new"))
+        return Response.json(
+          entry("inb_new", "Sent", {
+            delivery: "steer",
+            ...(steered ? { status: "consumed", assigned_run_id: "run" } : {}),
+          }),
+        );
       return Response.json(current);
     },
   });
@@ -182,22 +183,14 @@ function mount({
   render(
     <QueryClientProvider client={cache}>
       <MemoryRouter>
-        <RunDock
-          run={current}
-          thread={{
-            ...thread,
-            session_purpose: purpose,
-            role,
-            current_run_id: historical ? "later" : "run",
-          }}
-        />
+        <RunDock run={current} thread={thread} resubmit={resubmit} />
         <Location />
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  return posts;
+  return Object.assign(posts, { reads });
 }
-it("continues the completed head with version evidence and navigates to the accepted Run", async () => {
+it("continues the completed head with a next-run message and navigates to its Run", async () => {
   const posts = mount();
   await waitFor(() =>
     expect(
@@ -213,20 +206,34 @@ it("continues the completed head with version evidence and navigates to the acce
     expect(screen.getByTestId("location").textContent).toContain("/runs/next"),
   );
   expect(posts).toHaveLength(1);
-  expect(posts[0]?.path).toBe("/api/v1/runs/run/continue");
-  expect(posts[0]?.body).toMatchObject({
-    expected_thread_version: 7,
-    input: { content: [{ type: "text", text: "Next test" }] },
+  expect(posts[0]?.path).toBe(
+    "/api/v1/workspaces/workspace/threads/thread/inbox",
+  );
+  expect(posts[0]?.body).toEqual({
+    kind: "message",
+    delivery: "next_run",
+    payload: { content: [{ type: "text", text: "Next test" }] },
+    agent_id: "agent",
   });
 });
-it("steers the exact active Run and reports consumption", async () => {
+it("steers the active Run and reports when it applied the guidance", async () => {
   const posts = mount({ status: "running" });
   fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
     target: { value: "Use the smaller scope" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Send guidance" }));
   await screen.findByText("Guidance applied to the run.");
-  expect(posts.map((p) => p.path)).toEqual(["/api/v1/runs/run/steer"]);
+  expect(posts.map((p) => p.path)).toEqual([
+    "/api/v1/workspaces/workspace/threads/thread/inbox",
+  ]);
+  // The dock reads its own entry, never the whole inbox history.
+  expect(posts.reads).toContain(
+    "/api/v1/workspaces/workspace/threads/thread/inbox/inb_new",
+  );
+  expect(posts[0]?.body).toMatchObject({
+    delivery: "steer",
+    agent_id: "agent",
+  });
 });
 it("retains rejected guidance and never falls through to a new Run", async () => {
   const posts = mount({ status: "running", reject: true });
@@ -249,9 +256,9 @@ it("retains rejected guidance and never falls through to a new Run", async () =>
   expect(posts[1]).toEqual(posts[0]);
 });
 it.each(["completed", "failed", "waiting", "running"] as const)(
-  "keeps external %s execution inspectable without mutation controls",
+  "keeps a %s child Thread inspectable without mutation controls",
   async (status) => {
-    mount({ purpose: "execution", status });
+    mount({ origin: "child", status });
     await screen.findByText(
       "This session is controlled by its originating application. Use New session to start your own debug session.",
     );
@@ -267,15 +274,14 @@ it.each(["completed", "failed", "waiting", "running"] as const)(
     fireEvent.click(screen.getByRole("button", { name: /Queued messages/ }));
     await screen.findByText("Queued test");
     for (const name of [
-      "Delete",
-      "Run next message",
+      "Queued message actions",
       "Move message up",
       "Move message down",
     ])
       expect(screen.queryByRole("button", { name })).toBeNull();
   },
 );
-it("shows feedback instead of a general composer while waiting in a debug Session", async () => {
+it("shows feedback instead of a general composer while waiting", async () => {
   mount({ status: "waiting" });
   await screen.findByText("Waiting for your response");
   expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
@@ -290,20 +296,17 @@ it("does not offer input or retry on historical Runs", () => {
   expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
 });
 it("does not give independently interactive controls to child Threads", () => {
-  mount({ role: "child" });
+  mount({ origin: "child" });
   expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
 });
-it("keeps steer disabled without its permission and still allows stopping", () => {
-  denied = ["run.steer"];
+it("keeps guidance and stopping from a reader without run permission", () => {
+  denied = ["run"];
   mount({ status: "running" });
   expect(
     screen.getByRole("textbox", { name: "Message" }).closest("fieldset")
       ?.disabled,
   ).toBe(true);
-  const stop = screen.getByRole("button", {
-    name: "Stop",
-  }) as HTMLButtonElement;
-  expect(stop.disabled).toBe(false);
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
 });
 
 it("offers Stop in place of Send while a run is active and the draft is empty", async () => {
@@ -311,7 +314,10 @@ it("offers Stop in place of Send while a run is active and the draft is empty", 
   expect(screen.queryByRole("button", { name: "Send guidance" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Stop" }));
   await waitFor(() => expect(posts).toHaveLength(1));
-  expect(posts[0]?.path).toBe("/api/v1/runs/run/interrupt");
+  expect(posts[0]).toMatchObject({
+    path: "/api/v1/workspaces/workspace/runs/run/interrupt",
+    body: null,
+  });
   fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
     target: { value: "Keep going, but smaller" },
   });
@@ -325,4 +331,73 @@ it("leaves retrying a stopped run to the run itself", async () => {
     await screen.findByRole("button", { name: "Run next step" }),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
+});
+
+it("prefills a stopped Run's message and resubmits it with the options it ran with", async () => {
+  const posts = mount({
+    status: "failed",
+    resubmit: {
+      payload: {
+        content: [
+          { type: "text", text: "Run the checks" },
+          { type: "url", url: "https://example.com/report" },
+        ],
+      },
+      agent_revision_id: "rev_1",
+      options: { max_usage: { requests: 3 } },
+    },
+  });
+  const message = await screen.findByRole("textbox", { name: "Message" });
+  expect(message).toHaveProperty("value", "Run the checks");
+  expect(screen.getByText("https://example.com/report")).toBeTruthy();
+  await waitFor(() =>
+    expect(message.closest("fieldset")?.disabled).toBe(false),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Run next step" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("location").textContent).toContain("/runs/next"),
+  );
+  expect(posts[0]?.body).toEqual({
+    kind: "message",
+    delivery: "next_run",
+    payload: {
+      content: [
+        { type: "text", text: "Run the checks" },
+        { type: "url", url: "https://example.com/report" },
+      ],
+    },
+    agent_id: "agent",
+    agent_revision_id: "rev_1",
+    options: { max_usage: { requests: 3 } },
+  });
+});
+
+it("resumes a waiting Run with default answers before sending the new message", async () => {
+  const posts = mount({ status: "waiting" });
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Continue without feedback" }),
+  );
+  fireEvent.click(await screen.findByRole("switch"));
+  fireEvent.change(await screen.findByRole("textbox", { name: "Message" }), {
+    target: { value: "Try another way" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Resolve and continue" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("location").textContent).toContain(
+      "/runs/resumed",
+    ),
+  );
+  expect(posts.map(({ path, body }) => [path, body])).toEqual([
+    ["/api/v1/workspaces/workspace/runs/run/resume", { answers: [] }],
+    [
+      "/api/v1/workspaces/workspace/threads/thread/inbox",
+      {
+        kind: "message",
+        delivery: "steer",
+        payload: { content: [{ type: "text", text: "Try another way" }] },
+        agent_id: "agent",
+      },
+    ],
+  ]);
+  expect(posts[0]?.key).toBe(`${posts[1]?.key}:resume`);
 });

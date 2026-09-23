@@ -1,9 +1,13 @@
 import { ToastProvider } from "a13n-ui";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { ErrorToast, InlineLoading, Loading } from ".";
+import { ApiError } from "../../service-client";
+import { ErrorNotice, ErrorToast, InlineLoading, Loading } from ".";
 
-const translate = vi.hoisted(() => (key: string) => key);
+const translate = vi.hoisted(
+  () => (key: string, values?: Record<string, unknown>) =>
+    key.replace(/{{(\w+)}}/g, (_, name) => String(values?.[name] ?? name)),
+);
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: translate }),
 }));
@@ -94,4 +98,31 @@ it("keeps an error visible until its owner resolves it", () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("reads a limit refusal from its reason, since its message names identifiers", () => {
+  const refusal = (reason: string) =>
+    new ApiError(
+      409,
+      "conflict",
+      "thread thr_1: mount limit",
+      { kind: "thread", id: "thr_1", reason, limit: 32 },
+      "req_test",
+    );
+  const { rerender } = render(<ErrorNotice error={refusal("mount_limit")} />);
+  expect(
+    screen.getByText(
+      "A thread can mount at most 32 environments. Remove one before adding another.",
+    ),
+  ).toBeTruthy();
+  rerender(<ErrorNotice error={refusal("idempotency_key_reused")} />);
+  expect(
+    screen.getByText(
+      "This request was already sent with different content. Send it again as a new request.",
+    ),
+  ).toBeTruthy();
+  // Any other refusal reads as the Service wrote it.
+  rerender(<ErrorNotice error={refusal("inbox_full")} />);
+  expect(screen.getByText("thread thr_1: mount limit")).toBeTruthy();
+  expect(screen.getByText(/req_test/)).toBeTruthy();
 });

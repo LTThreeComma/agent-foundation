@@ -8,7 +8,7 @@ import type { Schema } from "../../shared/api";
 const http = vi.hoisted(() => ({
   GET: vi.fn(),
   POST: vi.fn(),
-  PUT: vi.fn(),
+  PATCH: vi.fn(),
   start: vi.fn(),
 }));
 vi.mock("../connections/authorization-context", () => ({
@@ -35,66 +35,50 @@ afterEach(() => {
 
 it("uses the saved app and refreshed version for reconnect after authorization fails", async () => {
   const initial: Schema["Connection"] = {
-    id: "mcpc_test",
+    id: "conn_test",
     organization_id: "org_test",
+    workspace_id: "ws_test",
+    type: "mcp",
     name: "Test OAuth connection",
-    source: {
-      kind: "mcp",
-      endpoint_url: "https://mcp.example",
-      auth_mode: "oauth",
-    },
-    status_reason: null,
+    config: { url: "https://mcp.example", headers: [], oauth: null },
+    auth: "oauth",
+    connector_provider_id: null,
+    status: "pending",
+    failure: null,
     credential_configured: false,
-    authorization_generation: 1,
-    created_by: { principal_id: "usr_test", principal_type: "user" },
+    client_secret_configured: false,
+    authorization_pending: false,
+    last_test: null,
+    enabled: true,
+    version: 1,
+    created_by_id: "usr_test",
+    updated_by_id: "usr_test",
     created_at: "2026-09-11T00:00:00Z",
     updated_at: "2026-09-11T00:00:00Z",
-    workspace_id: "ws_test",
-    version: 1,
-    status: "pending",
   };
+  const saved = {
+    ...initial,
+    version: 2,
+    config: {
+      ...initial.config,
+      oauth: {
+        client_id: "my-app",
+        token_endpoint_auth_method: "none" as const,
+        grant_type: "authorization_code" as const,
+      },
+    },
+  };
+  const refreshed = { ...saved, version: 3 };
   http.start.mockRejectedValue(new Error("Provider unavailable"));
-  const updated = { ...initial, version: 2 };
-  const failed = {
-    ...updated,
-    version: 3,
-    status: "pending",
-    credential_configured: true,
-  };
-  http.GET.mockResolvedValue({ data: failed, response: new Response() });
-  http.PUT.mockResolvedValue({ data: updated, response: new Response() });
-  http.POST.mockImplementation(async (path: string) => {
-    if (path.endsWith("oauth-discovery"))
-      return {
-        data: {
-          issuer_url: "https://auth.example",
-          redirect_uri: "https://application.example/connections/callback",
-          grant_types_supported: ["authorization_code"],
-          client_registration: "manual",
-          token_endpoint_auth_methods_supported: ["client_secret_post"],
-          authorization_response_iss_parameter_supported: true,
-        },
-        response: new Response(),
-      };
-    if (path.endsWith("oauth-setup"))
-      return {
-        data: {
-          client: null,
-          next_action: {
-            type: "configure_oauth_client",
-            issuer_url: "https://auth.example",
-            redirect_uri: "https://application.example/connections/callback",
-            grant_types: ["authorization_code"],
-            client_registration: "manual",
-            token_endpoint_auth_methods: ["client_secret_post"],
-          },
-        },
-        response: new Response(),
-      };
-    if (path.endsWith("authorizations"))
-      throw new Error("Provider unavailable");
-    return { data: failed, response: new Response() };
-  });
+  http.GET.mockImplementation(async (path: string) => ({
+    data: path.endsWith("/redirect-uri")
+      ? { redirect_uri: "https://service.example/api/v1/connections/callback" }
+      : path.endsWith("/mcp-servers")
+        ? { items: [], next_cursor: null }
+        : refreshed,
+    response: new Response(),
+  }));
+  http.PATCH.mockResolvedValue({ data: saved, response: new Response() });
   const cache = new QueryClient({
     defaultOptions: {
       queries: { retry: false, staleTime: Infinity },
@@ -112,31 +96,37 @@ it("uses the saved app and refreshed version for reconnect after authorization f
     </QueryClientProvider>,
   );
   const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("button", { name: "Use your own OAuth app" }),
+  );
   await user.type(
     await screen.findByRole("textbox", { name: "Client ID" }),
     "my-app",
   );
-  await user.type(screen.getByLabelText("Client secret"), "private-secret");
   await user.click(screen.getByRole("button", { name: "Save and authorize" }));
-  expect(http.PUT.mock.calls[0][1].body).toMatchObject({
-    expected_version: 1,
-    client: {
-      client_id: "my-app",
-      client_secret: "private-secret",
-      grant_type: "authorization_code",
+  expect(http.PATCH).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+    {
+      params: { path: { workspace_id: "ws_test", connection_id: "conn_test" } },
+      headers: { "If-Match": '"conn_test:1"' },
+      body: { config: saved.config },
     },
-  });
+  );
   await waitFor(() =>
     expect(http.start).toHaveBeenCalledWith(
       expect.anything(),
-      updated,
+      saved,
       "/workspace/test",
     ),
   );
-  await user.click(screen.getByRole("button", { name: "Check connection" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Continue authorization" }),
+  );
   await waitFor(() =>
-    expect(
-      http.POST.mock.calls.find(([path]) => path.endsWith("check"))?.[1].body,
-    ).toEqual({ expected_version: 3 }),
+    expect(http.start).toHaveBeenLastCalledWith(
+      expect.anything(),
+      refreshed,
+      "/workspace/test",
+    ),
   );
 });

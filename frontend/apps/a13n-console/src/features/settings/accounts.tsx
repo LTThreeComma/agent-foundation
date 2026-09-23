@@ -25,7 +25,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -61,10 +61,10 @@ export function ServiceAccounts() {
     queryKey: ["service-accounts", workspace.id, page.cursor],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/service-accounts", {
+        .GET("/api/v1/workspaces/{workspace_id}/service-accounts", {
           signal,
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             query: { cursor: page.cursor, limit: 30 },
           },
         })
@@ -111,10 +111,15 @@ export function ServiceAccounts() {
                   danger
                   action={async () => {
                     await client.http.DELETE(
-                      "/api/v1/service-accounts/{account_id}",
+                      "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}",
                       {
-                        params: { path: { account_id: item.id } },
-                        body: { expected_version: item.version },
+                        params: {
+                          path: {
+                            workspace_id: workspace.id,
+                            account_id: item.id,
+                          },
+                        },
+                        headers: ifMatch(rowTag(item)),
                       },
                     );
                     await cache.invalidateQueries({
@@ -132,7 +137,7 @@ export function ServiceAccounts() {
                   <ResourceIdentity
                     icon={<RobotIcon size={15} aria-hidden="true" />}
                     name={item.name}
-                    description={item.description ?? undefined}
+                    description={item.description}
                     to={`${accountsPath(basePath)}/${item.id}`}
                     resourceId={item.id}
                   />
@@ -140,11 +145,12 @@ export function ServiceAccounts() {
               },
               {
                 label: t("Role"),
-                render: (item) => (
-                  <span className={settings.chip}>
-                    {t(`role.${item.role}`, { defaultValue: item.role })}
-                  </span>
-                ),
+                render: (item) =>
+                  item.role && (
+                    <span className={settings.chip}>
+                      {t(`role.${item.role}`, { defaultValue: item.role })}
+                    </span>
+                  ),
               },
               {
                 label: t("Status"),
@@ -188,10 +194,15 @@ export function ServiceAccountDetail({ accountId }: { accountId: string }) {
     queryKey: ["service-account", accountId],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/service-accounts/{account_id}", {
-          signal,
-          params: { path: { account_id: accountId } },
-        })
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}",
+          {
+            signal,
+            params: {
+              path: { workspace_id: workspace.id, account_id: accountId },
+            },
+          },
+        )
         .then(data),
   });
   const list = accountsPath(basePath);
@@ -255,10 +266,15 @@ export function ServiceAccountDetail({ accountId }: { accountId: string }) {
                   }}
                   action={() =>
                     client.http.DELETE(
-                      "/api/v1/service-accounts/{account_id}",
+                      "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}",
                       {
-                        params: { path: { account_id: account.id } },
-                        body: { expected_version: account.version },
+                        params: {
+                          path: {
+                            workspace_id: workspace.id,
+                            account_id: account.id,
+                          },
+                        },
+                        headers: ifMatch(rowTag(account)),
                       },
                     )
                   }
@@ -270,7 +286,10 @@ export function ServiceAccountDetail({ accountId }: { accountId: string }) {
         <dl className={settings.facts}>
           <div>
             <dt>{t("Role")}</dt>
-            <dd>{t(`role.${account.role}`, { defaultValue: account.role })}</dd>
+            <dd>
+              {account.role &&
+                t(`role.${account.role}`, { defaultValue: account.role })}
+            </dd>
           </div>
           <div>
             <dt>{t("Created")}</dt>
@@ -326,9 +345,14 @@ function AccountEditor({
   const reload = useMutation({
     mutationFn: () =>
       client.http
-        .GET("/api/v1/service-accounts/{account_id}", {
-          params: { path: { account_id: account!.id } },
-        })
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}",
+          {
+            params: {
+              path: { workspace_id: workspace.id, account_id: account!.id },
+            },
+          },
+        )
         .then(data),
     onSuccess: (value) => {
       load(value);
@@ -338,14 +362,23 @@ function AccountEditor({
   const mutation = useMutation({
     mutationFn: () =>
       basis
-        ? client.http.PATCH("/api/v1/service-accounts/{account_id}", {
-            params: { path: { account_id: basis.id } },
-            body: { expected_version: basis.version, name, role, status },
-          })
-        : client.http.POST("/api/v1/workspaces/{workspace}/service-accounts", {
-            params: { path: { workspace: workspace.id } },
-            body: { name, role },
-          }),
+        ? client.http.PATCH(
+            "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}",
+            {
+              params: {
+                path: { workspace_id: workspace.id, account_id: basis.id },
+              },
+              headers: ifMatch(rowTag(basis)),
+              body: { name, role, status },
+            },
+          )
+        : client.http.POST(
+            "/api/v1/workspaces/{workspace_id}/service-accounts",
+            {
+              params: { path: { workspace_id: workspace.id } },
+              body: { name, role },
+            },
+          ),
     onSuccess: () => {
       void cache.invalidateQueries({
         queryKey: ["service-accounts", workspace.id],

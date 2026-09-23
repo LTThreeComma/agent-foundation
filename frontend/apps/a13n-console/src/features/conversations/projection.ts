@@ -1,18 +1,16 @@
-import type { RunEvent } from "../../service-client";
+import type { RunEvent } from "./display";
 import type { Schema } from "../../shared/api";
 export interface PresentedItem {
   id: string;
   kind: string;
   state: string;
-  parentId: string | null;
   firstCursor: string;
   lastCursor: string;
   /**
-   * `occurred_at` of the first observed event for this Item, and of the event
-   * that gave it a terminal state. Both are null for an Item read from a
-   * retained snapshot, which carries stream cursors but no timestamps, and
-   * `endedAt` stays null when an Item is interrupted without a terminal
-   * observation.
+   * When the Item's first event occurred, and the event that gave it a
+   * terminal state. A committed Item carries both; a live event that carried
+   * no time leaves them null, and `endedAt` stays null when an Item is
+   * interrupted without a terminal observation.
    */
   startedAt: string | null;
   endedAt: string | null;
@@ -56,7 +54,6 @@ function emptyItem(
     id,
     kind,
     state: "in_progress",
-    parentId: null,
     firstCursor: cursor,
     lastCursor: cursor,
     startedAt: occurredAt,
@@ -72,12 +69,10 @@ function applyPayload(
   item: PresentedItem,
   type: string,
   payload: Record<string, unknown>,
-  occurredAt: string,
+  occurredAt: string | null,
 ): PresentedItem {
   const next = { ...item };
   if (typeof payload.item_kind === "string") next.kind = payload.item_kind;
-  if (typeof payload.parent_item_id === "string")
-    next.parentId = payload.parent_item_id;
   if (typeof payload.item_state === "string") {
     next.state = payload.item_state;
     if (payload.item_state !== "in_progress") next.endedAt = occurredAt;
@@ -152,13 +147,11 @@ export function applyRunEvent(
   result.set(item.id, item);
   return result;
 }
-export function presentRetainedItem(
-  item: Schema["ItemResource"],
-): PresentedItem {
+export function presentRetainedItem(item: Schema["Item"]): PresentedItem {
   compareCursors(item.first_stream_id, item.last_stream_id);
   const presented = emptyItem(item.id, item.kind, item.first_stream_id);
   const content = item.content;
-  if (isObject(content) && item.kind !== "run_output") {
+  if (isObject(content)) {
     if (typeof content.text === "string") presented.text = content.text;
     if (typeof content.role === "string") presented.role = content.role;
     if (typeof content.toolCallName === "string")
@@ -178,13 +171,14 @@ export function presentRetainedItem(
   return {
     ...presented,
     state: item.state,
-    parentId: item.parent_item_id,
     lastCursor: item.last_stream_id,
+    startedAt: item.started_at,
+    endedAt: item.ended_at ?? null,
   };
 }
 export function mergeRetainedItems(
   current: ReadonlyMap<string, PresentedItem>,
-  items: readonly Schema["ItemResource"][],
+  items: readonly Schema["Item"][],
 ) {
   const merged = new Map(current);
   for (const item of items) {
@@ -193,12 +187,7 @@ export function mergeRetainedItems(
       !previous ||
       compareCursors(item.last_stream_id, previous.lastCursor) >= 0
     )
-      // A retained snapshot has no timestamps; keep any already observed.
-      merged.set(item.id, {
-        ...presentRetainedItem(item),
-        startedAt: previous?.startedAt ?? null,
-        endedAt: previous?.endedAt ?? null,
-      });
+      merged.set(item.id, presentRetainedItem(item));
   }
   return merged;
 }

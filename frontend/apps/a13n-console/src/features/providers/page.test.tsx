@@ -7,7 +7,7 @@ import { ProvidersPage } from "./page";
 
 const state = vi.hoisted(() => ({
   GET: vi.fn(),
-  organizationAdmin: true,
+  organizationWrite: true,
   hasWorkspace: true,
   manage: true,
 }));
@@ -20,7 +20,7 @@ vi.mock("../../layout/workspace", () => ({
       ? { id: "ws_test", key: "research", name: "Research" }
       : undefined,
     organization: { id: "org_test", name: "Acme" },
-    organizationAdmin: state.organizationAdmin,
+    organizationCan: () => state.organizationWrite,
     can: () => state.manage,
   }),
 }));
@@ -71,7 +71,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
-  state.organizationAdmin = true;
+  state.organizationWrite = true;
   state.hasWorkspace = true;
   state.manage = true;
 });
@@ -80,9 +80,12 @@ it("restores category and scope, then switches domains without losing workspace 
   mount();
   await screen.findByText("No web providers yet");
   expect(state.GET).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace}/web-providers",
+    "/api/v1/organizations/{organization_id}/web-providers",
     expect.objectContaining({
-      params: expect.objectContaining({ path: { workspace: "ws_test" } }),
+      params: {
+        path: { organization_id: "org_test" },
+        query: expect.objectContaining({ workspace_id: "ws_test" }),
+      },
     }),
   );
   await user.click(screen.getByRole("tab", { name: "Connector" }));
@@ -92,24 +95,27 @@ it("restores category and scope, then switches domains without losing workspace 
   );
   expect(screen.queryByRole("combobox", { name: "Scope" })).toBeNull();
 });
-it("allows an organization administrator to manage providers without a workspace", async () => {
+it("allows an organization writer to manage shared providers without a workspace", async () => {
   state.hasWorkspace = false;
   mount("section=providers&category=web", "organization");
   await screen.findByText("No web providers yet");
   expect(screen.getByRole("button", { name: "Add provider" })).toBeTruthy();
   expect(
-    state.GET.mock.calls.every(([path]) => !path.includes("/workspaces/")),
+    state.GET.mock.calls.every(
+      ([path, init]) =>
+        !path.includes("/workspaces/") && !init.params.query?.workspace_id,
+    ),
   ).toBe(true);
 });
 it("does not query organization resources when organization access is unavailable", () => {
-  state.organizationAdmin = false;
+  state.organizationWrite = false;
   mount("section=providers&category=web", "organization");
   expect(screen.getByText("Access unavailable")).toBeTruthy();
   expect(state.GET).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Add provider" })).toBeNull();
 });
 it("shows workspace providers without offering mutations to a read-only member", async () => {
-  state.organizationAdmin = false;
+  state.organizationWrite = false;
   state.manage = false;
   mount();
   await screen.findByText("No web providers yet");

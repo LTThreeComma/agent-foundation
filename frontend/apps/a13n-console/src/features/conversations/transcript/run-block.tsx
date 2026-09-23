@@ -25,16 +25,16 @@ export function RunBlock({
   earlier,
   children,
 }: {
-  run: Schema["RunResource"];
+  run: Schema["RunView"];
   /** The Thread that owns the run; a child Thread reads a delegated task. */
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
   /** The same reading of the run the Debug level renders. */
   timeline: RunTimeline;
   agentName?: string;
   agentImageUrl?: string | null;
   /** A quiet link for this turn, such as "View run" on an ancestor. */
   separatorAction?: ReactNode;
-  /** The "load earlier messages" control for this run's own items. */
+  /** What the transcript cannot show of this run's own earlier Items. */
   earlier?: ReactNode;
   children?: ReactNode;
 }) {
@@ -66,8 +66,8 @@ export function RunBlock({
         agentImageUrl={agentImageUrl}
         childPath={child && childThreadPath(basePath, child)}
       >
-        {!spoken && run.output_text && (
-          <MarkdownContent text={run.output_text} />
+        {!spoken && typeof run.output === "string" && run.output && (
+          <MarkdownContent text={run.output} />
         )}
         {children}
       </AgentTurn>

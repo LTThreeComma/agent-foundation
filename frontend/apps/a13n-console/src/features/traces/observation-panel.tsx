@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { Schema } from "../../shared/api";
 import { Timestamp } from "../../shared/feedback";
 import { CopyableId, CopyButton } from "../../shared/identity";
-import { CompactNotice, TraceContent, TraceJson } from "./content";
+import { TraceContent, TraceJson } from "./content";
 import { formatCost } from "../../shared/cost";
 import { ObservationGlyph } from "./identity";
 import { AttributeValues, MetadataChips } from "./metadata";
@@ -14,17 +14,15 @@ import {
   TracePill,
   TelemetryStatus,
 } from "./values";
-import { UNKNOWN } from "../../shared/unknown";
 import styles from "./traces.module.css";
 
 /** Panel header identity: kind mark, name, and the facts that fit one line. */
 export function ObservationTitle({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
-  const model =
-    observation.model?.response ?? observation.model?.requested ?? null;
+  const model = observation.model;
   const cost =
     observation.cost_usd === null ? null : formatCost(observation.cost_usd);
   return (
@@ -35,7 +33,7 @@ export function ObservationTitle({
       <span className={styles.panelIdentityCopy}>
         <strong title={observation.name}>{observation.name}</strong>
         <span className={styles.panelIdentityMeta}>
-          <span title={observation.type}>{observation.type}</span>
+          <span title={observation.kind}>{observation.kind}</span>
           {model && <span title={model}>· {model}</span>}
           {durationMs(observation) !== null && (
             <span className={styles.panelIdentityNumber}>
@@ -52,27 +50,19 @@ export function ObservationTitle({
 /** Observation inspection: paired content first, then diagnostics and payloads. */
 export function ObservationPanelBody({
   observation,
-  view,
-  onFull,
 }: {
-  observation: Schema["Observation"];
-  view: Schema["TraceView"];
-  onFull: () => void;
+  observation: Schema["Span"];
 }) {
   const { t } = useTranslation();
   return (
     <div className={styles.panelStack}>
-      <CompactNotice view={view} onFull={onFull} />
       <div className={styles.panelPair}>
         {(["input", "output"] as const).map((key) => (
           <section key={key} className={styles.panelSection}>
             <h3 className={styles.panelLabel}>
               {t(key === "input" ? "Input" : "Output")}
             </h3>
-            <TraceContent
-              content={observation[key]}
-              compact={view === "compact"}
-            />
+            <TraceContent content={observation[key]} />
           </section>
         ))}
       </div>
@@ -86,7 +76,7 @@ export function ObservationPanelBody({
 export function ObservationDiagnostics({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
   const { t } = useTranslation();
   return (
@@ -114,12 +104,7 @@ export function ObservationDiagnostics({
       </p>
       {observation.model && (
         <dl className={styles.modelIdentity}>
-          <Fact label={t("Requested model")}>
-            {observation.model.requested ?? UNKNOWN}
-          </Fact>
-          <Fact label={t("Response model")}>
-            {observation.model.response ?? UNKNOWN}
-          </Fact>
+          <Fact label={t("Model")}>{observation.model}</Fact>
         </dl>
       )}
       <dl className={styles.diagnosticValues}>
@@ -160,7 +145,7 @@ const payloads = [
 export function ObservationPayloads({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
   const { t } = useTranslation();
   return (

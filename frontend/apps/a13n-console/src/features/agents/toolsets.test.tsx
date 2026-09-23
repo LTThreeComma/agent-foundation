@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "a13n-ui";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import { ApiError } from "../../service-client";
 import type { AgentConfig } from "./configuration";
 import { AgentToolsets } from "./toolsets";
 
@@ -19,6 +20,7 @@ vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test", key: "default" },
+    organization: { id: "org_test" },
     can: () => true,
   }),
 }));
@@ -62,7 +64,12 @@ function renderDraft(starting: NonNullable<AgentConfig["toolsets"]>) {
     const [value, setValue] = useState(starting);
     return (
       <>
-        <AgentToolsets value={value} onChange={setValue} reviewer={null} />
+        <AgentToolsets
+          value={value}
+          onChange={setValue}
+          config={{ model: { model_id: "mdl_test" }, toolsets: value }}
+          agentId="ap_test"
+        />
         <output data-testid="draft">{JSON.stringify(value)}</output>
       </>
     );
@@ -97,7 +104,7 @@ it("keeps disabled child settings, edits permissions, and validates the candidat
       : { items: [], next_cursor: null },
   }));
   http.POST.mockResolvedValue({
-    data: { valid: true, errors: [], toolsets: initial },
+    response: new Response(null, { status: 204 }),
   });
   const { user, draft } = renderDraft(initial);
   await screen.findByText("Off");
@@ -189,19 +196,53 @@ it("keeps disabled child settings, edits permissions, and validates the candidat
   expect(draft().web.tools.search.config.max_results).toBe(7);
   await waitFor(() =>
     expect(http.POST).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace}/toolsets/validate",
+      "/api/v1/workspaces/{workspace_id}/agents/validate",
       expect.objectContaining({
-        body: expect.objectContaining({ toolsets: draft() }),
+        params: { path: { workspace_id: "ws_test" } },
+        body: {
+          config: { model: { model_id: "mdl_test" }, toolsets: draft() },
+          agent_id: "ap_test",
+        },
       }),
     ),
   );
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("shows why the Service would refuse the configuration, with its setup link", async () => {
+  http.GET.mockImplementation(async (path: string) => ({
+    data: path.endsWith("/toolsets")
+      ? { items: [web] }
+      : { items: [], next_cursor: null },
+  }));
+  const field = "toolsets.web.tools.search.config.provider_id";
+  http.POST.mockRejectedValue(
+    new ApiError(
+      400,
+      "invalid_argument",
+      `${field}: web_provider wp_missing not found`,
+      { field, reason: "web_provider wp_missing not found" },
+      null,
+    ),
+  );
+  renderDraft(initial);
+  const alert = await screen.findByRole("alert", {}, { timeout: 2000 });
+  expect(alert.textContent).toContain(
+    `${field}: web_provider wp_missing not found`,
+  );
+  expect(
+    within(alert)
+      .getByRole("link", { name: "Manage Web Providers" })
+      .getAttribute("href"),
+  ).toBe("/workspace/default/settings?section=providers&category=web");
+  expect(http.POST).toHaveBeenCalledOnce();
 });
 
 it("defaults to the first compatible Web Provider and shows its logo in the selector", async () => {
   http.GET.mockImplementation(async (path: string) => ({
     data: path.endsWith("/toolsets")
       ? { items: [web] }
-      : path.endsWith("/web-provider-types")
+      : path.endsWith("/provider-types/{kind}")
         ? {
             items: [
               {
@@ -242,9 +283,6 @@ it("defaults to the first compatible Web Provider and shows its logo in the sele
             }
           : { items: [], next_cursor: null },
   }));
-  http.POST.mockResolvedValue({
-    data: { valid: true, errors: [], toolsets: initial },
-  });
   const { user, draft } = renderDraft(initial);
   await user.click((await screen.findByText("Web")).closest("button")!);
   await user.click(screen.getByRole("button", { name: "Configure search" }));
@@ -313,9 +351,6 @@ it("shows only effective child access when a group is off and bulk toggles its c
       ? { items: [assets] }
       : { items: [], next_cursor: null },
   }));
-  http.POST.mockResolvedValue({
-    data: { valid: true, errors: [], toolsets: starting },
-  });
   const { user, draft } = renderDraft(starting);
   await user.click((await screen.findByText("Assets")).closest("button")!);
   const group = screen.getByRole("checkbox", { name: "Enable Assets tools" });
@@ -348,7 +383,7 @@ it("does not replace an unavailable saved Web Provider when enabling the group",
   http.GET.mockImplementation(async (path: string) => ({
     data: path.endsWith("/toolsets")
       ? { items: [web] }
-      : path.endsWith("/web-provider-types")
+      : path.endsWith("/provider-types/{kind}")
         ? {
             items: [
               {
@@ -373,9 +408,6 @@ it("does not replace an unavailable saved Web Provider when enabling the group",
             next_cursor: null,
           },
   }));
-  http.POST.mockResolvedValue({
-    data: { valid: true, errors: [], toolsets: starting },
-  });
   const { user, draft } = renderDraft(starting);
   await user.click((await screen.findByText("Web")).closest("button")!);
   const group = screen.getByRole("checkbox", { name: "Enable Web tools" });
@@ -406,7 +438,7 @@ it("does not show an enabled provider-backed tool without a saved provider refer
   http.GET.mockImplementation(async (path: string) => ({
     data: path.endsWith("/toolsets")
       ? { items: [web] }
-      : path.endsWith("/web-provider-types")
+      : path.endsWith("/provider-types/{kind}")
         ? {
             items: [
               {
@@ -431,9 +463,6 @@ it("does not show an enabled provider-backed tool without a saved provider refer
             next_cursor: null,
           },
   }));
-  http.POST.mockResolvedValue({
-    data: { valid: false, errors: [], toolsets: starting },
-  });
   const { user, draft } = renderDraft(starting);
   await user.click((await screen.findByText("Web")).closest("button")!);
   const search = screen.getByRole("checkbox", { name: "search" });
@@ -466,9 +495,6 @@ it("enables local Web tools while Provider discovery is still pending", async ()
             ],
           },
     });
-  });
-  http.POST.mockResolvedValue({
-    data: { valid: true, errors: [], toolsets: initial },
   });
   const { user, draft } = renderDraft(initial);
   await user.click((await screen.findByText("Web")).closest("button")!);

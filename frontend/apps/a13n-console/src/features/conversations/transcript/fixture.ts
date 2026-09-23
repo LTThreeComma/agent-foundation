@@ -11,64 +11,73 @@ const START = "2026-09-20T10:00:00.000Z";
 const at = (seconds: number) =>
   new Date(Date.parse(START) + seconds * 1000).toISOString();
 
+/** A message payload of one text part, as a Run's source entry carries it. */
+export const textInput = (text: string) => ({
+  content: [{ type: "text", text }],
+});
+
 export function fixtureRun(
-  overrides: Partial<Schema["RunResource"]> = {},
-): Schema["RunResource"] {
+  overrides: Partial<Schema["RunView"]> = {},
+): Schema["RunView"] {
   return {
     id: "run_2",
+    workspace_id: "ws_1",
     agent_id: "agt_1",
     agent_revision_id: "rev_1",
-    completed_at: at(12),
+    revision_selection: "default",
+    principal_id: "usr_1",
+    attempts: 1,
+    max_attempts: 3,
+    cancel_requested_at: null,
     created_at: START,
-    effective_agent_config_digest: "sha256:abc",
-    environment_id: null,
-    environment_working_directory: null,
+    current_attempt_id: null,
+    environment_mounts: [],
     failure: null,
-    input: { input: { content: [{ type: "text", text: "Run the checks" }] } },
-    input_kind: "agent_input",
-    input_text: "Run the checks",
+    input: textInput("Run the checks"),
     labels: {},
-    lineage_kind: "continue",
-    output: null,
-    output_text: "Patched the fold.",
+    lineage: "continue",
+    options: {},
+    output: "Patched the fold.",
     parent_run_id: "run_1",
     pending: null,
-    retry_of_run_id: null,
+    resume: null,
+    resumed_by_id: null,
     sealed_at: at(12),
-    sealed_state_digest_sha256: null,
     session_id: "ses_1",
+    source_entry_id: "inb_1",
     started_at: START,
     status: "completed",
     thread_id: "thr_1",
-    trigger_type: "user_input",
+    trigger: "input",
     updated_at: at(12),
+    usage_at_seal: null,
     version: 3,
     wait_reason: null,
-    waiting_at: null,
     ...overrides,
   };
 }
 
 export function fixtureThread(
-  overrides: Partial<Schema["ThreadResource"]> = {},
-): Schema["ThreadResource"] {
+  overrides: Partial<Schema["ThreadView"]> = {},
+): Schema["ThreadView"] {
   return {
+    archived_at: null,
     created_at: START,
-    current_run_id: "run_2",
-    default_environment_id: null,
-    default_environment_working_directory: null,
+    current_run_id: null,
     head_run_id: "run_2",
     id: "thr_1",
     labels: {},
-    origin_kind: "new",
+    last_run_id: "run_2",
+    mcp_headers: {},
+    origin: "new",
     origin_run_id: null,
     origin_thread_id: null,
-    queue_version: 1,
-    role: "root",
+    origin_tool_call_id: null,
     session_id: "ses_1",
-    session_purpose: "debug",
+    subagent: null,
     updated_at: at(12),
     version: 4,
+    workspace_id: "ws_1",
     ...overrides,
   };
 }
@@ -76,35 +85,22 @@ export function fixtureThread(
 /** The Thread a Run delegated to, and the Thread a Run was forked into. */
 export const fixtureChildThread = fixtureThread({
   id: "thr_child",
-  role: "child",
-  origin_kind: "child",
+  origin: "child",
   origin_thread_id: "thr_1",
   origin_run_id: "run_2",
-  current_run_id: "run_child",
+  origin_tool_call_id: "call_delegate",
+  subagent: "researcher",
   head_run_id: "run_child",
+  last_run_id: "run_child",
 });
 export const fixtureForkThread = fixtureThread({
   id: "thr_fork",
-  role: "child",
-  origin_kind: "fork",
+  origin: "fork",
   origin_thread_id: "thr_1",
   origin_run_id: "run_2",
-  current_run_id: "run_fork",
   head_run_id: "run_fork",
+  last_run_id: "run_fork",
 });
-
-function lineageEntry(runId: string, threadId: string, depth: number) {
-  return {
-    run_id: runId,
-    thread_id: threadId,
-    session_id: "ses_1",
-    depth_from_head: depth,
-    lineage_kind: depth === 0 ? "root" : "continue",
-    parent_run_id: null,
-    status: "completed",
-    created_at: START,
-  };
-}
 
 /**
  * The Session those Threads belong to, served: a root Thread of two Runs, a
@@ -118,14 +114,18 @@ export function fixtureBranchedSession() {
       const url = new URL(new Request(input, init).url);
       const name = url.pathname.split("/").at(-1) ?? "";
       if (url.pathname.endsWith("/runs/run_2/lineage"))
-        return Response.json({ items: [lineageEntry("run_2", "thr_1", 0)] });
+        return Response.json({
+          items: [fixtureRun({ lineage: "root", parent_run_id: null })],
+          next_cursor: null,
+        });
       if (url.pathname.endsWith("/runs/run_fork/lineage"))
         return Response.json({
           items: [
-            lineageEntry("run_fork", "thr_fork", 0),
-            lineageEntry("run_2", "thr_1", 1),
-            lineageEntry("run_1", "thr_1", 2),
+            fixtureRun({ id: "run_fork", thread_id: "thr_fork" }),
+            fixtureRun(),
+            fixtureRun({ id: "run_1", lineage: "root", parent_run_id: null }),
           ],
+          next_cursor: null,
         });
       if (url.pathname.includes("/agents/"))
         return Response.json({
@@ -135,7 +135,10 @@ export function fixtureBranchedSession() {
         });
       if (url.pathname.endsWith("/threads/thr_1"))
         return Response.json(fixtureThread());
-      if (url.pathname.endsWith("/sessions/ses_1/threads"))
+      if (
+        url.pathname.endsWith("/threads") &&
+        url.searchParams.get("session_id") === "ses_1"
+      )
         return Response.json({
           items: [fixtureThread(), fixtureChildThread, fixtureForkThread],
           next_cursor: null,
@@ -146,9 +149,8 @@ export function fixtureBranchedSession() {
             fixtureRun({
               id: "run_fork",
               thread_id: "thr_fork",
-              lineage_kind: "fork",
-              input: null,
-              input_text: "Alternative proposal",
+              lineage: "fork",
+              input: textInput("Alternative proposal"),
             }),
           ],
           next_cursor: null,
@@ -157,16 +159,13 @@ export function fixtureBranchedSession() {
         return Response.json({
           items: [
             fixtureRun({
-              id: "run_1",
-              input: null,
-              input_text: "Review the release",
+              id: "run_2",
+              input: textInput("Write the marker"),
+              status: "waiting",
             }),
             fixtureRun({
-              id: "run_2",
-              input: null,
-              input_text: "Write the marker",
-              status: "waiting",
-              completed_at: null,
+              id: "run_1",
+              input: textInput("Review the release"),
             }),
           ],
           next_cursor: null,
@@ -178,8 +177,8 @@ export function fixtureBranchedSession() {
               id: "run_child",
               thread_id: "thr_child",
               agent_id: "agt_child",
-              input: null,
-              input_text: "Find prior incidents",
+              trigger: "spawned",
+              input: textInput("Find prior incidents"),
             }),
           ],
           next_cursor: null,
@@ -262,7 +261,6 @@ function fixtureItems(): PresentedItem[] {
       id: "item_edit",
       kind: "tool_call",
       state: "completed",
-      parentId: null,
       firstCursor: "2-0",
       lastCursor: "2-1",
       startedAt: at(2),
@@ -278,7 +276,6 @@ function fixtureItems(): PresentedItem[] {
       id: "item_reply",
       kind: "text_message",
       state: "completed",
-      parentId: null,
       firstCursor: "3-0",
       lastCursor: "3-1",
       startedAt: at(3),
@@ -298,7 +295,7 @@ export function fixtureTimeline({
   items = fixtureItems(),
   execution = fixtureExecution(),
 }: {
-  run?: Schema["RunResource"];
+  run?: Schema["RunView"];
   items?: PresentedItem[];
   execution?: RunExecution;
 } = {}): RunTimeline {

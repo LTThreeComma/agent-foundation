@@ -12,9 +12,8 @@ import { useId, useRef, useState } from "react";
 
 import { InfoIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
 import { useAuth, useClient } from "../../auth/context";
-import { data } from "../../shared/api";
+import { data, ifMatch } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
 import styles from "./security.module.css";
@@ -23,12 +22,11 @@ import settings from "./settings.module.css";
 export function Security() {
   const { t } = useTranslation();
   const auth = useAuth(),
-    client = useClient(),
-    navigate = useNavigate();
+    client = useClient();
   const id = useId();
   const emailTrigger = useRef<HTMLButtonElement>(null);
   const [editingEmail, setEditingEmail] = useState(false);
-  const [email, setEmail] = useState(auth.data!.user.value.email);
+  const [email, setEmail] = useState(auth.data!.user.value.email ?? "");
   const [emailPassword, setEmailPassword] = useState("");
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -40,7 +38,8 @@ export function Security() {
   });
   const changeEmail = useMutation({
     mutationFn: () =>
-      client.http.POST("/api/v1/users/me/email-change", {
+      client.http.PATCH("/api/v1/users/me", {
+        headers: ifMatch(auth.data!.user.etag),
         body: { email, current_password: emailPassword },
       }),
     onSuccess: () => {
@@ -57,8 +56,6 @@ export function Security() {
       setCurrentPassword("");
       setPassword("");
       setPasswordOpen(false);
-      void auth.refresh();
-      navigate("/login");
     },
   });
   const togglePassword = (open: boolean) => {
@@ -76,7 +73,7 @@ export function Security() {
           "Verify a new address before it becomes your sign-in email.",
         )}
       >
-        <SettingsRow label={auth.data!.user.value.email}>
+        <SettingsRow label={auth.data!.user.value.email ?? ""}>
           <Button
             ref={emailTrigger}
             aria-expanded={editingEmail}
@@ -209,7 +206,7 @@ export function Security() {
             size={"md"}
             title={t("Change password")}
             description={t(
-              "Changing your password signs out all browser sessions. API keys remain active.",
+              "Changing your password signs out your other browser sessions. API keys remain active.",
             )}
             closeLabel={t("Close")}
             open={passwordOpen}
@@ -236,7 +233,7 @@ export function Security() {
               <FormField
                 className="min-w-0 w-full"
                 label={t("New password")}
-                description={t("Use at least 15 characters.")}
+                description={t("Use at least 12 characters.")}
               >
                 <Input
                   required={true}
@@ -244,7 +241,7 @@ export function Security() {
                   autoComplete="new-password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  minLength={15}
+                  minLength={12}
                   maxLength={128}
                 />
               </FormField>

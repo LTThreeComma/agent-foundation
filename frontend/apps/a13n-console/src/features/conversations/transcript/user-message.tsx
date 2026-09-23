@@ -29,8 +29,6 @@ export function requestLabel(request: RunRequest, t: TFunction): string {
   switch (request.kind) {
     case "feedback":
       return t("Feedback");
-    case "continue":
-      return t("Continued without feedback");
     case "subagent_result":
       return request.subagent
         ? t("Subagent result · {{name}}", { name: request.subagent })
@@ -93,76 +91,53 @@ export function InputContent({
   fallback?: string | null;
 }) {
   const { t } = useTranslation();
-  if (isObject(input) && Array.isArray(input.resolutions))
+  if (isObject(input) && Array.isArray(input.answers))
     return (
       <div className={styles.resolutions}>
-        {input.resolutions.map((resolution, index) =>
-          isObject(resolution) ? (
+        {input.answers.map((answer, index) =>
+          isObject(answer) ? (
             <section key={index}>
-              <strong>{String(resolution.call_id ?? t("Response"))}</strong> ·{" "}
-              {t(String(resolution.outcome ?? resolution.kind ?? "Response"))}
-              {resolution.result !== undefined && (
-                <JsonView value={resolution.result} />
+              <strong>{String(answer.tool_call_id ?? t("Response"))}</strong> ·{" "}
+              {t(String(answer.action ?? "Response"))}
+              {answer.result !== undefined && (
+                <JsonView value={answer.result} />
               )}
-              {resolution.response !== undefined && (
-                <JsonView value={resolution.response} />
-              )}
+              {answer.reason != null && <JsonView value={answer.reason} />}
             </section>
           ) : null,
         )}
       </div>
     );
-  const ordinary =
-    isObject(input) && isObject(input.input) ? input.input : input;
-  if (!isObject(ordinary) || !Array.isArray(ordinary.content))
+  if (!isObject(input) || !Array.isArray(input.content))
     return fallback ? (
       <div className={styles.prose}>{fallback}</div>
     ) : (
       <JsonView value={input} />
     );
-  const attachments = ordinary.content.flatMap((block, index) => {
-    if (!isObject(block) || block.type !== "binary" || !isObject(block.source))
-      return [];
-    const filename =
-      typeof block.filename === "string" ? block.filename : undefined;
-    if (
-      block.source.type === "asset" &&
-      typeof block.source.asset_id === "string"
-    )
-      return [
-        <AssetAttachment
-          key={index}
-          assetId={block.source.asset_id}
-          filename={filename}
-        />,
-      ];
-    return [
-      <AttachmentChip
-        key={index}
-        label={
-          filename ??
-          String(
-            block.source.type === "url" ? block.source.url : block.source.path,
-          )
-        }
-      />,
-    ];
-  });
+  const parts = input.content.filter(isObject);
+  const attachments = parts.flatMap((part, index) =>
+    part.type === "asset" && typeof part.asset_id === "string"
+      ? [<AssetAttachment key={index} assetId={part.asset_id} />]
+      : part.type === "url" && typeof part.url === "string"
+        ? [<AttachmentChip key={index} label={part.url} />]
+        : [],
+  );
+  const structured = parts.filter((part) => part.type === "json");
   return (
     <>
       <div className={styles.prose}>{inputText(input, fallback)}</div>
       {!!attachments.length && (
         <div className={styles.attachments}>{attachments}</div>
       )}
-      {ordinary.structured_content !== undefined &&
-        ordinary.structured_content !== null && (
-          <DisclosureSection
-            className={styles.inlineDisclosure}
-            title={<>{t("Structured input")}</>}
-          >
-            <JsonView value={ordinary.structured_content} />
-          </DisclosureSection>
-        )}
+      {structured.map((part, index) => (
+        <DisclosureSection
+          key={index}
+          className={styles.inlineDisclosure}
+          title={<>{t("Structured input")}</>}
+        >
+          <JsonView value={part.value} />
+        </DisclosureSection>
+      ))}
     </>
   );
 }

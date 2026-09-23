@@ -22,14 +22,15 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
-import { ErrorNotice } from "../../shared/feedback";
+import { data } from "../../shared/api";
+import { ErrorNotice, ErrorToast } from "../../shared/feedback";
 import { FileUpload } from "../../shared/forms";
 import { FormActions, TextAreaField } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
 import shared from "../../shared/shared.module.css";
 import styles from "./agents.module.css";
+import { useConfigurationAssistant } from "./assistant";
 import { AgentFilePreview } from "./export";
+import { createWithKey } from "../../shared/keys";
 import {
   agentDependencies,
   inspectAgentDependencies,
@@ -43,9 +44,9 @@ import {
 } from "./transfer";
 
 export function AgentCreationMenu() {
-  const { basePath } = useWorkspace();
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const assistant = useConfigurationAssistant();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -78,10 +79,15 @@ export function AgentCreationMenu() {
               <PlusIcon size={16} aria-hidden="true" />
               {t("New agent")}
             </MenuItem>
-            <MenuItem onClick={() => navigate(`${basePath}/configuration/new`)}>
-              <SparkleIcon size={16} aria-hidden="true" />
-              {t("Configure with assistant")}
-            </MenuItem>
+            {assistant.available && (
+              <MenuItem
+                disabled={assistant.pending}
+                onClick={() => assistant.start()}
+              >
+                <SparkleIcon size={16} aria-hidden="true" />
+                {t("Configure with assistant")}
+              </MenuItem>
+            )}
             <MenuItem onClick={() => setOpen(true)}>
               <FileArrowUpIcon size={16} aria-hidden="true" />
               {t("Import from YAML")}
@@ -110,6 +116,7 @@ export function AgentCreationMenu() {
           />
         )}
       </ModalFrame>
+      <ErrorToast error={assistant.error} />
     </>
   );
 }
@@ -125,10 +132,9 @@ export function ImportAgentForm({
 }) {
   const { t } = useTranslation();
   const client = useClient(),
-    { workspace, basePath } = useWorkspace();
+    { workspace, organization, basePath } = useWorkspace();
   const cache = useQueryClient(),
-    navigate = useNavigate(),
-    idempotency = useIdempotency();
+    navigate = useNavigate();
   const [source, setSource] = useState("");
   const [file, setFile] = useState<File>();
   const [reading, setReading] = useState(false);
@@ -140,35 +146,44 @@ export function ImportAgentForm({
     queryKey: [
       "agent-import-dependencies",
       workspace.id,
-      references.map(({ path, kind, value, version }) => [
+      references.map(({ path, kind, value, revision }) => [
         path,
         kind,
         value,
-        version,
+        revision,
       ]),
     ],
     enabled: !!draft,
     gcTime: 0,
     retry: false,
     queryFn: ({ signal }) =>
-      inspectAgentDependencies(client, workspace.id, draft!.config, signal),
+      inspectAgentDependencies(
+        client,
+        organization.id,
+        workspace.id,
+        draft!.config,
+        signal,
+      ),
   });
   const create = useMutation({
-    mutationFn: (body: Schema["CreateAgentRequest"]) =>
-      client.http
-        .POST("/api/v1/workspaces/{workspace}/agents", {
-          params: {
-            path: { workspace: workspace.id },
-            header: commandHeaders(workspace.id, idempotency.forBody(body)),
-          },
-          body,
-        })
-        .then(data),
+    mutationFn: (file: AgentFile) =>
+      createWithKey(file.name, "agent", (key) =>
+        client.http
+          .POST("/api/v1/workspaces/{workspace_id}/agents", {
+            params: { path: { workspace_id: workspace.id } },
+            body: {
+              key,
+              name: file.name,
+              description: file.description ?? "",
+              config: file.config,
+            },
+          })
+          .then(data),
+      ),
     onSuccess: (result) => {
-      idempotency.reset();
       void cache.invalidateQueries({ queryKey: ["agents", workspace.id] });
       onSuccess();
-      navigate(`${basePath}/agents/${result.agent.key}`);
+      navigate(`${basePath}/agents/${result.key}`);
     },
     onSettled: () => onBusyChange?.(false),
   });
@@ -236,11 +251,7 @@ export function ImportAgentForm({
           const checked = parseAgentFile(serializeAgentFile(draft));
           setError(undefined);
           onBusyChange?.(true);
-          create.mutate({
-            name: checked.name,
-            description: checked.description,
-            config: checked.config,
-          });
+          create.mutate(checked);
         } catch (error) {
           setError(
             new Error(
@@ -344,10 +355,10 @@ export function ImportAgentForm({
                   <div key={ref.path} className={styles.dependency}>
                     <div className={styles.dependencyHead}>
                       <span title={ref.path}>{ref.path}</span>
-                      {ref.version != null && (
+                      {check?.version != null && (
                         <span>
                           {t("Pinned version {{version}}", {
-                            version: ref.version,
+                            version: check.version,
                           })}
                         </span>
                       )}

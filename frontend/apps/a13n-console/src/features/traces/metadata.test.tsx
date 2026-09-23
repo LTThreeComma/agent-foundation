@@ -16,11 +16,13 @@ it("uses only the observation's explicit metadata namespace and resource environ
       "a13n.observation.metadata.region": "west",
       "a13n.observation.metadata.enabled": false,
       "a13n.observation.metadata.nested": { inspect: "in attributes" },
+      "a13n.observation.metadata.organization_id": "org_correlation",
+      "a13n.observation.metadata.service_run_id": "run_correlation",
       "a13n.observation.metadata": { ignored: true },
       "user.email": "not-a-chip@example.com",
     },
     resource_attributes: { "deployment.environment.name": "development" },
-  } as unknown as Schema["Observation"];
+  } as unknown as Schema["Span"];
   expect(metadataChips(observation).map(({ value }) => value)).toEqual([
     "development",
     "2",
@@ -34,10 +36,6 @@ it("uses only the observation's explicit metadata namespace and resource environ
   expect(screen.queryByText("west")).toBeNull();
   expect(screen.queryByText("wrong-scope")).toBeNull();
   expect(
-    metadataChips({
-      ...observation,
-      attributes: null,
-      resource_attributes: null,
-    }),
+    metadataChips({ ...observation, attributes: {}, resource_attributes: {} }),
   ).toEqual([]);
 });

@@ -16,6 +16,8 @@ import {
 
 let client: Client;
 let cache: QueryClient;
+/** Sessions the Console starts carry its label; applications' do not. */
+let labels: Record<string, string>;
 vi.mock("../../auth/context", () => ({ useClient: () => client }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
@@ -33,9 +35,6 @@ vi.mock("react-i18next", () => ({
     i18n: { resolvedLanguage: "en" },
   }),
 }));
-vi.mock("../memory/availability", () => ({
-  useMemoryProviders: () => ({ visible: false }),
-}));
 vi.mock("../agents/queries", () => ({
   useAgent: () => ({
     data: { id: "agt_1", key: "release-bot", name: "Release Bot" },
@@ -44,11 +43,12 @@ vi.mock("../agents/queries", () => ({
 
 const child = fixtureThread({
   id: "thr_child",
-  role: "child",
+  origin: "child",
   origin_thread_id: "thr_1",
 });
 
 beforeEach(() => {
+  labels = { "a13n.console": "debug" };
   cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client = createClient({
     baseUrl: "https://service.example",
@@ -62,6 +62,17 @@ beforeEach(() => {
         });
       if (url.pathname.endsWith("/threads"))
         return Response.json({ items: [], next_cursor: null });
+      if (url.pathname.endsWith("/sessions/ses_1"))
+        return Response.json({
+          id: "ses_1",
+          workspace_id: "workspace",
+          labels,
+          created_by_id: "usr_1",
+          last_run_id: "run_2",
+          version: 1,
+          created_at: "2026-09-20T10:00:00.000Z",
+          updated_at: "2026-09-20T10:00:12.000Z",
+        });
       return Response.json(fixtureRun({ status: "running" }));
     },
   });
@@ -126,8 +137,27 @@ it("identifies the session and switches the level in the URL", async () => {
   expect(await screen.findByText("level:?view=chat")).toBeTruthy();
 });
 
-it("opens an execution session in Debug and still offers Chat", async () => {
-  show([fixtureThread({ session_purpose: "execution" })]);
+it("opens an application's session in Debug and still offers Chat", async () => {
+  labels = {};
+  show([fixtureThread()]);
+  const user = userEvent.setup();
+  expect(await screen.findByText("Started by trigger.input")).toBeTruthy();
+  expect(screen.getByText("level:")).toBeTruthy();
+  // Only the Debug level collapses runs, so its menu says which level is open.
+  await user.click(screen.getByRole("button", { name: "Session actions" }));
+  expect(
+    await screen.findByRole("menuitem", { name: "Collapse all runs" }),
+  ).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Chat" }));
+  expect(await screen.findByText("level:?view=chat")).toBeTruthy();
+});
+
+it("opens a child thread in Debug and still offers Chat", async () => {
+  show(
+    [fixtureThread(), child],
+    "/sessions/ses_1/threads/thr_child/runs/run_2",
+  );
   const user = userEvent.setup();
   expect(screen.getByText("level:")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Chat" }));

@@ -65,36 +65,21 @@ export function ProviderName({
 }
 
 /** The single soft group an editor settles everything else into. */
-export function ProviderGroup({
-  note,
-  children,
-}: {
-  /** A sentence the group cannot say in a row, such as an immutable target. */
-  note?: ReactNode;
-  children: ReactNode;
-}) {
+export function ProviderGroup({ children }: { children: ReactNode }) {
   return (
     <div className={styles.group}>
       <SettingsSection>{children}</SettingsSection>
-      {note && <p className={styles.groupNote}>{note}</p>}
     </div>
   );
 }
 
-/**
- * A provider another scope owns, or one the deployment configures: the same
- * group, stated rather than edited.
- */
+/** A provider another scope owns: the same group, stated rather than edited. */
 export function ProviderReadOnly({
   enabled,
   credentials,
   configuration = {},
   schema,
   only,
-  hideDefaults = false,
-  facts,
-  note,
-  leading,
   onClose,
 }: {
   enabled: boolean;
@@ -102,23 +87,16 @@ export function ProviderReadOnly({
   configuration?: Record<string, unknown>;
   schema?: Record<string, unknown> | null;
   only?: readonly string[];
-  hideDefaults?: boolean;
-  /** Rows the category states itself, such as a live engine status. */
-  facts?: ReactNode;
-  note?: ReactNode;
-  leading?: ReactNode;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   return (
     <div className={styles.editor}>
-      <ProviderGroup note={note}>
-        {facts}
+      <ProviderGroup>
         <ProviderFacts
           configuration={configuration}
           schema={schema}
           only={only}
-          hideDefaults={hideDefaults}
         />
         <SettingsRow stackOnNarrow={false} label={t("Status")}>
           <StatePill state={enabled ? "enabled" : "disabled"} />
@@ -130,7 +108,6 @@ export function ProviderReadOnly({
       <FormActions
         dismiss
         pending={false}
-        leading={leading}
         cancelLabel={t("Close")}
         onCancel={onClose}
       />

@@ -6,7 +6,7 @@ import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { allPages, data, type Schema } from "../../shared/api";
+import { allPages, data } from "../../shared/api";
 import {
   Empty,
   ResourceIdentity,
@@ -24,6 +24,7 @@ import { ManageProvidersLink } from "../providers/manage-link";
 import { connectorApi } from "../connectors/api";
 import { NewConnection } from "./new";
 import { MCPConnectionIcon } from "./mcp-icon";
+import { connectionState, type RemoteCleanup } from "./api";
 import styles from "./connections.module.css";
 
 /** A remote endpoint reads better as its host than as a full URL. */
@@ -37,19 +38,19 @@ function endpointHost(url: string) {
 
 export function ConnectionsPage() {
   const client = useClient(),
-    { workspace, can } = useWorkspace(),
+    { workspace, organization, can } = useWorkspace(),
     { t } = useTranslation();
   const [search, setSearch] = useSearchParams();
-  const [cleanup, setCleanup] = useState<Schema["ConnectionCleanupReceipt"]>();
+  const [cleanup, setCleanup] = useState<RemoteCleanup>();
   const connections = useInfiniteQuery({
     queryKey: ["connections", workspace.id, "list"],
-    enabled: can("connection.read"),
+    enabled: can("read"),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ signal, pageParam }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/connections", {
+        .GET("/api/v1/workspaces/{workspace_id}/connections", {
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             query: { cursor: pageParam },
           },
           signal,
@@ -61,13 +62,13 @@ export function ConnectionsPage() {
   const focused = search.get("connection");
   const providers = useQuery({
     queryKey: ["connector-providers", "workspace", workspace.id, "picker"],
-    enabled: can("connector_provider.read"),
+    enabled: can("read"),
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        connectorApi(client, { kind: "workspace", id: workspace.id }).providers(
-          signal,
-          cursor,
-        ),
+        connectorApi(client, organization.id, {
+          kind: "workspace",
+          id: workspace.id,
+        }).providers(signal, cursor),
       ),
   });
   const select = (id?: string) =>
@@ -80,9 +81,7 @@ export function ConnectionsPage() {
       },
       { replace: true },
     );
-  const create = can("connection.manage") && (
-    <NewConnection onConnected={select} />
-  );
+  const create = can("write") && <NewConnection onConnected={select} />;
   return (
     <Page
       title={t("Connections")}
@@ -97,25 +96,18 @@ export function ConnectionsPage() {
       {cleanup && (
         <div className={styles.cleanup} role="status">
           <div>
-            <h3>
-              {t(
-                cleanup.local_status === "deleted"
-                  ? "Connection deleted"
-                  : cleanup.local_status === "disabled"
-                    ? "Connection revoked"
-                    : "Connection",
-              )}
-            </h3>
+            <h3>{t("Connection revoked")}</h3>
             <p>
               {t(
                 {
-                  not_required: "No external authorization needed cleanup.",
-                  succeeded: "External authorization was removed.",
+                  skipped:
+                    "External cleanup was skipped. If your provider still holds the authorization, remove it there.",
+                  revoked: "External authorization was removed.",
                   failed:
                     "External cleanup failed. Remove the authorization with your provider.",
                   unknown:
                     "External cleanup could not be confirmed; check with your provider.",
-                }[cleanup.remote_status],
+                }[cleanup],
               )}
             </p>
           </div>
@@ -145,15 +137,15 @@ export function ConnectionsPage() {
                   name={row.name}
                   resourceId={row.id}
                   description={
-                    row.source.kind === "connector"
-                      ? row.source.connector_key
-                      : endpointHost(row.source.endpoint_url)
+                    "app" in row.config
+                      ? row.config.app
+                      : endpointHost(row.config.url)
                   }
                   icon={
-                    row.source.kind === "connector" ? (
-                      <BrandIcon alias={row.source.connector_key} />
+                    "app" in row.config ? (
+                      <BrandIcon alias={row.config.app} />
                     ) : (
-                      <MCPConnectionIcon endpoint={row.source.endpoint_url} />
+                      <MCPConnectionIcon endpoint={row.config.url} />
                     )
                   }
                 />
@@ -162,17 +154,17 @@ export function ConnectionsPage() {
             {
               label: t("Source"),
               render: (row) =>
-                row.source.kind === "mcp"
+                row.type === "mcp"
                   ? t("Remote MCP")
                   : (providers.data?.find(
-                      (provider) =>
-                        row.source.kind === "connector" &&
-                        provider.id === row.source.provider_id,
+                      (provider) => provider.id === row.connector_provider_id,
                     )?.name ?? t("Connected account")),
             },
             {
               label: t("Status"),
-              render: (connection) => <StatePill state={connection.status} />,
+              render: (connection) => (
+                <StatePill state={connectionState(connection)} />
+              ),
             },
             {
               label: t("Updated"),
@@ -204,7 +196,7 @@ export function ConnectionsPage() {
           {t("Load more")}
         </Button>
       )}
-      {focused && can("connection.read") && (
+      {focused && can("read") && (
         <ConnectionDetails
           key={focused}
           connectionId={focused}

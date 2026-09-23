@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Schema } from "../../shared/api";
-import { ModelPricing } from "./model-pricing";
+import {
+  ModelPricing,
+  priceEntry,
+  priceTable,
+  type PriceTable,
+} from "./model-pricing";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -16,9 +21,7 @@ vi.mock("react-i18next", () => ({
 afterEach(cleanup);
 
 function Editor() {
-  const [pricing, setPricing] = useState<Schema["TokenPricing-Input"] | null>(
-    null,
-  );
+  const [pricing, setPricing] = useState<PriceTable | null>(null);
   return (
     <>
       <ModelPricing value={pricing} onChange={setPricing} />
@@ -33,11 +36,11 @@ it("edits decimal rates, retains zero, and clears unknown prices", async () => {
   await user.click(screen.getByRole("button", { name: /Pricing/ }));
   await user.type(screen.getByLabelText("Tier 1: Input"), "0");
   expect(JSON.parse(screen.getByTestId("value").textContent!)).toMatchObject({
-    tiers: [{ rates: { input: "0" } }],
+    tiers: [{ rates: { input_mtok: "0" } }],
   });
   await user.clear(screen.getByLabelText("Tier 1: Input"));
   expect(JSON.parse(screen.getByTestId("value").textContent!)).toMatchObject({
-    tiers: [{ rates: { input: null } }],
+    tiers: [{ rates: { input_mtok: null } }],
   });
   await user.click(screen.getByRole("button", { name: "Clear prices" }));
   expect(screen.getByTestId("value").textContent).toBe("null");
@@ -57,10 +60,100 @@ it("adds and removes explicit threshold rows without inheriting prices", async (
   await user.type(screen.getByLabelText("Tier 2: Output"), "45");
   expect(JSON.parse(screen.getByTestId("value").textContent!)).toMatchObject({
     tiers: [
-      { above: null, rates: { input: "5" } },
-      { above: 200000, rates: { output: "45" } },
+      { above: null, rates: { input_mtok: "5" } },
+      { above: 200000, rates: { output_mtok: "45" } },
     ],
   });
   await user.click(screen.getByRole("button", { name: "Remove tier 2" }));
   expect(screen.queryByLabelText("Tier 2: above input tokens")).toBeNull();
+});
+
+const catalogPrice: Schema["ModelPricingEntry-Output"] = {
+  provider: "anthropic",
+  model: "claude-opus-5",
+  context_window: 1000000,
+  source: "genai_prices",
+  source_revision: "2026-09-01",
+  source_url: "https://example.com/pricing",
+  rules: [
+    {
+      rule_id: "standard",
+      constraint: { kind: "always" },
+      prices: [
+        {
+          price_key: "input_mtok",
+          price: "5",
+          tiers: [{ start: 200000, price: "10" }],
+        },
+        { price_key: "output_mtok", price: "25" },
+        { price_key: "cache_write_1h_mtok", price: "10" },
+      ],
+    },
+  ],
+};
+
+it("reads the standard rule's token prices into threshold rows", () => {
+  expect(priceTable(catalogPrice)).toEqual({
+    tiers: [
+      { above: null, rates: { input_mtok: "5", output_mtok: "25" } },
+      { above: 200000, rates: { input_mtok: "10" } },
+    ],
+  });
+  expect(priceTable(null)).toBeNull();
+});
+
+it("saves an edited table for the model without dropping prices the editor does not show", () => {
+  const table = priceTable(catalogPrice)!;
+  table.tiers[0].rates.output_mtok = "30";
+  expect(
+    priceEntry(table, catalogPrice, {
+      provider: "openai",
+      model: "gateway-opus",
+    }),
+  ).toEqual({
+    provider: "anthropic",
+    model: "gateway-opus",
+    context_window: 1000000,
+    source: "console",
+    source_revision: "manual",
+    rules: [
+      {
+        rule_id: "standard",
+        constraint: { kind: "always" },
+        prices: [
+          { price_key: "cache_write_1h_mtok", price: "10" },
+          {
+            price_key: "input_mtok",
+            price: "5",
+            tiers: [{ start: 200000, price: "10" }],
+          },
+          { price_key: "output_mtok", price: "30", tiers: [] },
+        ],
+      },
+    ],
+  });
+});
+
+it("names hand-entered prices after the model and clears an empty table", () => {
+  const table: PriceTable = {
+    tiers: [{ above: null, rates: { input_mtok: "1", output_mtok: null } }],
+  };
+  expect(
+    priceEntry(table, null, { provider: "openai", model: "company-smart" }),
+  ).toMatchObject({
+    provider: "openai",
+    model: "company-smart",
+    rules: [
+      {
+        rule_id: "standard",
+        prices: [{ price_key: "input_mtok", price: "1", tiers: [] }],
+      },
+    ],
+  });
+  expect(
+    priceEntry({ tiers: [{ above: null, rates: {} }] }, null, {
+      provider: "openai",
+      model: "company-smart",
+    }),
+  ).toBeNull();
 });

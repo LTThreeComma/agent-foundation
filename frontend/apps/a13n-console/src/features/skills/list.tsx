@@ -5,8 +5,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { data, workspaceHeaders } from "../../shared/api";
+import { data, type Schema } from "../../shared/api";
 import {
+  ArchivedFilter,
   CollectionFooter,
   Empty,
   Pagination,
@@ -22,44 +23,56 @@ import {
   Timestamp,
 } from "../../shared/feedback";
 import { Page } from "../../shared/page";
+import { usedByQuery } from "./detail/used-by";
 import { ImportSkill } from "./import-dialog";
 import { SkillIcon, SourceChip } from "./source";
 import styles from "./skills.module.css";
+
+type Source = Schema["SkillRevisionSummary"]["source"]["kind"];
 
 export function SkillsPage() {
   const { workspace, can } = useWorkspace(),
     client = useClient(),
     { t } = useTranslation(),
-    page = useCursor(),
     navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [source, setSource] = useState("all");
+  const [source, setSource] = useState<Source | "all">("all");
+  const [archived, setArchived] = useState(false);
   const term = search.trim().toLocaleLowerCase();
+  const page = useCursor({ term, source, archived });
   const query = useQuery({
-    queryKey: ["skills", workspace.id, "list", term, source, page.cursor],
+    queryKey: [
+      "skills",
+      workspace.id,
+      "list",
+      term,
+      source,
+      archived,
+      page.cursor,
+    ],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/skills", {
+        .GET("/api/v1/workspaces/{workspace_id}/skills", {
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             query: {
               cursor: page.cursor,
+              // The chip adds archived items; omitting the filter lists both.
+              ...(!archived && { archived: false }),
               ...(term && { q: term }),
-              ...(source !== "all" && {
-                source_kind: source as "zip" | "github",
-              }),
+              ...(source !== "all" && { source }),
             },
           },
           signal,
         })
         .then(data),
   });
-  const importSkill = can("skill.create") ? (
+  const importSkill = can("write") ? (
     <ImportSkill
       onSuccess={(skill) => navigate(encodeURIComponent(skill.key))}
     />
   ) : undefined;
-  const filtered = !!term || source !== "all";
+  const filtered = !!term || source !== "all" || archived;
   return (
     <Page
       title={t("Skills")}
@@ -69,25 +82,26 @@ export function SkillsPage() {
         <Toolbar
           search={search}
           searchLabel={t("Search skills")}
-          onSearchChange={(value) => {
-            setSearch(value);
-            page.reset();
-          }}
+          onSearchChange={setSearch}
           filters={
-            <ChoiceField
-              label={t("Source")}
-              variant="filter"
-              value={source}
-              onValueChange={(value) => {
-                setSource(value);
-                page.reset();
-              }}
-              options={[
-                { value: "all", label: t("All sources") },
-                { value: "github", label: "GitHub" },
-                { value: "zip", label: t("ZIP") },
-              ]}
-            />
+            <>
+              <ChoiceField
+                label={t("Source")}
+                variant="filter"
+                value={source}
+                onValueChange={(value) =>
+                  setSource(
+                    value === "github" || value === "upload" ? value : "all",
+                  )
+                }
+                options={[
+                  { value: "all", label: t("All sources") },
+                  { value: "github", label: "GitHub" },
+                  { value: "upload", label: t("ZIP") },
+                ]}
+              />
+              <ArchivedFilter value={archived} onChange={setArchived} />
+            </>
           }
         />
       }
@@ -119,15 +133,23 @@ export function SkillsPage() {
               },
               {
                 label: t("Source"),
-                render: (skill) => <SourceChip kind={skill.source_kind} />,
+                render: (skill) =>
+                  skill.default_revision ? (
+                    <SourceChip kind={skill.default_revision.source.kind} />
+                  ) : (
+                    <span>—</span>
+                  ),
               },
               {
                 label: t("Version"),
-                render: (skill) => (
-                  <span className={styles.version}>
-                    v{skill.default_version}
-                  </span>
-                ),
+                render: (skill) =>
+                  skill.default_revision ? (
+                    <span className={styles.version}>
+                      v{skill.default_revision.number}
+                    </span>
+                  ) : (
+                    <span>—</span>
+                  ),
               },
               {
                 label: t("Used by"),
@@ -169,22 +191,13 @@ export function SkillsPage() {
   );
 }
 
-/** How many agent configurations currently depend on this skill. */
-function UsedBy({ skill }: { skill: { id: string } }) {
+/** How many unarchived agents have a revision that depends on this skill. */
+function UsedBy({ skill }: { skill: Schema["Skill"] }) {
   const client = useClient(),
-    { workspace } = useWorkspace(),
     { t } = useTranslation();
   const query = useQuery({
-    queryKey: ["skills", workspace.id, skill.id, "reference-count"],
+    ...usedByQuery(client, skill),
     staleTime: 60_000,
-    queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/skills/{skill_id}/references", {
-          params: { path: { skill_id: skill.id }, query: { limit: 50 } },
-          headers: workspaceHeaders(workspace.id),
-          signal,
-        })
-        .then(data),
   });
   if (query.isPending) return <InlineLoading width="4rem" />;
   if (!query.data) return <span>—</span>;

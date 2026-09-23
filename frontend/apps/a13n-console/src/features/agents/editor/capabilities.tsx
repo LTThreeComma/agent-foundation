@@ -1,7 +1,9 @@
 import { Button } from "a13n-ui";
 import { PuzzlePieceIcon, XIcon } from "@phosphor-icons/react";
+import { useQueries } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
+import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
 import {
   ListRow,
@@ -10,6 +12,8 @@ import {
   ResourcePicker,
 } from "../../../shared/collection";
 import { Section } from "../../../shared/page";
+import { connectionState } from "../../connections/api";
+import { revisionsQuery } from "../../skills/revisions";
 import type { useAgentChoices } from "../choices";
 import {
   ConnectionBrandIcon,
@@ -31,9 +35,15 @@ export function SkillsSection({
   readOnly: boolean;
 }) {
   const { t } = useTranslation();
-  const { basePath } = useWorkspace();
+  const client = useClient();
+  const { workspace, basePath } = useWorkspace();
   const items = choices.data?.skills ?? [];
-  const selected = new Set(draft.skills.map((item) => item.skill_key));
+  const selected = new Set(draft.skills.map((item) => item.skill_id));
+  const revisions = useQueries({
+    queries: draft.skills.map((item) =>
+      revisionsQuery(client, workspace.id, item.skill_id),
+    ),
+  });
   return (
     <Section
       title={t("Skills")}
@@ -47,17 +57,20 @@ export function SkillsSection({
             loading={choices.isPending}
             manageHref={`${basePath}/skills`}
             manageLabel={t("Manage skills")}
-            items={items.map((skill) => ({
-              id: skill.key,
-              name: skill.name,
-              detail: skill.key,
-            }))}
+            // Archived skills cannot be added; a selected one can still be removed.
+            items={items
+              .filter((skill) => !skill.archived_at || selected.has(skill.id))
+              .map((skill) => ({
+                id: skill.id,
+                name: skill.name,
+                detail: skill.key,
+              }))}
             selected={selected}
-            onToggle={(key, checked) =>
+            onToggle={(id, checked) =>
               draft.setSkills((previous) =>
                 checked
-                  ? [...previous, { skill_key: key }]
-                  : previous.filter((item) => item.skill_key !== key),
+                  ? [...previous, { skill_id: id }]
+                  : previous.filter((item) => item.skill_id !== id),
               )
             }
           />
@@ -66,35 +79,28 @@ export function SkillsSection({
     >
       {draft.skills.length ? (
         <ListRows>
-          {draft.skills.map((selection) => {
-            const skill = items.find(
-              (item) => item.key === selection.skill_key,
-            );
-            const versions = Array.from(
-              { length: skill?.version ?? 0 },
-              (_, index) => skill!.version - index,
-            );
+          {draft.skills.map((selection, index) => {
+            const skill = items.find((item) => item.id === selection.skill_id);
+            const versions = revisions[index]?.data?.items ?? [];
             return (
               <ListRow
-                key={selection.skill_key}
+                key={selection.skill_id}
                 icon={<PuzzlePieceIcon size={16} />}
-                name={skill?.name ?? selection.skill_key}
+                name={skill?.name ?? selection.skill_id}
                 secondary={skill ? skill.key : t("Not in this workspace")}
                 control={
                   <label className={styles.rowSelect}>
                     {t("Version")}
                     <select
                       disabled={readOnly}
-                      value={selection.version ?? ""}
+                      value={selection.revision_id ?? ""}
                       onChange={(event) =>
                         draft.setSkills((previous) =>
                           previous.map((item) =>
-                            item.skill_key === selection.skill_key
+                            item.skill_id === selection.skill_id
                               ? {
                                   ...item,
-                                  version: event.target.value
-                                    ? Number(event.target.value)
-                                    : null,
+                                  revision_id: event.target.value || null,
                                 }
                               : item,
                           ),
@@ -102,15 +108,17 @@ export function SkillsSection({
                       }
                     >
                       <option value="">{t("Latest")}</option>
-                      {versions.map((value) => (
-                        <option key={value} value={value}>
-                          v{value}
+                      {versions.map((revision) => (
+                        <option key={revision.id} value={revision.id}>
+                          v{revision.number}
                         </option>
                       ))}
-                      {selection.version &&
-                        !versions.includes(selection.version) && (
-                          <option value={selection.version}>
-                            v{selection.version}
+                      {selection.revision_id &&
+                        !versions.some(
+                          (revision) => revision.id === selection.revision_id,
+                        ) && (
+                          <option value={selection.revision_id}>
+                            {selection.revision_id}
                           </option>
                         )}
                     </select>
@@ -123,12 +131,12 @@ export function SkillsSection({
                       variant="ghost"
                       size="icon-xs"
                       aria-label={t("Remove {{name}}", {
-                        name: skill?.name ?? selection.skill_key,
+                        name: skill?.name ?? selection.skill_id,
                       })}
                       onClick={() =>
                         draft.setSkills((previous) =>
                           previous.filter(
-                            (item) => item.skill_key !== selection.skill_key,
+                            (item) => item.skill_id !== selection.skill_id,
                           ),
                         )
                       }
@@ -183,12 +191,12 @@ export function ConnectionsSection({
               id: connection.id,
               name: displayName(connection),
               detail:
-                connection.source.kind === "mcp"
-                  ? connection.source.endpoint_url
-                  : connection.source.connector_key,
+                "url" in connection.config
+                  ? connection.config.url
+                  : connection.config.app,
               icon: <ConnectionBrandIcon connection={connection} />,
-              disabled: connection.status !== "ready",
-              disabledReason: t(connection.status),
+              disabled: connectionState(connection) !== "ready",
+              disabledReason: t(connectionState(connection)),
             }))}
             selected={selected}
             onToggle={(id, checked) =>

@@ -31,10 +31,10 @@ import styles from "./connections.module.css";
 export type Selection =
   | {
       kind: "connector";
-      connector: Schema["Connector"];
-      provider: Schema["ConnectorProvider"];
+      connector: Schema["ConnectorApp"];
+      provider: Schema["Provider"];
     }
-  | { kind: "mcp"; preset?: Schema["MCPServer"] };
+  | { kind: "mcp"; preset?: Schema["McpServer"] };
 
 export function sourceName(selected: Selection, t: TFunction) {
   return selected.kind === "connector"
@@ -64,7 +64,7 @@ export function SourceIcon({
   ) : (
     <BrandIcon
       identity={selected.preset?.key}
-      endpoint={selected.preset?.endpoint_url}
+      endpoint={selected.preset?.url}
       logo={selected.preset?.logo_url}
       fallbackIdentity="mcp"
       size={size}
@@ -96,7 +96,11 @@ export function SourceSetup({
     );
   return (
     <>
-      <ConnectionSetup connector={selected.connector} onStarted={onStarted} />
+      <ConnectionSetup
+        connector={selected.connector}
+        provider={selected.provider}
+        onStarted={onStarted}
+      />
       {selected.provider.type === "composio" && (
         <div className={styles.composioHelp}>
           {selected.connector.authentication_methods.includes("OAUTH2") && (
@@ -129,7 +133,10 @@ export function SourceSetup({
           </a>
         </div>
       )}
-      <ConnectorToolPreview connector={selected.connector} />
+      <ConnectorToolPreview
+        connector={selected.connector}
+        providerId={selected.provider.id}
+      />
     </>
   );
 }
@@ -234,7 +241,7 @@ function SourceDirectory({
     { can, workspace } = useWorkspace();
   const [search, setSearch] = useState("");
   const directory = useConnectionDirectory(search);
-  const manage = can("connection.manage");
+  const manage = can("write");
   const term = search.trim().toLocaleLowerCase();
   const matches = (...values: (string | null | undefined)[]) =>
     !term || values.some((value) => value?.toLocaleLowerCase().includes(term));
@@ -344,7 +351,7 @@ function SourceDirectory({
                 icon={
                   <BrandIcon
                     identity={preset.key}
-                    endpoint={preset.endpoint_url}
+                    endpoint={preset.url}
                     logo={preset.logo_url}
                     fallbackIdentity="mcp"
                   />

@@ -25,7 +25,7 @@ export function RunNavigator({
   thread,
   runId,
 }: {
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
   runId: string;
 }) {
   const { t } = useTranslation();

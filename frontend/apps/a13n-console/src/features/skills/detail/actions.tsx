@@ -10,21 +10,20 @@ import {
   ModalFrame,
 } from "a13n-ui";
 import {
+  ArchiveIcon,
   DotsThreeOutlineVerticalIcon,
   DownloadSimpleIcon,
   PencilSimpleIcon,
-  TrashIcon,
 } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
 import {
   data,
+  ifMatch,
   representation,
-  workspaceHeaders,
   type Schema,
 } from "../../../shared/api";
 import { Confirm } from "../../../shared/dialogs";
@@ -46,12 +45,13 @@ export function SkillMenu({
 }: {
   resource: SkillResource;
   revisionId: string;
-  version: number;
+  /** Unknown until the viewed revision loads; the download names it. */
+  version?: number;
 }) {
   const client = useClient(),
+    cache = useQueryClient(),
     { t } = useTranslation(),
-    { basePath, can } = useWorkspace(),
-    navigate = useNavigate();
+    { can } = useWorkspace();
   const skill = resource.value;
   const [renaming, setRenaming] = useState(false);
   const download = useArchiveDownload(
@@ -75,30 +75,38 @@ export function SkillMenu({
           <DotsThreeOutlineVerticalIcon size={14} weight="fill" />
         </MenuTrigger>
         <MenuPopup align="end">
-          {can("skill.update") && (
+          {can("write") && (
             <MenuItem closeOnClick={true} onClick={() => setRenaming(true)}>
               <PencilSimpleIcon size={14} />
               {t("Rename skill")}
             </MenuItem>
           )}
-          <MenuItem onClick={() => download.mutate()}>
+          <MenuItem
+            disabled={version === undefined}
+            onClick={() => download.mutate()}
+          >
             <DownloadSimpleIcon size={14} />
             {t("Download ZIP")}
           </MenuItem>
-          {can("skill.delete") && (
+          {can("write") && (
             <>
               <MenuSeparator />
               <Confirm
                 subject={skill.name}
-                title={t("Delete skill")}
-                description={t(
-                  "This removes the skill and its revisions from ordinary access. Agents currently using this skill must be updated first.",
+                title={t(
+                  skill.archived_at ? "Unarchive skill" : "Archive skill",
                 )}
-                danger
+                description={t(
+                  "Archived skills keep their versions for agents that already use them, but cannot publish new versions or be added to agents.",
+                )}
+                danger={!skill.archived_at}
                 triggerElement={
-                  <MenuItem closeOnClick={false} variant="destructive">
-                    <TrashIcon size={14} />
-                    {t("Delete skill")}
+                  <MenuItem
+                    closeOnClick={false}
+                    variant={skill.archived_at ? "default" : "destructive"}
+                  >
+                    <ArchiveIcon size={14} />
+                    {t(skill.archived_at ? "Unarchive skill" : "Archive skill")}
                   </MenuItem>
                 }
                 action={async () => {
@@ -108,16 +116,23 @@ export function SkillMenu({
                         "Version information is unavailable. Reload this page.",
                       ),
                     );
-                  await client.http.DELETE("/api/v1/skills/{skill_id}", {
-                    params: {
-                      path: { skill_id: skill.id },
-                      header: {
-                        ...workspaceHeaders(skill.workspace_id),
-                        "If-Match": resource.etag,
+                  await client.http
+                    .POST(
+                      skill.archived_at
+                        ? "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/unarchive"
+                        : "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/archive",
+                      {
+                        params: {
+                          path: {
+                            workspace_id: skill.workspace_id,
+                            skill_id: skill.id,
+                          },
+                        },
+                        headers: ifMatch(resource.etag),
                       },
-                    },
-                  });
-                  navigate(`${basePath}/skills`);
+                    )
+                    .then(data);
+                  await cache.invalidateQueries({ queryKey: ["skills"] });
                 }}
               />
             </>
@@ -161,14 +176,14 @@ function RenameForm({
           t("Version information is unavailable. Reload this page."),
         );
       return client.http
-        .PATCH("/api/v1/skills/{skill_id}", {
+        .PATCH("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
           params: {
-            path: { skill_id: basis.value.id },
-            header: {
-              ...workspaceHeaders(basis.value.workspace_id),
-              "If-Match": basis.etag,
+            path: {
+              workspace_id: basis.value.workspace_id,
+              skill_id: basis.value.id,
             },
           },
+          headers: ifMatch(basis.etag),
           body: { name: name.trim() },
         })
         .then(data);
@@ -181,9 +196,13 @@ function RenameForm({
   const reload = useMutation({
     mutationFn: () =>
       client.http
-        .GET("/api/v1/skills/{skill_id}", {
-          params: { path: { skill_id: basis.value.id } },
-          headers: workspaceHeaders(basis.value.workspace_id),
+        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+          params: {
+            path: {
+              workspace_id: basis.value.workspace_id,
+              skill_id: basis.value.id,
+            },
+          },
         })
         .then(representation),
     onSuccess: (result) => {

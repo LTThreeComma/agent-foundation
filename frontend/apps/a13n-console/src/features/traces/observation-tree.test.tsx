@@ -15,11 +15,12 @@ vi.mock("react-i18next", () => ({
 }));
 afterEach(cleanup);
 
-function observation(id: string, parent: string | null): Schema["Observation"] {
+function observation(id: string, parent: string | null): Schema["Span"] {
   return {
+    trace_id: "trace",
     id,
     parent_id: parent,
-    type: "span",
+    kind: "span",
     name: id,
     started_at: "2026-09-11T00:00:00Z",
     ended_at: "2026-09-11T00:00:01Z",
@@ -27,15 +28,16 @@ function observation(id: string, parent: string | null): Schema["Observation"] {
     level: null,
     status_message: null,
     model: null,
-    usage: null,
+    usage: {},
     cost_usd: null,
     input: null,
     output: null,
     attributes: {},
-    resource_attributes: null,
+    resource_attributes: {},
     scope: null,
-    events: null,
-    links: null,
+    events: [],
+    links: [],
+    source_url: null,
   };
 }
 

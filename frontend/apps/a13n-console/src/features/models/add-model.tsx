@@ -13,7 +13,7 @@ import { FormActions } from "../../shared/forms";
 import { ProviderIcon, ResourceEditorButton } from "../../shared/identity";
 import { connectStepDescription, connectStepTitle } from "./add-provider";
 import { type ModelScope } from "./api";
-import { CatalogPicker } from "./catalog-picker";
+import { CatalogPicker, catalogRef } from "./catalog-picker";
 import {
   CatalogNotice,
   ModelFields,
@@ -59,7 +59,10 @@ export function AddModel({
     onSaved,
   });
   const definitions = model.definitions.data?.items ?? [];
-  const providers = model.providers.data ?? [];
+  // A shared model can only use a shared provider.
+  const providers = (model.providers.data ?? []).filter(
+    (item) => scope.kind === "workspace" || !item.workspace_id,
+  );
   const providerDraft = useProviderDraft({
     scope,
     definitions,
@@ -122,10 +125,8 @@ export function AddModel({
             ) : (
               <CatalogPicker
                 entries={model.catalog.data?.items ?? []}
-                channels={model.channels}
-                allowCompatible={model.selectedProvider?.type === "openai"}
                 providerName={model.definition?.display_name}
-                value={model.draft.catalog_ref}
+                value={model.draft.catalog_key}
                 onSelect={(entry) => {
                   model.chooseCatalog(entry);
                   setStep("details");
@@ -165,7 +166,7 @@ export function AddModel({
 function stepHeading(
   step: Step,
   model: ReturnType<typeof useModelDraft>,
-  connecting: Schema["ModelProviderMetadata"] | undefined,
+  connecting: Schema["ProviderType"] | undefined,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): { title: ReactNode; description?: string } {
   if (step === "provider")
@@ -195,14 +196,16 @@ function stepHeading(
       description: t("Pick one from the catalog, or add a model by its ID."),
     };
   const chosen =
-    model.selectedEntry?.name || model.draft.name || model.draft.upstream_model;
+    model.selectedEntry?.model_name ||
+    model.draft.name ||
+    model.draft.model_name;
   return {
     title: (
       <BrandTitle
         mark={
           <ModelIcon
-            upstream={model.draft.upstream_model}
-            catalogRef={model.draft.catalog_ref}
+            upstream={model.draft.model_name}
+            catalogRef={model.selectedEntry && catalogRef(model.selectedEntry)}
             provider={model.selectedProvider?.type}
             size={20}
           />

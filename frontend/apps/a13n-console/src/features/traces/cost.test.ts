@@ -5,7 +5,7 @@ import { observationCost } from "./cost";
 import { UNKNOWN } from "../../shared/unknown";
 
 function cost(id: string, value: string | null) {
-  return { id, cost_usd: value } as Schema["Observation"];
+  return { id, cost_usd: value } as Schema["Span"];
 }
 
 it("sums reported decimal costs once per observation, including a root's own cost", () => {

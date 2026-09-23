@@ -7,7 +7,7 @@ import { ArrowRightIcon, ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { data, type Schema } from "../../shared/api";
+import { data } from "../../shared/api";
 import { ErrorNotice, Loading, Timestamp } from "../../shared/feedback";
 import {
   DetailHeader,
@@ -17,8 +17,10 @@ import {
   Section,
   useTabParam,
 } from "../../shared/page";
-import { CompactNotice, TraceContent } from "./content";
+import { TraceContent } from "./content";
 import { formatCost } from "../../shared/cost";
+import { backendName, useTraceBackend } from "./backend";
+import { runPath, traceCorrelation } from "./correlation";
 import { observationCost } from "./cost";
 import { ObservationGlyph } from "./identity";
 import { MetadataChips } from "./metadata";
@@ -46,30 +48,30 @@ export function TraceDetail({ traceId }: { traceId: string }) {
   const client = useClient(),
     { workspace, basePath } = useWorkspace(),
     { t } = useTranslation();
-  const [view, setView] = useState<Schema["TraceView"]>("full");
   const [order, setOrder] = useState("tree");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useTabParam(TABS);
   const sourceHintId = useId();
-  const path = { workspace: workspace.id, trace_id: traceId };
+  const backend = useTraceBackend();
+  const path = { workspace_id: workspace.id, trace_id: traceId };
   const query = useQuery({
-    queryKey: ["traces", workspace.id, traceId, view],
+    queryKey: ["traces", workspace.id, traceId],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/traces/{trace_id}", {
-          params: { path, query: { view } },
+        .GET("/api/v1/workspaces/{workspace_id}/traces/{trace_id}", {
+          params: { path },
           signal,
         })
         .then(data),
   });
   const observationsQuery = useInfiniteQuery({
-    queryKey: ["trace-observations", workspace.id, traceId, view],
+    queryKey: ["trace-observations", workspace.id, traceId],
     initialPageParam: undefined as string | undefined,
     enabled: query.isSuccess,
     queryFn: ({ pageParam, signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/traces/{trace_id}/observations", {
-          params: { path, query: { view, limit: 50, cursor: pageParam } },
+        .GET("/api/v1/workspaces/{workspace_id}/traces/{trace_id}/spans", {
+          params: { path, query: { limit: 50, cursor: pageParam } },
           signal,
         })
         .then(data),
@@ -99,9 +101,8 @@ export function TraceDetail({ traceId }: { traceId: string }) {
       </Page>
     );
   if (!query.data) return <Loading variant="detail" page />;
-  const trace = query.data,
-    root = trace.root,
-    correlation = trace.correlation;
+  const root = query.data,
+    correlation = traceCorrelation(root);
   const byId = new Map(
     observationsQuery.data?.pages
       .flatMap((page) => page.items)
@@ -121,7 +122,7 @@ export function TraceDetail({ traceId }: { traceId: string }) {
     ...observations.map((item) => Date.parse(item.ended_at ?? item.started_at)),
   );
   const duration = Math.max(1, latest - start);
-  const source = safeSource(trace.source_url);
+  const source = safeSource(root.source_url);
   const [field, direction] = order.split(":");
   const rows: TimelineRow[] =
     order === "tree"
@@ -132,8 +133,8 @@ export function TraceDetail({ traceId }: { traceId: string }) {
           )
           .map((observation) => ({ observation, depth: 0, childCount: 0 }));
   const selected = selectedId ? byId.get(selectedId) : undefined;
-  const provider = trace.provider === "langfuse" ? "Langfuse" : "Logfire";
-  const runPath = `${basePath}/sessions/${correlation.session_id}/threads/${correlation.thread_id}/runs/${correlation.run_id}?view=debug`;
+  const provider = backend.data?.type && backendName(backend.data.type);
+  const run = runPath(basePath, correlation);
   return (
     <DetailPage
       back={`${basePath}/traces`}
@@ -153,14 +154,19 @@ export function TraceDetail({ traceId }: { traceId: string }) {
             </IconTile>
           }
           name={root.name}
-          resourceKey={trace.id}
+          resourceKey={root.trace_id}
           actions={
             <>
-              <Button variant="outline" render={<Link to={runPath} />}>
-                {t("View run")}
-                <ArrowRightIcon aria-hidden="true" />
-              </Button>
-              {source && (
+              {run && (
+                <Button
+                  variant="outline"
+                  render={<Link to={`${run}?view=debug`} />}
+                >
+                  {t("View run")}
+                  <ArrowRightIcon aria-hidden="true" />
+                </Button>
+              )}
+              {source && provider && (
                 <Button
                   variant="outline"
                   render={
@@ -177,7 +183,7 @@ export function TraceDetail({ traceId }: { traceId: string }) {
                   <ArrowSquareOutIcon aria-hidden="true" />
                 </Button>
               )}
-              {source && (
+              {source && provider && (
                 <span id={sourceHintId} className="sr-only">
                   {t("Opens in a new tab")}
                 </span>
@@ -250,18 +256,6 @@ export function TraceDetail({ traceId }: { traceId: string }) {
                     { value: "cost:asc", label: t("Cost · lowest first") },
                   ]}
                 />
-                <ChoiceField
-                  label={t("Content")}
-                  variant="filter"
-                  value={view}
-                  onValueChange={(value) => {
-                    if (value === "compact" || value === "full") setView(value);
-                  }}
-                  options={[
-                    { value: "full", label: t("Full") },
-                    { value: "compact", label: t("Compact") },
-                  ]}
-                />
               </div>
             </div>
             <ObservationTree
@@ -309,17 +303,13 @@ export function TraceDetail({ traceId }: { traceId: string }) {
         )}
         {tab === "content" && (
           <div>
-            <CompactNotice view={view} onFull={() => setView("full")} />
             <div className={styles.contentPair}>
               {(["input", "output"] as const).map((key) => (
                 <Section
                   key={key}
                   title={t(key === "input" ? "Input" : "Output")}
                 >
-                  <TraceContent
-                    content={root[key]}
-                    compact={view === "compact"}
-                  />
+                  <TraceContent content={root[key]} />
                 </Section>
               ))}
             </div>
@@ -332,19 +322,21 @@ export function TraceDetail({ traceId }: { traceId: string }) {
         )}
         {tab === "metadata" && (
           <div className={styles.payloads}>
-            <CompactNotice view={view} onFull={() => setView("full")} />
             <ObservationDiagnostics observation={root} />
             <ObservationPayloads observation={root} />
             <DisclosureSection title={<>{t("Correlation")}</>}>
               <dl className={styles.properties}>
-                {Object.entries(correlation).map(([key, value]) => (
-                  <div key={key}>
-                    <dt>{key}</dt>
-                    <dd>
-                      <CopyableId value={value} />
-                    </dd>
-                  </div>
-                ))}
+                {Object.entries(correlation).map(
+                  ([key, value]) =>
+                    value && (
+                      <div key={key}>
+                        <dt>{key}</dt>
+                        <dd>
+                          <CopyableId value={value} />
+                        </dd>
+                      </div>
+                    ),
+                )}
               </dl>
             </DisclosureSection>
           </div>
@@ -357,11 +349,7 @@ export function TraceDetail({ traceId }: { traceId: string }) {
           title={<ObservationTitle observation={selected} />}
           onClose={() => setSelectedId(null)}
         >
-          <ObservationPanelBody
-            observation={selected}
-            view={view}
-            onFull={() => setView("full")}
-          />
+          <ObservationPanelBody observation={selected} />
         </Panel>
       )}
     </DetailPage>

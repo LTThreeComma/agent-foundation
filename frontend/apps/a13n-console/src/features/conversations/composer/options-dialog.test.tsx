@@ -10,6 +10,7 @@ const http = vi.hoisted(() => ({ GET: vi.fn() }));
 vi.mock("../../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../../layout/workspace", () => ({
   useWorkspace: () => ({
+    organization: { id: "org_test" },
     workspace: { id: "ws_test" },
     basePath: "/workspace/design",
   }),
@@ -24,21 +25,20 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-it("distinguishes new allocation from reuse and submits the selected identity", async () => {
-  http.GET.mockImplementation(async (path: string) => ({
-    data: {
-      items: path.includes("environment-templates")
-        ? [{ id: "envt_test", name: "Research" }]
-        : path.endsWith("/environments")
-          ? [
-              { id: "env_first", name: "Research" },
-              { id: "env_second", name: "Research" },
-            ]
-          : [],
-    },
-  }));
-  const submit = vi.fn();
-  function ComposerOptions() {
+const vision = {
+  id: "mdl_0123456789abcdef",
+  key: "vision",
+  name: "Vision",
+  enabled: true,
+  provider_id: "provider",
+  config: {
+    model_name: "claude-vision",
+    characteristics: { capabilities: ["image_understanding"] },
+  },
+};
+
+function mount(submit: (options: unknown) => void) {
+  function Editor() {
     const options = useRunOptions();
     return (
       <>
@@ -47,23 +47,49 @@ it("distinguishes new allocation from reuse and submits the selected identity", 
       </>
     );
   }
-  const cache = new QueryClient();
   render(
-    <QueryClientProvider client={cache}>
+    <QueryClientProvider client={new QueryClient()}>
       <MemoryRouter>
-        <ComposerOptions />
+        <Editor />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+it("distinguishes new allocation from reuse and submits the selected identity", async () => {
+  http.GET.mockImplementation(async (path: string) => ({
+    response: new Response(null),
+    data: {
+      items: path.includes("environment-templates")
+        ? [{ id: "envt_test", name: "Research" }]
+        : path.endsWith("/environments")
+          ? [
+              { id: "env_first", name: "Research", status: "ready" },
+              { id: "env_second", name: "Research", status: "stopped" },
+              { id: "env_gone", name: "Research", status: "deleted" },
+            ]
+          : [],
+      next_cursor: null,
+    },
+  }));
+  const submit = vi.fn();
+  mount(submit);
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Options" }));
   await user.click(screen.getByRole("combobox", { name: "Environment" }));
+  // Without a choice the agent's own template is reserved; there is no "none".
+  expect(screen.queryByRole("option", { name: "No environment" })).toBeNull();
   await user.click(
     await screen.findByRole("option", {
       name: "Create from template: Research",
     }),
   );
   await user.click(screen.getByRole("button", { name: "Apply" }));
+  expect(
+    screen.getByRole("button", {
+      name: "Environment: Create from template: Research",
+    }),
+  ).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Submit" }));
   expect(submit).toHaveBeenLastCalledWith(
     expect.objectContaining({ environment: { template_id: "envt_test" } }),
@@ -75,6 +101,12 @@ it("distinguishes new allocation from reuse and submits the selected identity", 
       name: "Reuse existing: Research (env_first)",
     }),
   ).toBeTruthy();
+  // A deleted environment is never mounted again.
+  expect(
+    screen.queryByRole("option", {
+      name: "Reuse existing: Research (env_gone)",
+    }),
+  ).toBeNull();
   await user.click(
     screen.getByRole("option", {
       name: "Reuse existing: Research (env_second)",
@@ -85,98 +117,27 @@ it("distinguishes new allocation from reuse and submits the selected identity", 
   expect(submit).toHaveBeenLastCalledWith(
     expect.objectContaining({ environment: { environment_id: "env_second" } }),
   );
-  cache.clear();
 });
 
-it("preserves a captured directory and clears it when switching targets", async () => {
-  http.GET.mockResolvedValue({
-    data: {
-      items: [
-        {
-          id: "env_saved",
-          name: "Device",
-          device_id: "native-device",
-        },
-      ],
-    },
-  });
-  const submit = vi.fn();
-  function Editor() {
-    const options = useRunOptions({
-      environment: {
-        environment_id: "env_saved",
-        working_directory: "/captured",
-      },
-    });
-    return (
-      <>
-        <RunOptions options={options} />
-        <button onClick={() => submit(options.build())}>Submit</button>
-      </>
-    );
-  }
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter>
-        <Editor />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-  const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Submit" }));
-  expect(submit).toHaveBeenLastCalledWith(
-    expect.objectContaining({
-      environment: {
-        environment_id: "env_saved",
-        working_directory: "/captured",
-      },
-    }),
-  );
-  await user.click(screen.getByRole("button", { name: "Options" }));
-  await screen.findByRole("textbox", { name: "Working directory" });
-  await user.click(screen.getByRole("combobox", { name: "Environment" }));
-  await user.click(await screen.findByRole("option", { name: "Inherit" }));
-  await user.click(screen.getByRole("button", { name: "Apply" }));
-  await user.click(screen.getByRole("button", { name: "Submit" }));
-  expect(submit.mock.lastCall?.[0].environment).toBeUndefined();
-});
-
-it("submits a Device default as an explicit path without access presets", async () => {
+it("mounts a Device at a working directory and clears it when switching targets", async () => {
   http.GET.mockImplementation(async (path: string) => ({
-    data: path.endsWith("/device")
-      ? {
-          default_working_directory: "/selected/default",
-          directory_discovery: false,
-        }
-      : {
-          items: path.endsWith("/environments")
-            ? [
-                {
-                  id: "env_device",
-                  name: "Device",
-                  device_id: "native-device",
-                },
-              ]
-            : [],
-        },
+    response: new Response(null),
+    data: {
+      items: path.endsWith("/environments")
+        ? [
+            {
+              id: "env_device",
+              name: "Device",
+              status: "ready",
+              device_id: "native-device",
+            },
+          ]
+        : [],
+      next_cursor: null,
+    },
   }));
   const submit = vi.fn();
-  function Editor() {
-    const options = useRunOptions();
-    return (
-      <>
-        <RunOptions options={options} />
-        <button onClick={() => submit(options.build())}>Submit</button>
-      </>
-    );
-  }
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter>
-        <Editor />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  mount(submit);
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Options" }));
   await user.click(screen.getByRole("combobox", { name: "Environment" }));
@@ -185,69 +146,58 @@ it("submits a Device default as an explicit path without access presets", async 
       name: "Reuse existing: Device (env_device)",
     }),
   );
-  await screen.findByText(
-    "Browsing is disabled on this Device. Use its default or enter a known path.",
+  await user.type(
+    await screen.findByRole("textbox", { name: "Working directory" }),
+    "/work/repo",
   );
-  await user.click(screen.getByRole("button", { name: "Use Device default" }));
-  expect(
-    screen.queryByRole("combobox", { name: "Access permissions" }),
-  ).toBeNull();
   await user.click(screen.getByRole("button", { name: "Apply" }));
   await user.click(screen.getByRole("button", { name: "Submit" }));
   expect(submit).toHaveBeenLastCalledWith(
     expect.objectContaining({
       environment: {
         environment_id: "env_device",
-        working_directory: "/selected/default",
+        working_directory: "/work/repo",
       },
     }),
   );
+  await user.click(screen.getByRole("button", { name: "Options" }));
+  await user.click(screen.getByRole("combobox", { name: "Environment" }));
+  await user.click(await screen.findByRole("option", { name: "Inherit" }));
+  expect(
+    screen.queryByRole("textbox", { name: "Working directory" }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Apply" }));
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  expect(submit.mock.lastCall?.[0].environment).toBeUndefined();
 });
 
 it("overrides media understanding per kind and names the choice on its chip", async () => {
   http.GET.mockImplementation(async (path: string) => ({
-    response: new Response(null, { headers: { ETag: '"v0"' } }),
+    response: new Response(null),
     data: path.endsWith("/media-understanding-defaults")
-      ? { image: "vision", video: null, audio: null }
+      ? {
+          id: "ws_test",
+          version: 0,
+          image: "mdl_0123456789abcdef",
+          video: null,
+          audio: null,
+        }
       : {
           items: path.endsWith("/model-providers")
             ? [{ id: "provider", name: "Local", enabled: true }]
             : path.endsWith("/models")
-              ? [
-                  {
-                    key: "vision",
-                    name: "Vision",
-                    upstream_model: "claude-vision",
-                    enabled: true,
-                    provider_id: "provider",
-                    declarations: { capabilities: ["image_understanding"] },
-                  },
-                ]
+              ? [vision]
               : [],
+          next_cursor: null,
         },
   }));
   const submit = vi.fn();
-  function Editor() {
-    const options = useRunOptions({
-      config_override: { media_understanding: { image: "retired" } },
-    });
-    return (
-      <>
-        <RunOptions options={options} />
-        <button onClick={() => submit(options.build())}>Submit</button>
-      </>
-    );
-  }
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter>
-        <Editor />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  mount(submit);
   const user = userEvent.setup();
-  // The saved key travels on the chip until the dialog can name its model.
-  await user.click(screen.getByRole("button", { name: "Image: retired" }));
+  await user.click(screen.getByRole("button", { name: "Options" }));
+  await user.click(
+    await screen.findByRole("button", { name: /Media understanding/ }),
+  );
   const image = await screen.findByRole("combobox", {
     name: "Image understanding",
   });
@@ -261,8 +211,14 @@ it("overrides media understanding per kind and names the choice on its chip", as
   await user.click(screen.getByRole("button", { name: "Apply" }));
   expect(screen.getByRole("button", { name: "Image: Vision" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  expect(submit.mock.lastCall?.[0].config_override).toEqual({
-    media_understanding: { image: "vision", video: null, audio: null },
+  expect(submit.mock.lastCall?.[0].options).toEqual({
+    overrides: {
+      media_understanding: {
+        image: "mdl_0123456789abcdef",
+        video: null,
+        audio: null,
+      },
+    },
   });
   // Opened without a media chip, the rows stay behind a summary of the selection.
   await user.click(screen.getByRole("button", { name: "Options" }));
@@ -281,5 +237,43 @@ it("overrides media understanding per kind and names the choice on its chip", as
   await user.click(screen.getByRole("button", { name: "Apply" }));
   expect(screen.queryByRole("button", { name: /^Image:/ })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Submit" }));
-  expect(submit.mock.lastCall?.[0].config_override).toBeUndefined();
+  expect(submit.mock.lastCall?.[0].options).toBeUndefined();
+});
+
+it("sends the chosen model and instructions as the run's overrides", async () => {
+  http.GET.mockImplementation(async (path: string) => ({
+    response: new Response(null),
+    data: {
+      items: path.endsWith("/model-providers")
+        ? [{ id: "provider", name: "Local", enabled: true }]
+        : path.endsWith("/models")
+          ? [vision]
+          : [],
+      next_cursor: null,
+    },
+  }));
+  const submit = vi.fn();
+  mount(submit);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Options" }));
+  await user.click(await screen.findByRole("combobox", { name: "Model" }));
+  await user.click(await screen.findByRole("option", { name: /^Vision/ }));
+  await user.click(
+    screen.getByRole("switch", { name: "Override instructions" }),
+  );
+  await user.type(
+    screen.getByRole("textbox", { name: "Instructions override" }),
+    "Answer briefly.",
+  );
+  await user.click(screen.getByRole("button", { name: "Apply" }));
+  expect(screen.getByRole("button", { name: "Model: Vision" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Submit" }));
+  expect(submit.mock.lastCall?.[0]).toEqual({
+    options: {
+      overrides: {
+        model: { model_id: "mdl_0123456789abcdef" },
+        instructions: "Answer briefly.",
+      },
+    },
+  });
 });

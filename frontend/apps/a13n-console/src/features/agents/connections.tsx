@@ -1,4 +1,4 @@
-import { CaretDownIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 import {
   BrandIcon,
   Button,
@@ -6,23 +6,18 @@ import {
   Collapsible,
   CollapsiblePanel,
   CollapsibleTrigger,
-  FormField,
-  Input,
   Label,
   Spinner,
 } from "a13n-ui";
 import { useQuery } from "@tanstack/react-query";
-import { useState, type Dispatch, type SetStateAction } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "react-router";
 import { useClient } from "../../auth/context";
-import { useWorkspace } from "../../layout/workspace";
 import { data, type Schema } from "../../shared/api";
 import { ErrorNotice, Loading } from "../../shared/feedback";
-import type { useAgentChoices } from "./choices";
 import type { AgentConfig } from "./configuration";
+import { connectionPath, connectionState } from "../connections/api";
 import { MCPConnectionIcon } from "../connections/mcp-icon";
-import { Section } from "../../shared/page";
 import { ToolPermissions, type PermissionChoice } from "./tool-permissions";
 import styles from "./agents.module.css";
 
@@ -45,159 +40,12 @@ export function ConnectionBrandIcon({
 }) {
   return (
     <span className={styles.connectionBrandIcon} aria-hidden="true">
-      {connection.source.kind === "connector" ? (
-        <BrandIcon alias={connection.source.connector_key} size={18} />
+      {"app" in connection.config ? (
+        <BrandIcon alias={connection.config.app} size={18} />
       ) : (
-        <MCPConnectionIcon
-          endpoint={connection.source.endpoint_url}
-          size={18}
-        />
+        <MCPConnectionIcon endpoint={connection.config.url} size={18} />
       )}
     </span>
-  );
-}
-
-export function AgentConnections({
-  choices,
-  connections,
-  setConnections,
-  readOnly = false,
-}: {
-  choices: ReturnType<typeof useAgentChoices>;
-  connections: Connections;
-  setConnections: Dispatch<SetStateAction<Connections>>;
-  readOnly?: boolean;
-}) {
-  const { t } = useTranslation();
-  const { basePath } = useWorkspace();
-  const [adding, setAdding] = useState(false);
-  const [search, setSearch] = useState("");
-  const available = choices.data?.connections ?? [];
-  const unselected = available.filter(
-    (item) =>
-      !connections.some((selection) => selection.connection_id === item.id) &&
-      displayName(item)
-        .toLocaleLowerCase()
-        .includes(search.toLocaleLowerCase()),
-  );
-  function update(id: string, change: (selection: Selection) => Selection) {
-    setConnections((previous) =>
-      previous.map((selection) =>
-        selection.connection_id === id ? change(selection) : selection,
-      ),
-    );
-  }
-  return (
-    <Section
-      title={t("Connections")}
-      description={t("Connected services this agent can use.")}
-    >
-      {connections.length > 0 ? (
-        <div className={styles.toolsetCard}>
-          {connections.map((selection) => (
-            <ConnectionGroup
-              key={selection.connection_id}
-              connection={available.find(
-                (item) => item.id === selection.connection_id,
-              )}
-              selection={selection}
-              readOnly={readOnly}
-              onChange={(change) => update(selection.connection_id, change)}
-              onRemove={() =>
-                setConnections((previous) =>
-                  previous.filter(
-                    (item) => item.connection_id !== selection.connection_id,
-                  ),
-                )
-              }
-            />
-          ))}
-        </div>
-      ) : readOnly ? (
-        <p className="text-sm text-muted-foreground">{t("None")}</p>
-      ) : null}
-      {!readOnly && (
-        <Collapsible
-          className={styles.connectionPicker}
-          open={adding}
-          onOpenChange={setAdding}
-        >
-          <CollapsibleTrigger
-            render={<Button type="button" variant="secondary" size="sm" />}
-          >
-            {adding ? <XIcon size={14} /> : <PlusIcon size={14} />}
-            {adding ? t("Close selection") : t("Add Connections")}
-          </CollapsibleTrigger>
-          <CollapsiblePanel>
-            <div className={styles.connectionPickerPanel}>
-              {available.length > 6 && (
-                <FormField label={t("Search Connections")} hideLabel>
-                  <Input
-                    type="search"
-                    placeholder={t("Search…")}
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </FormField>
-              )}
-              <div className={`a13n-scrollbar ${styles.connectionPickerList}`}>
-                {unselected.map((connection) => (
-                  <button
-                    key={connection.id}
-                    type="button"
-                    className={styles.connectionPickerItem}
-                    disabled={connection.status !== "ready"}
-                    aria-label={
-                      connection.status === "ready"
-                        ? displayName(connection)
-                        : `${displayName(connection)} — ${t(connection.status)}`
-                    }
-                    onClick={() => {
-                      setConnections((previous) => [
-                        ...previous,
-                        {
-                          connection_id: connection.id,
-                          tools: null,
-                          defer_loading: true,
-                        },
-                      ]);
-                      setAdding(false);
-                    }}
-                  >
-                    <ConnectionBrandIcon connection={connection} />
-                    <span>{displayName(connection)}</span>
-                    {connection.status !== "ready" && (
-                      <span className={styles.toolsetGroupCount}>
-                        {t(connection.status)}
-                      </span>
-                    )}
-                  </button>
-                ))}
-                {!available.length && choices.isPending && (
-                  <Loading variant="list" rows={3} />
-                )}
-                {!unselected.length && !choices.isPending && (
-                  <p className={styles.capabilityEmpty}>
-                    {t(
-                      search
-                        ? "No matching capabilities"
-                        : "All available resources added",
-                    )}
-                  </p>
-                )}
-              </div>
-              <Link
-                to={`${basePath}/connections`}
-                rel="noreferrer"
-                className={styles.setupCapability}
-              >
-                {t("Set up Connections")}
-              </Link>
-            </div>
-          </CollapsiblePanel>
-        </Collapsible>
-      )}
-    </Section>
   );
 }
 
@@ -223,35 +71,16 @@ export function ConnectionGroup({
     enabled: !!connection,
     retry: false,
     refetchOnWindowFocus: false,
-    queryFn: async (): Promise<CatalogTool[]> => {
+    queryFn: async ({ signal }): Promise<CatalogTool[]> => {
       if (!connection) return [];
-      if (connection.source.kind === "mcp") {
-        const result = await client.http
-          .POST("/api/v1/connections/{connection_id}/mcp/discover", {
-            params: { path: { connection_id: connection.id } },
-            body: { expected_version: connection.version },
-          })
-          .then(data);
-        return result.items.map((tool) => ({
-          name: tool.name,
-          description: tool.description ?? "",
-        }));
-      }
       const result = await client.http
         .GET(
-          "/api/v1/connector-providers/{connector_provider_id}/connectors/{connector_key}/tools",
-          {
-            params: {
-              path: {
-                connector_provider_id: connection.source.provider_id,
-                connector_key: connection.source.connector_key,
-              },
-            },
-          },
+          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools",
+          { params: { path: connectionPath(connection) }, signal },
         )
         .then(data);
       return result.items.map((tool) => ({
-        name: tool.key,
+        name: tool.name,
         description: tool.description ?? "",
       }));
     },
@@ -312,8 +141,8 @@ export function ConnectionGroup({
       return { ...current, permissions };
     });
   }
-  const editingDisabled =
-    readOnly || !connection || connection.status !== "ready";
+  const state = connection && connectionState(connection);
+  const editingDisabled = readOnly || state !== "ready";
   return (
     <section className={styles.toolsetGroup}>
       <Collapsible open={expanded} onOpenChange={setExpanded}>
@@ -359,9 +188,9 @@ export function ConnectionGroup({
               />
             }
           >
-            {(!connection || connection.status !== "ready") && (
+            {state !== "ready" && (
               <span className={styles.toolsetGroupCount}>
-                {connection ? t(connection.status) : t("Unavailable")}
+                {state ? t(state) : t("Unavailable")}
               </span>
             )}
             {catalog.isPending && connection ? (

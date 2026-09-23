@@ -1,5 +1,5 @@
 import { Button } from "a13n-ui";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -9,14 +9,13 @@ import { ErrorNotice, Loading } from "../../../shared/feedback";
 import type { Schema } from "../../../shared/api";
 import { useAgent } from "../../agents/queries";
 import { conversationQueries, runPath, type ViewLevel } from "../api";
-import { useEarlierMessages } from "../earlier";
 import { emptyExecution } from "../execution";
 import { compareCursors, mergeRetainedItems } from "../projection";
 import { useRunStream } from "../run-stream";
 import { runTimeline } from "../timeline";
 import { DebugRunSection } from "./debug/run-section";
+import { DroppedItems } from "./dropped-items";
 import { useThreadRuns } from "./thread-runs";
-import { EarlierMessages } from "./earlier-messages";
 import { useKeepPosition } from "./keep-position";
 import { RunBlock } from "./run-block";
 import debug from "./debug/debug.module.css";
@@ -25,7 +24,8 @@ import styles from "./transcript.module.css";
 /**
  * The Runs this one continues, above it. Chat reaches further back on its own
  * as the reader scrolls up; Debug asks first, because every ancestor section
- * replays that Run's stream.
+ * replays that Run's display. The lineage is read a page at a time, only once
+ * the reader reaches past what is loaded.
  */
 export function HistoryTranscript({
   runId,
@@ -33,7 +33,7 @@ export function HistoryTranscript({
   level,
 }: {
   runId: string;
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
   level: ViewLevel;
 }) {
   const client = useClient(),
@@ -41,11 +41,20 @@ export function HistoryTranscript({
     { t } = useTranslation(),
     queries = conversationQueries(client, workspace.id),
     [limit, setLimit] = useState(0);
-  const lineage = useQuery(queries.lineage(runId));
-  const ancestors = [...(lineage.data?.items ?? [])]
-    .filter((entry) => entry.run_id !== runId)
-    .sort((a, b) => a.depth_from_head - b.depth_from_head);
+  const lineage = useInfiniteQuery(queries.lineage(runId));
+  // The lineage reads nearest first and starts at the Run itself.
+  const ancestors = (lineage.data?.pages ?? [])
+    .flatMap((page) => page.items)
+    .filter((entry) => entry.id !== runId);
   const shown = ancestors.slice(0, limit);
+  // The reader asked for a Run beyond the pages read so far; a failed read
+  // waits for the reader to retry it.
+  const { fetchNextPage, isFetchingNextPage, isFetchNextPageError } = lineage;
+  const beyond =
+    limit > ancestors.length && lineage.hasNextPage && !isFetchNextPageError;
+  useEffect(() => {
+    if (beyond && !isFetchingNextPage) void fetchNextPage();
+  }, [beyond, isFetchingNextPage, fetchNextPage]);
   // Everything a Chat ancestor is read from. Reaching further back waits for
   // all of it, so one automatic load never cascades into the next and the
   // reader's position is restored only once the new Run has its own height.
@@ -53,22 +62,23 @@ export function HistoryTranscript({
     queries:
       level === "chat"
         ? shown.flatMap((entry) => [
-            { ...queries.run(entry.run_id), staleTime: 60_000 },
-            { ...queries.items(entry.run_id), staleTime: 60_000 },
-            ...(entry.thread_id && entry.thread_id !== thread.id
+            { ...queries.run(entry.id), staleTime: 60_000 },
+            { ...queries.items(entry.id), staleTime: 60_000 },
+            ...(entry.thread_id !== thread.id
               ? [{ ...queries.thread(entry.thread_id), staleTime: 60_000 }]
               : []),
           ])
         : [],
     combine: (results) => results.every((result) => !result.isPending),
   });
-  const keepPosition = useKeepPosition(!loaded);
+  const settled = loaded && !beyond && !isFetchingNextPage;
+  const keepPosition = useKeepPosition(!settled);
   const sentinel = useRef<HTMLDivElement>(null);
-  const more = ancestors.length > limit;
+  const more = ancestors.length > limit || lineage.hasNextPage;
   useEffect(() => {
     const mark = sentinel.current;
     const stage = mark?.closest("[data-session-stage]");
-    if (!loaded || !mark || !(stage instanceof HTMLElement)) return;
+    if (!settled || !mark || !(stage instanceof HTMLElement)) return;
     if (typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
       (records) => {
@@ -82,7 +92,7 @@ export function HistoryTranscript({
     );
     observer.observe(mark);
     return () => observer.disconnect();
-  }, [keepPosition, loaded, more]);
+  }, [keepPosition, settled, more]);
   return (
     <>
       <ErrorNotice error={lineage.error} retry={() => void lineage.refetch()} />
@@ -95,6 +105,7 @@ export function HistoryTranscript({
               size="sm"
               variant="ghost"
               className={styles.earlierRunsAction}
+              loading={beyond || isFetchingNextPage}
               onClick={() => setLimit((value) => value + 1)}
               type="button"
             >
@@ -106,17 +117,9 @@ export function HistoryTranscript({
         .reverse()
         .map((entry) =>
           level === "debug" ? (
-            <DebugAncestor
-              key={entry.run_id}
-              runId={entry.run_id}
-              thread={thread}
-            />
+            <DebugAncestor key={entry.id} runId={entry.id} thread={thread} />
           ) : (
-            <HistoricalRun
-              key={entry.run_id}
-              runId={entry.run_id}
-              thread={thread}
-            />
+            <HistoricalRun key={entry.id} runId={entry.id} thread={thread} />
           ),
         )}
     </>
@@ -128,8 +131,8 @@ export function HistoryTranscript({
  * read, numbered and linked as that Thread's Run, not as one of this Thread.
  */
 function useOwnThread(
-  run: Schema["RunResource"] | undefined,
-  thread: Schema["ThreadResource"],
+  run: Schema["RunView"] | undefined,
+  thread: Schema["ThreadView"],
 ) {
   const client = useClient(),
     { workspace } = useWorkspace();
@@ -154,13 +157,13 @@ function DebugAncestor({
   thread,
 }: {
   runId: string;
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
 }) {
   const client = useClient(),
     { workspace } = useWorkspace(),
     queries = conversationQueries(client, workspace.id);
   const runQuery = useQuery({ ...queries.run(runId), staleTime: 60_000 });
-  const live = useRunStream(runId, { replay: true });
+  const live = useRunStream(runId);
   const run = runQuery.data;
   const own = useOwnThread(run, thread);
   const timeline = useMemo(
@@ -187,13 +190,15 @@ function DebugAncestor({
       />
     );
   return (
-    <DebugRunSection
-      run={run}
-      thread={own.thread}
-      timeline={timeline}
-      index={own.number(run.id)}
-      runNumber={own.number}
-    />
+    <>
+      <DroppedItems count={live.dropped} />
+      <DebugRunSection
+        run={run}
+        thread={own.thread}
+        timeline={timeline}
+        index={own.number(run.id)}
+      />
+    </>
   );
 }
 
@@ -202,7 +207,7 @@ function HistoricalRun({
   thread,
 }: {
   runId: string;
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
 }) {
   const client = useClient(),
     { workspace, basePath } = useWorkspace(),
@@ -212,27 +217,12 @@ function HistoricalRun({
   const own = useOwnThread(runQuery.data, thread);
   const agent = useAgent(runQuery.data?.agent_id);
   const retained = useQuery({ ...queries.items(runId), staleTime: 60_000 });
-  const [older, setOlder] = useState<Schema["ItemResource"][]>([]);
-  const initialized = useRef(false);
-  const earlier = useEarlierMessages(runId, (page) =>
-    setOlder((items) => [...page.items, ...items]),
-  );
-  const { resetEarlier } = earlier;
-  useEffect(() => {
-    if (retained.data?.available && !initialized.current) {
-      initialized.current = true;
-      resetEarlier(retained.data.next_cursor);
-    }
-  }, [retained.data, resetEarlier]);
   const items = useMemo(
     () =>
       [
-        ...mergeRetainedItems(
-          mergeRetainedItems(new Map(), older),
-          retained.data?.items ?? [],
-        ).values(),
+        ...mergeRetainedItems(new Map(), retained.data?.items ?? []).values(),
       ].sort((a, b) => compareCursors(a.firstCursor, b.firstCursor)),
-    [retained.data, older],
+    [retained.data],
   );
   const run = runQuery.data;
   // A historical run is read from its retained Items alone: the timeline
@@ -270,7 +260,7 @@ function HistoricalRun({
         timeline={timeline}
         agentName={agent.data?.name}
         agentImageUrl={agent.data?.image_url}
-        earlier={<EarlierMessages {...earlier} />}
+        earlier={<DroppedItems count={retained.data.dropped} />}
         separatorAction={
           <Link
             className={styles.separatorLink}
@@ -280,14 +270,6 @@ function HistoricalRun({
           </Link>
         }
       />
-      {!retained.data.available && (
-        <p className={styles.notice}>
-          {t("Detailed items are currently unavailable for this run.")}
-          <Button size="sm" variant="outline" type="button" onClick={reload}>
-            {t("Reload")}
-          </Button>
-        </p>
-      )}
     </div>
   );
 }

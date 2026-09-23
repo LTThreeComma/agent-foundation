@@ -18,6 +18,7 @@ const variants: Record<string, StatusPillVariant> = {
   revoked: "danger",
   queued: "warning",
   ready: "success",
+  reauthorization_required: "warning",
   receiving: "success",
   reception_off: "neutral",
   running: "info",

@@ -12,7 +12,7 @@ import { ProviderIcon } from "../../shared/identity";
 import { ModelProviderCatalog, ProviderConnectForm } from "./add-provider";
 import { type useProviderDraft } from "./provider-draft";
 
-type Definition = Schema["ModelProviderMetadata"];
+type Definition = Schema["ProviderType"];
 
 /**
  * First step of the add flow: the providers this scope already connects, with
@@ -24,7 +24,7 @@ export function ProviderChoice({
   onSelect,
   onConnect,
 }: {
-  providers: readonly Schema["ModelProvider"][];
+  providers: readonly Schema["Provider"][];
   definitions: readonly Definition[];
   onSelect: (id: string) => void;
   onConnect: () => void;

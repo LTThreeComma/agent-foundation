@@ -256,15 +256,6 @@
   color: var(--a13n-secondary);
   font-size: 12px;
 }
-.connectionPicker {
-  margin-top: 12px;
-}
-.connectionPickerPanel {
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 10px;
-  background: var(--a13n-surface);
-}
 .connectionNameTrigger,
 .connectionSummaryTrigger {
   display: flex;
@@ -290,31 +281,6 @@
 .connectionSummaryTrigger:focus-visible {
   outline: 2px solid var(--a13n-focus);
   outline-offset: 2px;
-}
-.connectionPickerList {
-  max-height: 240px;
-  overflow-y: auto;
-}
-.connectionPickerItem {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 9px 10px;
-  border-radius: 6px;
-  text-align: left;
-  font-size: 13px;
-}
-.connectionPickerItem:hover,
-.connectionPickerItem:focus-visible {
-  background: var(--a13n-hover);
-}
-.connectionPickerItem:disabled {
-  cursor: not-allowed;
-  color: var(--a13n-secondary);
-}
-.connectionPickerItem:disabled:hover {
-  background: transparent;
 }
 .connectionBrandIcon {
   display: inline-flex;
@@ -524,22 +490,6 @@
   resize: vertical;
   min-height: 210px;
 }
-.capabilityEmpty {
-  font-size: 13px;
-  color: var(--a13n-secondary);
-  padding: 12px 0;
-}
-.setupCapability {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--a13n-secondary);
-  margin-top: 12px;
-}
-.setupCapability:hover {
-  color: var(--a13n-text);
-}
 @media (max-width: 760px) {
   .identity {
     grid-template-columns: minmax(0, 1fr);
@@ -586,18 +536,6 @@
 }
 
 /* Agents list toolbar and creation ---------------------------------------- */
-.chip {
-  border-radius: 999px;
-}
-.chip[data-active="true"] {
-  background: var(--a13n-selected);
-  color: var(--a13n-text);
-}
-.searchBound {
-  margin: 10px 2px 0;
-  color: var(--a13n-secondary);
-  font-size: 12px;
-}
 .splitButton {
   display: inline-flex;
   align-items: stretch;

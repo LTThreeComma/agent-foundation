@@ -14,7 +14,11 @@ export {
   type ProviderCategoryValue,
 } from "./categories";
 export { ProviderConnectFields } from "./connect-fields";
-export { ConnectionTest, type ConnectionTestResult } from "./connection-test";
+export {
+  ConnectionTest,
+  providerTestResult,
+  type ConnectionTestResult,
+} from "./connection-test";
 export {
   CredentialRow,
   credentialRowState,

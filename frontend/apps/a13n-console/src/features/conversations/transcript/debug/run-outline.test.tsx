@@ -44,7 +44,7 @@ function Outline({
   thread,
   runId,
 }: {
-  thread: Schema["ThreadResource"];
+  thread: Schema["ThreadView"];
   runId: string;
 }) {
   return <RunOutline outline={useRunOutline(thread, runId)} />;

@@ -50,13 +50,6 @@
   gap: 8px;
   min-width: 0;
 }
-.groupNote {
-  margin: 0;
-  padding: 0 4px;
-  color: var(--a13n-secondary);
-  font-size: 12px;
-  line-height: 1.6;
-}
 
 /* Connection facts: what the saved provider answers for, never editable. */
 .fact {

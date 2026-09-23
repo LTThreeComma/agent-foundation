@@ -10,12 +10,14 @@ import type { Schema } from "../../shared/api";
 import { ResourceTable, type ResourceColumn } from "../../shared/collection";
 import { CopyButton, Identifier, IconTile } from "../../shared/identity";
 import { Timestamp } from "../../shared/feedback";
+import { UNKNOWN } from "../../shared/unknown";
 import {
   compareObservations,
   compareValues,
   type ObservationSort,
 } from "./sorting";
 import { formatCost } from "../../shared/cost";
+import { runPath, traceCorrelation } from "./correlation";
 import { ObservationGlyph } from "./identity";
 import { Duration, TracePill } from "./values";
 import styles from "./list.module.css";
@@ -35,7 +37,8 @@ export function TraceTable({
   sort,
   onSortChange,
 }: {
-  items: readonly Schema["Trace"][];
+  /** Trace roots, one per attempt. */
+  items: readonly Schema["Span"][];
   basePath: string;
   costs: Readonly<Record<string, string | null>>;
   sort: ObservationSort;
@@ -45,8 +48,12 @@ export function TraceTable({
   const navigate = useNavigate();
   const sorted = [...items].sort((a, b) =>
     sort.field === "cost"
-      ? compareValues(costs[a.id] ?? null, costs[b.id] ?? null, sort.direction)
-      : compareObservations(a.root, b.root, sort),
+      ? compareValues(
+          costs[a.trace_id] ?? null,
+          costs[b.trace_id] ?? null,
+          sort.direction,
+        )
+      : compareObservations(a, b, sort),
   );
   const detailUrl = (id: string) =>
     `${basePath}/traces/${encodeURIComponent(id)}`;
@@ -77,23 +84,23 @@ export function TraceTable({
       </Button>
     );
   };
-  const columns: ResourceColumn<Schema["Trace"]>[] = [
+  const columns: ResourceColumn<Schema["Span"]>[] = [
     {
       label: t("Trace"),
       tone: "primary",
       render: (item) => (
         <div className={styles.traceIdentity}>
           <IconTile size={32}>
-            <ObservationGlyph observation={item.root} />
+            <ObservationGlyph observation={item} />
           </IconTile>
           <div className={styles.traceCopy}>
-            <Link className={styles.traceName} to={detailUrl(item.id)}>
-              {item.root.name}
+            <Link className={styles.traceName} to={detailUrl(item.trace_id)}>
+              {item.name}
             </Link>
             <span className={styles.traceMeta}>
-              <Identifier value={item.id} />
+              <Identifier value={item.trace_id} />
               <CopyButton
-                value={item.id}
+                value={item.trace_id}
                 iconOnly
                 copyLabel={t("Copy trace ID")}
               />
@@ -105,22 +112,14 @@ export function TraceTable({
     {
       label: t("Run"),
       dataColumn: "run",
-      render: (item) => (
-        <Link
-          className={styles.runLink}
-          title={`${t("Run ID")}: ${item.correlation.run_id}`}
-          to={`${basePath}/sessions/${item.correlation.session_id}/threads/${item.correlation.thread_id}/runs/${item.correlation.run_id}`}
-        >
-          {item.correlation.run_id}
-        </Link>
-      ),
+      render: (item) => <RunLink root={item} basePath={basePath} />,
     },
     {
       label: t("Level"),
       dataColumn: "level",
-      render: (item) => <TracePill level={item.root.level} />,
+      render: (item) => <TracePill level={item.level} />,
     },
-    ...sortable.map(({ field, label }): ResourceColumn<Schema["Trace"]> => {
+    ...sortable.map(({ field, label }): ResourceColumn<Schema["Span"]> => {
       const translated = t(label);
       return {
         label: translated,
@@ -136,17 +135,17 @@ export function TraceTable({
         header: sortHeader(field, translated),
         render: (item) =>
           field === "duration" ? (
-            <Duration observation={item.root} />
+            <Duration observation={item} />
           ) : field === "cost" ? (
             <span
               title={t(
                 "Reported observation costs; missing costs are not estimated.",
               )}
             >
-              {formatCost(costs[item.id] ?? null)}
+              {formatCost(costs[item.trace_id] ?? null)}
             </span>
           ) : (
-            <Timestamp value={item.root.started_at} />
+            <Timestamp value={item.started_at} />
           ),
       };
     }),
@@ -157,7 +156,32 @@ export function TraceTable({
       columns={columns}
       caption={t("Traces")}
       className={styles.traceTable}
-      onRowActivate={(item) => navigate(detailUrl(item.id))}
+      onRowActivate={(item) => navigate(detailUrl(item.trace_id))}
     />
+  );
+}
+
+/** The traced run; without its session and thread it reads as its ID alone. */
+function RunLink({
+  root,
+  basePath,
+}: {
+  root: Schema["Span"];
+  basePath: string;
+}) {
+  const { t } = useTranslation();
+  const correlation = traceCorrelation(root),
+    runId = correlation.run_id,
+    path = runPath(basePath, correlation);
+  if (!runId) return <>{UNKNOWN}</>;
+  const title = `${t("Run ID")}: ${runId}`;
+  return path ? (
+    <Link className={styles.runLink} title={title} to={path}>
+      {runId}
+    </Link>
+  ) : (
+    <span className={styles.runLink} title={title}>
+      {runId}
+    </span>
   );
 }
