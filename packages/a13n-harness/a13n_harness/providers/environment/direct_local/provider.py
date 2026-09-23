@@ -156,7 +156,7 @@ class DirectLocalEnvironment(Environment):
             if policy[field] is not None:
                 policy[field] = sorted(policy[field])
         backing_identity = await asyncio.to_thread(
-            local_backing_identity, provider_key=_PROVIDER_KEY, roots=(root,), policy=policy
+            local_backing_identity, provider_key=self.provider_key, roots=(root,), policy=policy
         )
         generation = f"generation-{uuid4().hex[:16]}"
         files = LocalFileOperator(
@@ -194,7 +194,7 @@ class DirectLocalEnvironment(Environment):
                     max_spool_bytes=self._configuration.max_spool_bytes,
                 ),
                 shell_profiles=self._configuration.shell_profiles,
-                provider_type=_PROVIDER_KEY,
+                provider_type=self.provider_key,
                 environment_id=self.environment_id,
                 mount_id=mount_id,
                 generation=generation,

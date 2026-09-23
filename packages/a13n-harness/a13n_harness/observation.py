@@ -23,6 +23,7 @@ from opentelemetry.trace import INVALID_SPAN, NoOpTracerProvider, Span, Status, 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation
 from pydantic_ai.models.instrumented import InstrumentationSettings
 
+from a13n_harness._json import redact_json
 from a13n_harness._tool_observation import (
     _current_tool,
     _ToolObservation,
@@ -868,4 +869,5 @@ __all__ = [
     "HarnessTraceContent",
     "SkillObservation",
     "record_span_metadata",
+    "redact_json",
 ]

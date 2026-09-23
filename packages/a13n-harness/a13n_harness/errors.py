@@ -76,3 +76,6 @@ class RunCleanupError(HarnessError):
         )
         self.outcome = outcome
         self.causes = causes
+        # Causes are not chained, so a logged traceback would otherwise omit what actually failed.
+        for cause in causes:
+            self.add_note(f"Cleanup cause: {cause!r}")
