@@ -65,12 +65,14 @@ Service allocates four suffix lengths. The table specifies capacity assumptions,
 
 The shared Service allocator owns these prefix assignments; callers cannot choose a shorter length:
 
-| Suffix length | Allocated prefixes                                                                                                                                                                                                                                             |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 20            | `acct`, `ap`, `cconn`, `cnr`, `conn`, `envp`, `envtpl`, `hsub`, `mcpc`, `mdl`, `memprov`, `mprov`, `org`, `sa`, `sk`, `usr`, `ws`                                                                                                                              |
-| 24            | `a2actx`, `aguitb`, `apr`, `ast`, `bind`, `env`, `envrev`, `hsubr`, `img`, `inv`, `rb`, `sess`, `session`, `skr`, `sku`, `tgt`                                                                                                                                 |
-| 28            | `a2amsg`, `a2apush`, `a2atask`, `aguirb`, `crr`, `envop`, `ibat`, `inb`, `qsub`, `rat`, `run`                                                                                                                                                                  |
-| 32            | `ase`, `aud`, `audit`, `comment`, `csa`, `dlv`, `ect`, `effect`, `envowner`, `iadm`, `idem`, `key`, `lev`, `lsp`, `message`, `mos`, `mut`, `ntf`, `obx`, `opg`, `prt`, `reply`, `svc`, `thread`, `tool`, `wrk`; every other valid kind defaults to this length |
+| Suffix length | Allocated prefixes                                                                                                                 |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 20            | `ap`, `cnr`, `conn`, `envp`, `envtpl`, `mdl`, `mprov`, `org`, `sa`, `sk`, `usr`, `ws`                                              |
+| 24            | `apr`, `ast`, `env`, `inv`, `rb`, `sess`, `skr`                                                                                    |
+| 28            | `inb`, `rat`, `run`                                                                                                                |
+| 32            | `ase`, `audit`, `ect`, `key`, `obx`, `prt`, `sec`, `sub`, `thread`, `wprov`, `wrk`; every other valid kind defaults to this length |
+
+Prefixes allocated by the historical Service remain retired and are never reassigned: `a2actx`, `a2amsg`, `a2apush`, `a2atask`, `acct`, `aguirb`, `aguitb`, `aud`, `bind`, `cconn`, `comment`, `crr`, `csa`, `dlv`, `effect`, `envop`, `envowner`, `envrev`, `hsub`, `hsubr`, `iadm`, `ibat`, `idem`, `img`, `lev`, `lsp`, `mcpc`, `memprov`, `message`, `mos`, `mut`, `ntf`, `opg`, `qsub`, `reply`, `session`, `sku`, `svc`, `tgt` and `tool`.
 
 Kinds used for claims, worker incarnations, publication generations, or authentication workflows retain at least 128 random bits regardless of their expected volume. New kinds start at 32 characters until their owner assigns a smaller tier against an explicit lifetime volume budget. A deployment expected to exceed a tier's budget must review allocation length before that growth; cleanup does not reset the budget. These probabilities apply per prefix, not to the aggregate probability across all kinds.
 

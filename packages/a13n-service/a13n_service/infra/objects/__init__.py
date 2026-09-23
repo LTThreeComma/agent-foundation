@@ -1,1 +1,1 @@
-"""Bounded object reads, immutable payloads and version-conditional snapshots."""
+"""Object storage adapters behind the create-only contract in `interface.py`."""

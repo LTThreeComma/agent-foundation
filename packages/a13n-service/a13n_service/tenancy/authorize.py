@@ -36,6 +36,14 @@ class Scope:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceScope:
+    """A resolved workspace: the scope of every execution and of workspace-owned resources."""
+
+    organization_id: str
+    workspace_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class Grant:
     organization_id: str
     workspace_id: str | None
@@ -113,10 +121,8 @@ def authorize(
 
 
 def execution_authority(
-    principal: Principal, scope: Scope, *, roles: Mapping[str, frozenset[Verb]] = ROLES
+    principal: Principal, scope: WorkspaceScope, *, roles: Mapping[str, frozenset[Verb]] = ROLES
 ) -> ExecutionAuthority:
-    if scope.workspace_id is None:
-        raise ServiceError("invalid_argument", "Execution requires a workspace")
     authorize(principal, scope, "run", roles=roles)
     return ExecutionAuthority(
         principal_id=principal.id,

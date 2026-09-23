@@ -1,38 +1,17 @@
-"""Export the Native HTTP and existing streaming wire models without opening process resources."""
+"""Export the Service HTTP contract without opening process resources."""
 
 import argparse
 import json
 from pathlib import Path
 
 from a13n_service.app import build_app
-from a13n_service.infra.cursors import encode
-from a13n_service.runs.delivery import ControlPayload, DataPayload, frame
-from pydantic import TypeAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "proto/a13n-service"
 
 
 def documents() -> dict[str, dict]:
-    cursor = encode("run-stream", "run_example", 1, 1)
-    data = DataPayload(
-        attempt_number=1,
-        event_sequence=1,
-        event={"type": "TEXT_MESSAGE_START", "messageId": "msg_example", "role": "assistant"},
-    )
-    control = ControlPayload(display_version="display_example", cursor=cursor, retry_after_ms=0)
-    return {
-        "openapi.json": build_app().openapi(),
-        "run-stream.schema.json": TypeAdapter(DataPayload | ControlPayload).json_schema(),
-        "run-stream.examples.json": {
-            "data": frame("data", data.model_dump(mode="json"), cursor=cursor),
-            "reset": frame("reset", control.model_dump(mode="json")),
-            "closed": frame("closed", control.model_dump(mode="json")),
-            "retry_later": frame(
-                "retry_later", control.model_copy(update={"retry_after_ms": 1000}).model_dump(mode="json")
-            ),
-        },
-    }
+    return {"openapi.json": build_app().openapi()}
 
 
 def main() -> None:

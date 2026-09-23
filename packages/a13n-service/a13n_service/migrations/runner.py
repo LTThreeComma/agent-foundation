@@ -23,6 +23,7 @@ def configuration(distribution: Distribution) -> Config:
     config.set_main_option("version_locations", ":".join(str(path) for path in distribution.migrations))
     config.set_main_option("file_template", "%%(year)d%%(month).2d%%(day).2d_%%(rev)s_%%(slug)s")
     config.attributes["metadata"] = distribution.metadata()
+    config.attributes["rules"] = distribution.table_rules()
     return config
 
 

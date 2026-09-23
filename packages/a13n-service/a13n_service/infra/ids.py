@@ -10,63 +10,17 @@ from pydantic import StringConstraints
 ObjectId = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$", max_length=72)]
 
 _KIND_PATTERN = re.compile(r"^[a-z][a-z0-9]{1,7}$")
-# Allocation tiers and their lifetime volume budgets are owned by
-# spec/data-conventions.md#service-id-allocation.
-_ID_RANDOM_BYTES = {
-    **dict.fromkeys(
-        (
-            "acct",
-            "ap",
-            "cconn",
-            "cnr",
-            "conn",
-            "envp",
-            "envtpl",
-            "hsub",
-            "mcpc",
-            "mdl",
-            "mprov",
-            "memprov",
-            "org",
-            "sa",
-            "sk",
-            "usr",
-            "ws",
-        ),
-        10,
-    ),
-    **dict.fromkeys(
-        (
-            "a2actx",
-            "aguitb",
-            "apr",
-            "ast",
-            "bind",
-            "env",
-            "envrev",
-            "hsubr",
-            "img",
-            "inv",
-            "rb",
-            "sess",
-            "session",
-            "skr",
-            "sku",
-            "tgt",
-        ),
-        12,
-    ),
-    **dict.fromkeys(
-        ("a2amsg", "a2apush", "a2atask", "aguirb", "crr", "envop", "ibat", "inb", "qsub", "rat", "run"),
-        14,
-    ),
+# Tiers and their lifetime volume budgets are owned by spec/data-conventions.md#service-id-allocation.
+# Every kind not listed here allocates 32 hex characters (128 random bits).
+_RANDOM_BYTES = {
+    **dict.fromkeys(("ap", "cnr", "conn", "envp", "envtpl", "mdl", "mprov", "org", "sa", "sk", "usr", "ws"), 10),
+    **dict.fromkeys(("apr", "ast", "env", "inv", "rb", "sess", "skr"), 12),
+    **dict.fromkeys(("inb", "rat", "run"), 14),
 }
 
 
 def new_object_id(kind: str) -> str:
-    """Allocate one unpredictable Service object ID for an assigned kind."""
-
+    """Allocate one unpredictable Service object ID for a kind prefix."""
     if _KIND_PATTERN.fullmatch(kind) is None:
         raise ValueError("object ID kind must be 2-8 lowercase ASCII letters or digits")
-    suffix = secrets.token_hex(_ID_RANDOM_BYTES.get(kind, 16))
-    return f"{kind}_{suffix}"
+    return f"{kind}_{secrets.token_hex(_RANDOM_BYTES.get(kind, 16))}"

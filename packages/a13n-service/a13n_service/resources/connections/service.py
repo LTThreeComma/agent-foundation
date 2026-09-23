@@ -126,7 +126,6 @@ async def resolve(
     verb: Literal["read", "run"],
     authority: ExecutionAuthority | None = None,
 ) -> ResolvedConnection:
-    assert scope.workspace_id is not None
     row = await get_row(session, scope.workspace_id, connection_id)
     authorize(actor, Scope(row.organization_id, row.workspace_id), verb, authority=authority)
     if not row.enabled:
@@ -172,7 +171,6 @@ async def create(
 ) -> ConnectionView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-    assert scope.workspace_id is not None
     try:
         catalog.require(body.type)
     except ProviderNotSelected:
@@ -232,7 +230,6 @@ async def create(
 async def get(storage: Storage, actor: Principal, workspace_id: str, connection_id: str) -> ConnectionView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         return view(await get_row(session, scope.workspace_id, connection_id))
 
 
@@ -241,7 +238,6 @@ async def list_connections(
 ) -> ConnectionPage:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         position = cursors.id_position(cursor, "connections", scope.workspace_id)
         rows = list(
             await session.scalars(
@@ -276,7 +272,6 @@ async def update(
         raise ServiceError("invalid_argument", "Only the credential may be cleared")
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-        assert scope.workspace_id is not None
         current = await get_row(session, scope.workspace_id, connection_id)
         require_match(if_match, current.id, current.version)
     if body.config is not None:
@@ -371,3 +366,27 @@ async def validate_endpoint(config: ConnectionConfig, policy: EndpointPolicy) ->
             await policy.validate(config.oauth.issuer)
     except ValueError:
         raise ServiceError("invalid_argument", "Connection endpoint is not permitted") from None
+
+
+async def validate_caller_headers(session: AsyncSession, workspace_id: str, headers: dict[str, dict[str, str]]) -> None:
+    """Thread caller headers may name only this workspace's enabled MCP connections."""
+    if not headers:
+        return
+    known = set(
+        (
+            await session.scalars(
+                select(ConnectionRow.id).where(
+                    ConnectionRow.workspace_id == workspace_id,
+                    ConnectionRow.id.in_(headers),
+                    ConnectionRow.type == "mcp",
+                    ConnectionRow.enabled,
+                )
+            )
+        ).all()
+    )
+    for connection_id in sorted(set(headers) - known):
+        raise ServiceError(
+            "invalid_argument",
+            "Caller headers name an unknown MCP connection",
+            {"field": "mcp_headers", "reason": connection_id},
+        )

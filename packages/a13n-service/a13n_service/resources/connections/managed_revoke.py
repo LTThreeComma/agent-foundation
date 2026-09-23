@@ -38,7 +38,6 @@ async def revoke(
 ) -> AuthorizationView:
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "run")
-        assert scope.workspace_id is not None
         connection = await get_row(session, scope.workspace_id, connection_id, lock=True)
         selected = ResolvedConnection(
             connection.id,

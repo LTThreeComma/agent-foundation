@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from a13n_service.infra import cursors
 from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, short_session, transaction
-from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.errors import ServiceError, disabled, not_found
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
 from a13n_service.resources.agents.schemas import (
@@ -26,7 +27,7 @@ from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
 from a13n_service.resources.connections.scope import connection_scope, validate_tools
 from a13n_service.resources.connections.service import resolve as resolve_connection
 from a13n_service.resources.models.tables import ModelProviderRow, ModelRow
-from a13n_service.tenancy.authorize import Principal, Scope, authorize
+from a13n_service.tenancy.authorize import Principal, Scope, WorkspaceScope, authorize
 from a13n_service.tenancy.grants import workspace_scope
 
 
@@ -45,7 +46,9 @@ async def resolve_agent(session: AsyncSession, workspace_id: str, reference: str
     return row
 
 
-async def validate_configuration(session: AsyncSession, actor: Principal, scope: Scope, config: AgentConfig) -> None:
+async def validate_configuration(
+    session: AsyncSession, actor: Principal, scope: WorkspaceScope, config: AgentConfig
+) -> None:
     model = await session.get(ModelRow, config.model_id)
     if (
         model is None
@@ -96,7 +99,6 @@ async def create_agent(storage: Storage, actor: Principal, workspace_id: str, bo
     try:
         async with transaction(storage) as session:
             scope = await workspace_scope(session, actor, workspace_id, "write")
-            assert scope.workspace_id is not None
             workspace_id = scope.workspace_id
             await validate_configuration(session, actor, scope, body.config)
             head = AgentRow(
@@ -143,7 +145,6 @@ async def create_revision(
 ) -> RevisionView:
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         head = await resolve_agent(session, workspace_id, agent_id, lock=True)
         require_match(if_match, head.id, head.version)
@@ -174,7 +175,6 @@ async def create_revision(
 async def get_agent(storage: Storage, actor: Principal, workspace_id: str, agent_id: str) -> AgentView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         row = await resolve_agent(session, workspace_id, agent_id)
         return AgentView.model_validate(row)
@@ -185,7 +185,6 @@ async def get_revision(
 ) -> RevisionView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         head = await resolve_agent(session, workspace_id, agent_id)
         agent_id = head.id
@@ -200,7 +199,6 @@ async def list_agents(
 ) -> AgentPage:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         after = cursors.id_position(cursor, "agents", workspace_id)
         rows = (
@@ -222,7 +220,6 @@ async def list_revisions(
 ) -> RevisionPage:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         head = await resolve_agent(session, workspace_id, agent_id)
         agent_id = head.id
@@ -246,7 +243,6 @@ async def set_default(
 ) -> AgentView:
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-        assert scope.workspace_id is not None
         workspace_id = scope.workspace_id
         head = await resolve_agent(session, workspace_id, agent_id, lock=True)
         require_match(if_match, head.id, head.version)
@@ -270,3 +266,38 @@ async def set_default(
         await session.flush()
         await session.refresh(head)
         return AgentView.model_validate(head)
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedRevision:
+    agent_id: str
+    revision_id: str
+    digest: str
+    config: AgentConfig
+
+
+async def select_revision(
+    session: AsyncSession, workspace_id: str, agent_id: str, revision_id: str | None
+) -> SelectedRevision:
+    """The revision a new run executes: the requested one, else the head's default. Archived heads refuse."""
+    head = await session.scalar(select(AgentRow).where(AgentRow.workspace_id == workspace_id, AgentRow.id == agent_id))
+    if head is None:
+        raise not_found("agent", agent_id)
+    if head.archived_at is not None:
+        raise disabled("agent", agent_id)
+    selected = revision_id or head.default_revision_id
+    revision = (
+        await session.scalar(
+            select(AgentRevisionRow).where(AgentRevisionRow.agent_id == head.id, AgentRevisionRow.id == selected)
+        )
+        if selected is not None
+        else None
+    )
+    if revision is None:
+        raise not_found("agent_revision", selected or agent_id)
+    return SelectedRevision(
+        agent_id=head.id,
+        revision_id=revision.id,
+        digest=revision.digest,
+        config=AgentConfig.model_validate(revision.config),
+    )

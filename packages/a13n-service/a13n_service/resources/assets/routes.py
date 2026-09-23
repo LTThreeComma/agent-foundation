@@ -31,10 +31,10 @@ async def upload(
     await rate_limit(
         state.redis,
         f"upload:{scope.workspace_id}:{actor.id}",
-        limit=config.uploads.limit,
-        window_seconds=config.uploads.window_seconds,
+        limit=config.objects.upload_limit,
+        window_seconds=config.objects.upload_window_seconds,
     )
-    bound = min(config.uploads.max_bytes, config.objects.max_bytes)
+    bound = min(config.objects.upload_bytes, config.objects.max_bytes)
     content = await file.read(bound + 1)
     if len(content) > bound:
         raise ServiceError("payload_too_large", "Upload exceeds its byte limit")

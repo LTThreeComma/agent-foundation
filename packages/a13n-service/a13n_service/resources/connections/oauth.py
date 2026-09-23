@@ -38,7 +38,6 @@ def cookie_name(authorization_id: str, state: str) -> str:
 async def status(storage: Storage, actor: Principal, workspace_id: str, connection_id: str) -> AuthorizationView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        assert scope.workspace_id is not None
         await get_row(session, scope.workspace_id, connection_id)
         row = await session.scalar(
             select(ConnectionAuthorizationRow).where(
@@ -94,7 +93,6 @@ async def start(
         raise ServiceError("unavailable", "OAuth discovery failed; check the issuer and client configuration") from None
     state, binding, verifier = (secrets.token_urlsafe(32) for _ in range(3))
     async with transaction(storage) as session:
-        assert scope.workspace_id is not None
         connection = await get_row(session, scope.workspace_id, connection_id, lock=True)
         if connection.version != selected.version or not connection.enabled:
             raise ServiceError("conflict", "Connection changed during OAuth preparation")
@@ -192,7 +190,6 @@ async def callback(
         scope = await workspace_scope(session, actor, found.workspace_id, "run")
     owned = None
     async with transaction(storage) as session:
-        assert scope.workspace_id is not None
         connection = await get_row(session, scope.workspace_id, connection_id, lock=True)
         row = await session.get(ConnectionAuthorizationRow, authorization_id, with_for_update=True)
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
@@ -248,7 +245,6 @@ async def callback(
 async def revoke(storage: Storage, actor: Principal, workspace_id: str, connection_id: str) -> AuthorizationView:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "run")
-    assert scope.workspace_id is not None
     async with transaction(storage) as session:
         await get_row(session, scope.workspace_id, connection_id, lock=True)
         row = await session.scalar(

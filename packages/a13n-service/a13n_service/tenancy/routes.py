@@ -106,7 +106,7 @@ async def current_credential(request: Request, response: Response) -> Authentica
         kind=kind,
         csrf_token=request.headers.get("x-csrf-token"),
         mutation=request.method not in {"GET", "HEAD", "OPTIONS"},
-        session_seconds=request.app.state.authentication.session_seconds,
+        session_seconds=request.app.state.settings.auth.session_seconds,
     )
 
     response.headers["Cache-Control"] = "no-store"
@@ -114,7 +114,7 @@ async def current_credential(request: Request, response: Response) -> Authentica
         response.set_cookie(
             COOKIE_NAME,
             secret,
-            max_age=request.app.state.authentication.session_seconds,
+            max_age=request.app.state.settings.auth.session_seconds,
             secure=True,
             httponly=True,
             samesite="strict",
@@ -130,7 +130,7 @@ async def current_principal(credential: Annotated[Authenticated, Depends(current
 @router.post("/auth/login", response_model=LoginOutput)
 async def password_login(request: Request, body: LoginInput, response: Response) -> LoginOutput:
     check_origin(request)
-    config = request.app.state.authentication
+    config = request.app.state.settings.auth
     peer = request.client.host if request.client else "unknown"
     for identity in ("login:peer:" + peer, "login:email:" + str(body.email)):
         await rate_limit(

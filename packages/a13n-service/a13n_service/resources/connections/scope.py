@@ -9,7 +9,6 @@ from a13n_service.infra.errors import ServiceError
 from a13n_service.resources.agents.schemas import AgentConfig
 from a13n_service.resources.connections.schemas import ConnectionSelection, selected_tools
 from a13n_service.resources.connections.service import ResolvedConnection, authentication_headers, resolve
-from a13n_service.runs.waiting import ToolTarget
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope
 
 
@@ -56,9 +55,3 @@ async def validate_context(
 
 def effective_headers(config: AgentConfig, headers: Mapping[str, Mapping[str, str]]) -> dict[str, dict[str, str]]:
     return {connection: dict(headers[connection]) for connection in connection_scope(config) if headers.get(connection)}
-
-
-def validate_approval_target(actual: ToolTarget, expected: tuple[ToolTarget, ...]) -> None:
-    """A human approval cannot survive a changed endpoint or private account binding."""
-    if any(target != actual for target in expected):
-        raise ServiceError("disabled", "The approved Connection or private account changed; submit a new decision")

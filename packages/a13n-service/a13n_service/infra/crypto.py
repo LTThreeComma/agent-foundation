@@ -1,6 +1,7 @@
 """One authenticated credential envelope, bound to its exact tenant and column."""
 
 import base64
+import hashlib
 import json
 import secrets
 from collections.abc import Mapping
@@ -11,6 +12,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from a13n_service.infra.errors import ServiceError
+
+
+def secret_hash(secret: str) -> str:
+    """Lookup digest of a high-entropy random secret (tokens, leases); not suitable for passwords."""
+    return hashlib.sha256(secret.encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

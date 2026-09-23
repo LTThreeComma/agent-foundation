@@ -26,6 +26,8 @@ class AgentConfig(BaseModel):
     user_questions: bool = False
     client_tools: tuple[ClientToolDefinition, ...] = Field(default=(), max_length=128)
     tool_permissions: ToolPermissions = Field(default_factory=ToolPermissions)
+    # Referenced, not pinned: read when the primary sandbox is created or started, never during execution.
+    environment_template_id: ObjectId | None = None
 
     @model_validator(mode="after")
     def interaction_configuration(self) -> AgentConfig:

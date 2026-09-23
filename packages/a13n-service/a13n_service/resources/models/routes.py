@@ -35,8 +35,8 @@ async def create_provider(
         actor,
         organization_id,
         body,
-        catalog=request.app.state.model_catalog,
-        policy=request.app.state.endpoint_policy,
+        catalog=request.app.state.runtime.registry.models,
+        policy=request.app.state.runtime.endpoint_policy,
         keys=request.app.state.key_ring,
     )
     response.headers["ETag"] = etag(result.id, result.version)
@@ -69,7 +69,7 @@ async def create_model(
         actor,
         organization_id,
         body,
-        catalog=request.app.state.model_catalog,
+        catalog=request.app.state.runtime.registry.models,
     )
     response.headers["ETag"] = etag(result.id, result.version)
     return result
@@ -130,7 +130,8 @@ async def provider_types(
 
     after = cursors.id_position(cursor, "model_provider_types", "deployment")
     definitions = sorted(
-        (item for item in request.app.state.model_catalog.values() if item.type > after), key=lambda item: item.type
+        (item for item in request.app.state.runtime.registry.models.values() if item.type > after),
+        key=lambda item: item.type,
     )[: limit + 1]
     return ProviderTypePage(
         items=[

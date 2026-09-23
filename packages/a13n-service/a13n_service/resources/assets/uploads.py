@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import Storage, short_session
 from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.objects.local import LocalObjects, ObjectConflict, ObjectCorrupt, StoredObject
+from a13n_service.infra.objects.interface import ObjectStore
 from a13n_service.resources.assets.schemas import UploadIntent, UploadReceipt, UploadView
-from a13n_service.tenancy.authorize import Principal, Scope, Verb
+from a13n_service.tenancy.authorize import Principal, Verb, WorkspaceScope
 from a13n_service.tenancy.grants import principal_for, workspace_scope
 
 
@@ -23,12 +23,12 @@ def raw_key(organization_id: str, upload_id: str) -> str:
     return f"orgs/{organization_id}/uploads/{upload_id}"
 
 
-async def authorize_scope(session: AsyncSession, actor: Principal, workspace_id: str, verb: Verb) -> Scope:
+async def authorize_scope(session: AsyncSession, actor: Principal, workspace_id: str, verb: Verb) -> WorkspaceScope:
     current = await principal_for(session, actor.id, confinement=actor.confinement)
     return await workspace_scope(session, current, workspace_id, verb)
 
 
-async def scope_for(storage: Storage, actor: Principal, workspace_id: str, verb: Verb) -> Scope:
+async def scope_for(storage: Storage, actor: Principal, workspace_id: str, verb: Verb) -> WorkspaceScope:
     async with short_session(storage) as session:
         return await authorize_scope(session, actor, workspace_id, verb)
 
@@ -44,35 +44,20 @@ def request_key(value: str | None) -> str:
     return value
 
 
-async def publish(objects: LocalObjects, key: str, content: bytes, *, timeout: float, intent: bool) -> StoredObject:
+async def publish(objects: ObjectStore, key: str, content: bytes, *, content_type: str, timeout: float) -> None:
+    """Create-only: repeating the same bytes after a lost acknowledgement succeeds, different bytes conflict."""
     try:
         async with asyncio.timeout(timeout):
-            result = await objects.create_payload(key, content)
-    except (TimeoutError, OSError, ObjectConflict):
-        # A lost acknowledgement may follow durable publication. Read back the
-        # same immutable key; never write new bytes or infer success from existence.
-        try:
-            async with asyncio.timeout(timeout):
-                result = await objects.read(key)
-        except (TimeoutError, OSError, ObjectCorrupt):
-            raise ServiceError("unavailable", "Upload publication could not be confirmed") from None
-        if result is None:
-            raise ServiceError("unavailable", "Upload publication could not be confirmed") from None
-    except ObjectCorrupt:
-        raise ServiceError("unavailable", "Upload storage is corrupt") from None
-    if result.content != content or result.writer is not None:
+            await objects.put(key, content, content_type=content_type)
+    except TimeoutError:
         raise ServiceError(
-            "conflict" if intent else "unavailable",
-            "Upload key was used for different content or metadata"
-            if intent
-            else "Upload bytes do not match their receipt",
-        )
-    return result
+            "unavailable", "Upload publication could not be confirmed", {"dependency": "objects"}
+        ) from None
 
 
 async def stage(
     storage: Storage,
-    objects: LocalObjects,
+    objects: ObjectStore,
     actor: Principal,
     workspace_id: str,
     *,
@@ -84,8 +69,7 @@ async def stage(
     timeout: float,
 ) -> UploadView:
     scope = await scope_for(storage, actor, workspace_id, "write")
-    assert scope.workspace_id is not None
-    if len(content) > min(max_bytes, objects.max_bytes):
+    if len(content) > max_bytes:
         raise ServiceError("payload_too_large", "Upload exceeds its byte limit")
     identity = (
         "upl_"
@@ -114,9 +98,13 @@ async def stage(
     # between these writes is repaired only by the exact same explicit request.
     object_key = raw_key(scope.organization_id, identity)
     await publish(
-        objects, object_key + ".receipt.json", canonical(receipt.model_dump(mode="json")), timeout=timeout, intent=True
+        objects,
+        object_key + ".receipt.json",
+        canonical(receipt.model_dump(mode="json")),
+        content_type="application/json",
+        timeout=timeout,
     )
-    await publish(objects, object_key, content, timeout=timeout, intent=False)
+    await publish(objects, object_key, content, content_type=receipt.content_type, timeout=timeout)
     await scope_for(storage, actor, scope.workspace_id, "write")
     return UploadView(
         upload_id=identity,
@@ -127,16 +115,18 @@ async def stage(
     )
 
 
-async def load(objects: LocalObjects, scope: Scope, upload_id: str, *, timeout: float) -> tuple[UploadReceipt, bytes]:
+async def load(
+    objects: ObjectStore, scope: WorkspaceScope, upload_id: str, *, timeout: float
+) -> tuple[UploadReceipt, bytes]:
     key = raw_key(scope.organization_id, upload_id)
     try:
         async with asyncio.timeout(timeout):
-            stored = await objects.read(key + ".receipt.json")
+            stored = await objects.get(key + ".receipt.json")
             if stored is None:
                 raise ServiceError("not_found", "Upload was not found")
-            receipt = UploadReceipt.model_validate_json(stored.content)
+            receipt = UploadReceipt.model_validate_json(stored)
             intent = receipt.model_dump(mode="json", exclude={"request_digest"})
-            if stored.writer is not None or hashlib.sha256(canonical(intent)).hexdigest() != receipt.request_digest:
+            if hashlib.sha256(canonical(intent)).hexdigest() != receipt.request_digest:
                 raise ServiceError("unavailable", "Upload receipt is corrupt")
             if (
                 receipt.id != upload_id
@@ -144,9 +134,9 @@ async def load(objects: LocalObjects, scope: Scope, upload_id: str, *, timeout: 
                 or receipt.workspace_id != scope.workspace_id
             ):
                 raise ServiceError("not_found", "Upload was not found")
-            raw = await objects.read(key)
-    except (TimeoutError, OSError, ObjectCorrupt, ValidationError):
+            raw = await objects.get(key)
+    except (TimeoutError, ValidationError):
         raise ServiceError("unavailable", "Upload content is unavailable") from None
-    if raw is None or raw.writer is not None or raw.digest != receipt.digest or len(raw.content) != receipt.size:
+    if raw is None or hashlib.sha256(raw).hexdigest() != receipt.digest or len(raw) != receipt.size:
         raise ServiceError("unavailable", "Upload content is incomplete or corrupt")
-    return receipt, raw.content
+    return receipt, raw

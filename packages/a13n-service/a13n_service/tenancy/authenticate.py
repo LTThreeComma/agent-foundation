@@ -13,6 +13,7 @@ from argon2.exceptions import VerificationError
 from sqlalchemy import func, or_, select
 
 from a13n_service.infra.audit import record
+from a13n_service.infra.crypto import secret_hash
 from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
@@ -22,10 +23,6 @@ from a13n_service.tenancy.grants import principal_for, workspace_scope
 from a13n_service.tenancy.tables import PasswordRow, PrincipalRow
 
 COOKIE_NAME = "__Host-a13n_session"
-
-
-def secret_hash(secret: str) -> str:
-    return hashlib.sha256(secret.encode()).hexdigest()
 
 
 def session_csrf(secret: str) -> str:

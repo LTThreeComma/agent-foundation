@@ -28,3 +28,21 @@ class ServiceError(Exception):
         self.code: ErrorCode = code
         self.message = message
         self.details = dict(details or {})
+
+
+def not_found(kind: str, resource_id: str) -> ServiceError:
+    return ServiceError("not_found", f"{kind} {resource_id} not found", {"kind": kind, "id": resource_id})
+
+
+def conflict(kind: str, resource_id: str, reason: str) -> ServiceError:
+    """A state rule refused the operation; `reason` is a stable machine-readable word."""
+    message = f"{kind} {resource_id}: {reason.replace('_', ' ')}"
+    return ServiceError("conflict", message, {"kind": kind, "id": resource_id, "reason": reason})
+
+
+def disabled(kind: str, resource_id: str) -> ServiceError:
+    return ServiceError("disabled", f"{kind} {resource_id} is disabled", {"kind": kind, "id": resource_id})
+
+
+def invalid(field: str, reason: str) -> ServiceError:
+    return ServiceError("invalid_argument", f"{field}: {reason}", {"field": field, "reason": reason})

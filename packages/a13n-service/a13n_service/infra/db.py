@@ -1,13 +1,20 @@
-"""One engine/session owner and short SQL transaction scopes."""
+"""One engine/session owner, short SQL transaction scopes and the database rules tables declare."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any, ClassVar
 
 import anyio
-from sqlalchemy import BigInteger, DateTime, MetaData, func, text
+from a13n_logging import get_logger
+from sqlalchemy import BigInteger, DateTime, FetchedValue, MetaData, Table, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+logger = get_logger(__name__)
+
+_AFTER_COMMIT = "a13n.after_commit"
 
 
 class Base(DeclarativeBase):
@@ -23,9 +30,82 @@ class Base(DeclarativeBase):
 
 
 class Stamped:
-    version: Mapped[int] = mapped_column(BigInteger, server_default=text("1"))
+    """Mutable rows; the `stamp_resource` trigger advances `version` and `updated_at` on every update.
+
+    ORM flushes read both back, so a row's ETag is current after its own update. A trigger that touches the
+    row from elsewhere (an inbox change bumping its thread) leaves loaded copies stale until refreshed.
+    """
+
+    __mapper_args__: ClassVar[dict[str, Any]] = {"eager_defaults": True}
+
+    version: Mapped[int] = mapped_column(BigInteger, server_default=text("1"), server_onupdate=FetchedValue())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), server_onupdate=FetchedValue()
+    )
+
+
+# Rules are the SQL that declarative constraints cannot express: transition guards, immutability and
+# cross-row checks. A table declares its own with `rules(...)` next to its constraints; tests apply them after
+# `create_all`, and migration generation renders the same statements into the revision that creates the table.
+
+_STAMP_RESOURCE = """
+CREATE FUNCTION stamp_resource() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.version := OLD.version + 1;
+    NEW.updated_at := clock_timestamp();
+    RETURN NEW;
+END $$
+"""
+
+_REFUSE_MUTATION = """
+CREATE FUNCTION refuse_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME;
+END $$
+"""
+
+_GUARD_IDENTITY = """
+CREATE FUNCTION guard_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.id, NEW.organization_id, NEW.workspace_id, NEW.created_by_id, NEW.created_at)
+        IS DISTINCT FROM ROW(OLD.id, OLD.organization_id, OLD.workspace_id, OLD.created_by_id, OLD.created_at)
+    THEN RAISE EXCEPTION '% identity and scope are immutable', TG_TABLE_NAME; END IF;
+    RETURN NEW;
+END $$
+"""
+
+FUNCTIONS = (_STAMP_RESOURCE, _REFUSE_MUTATION, _GUARD_IDENTITY)
+
+
+def trigger(table: str, function: str, *, on: str = "BEFORE UPDATE") -> str:
+    return f"CREATE TRIGGER {function} {on} ON {table} FOR EACH ROW EXECUTE FUNCTION {function}()"
+
+
+def immutable(table: str) -> str:
+    return trigger(table, "refuse_mutation", on="BEFORE UPDATE OR DELETE")
+
+
+def identity_guarded(table: str) -> str:
+    """Tenant resources never change identity, scope or authorship once created."""
+    return trigger(table, "guard_identity")
+
+
+def rules(*statements: str) -> dict[str, Any]:
+    """The `__table_args__` entry carrying a table's rules, in execution order (functions before triggers)."""
+    return {"info": {"rules": statements}}
+
+
+def table_rules(row: type[Base]) -> list[str]:
+    """One table's rules: the version stamp of a `Stamped` row, then what the table declares."""
+    table = row.__table__
+    assert isinstance(table, Table)
+    stamp = [trigger(table.name, "stamp_resource")] if issubclass(row, Stamped) else []
+    return [*stamp, *table.info.get("rules", ())]
+
+
+def schema_rules(rows: Iterable[type[Base]]) -> list[str]:
+    return [*FUNCTIONS, *(statement for row in rows for statement in table_rules(row))]
 
 
 class Storage:
@@ -59,10 +139,38 @@ async def short_session(storage: Storage) -> AsyncIterator[AsyncSession]:
 
 @asynccontextmanager
 async def transaction(storage: Storage) -> AsyncIterator[AsyncSession]:
-    async with short_session(storage) as session, session.begin():
-        yield session
+    """Commit on normal exit; callbacks registered with `after_commit` run only after that commit succeeded."""
+    async with short_session(storage) as session:
+        async with session.begin():
+            yield session
+        for callback in session.info.pop(_AFTER_COMMIT, ()):
+            try:
+                await callback()
+            except Exception as error:
+                # Callbacks are hints such as wakeups; the committed state is already durable and sweeps recover.
+                logger.warning("After-commit callback failed", extra={"error_type": type(error).__name__})
+
+
+def after_commit(session: AsyncSession, callback: Callable[[], Awaitable[None]]) -> None:
+    session.info.setdefault(_AFTER_COMMIT, []).append(callback)
+
+
+async def lock[R: Base](session: AsyncSession, row_type: type[R], row_id: str) -> R | None:
+    """Row lock that also refreshes any stale copy already loaded in this session."""
+    return await session.get(row_type, row_id, with_for_update=True, populate_existing=True)
+
+
+async def now(session: AsyncSession) -> datetime:
+    """Fresh database time; `now()` is frozen at transaction start and is wrong after waiting for locks."""
+    return (await session.execute(select(func.clock_timestamp()))).scalar_one()
 
 
 async def advisory_lock(session: AsyncSession, key: int) -> None:
     """Transaction-only lock for bounded SQL work, never external I/O."""
     await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+def violated_constraint(error: IntegrityError) -> str | None:
+    """The constraint a unique/check/foreign-key violation names, for callers that arbitrate by index."""
+    diag = getattr(error.orig, "diag", None)
+    return getattr(diag, "constraint_name", None)

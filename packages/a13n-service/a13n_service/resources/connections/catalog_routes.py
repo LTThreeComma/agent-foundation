@@ -64,7 +64,6 @@ async def composio_catalog(
     async def before(outbound):
         async with short_session(storage) as session:
             current = await principal_for(session, actor.id, confinement=actor.confinement)
-            assert scope.workspace_id is not None
             await workspace_scope(session, current, scope.workspace_id, "write")
             if selected:
                 row = await get_row(session, selected.workspace_id, selected.id)
