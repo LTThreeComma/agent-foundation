@@ -28,6 +28,7 @@ import {
 import styles from "./conversation.module.css";
 import { useResults } from "./results";
 import { useUnsent } from "./unsent";
+import { LeadIcon } from "./lead-icon";
 
 function threadState(row: ActivityRow) {
   if (row.pending_decision) return "Needs your answer";
@@ -62,11 +63,13 @@ export function ThreadRow({
   presence,
   showRestore = false,
   showProject = false,
+  projectLead = false,
 }: {
   row: ActivityRow;
   presence: Schema<"PresenceFrame"> | null;
   showRestore?: boolean;
   showProject?: boolean;
+  projectLead?: boolean;
 }) {
   const { tracker: results } = useResults();
   const unsent = useUnsent().inputs.has(row.thread.thread_id);
@@ -118,9 +121,12 @@ export function ThreadRow({
             `${styles.threadLink} ${isActive ? styles.selected : ""}`
           }
         >
-          <ThreadStateIcon row={row} />
+          {projectLead ? <LeadIcon size={18} /> : <ThreadStateIcon row={row} />}
           <span>
             <strong title={title}>{title}</strong>
+            {projectLead && title !== "Coordinator" && (
+              <small>Coordinator</small>
+            )}
             {showProject && (
               <small>
                 {row.project_name ??
@@ -132,13 +138,8 @@ export function ThreadRow({
             {threadState(row) && <small>{threadState(row)}</small>}
           </span>
           {unsent && (
-            <span
-              className={styles.unsentMarker}
-              role="img"
-              aria-label="Unsent input"
-              title="Unsent input"
-            >
-              <PencilSimple aria-hidden="true" />
+            <span className={styles.unsentMarker} title="Shared, unsent input">
+              Draft
             </span>
           )}
           {unread && (

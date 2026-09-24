@@ -24,6 +24,7 @@ from a13n_harness_ui.model_presets import (
     settings_presets,
     validate_base_url,
 )
+from a13n_harness_ui.model_reasoning_mode import ReasoningModeControl, describe_reasoning_mode
 from a13n_harness_ui.resource_names import model_name
 
 type AuthenticationKind = Literal["api_key", "codex_subscription", "grok_subscription"]
@@ -68,9 +69,9 @@ SUBSCRIPTION_CONNECTIONS = (
         authentication="codex_subscription",
         models=tuple(
             ModelChoice(value=value, label=model_name("codex", value))
-            for value in ("gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-terra")
+            for value in ("gpt-6-sol", "gpt-6-astra", "gpt-5.6-terra")
         ),
-        default_model="gpt-5.6-sol",
+        default_model="gpt-6-sol",
     ),
     ModelConnection(
         id="grok-subscription",
@@ -141,12 +142,12 @@ class ModelOptionsRequest(StrictModel):
     connection: str = Field(min_length=1, max_length=128)
     model_id: str = Field(min_length=1, max_length=480)
     base_url: str | None = Field(default=None, max_length=4096)
+    settings: dict[str, JsonValue] | None = None
 
 
 class ModelRecipeRequest(ModelOptionsRequest):
     authentication: ModelAuthentication | None = None
     preset: str | None = None
-    settings: dict[str, JsonValue] | None = None
     model_configuration: dict[str, JsonValue] = Field(default_factory=dict)
     model_characteristics: ModelCharacteristics | None = None
 
@@ -201,6 +202,7 @@ class ModelOptions(StrictModel):
     characteristics: ModelCharacteristics
     known_capabilities: bool
     supports_service_tier: bool
+    reasoning_mode: ReasoningModeControl
     native_tools: tuple[ModelToolChoice, ...] = ()
 
 
@@ -284,6 +286,7 @@ def model_options(request: ModelOptionsRequest) -> ModelOptions:
         ),
         known_capabilities=known_capabilities is not None,
         supports_service_tier=connection.id in {"codex", "openai-responses", "openai-chat"},
+        reasoning_mode=describe_reasoning_mode(route, request.settings or {}),
         native_tools=model_tool_choices(route, connection.authentication, base_url),
     )
 

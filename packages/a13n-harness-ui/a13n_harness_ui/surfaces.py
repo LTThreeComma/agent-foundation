@@ -15,8 +15,10 @@ from a13n_harness_ui.conversation import ConversationExcerpt
 from a13n_harness_ui.environment_bindings import EnvironmentBindingSelection, LocalRoots, validate_binding_aliases
 from a13n_harness_ui.goal import GoalView
 from a13n_harness_ui.live import LiveEvent, RootStreamSummary
+from a13n_harness_ui.model_controls import ModelControlSelection
 from a13n_harness_ui.model_fast import FastControl
-from a13n_harness_ui.model_thinking import ThinkingControl, ThinkingSelection
+from a13n_harness_ui.model_reasoning_mode import ReasoningModeControl
+from a13n_harness_ui.model_thinking import ThinkingControl
 from a13n_harness_ui.output_comment_models import SavedOutputTarget
 from a13n_harness_ui.storage import AgentResourceSource, MarkdownSubagentSource, ThreadConfiguration
 from a13n_harness_ui.storage import ThreadConfigurationPatch as StoredThreadConfigurationPatch
@@ -32,13 +34,11 @@ class SurfaceModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
 
-class RunModelOverrides(SurfaceModel):
+class RunModelOverrides(ModelControlSelection):
     """Per-operation choices; never rewrite resources or sticky Thread heads."""
 
     model_id: str | None = Field(default=None, min_length=1, max_length=128)
-    thinking: ThinkingSelection | None = None
     service_tier: Literal["auto", "default", "flex", "priority"] | None = None
-    fast: bool | None = None
 
     @model_validator(mode="after")
     def _exclusive_speed_override(self) -> Self:
@@ -139,6 +139,7 @@ class RootActivityView(SurfaceModel):
 
 class ThreadSummary(SurfaceModel):
     thread_id: str = Field(min_length=1, max_length=80)
+    lead_thread_id: str | None = Field(default=None, min_length=1, max_length=80)
     parent_thread_id: str | None = Field(default=None, min_length=1, max_length=80)
     created_at: datetime
     updated_at: datetime
@@ -206,7 +207,7 @@ class ThreadDetail(SurfaceModel):
     thread: ThreadSummary
     continuation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     deferred_requests: tuple[DeferredRequestView, ...] = ()
-    available_actions: tuple[Literal["run", "respond", "wait", "steer", "cancel", "archive"], ...] = ()
+    available_actions: tuple[Literal["run", "respond", "wait", "steer", "cancel", "archive", "clear_context"], ...] = ()
 
 
 class AppliedEditView(SurfaceModel):
@@ -317,6 +318,8 @@ class ProjectSummary(SurfaceModel):
     position: int
     roots: tuple[str, ...] = Field(max_length=64)
     last_active_at: datetime | None = None
+    lead_thread_id: str | None = Field(default=None, min_length=1, max_length=80)
+    lead_enabled: bool = False
     defaults: ProjectDefaults = Field(default_factory=ProjectDefaults)
 
     @field_validator("last_active_at")
@@ -448,6 +451,10 @@ class ExternalToolResult(SurfaceModel):
 
 
 type DeferredResponseItem = Annotated[ApprovalDecision | ExternalToolResult, Field(discriminator="kind")]
+
+
+class ThreadContextClear(SurfaceModel):
+    expected_continuation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ThreadDeferredResponse(SurfaceModel):
@@ -710,10 +717,12 @@ class ModelSummary(SurfaceModel):
     route: str = Field(min_length=1)
     thinking: ThinkingControl | None = None
     fast: FastControl | None = None
+    reasoning_mode: ReasoningModeControl | None = None
     media_capabilities: tuple[NativeInputMediaKind, ...] = ()
 
 
 class ThreadSelectorCatalog(SurfaceModel):
+    sidekick_enabled: bool = False
     media_understanding: dict[NativeInputMediaKind, str] = Field(default_factory=dict)
     media_understanding_environment: tuple[NativeInputMediaKind, ...] = ()
     agents: tuple[AgentSummary, ...]

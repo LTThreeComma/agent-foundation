@@ -37,6 +37,7 @@ function thread(id: string, project: string | null = "project-one") {
     configuration: { project_id: project },
     root_activity: { state: "inactive" },
     archived: false,
+    lead_thread_id: null as string | null,
   };
 }
 function page(
@@ -68,6 +69,10 @@ let failDrafts: boolean;
 let activity: URL[];
 let activeThreads: ReturnType<typeof thread>[];
 let writes: Request[];
+let sidekickEnabled: boolean;
+let leadEnabled: boolean;
+let leadThread: ReturnType<typeof thread> | null;
+let workerThreads: ReturnType<typeof thread>[];
 let failMore: boolean;
 let failSave: boolean;
 let cwd: string;
@@ -83,6 +88,10 @@ beforeEach(() => {
   activity = [];
   activeThreads = [];
   writes = [];
+  sidekickEnabled = false;
+  leadEnabled = true;
+  leadThread = null;
+  workerThreads = [];
   failMore = false;
   failSave = false;
   cwd = "/outside";
@@ -122,6 +131,14 @@ beforeEach(() => {
       }
       if (request.method !== "GET") {
         writes.push(request.clone());
+        if (url.pathname === "/api/projects/project-one/lead") {
+          if (failSave)
+            return json({ error: { message: "Lead update failed" } }, 500);
+          if (request.method === "PATCH")
+            leadEnabled = (await request.json()).enabled;
+          leadThread ??= thread("canonical-lead");
+          return json(leadThread);
+        }
         if (request.method === "PUT") {
           if (failSave)
             return json(
@@ -142,7 +159,22 @@ beforeEach(() => {
           });
         return json(thread("created"));
       }
-      if (url.pathname === "/api/projects") return json(projects);
+      if (url.pathname === "/api/projects")
+        return json(
+          projects.map((project) => ({
+            ...project,
+            lead_enabled:
+              project.project_id === "project-one" &&
+              !!leadThread &&
+              leadEnabled,
+            lead_thread_id:
+              project.project_id === "project-one"
+                ? (leadThread?.thread_id ?? null)
+                : null,
+          })),
+        );
+      if (leadThread && url.pathname === `/api/threads/${leadThread.thread_id}`)
+        return json({ thread: leadThread, deferred_requests: [] });
       if (url.pathname === "/api/setup")
         return json({ suggested_project_path: cwd });
       if (url.pathname === "/api/status")
@@ -150,18 +182,53 @@ beforeEach(() => {
       if (url.pathname === "/api/configuration/sources")
         return json({ sources: [] });
       if (url.pathname === "/api/selectors")
-        return json({ agents: [], environments: [] });
+        return json({
+          agents: [],
+          environments: [],
+          sidekick_enabled: sidekickEnabled,
+        });
       const activeThread = activeThreads.find(
         (item) =>
           url.pathname === `/api/threads/${encodeURIComponent(item.thread_id)}`,
       );
       if (activeThread) return json({ thread: activeThread });
+      const worker = workerThreads.find(
+        (item) => url.pathname === `/api/threads/${item.thread_id}`,
+      );
+      if (worker) return json({ thread: worker });
       if (url.pathname === "/api/threads/selected-old")
         return json({ thread: thread("selected-old") });
       if (url.pathname === "/api/threads/activity") {
         activity.push(url);
         if (url.searchParams.get("query"))
-          return json(page(["Global match"], null, "project-two"));
+          return json(
+            workerThreads.length
+              ? {
+                  rows: workerThreads.map((item) => ({
+                    thread: item,
+                    project_name: "One",
+                  })),
+                  next_cursor: null,
+                  total: workerThreads.length,
+                }
+              : page(["Global match"], null, "project-two"),
+          );
+        if (url.searchParams.get("lead_thread_id")) {
+          if (failMore)
+            return json({ error: { message: "Workers unavailable" } }, 503);
+          const offset = url.searchParams.get("cursor") ? 5 : 0;
+          return json({
+            rows: workerThreads
+              .slice(offset, offset + 5)
+              .map((item) => ({ thread: item, project_name: "One" })),
+            active_rows: workerThreads
+              .filter((item) => item.root_activity.state !== "inactive")
+              .map((item) => ({ thread: item, project_name: "One" })),
+            next_cursor:
+              !offset && workerThreads.length > 5 ? "workers-next" : null,
+            total: workerThreads.length,
+          });
+        }
         if (url.searchParams.get("cursor")) {
           request.signal.addEventListener("abort", () => {
             pageAborted = true;
@@ -920,9 +987,9 @@ it("pins off-page unread results, counts collapsed groups, and keeps running dot
   vi.restoreAllMocks();
 });
 
-it("surfaces unvisited drafts above collapsed projects and refreshes only discovery on a draft hint", async () => {
+it("opens unvisited drafts on demand and refreshes only discovery on a draft hint", async () => {
   unsentThreads = [
-    thread("old-draft"),
+    { ...thread("old-draft"), root_activity: { state: "running" } },
     { ...thread("archived-draft"), archived: true },
   ];
   unsentDrafts = unsentThreads.map((item) => ({
@@ -931,22 +998,28 @@ it("surfaces unvisited drafts above collapsed projects and refreshes only discov
     unsent_since: "2026-09-21T10:00:00Z",
   }));
   mount("/", true);
-  const section = await screen.findByRole("region", { name: "Unsent input" });
-  expect(within(section).getByText("Unsent (1)")).toBeTruthy();
-  const shortcut = within(section).getByRole("link", { name: /old-draft/ });
-  expect(
-    within(shortcut).getByRole("img", { name: "Unsent input" }),
-  ).toBeTruthy();
-  expect(within(shortcut).getByText("One")).toBeTruthy();
-  expect(screen.queryByText("archived-draft")).toBeNull();
+  const trigger = await screen.findByRole("button", { name: "Drafts 1" });
+  expect(screen.queryByRole("dialog", { name: "Drafts" })).toBeNull();
   expect(activity).toHaveLength(0);
+  fireEvent.click(trigger);
+  const popup = await screen.findByRole("dialog", { name: "Drafts" });
+  const shortcut = within(popup).getByRole("link", { name: /old-draft/ });
+  expect(within(shortcut).getByText("One")).toBeTruthy();
+  expect(within(popup).queryByText("Running")).toBeNull();
+  expect(within(popup).queryByRole("button", { name: /Actions/ })).toBeNull();
+  expect(screen.queryByText("archived-draft")).toBeNull();
   fireEvent.click(shortcut);
   await waitFor(() =>
     expect(screen.getByLabelText("Current route").textContent).toBe(
-      "/threads/old-draft",
+      "/threads/old-draft?compose=1",
     ),
   );
-  expect(within(section).getByText("old-draft")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("button", { name: "Drafts 1" })).toBe(trigger);
+  const project = await screen.findByRole("region", { name: "One" });
+  const row = within(project).getByRole("link", { name: /old-draft/ });
+  expect(within(row).getByText("Draft")).toBeTruthy();
+  expect(within(row).getByText("Running")).toBeTruthy();
   await screen.findByText("Recent 5");
   const activityCalls = activity.length;
   unsentDrafts = [];
@@ -959,34 +1032,72 @@ it("surfaces unvisited drafts above collapsed projects and refreshes only discov
     });
   });
   await waitFor(() =>
-    expect(screen.queryByRole("region", { name: "Unsent input" })).toBeNull(),
+    expect(screen.getByRole("button", { name: "Drafts" })).toBe(trigger),
   );
+  expect(within(row).queryByText("Draft")).toBeNull();
   expect(activity).toHaveLength(activityCalls);
 });
 
-it("shows local input immediately, retains the shortcut on opening, and removes it on clear", async () => {
+it("keeps the entry and project rows stable while local drafts appear and clear", async () => {
+  const user = userEvent.setup();
   const draft = new ThreadDraft();
   unsentThreads = [thread("old-draft")];
   mount("/", false, null, draft);
-  await screen.findByRole("button", { name: "One" });
-  expect(screen.queryByRole("region", { name: "Unsent input" })).toBeNull();
+  const project = await screen.findByRole("button", { name: "One" });
+  const trigger = screen.getByRole("button", { name: "Drafts" });
+  await user.click(trigger);
+  await screen.findByText("No unsent drafts.");
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  const search = screen.getByRole("searchbox");
+  search.focus();
   act(() => {
     draft.doc.getText("text").insert(0, "Remember me");
   });
-  const section = await screen.findByRole("region", { name: "Unsent input" });
-  await within(section).findByText("old-draft");
+  expect(await screen.findByRole("button", { name: "Drafts 1" })).toBe(trigger);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.activeElement).toBe(search);
+  expect(screen.getByRole("button", { name: "One" })).toBe(project);
+  await user.click(trigger);
+  await screen.findByRole("link", { name: /old-draft/ });
   act(() => {
     draft.doc.getText("text").delete(0, draft.doc.getText("text").length);
   });
-  await waitFor(() =>
-    expect(screen.queryByRole("region", { name: "Unsent input" })).toBeNull(),
-  );
+  await screen.findByText("No unsent drafts.");
+  expect(screen.getByRole("button", { name: "Drafts" })).toBe(trigger);
+  expect(screen.getByRole("dialog", { name: "Drafts" })).toBeTruthy();
 });
 
-it("makes discovery failure retryable rather than silently treating it as an empty index", async () => {
+it("refocuses the current draft without dismissing its reminder", async () => {
+  const user = userEvent.setup();
+  const draft = new ThreadDraft();
+  draft.doc.getText("text").insert(0, "Continue writing");
+  unsentThreads = [thread("old-draft")];
+  mount("/threads/old-draft?compose=1", false, null, draft);
+  const editor = document.createElement("textarea");
+  editor.setAttribute("data-composer-editor", "");
+  document.body.append(editor);
+  try {
+    await user.click(await screen.findByRole("button", { name: "Drafts 1" }));
+    const popup = await screen.findByRole("dialog", { name: "Drafts" });
+    await user.click(within(popup).getByRole("link", { name: /old-draft/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+    expect(screen.getByRole("button", { name: "Drafts 1" })).toBeTruthy();
+    expect(draft.hasUnsentInput).toBe(true);
+  } finally {
+    editor.remove();
+  }
+});
+
+it("keeps discovery failure inside the popup and supports retry without an empty claim", async () => {
   failDrafts = true;
   mount();
+  await screen.findByLabelText("Draft discovery unavailable");
+  expect(screen.queryByText("Draft discovery unavailable")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Drafts/ }));
   await screen.findByText("Draft discovery unavailable");
+  expect(screen.queryByText("No unsent drafts.")).toBeNull();
   failDrafts = false;
   unsentThreads = [thread("old-draft")];
   unsentDrafts = [
@@ -997,5 +1108,302 @@ it("makes discovery failure retryable rather than silently treating it as an emp
     },
   ];
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-  await screen.findByText("Unsent (1)");
+  await screen.findByRole("button", { name: "Drafts 1" });
+  await screen.findByRole("link", { name: /old-draft/ });
+});
+
+it("offers Coordinator by default and creates it only on explicit first open", async () => {
+  sidekickEnabled = true;
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  const group = screen.getByRole("region", { name: "One" });
+  await within(group).findByRole("button", { name: "Coordinator" });
+  const recent = await within(group).findByRole("link", { name: "Recent 1" });
+  expect(within(group).queryByRole("button", { name: "Lead" })).toBeNull();
+  expect(
+    within(group).queryByRole("button", { name: "Other conversations" }),
+  ).toBeNull();
+  expect(screen.getByLabelText("Current route").textContent).toBe("/");
+  fireEvent.click(recent);
+  expect(screen.getByLabelText("Current route").textContent).toBe(
+    "/threads/Recent%201",
+  );
+  expect(writes).toHaveLength(0);
+  fireEvent.click(within(group).getByRole("button", { name: "Coordinator" }));
+  await waitFor(() =>
+    expect(screen.getByLabelText("Current route").textContent).toBe(
+      "/threads/canonical-lead",
+    ),
+  );
+  expect(writes).toHaveLength(1);
+  expect(new URL(writes[0].url).pathname).toBe(
+    "/api/projects/project-one/lead",
+  );
+});
+
+it("pins the canonical Lead outside pagination, preserves archived identity and respects a direct worker link", async () => {
+  sidekickEnabled = true;
+  leadThread = {
+    ...thread("archived-lead"),
+    title: "Old Lead",
+    archived: true,
+  };
+  mount("/threads/selected-old");
+  await screen.findByRole("link", { name: /Old Lead.*Coordinator.*Archived/ });
+  expect(screen.getByRole("button", { name: "Restore Old Lead" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "selected-old" })).toBeTruthy();
+  expect(screen.getByLabelText("Current route").textContent).toBe(
+    "/threads/selected-old",
+  );
+  expect(writes).toHaveLength(0);
+  expect(screen.queryByRole("button", { name: "Coordinator" })).toBeNull();
+});
+
+it("does not offer a new Lead when Sidekick is disabled", async () => {
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  await screen.findByRole("link", { name: "Recent 1" });
+  expect(screen.queryByRole("button", { name: "Coordinator" })).toBeNull();
+  expect(writes).toHaveLength(0);
+});
+
+it("hides the dedicated Coordinator when Sidekick is disabled and restores the same identity", async () => {
+  leadThread = thread("canonical-lead");
+  recentTitle = "canonical-lead";
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  const group = screen.getByRole("region", { name: "One" });
+  await within(group).findByRole("link", { name: "Recent 2" });
+  expect(
+    within(group).queryByRole("link", { name: /canonical-lead/ }),
+  ).toBeNull();
+  expect(
+    within(group).queryByRole("button", { name: "Expand Coordinator workers" }),
+  ).toBeNull();
+  expect(
+    within(group).queryByRole("button", { name: "Coordinator" }),
+  ).toBeNull();
+  sidekickEnabled = true;
+  await act(() => queryClient.invalidateQueries({ queryKey: ["selectors"] }));
+  await within(group).findByRole("link", {
+    name: /canonical-lead.*Coordinator/,
+  });
+  expect(
+    within(group).getAllByRole("link", { name: /canonical-lead/ }),
+  ).toHaveLength(1);
+  sidekickEnabled = false;
+  await act(() => queryClient.invalidateQueries({ queryKey: ["selectors"] }));
+  await within(group).findByRole("link", { name: "Recent 2" });
+  expect(
+    within(group).queryByRole("link", { name: /canonical-lead/ }),
+  ).toBeNull();
+  expect(
+    within(group).queryByRole("button", { name: "Expand Coordinator workers" }),
+  ).toBeNull();
+  expect(writes).toHaveLength(0);
+});
+
+it("counts an unread Lead in its collapsed Project without duplicating it in the conversation list", async () => {
+  sidekickEnabled = true;
+  vi.stubGlobal("indexedDB", new IDBFactory());
+  leadThread = thread("canonical-lead");
+  const results = new ResultTracker(createTransport("test", () => {}));
+  vi.spyOn(results, "invalidate").mockImplementation(() => {});
+  const unread = {
+    ...leadThread,
+    completion: {
+      version: 1,
+      run_id: "run-done",
+      continuation_id: "a".repeat(64),
+      completed_at: "2026-09-23T00:00:00Z",
+    },
+  } as Schema<"ThreadSummary">;
+  await results.follow({ ...unread, completion: null });
+  results.observe(unread);
+  mount("/", false, results);
+  const group = await screen.findByRole("region", { name: "One" });
+  expect(
+    within(group).getByLabelText("1 conversations with new results"),
+  ).toBeTruthy();
+  fireEvent.click(
+    within(group).getByRole("button", { name: /^One/, expanded: false }),
+  );
+  await within(group).findByRole("link", { name: /canonical-lead/ });
+  expect(
+    within(group).getAllByRole("link", { name: /canonical-lead/ }),
+  ).toHaveLength(1);
+  vi.restoreAllMocks();
+});
+
+it("learns a Lead created in another client from a Project summary hint without ensuring again", async () => {
+  sidekickEnabled = true;
+  mount("/", true);
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  await screen.findByRole("button", { name: "Coordinator" });
+  leadThread = thread("remote-lead");
+  act(() =>
+    vi.mocked(watchSummary).mock.calls.at(-1)![1]({
+      kind: "project",
+      epoch: "test",
+      sequence: 1,
+    }),
+  );
+  await screen.findByRole("link", { name: /remote-lead/ });
+  expect(screen.queryByRole("button", { name: "Coordinator" })).toBeNull();
+  expect(writes).toHaveLength(0);
+});
+
+it("persists Coordinator mode through project actions and follows server updates", async () => {
+  sidekickEnabled = true;
+  leadThread = thread("canonical-lead");
+  recentTitle = "canonical-lead";
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  await screen.findByRole("link", { name: /canonical-lead.*Coordinator/ });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Actions for One" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: "Disable Coordinator" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: /canonical-lead/ })).toBeNull(),
+  );
+  expect(writes).toHaveLength(1);
+  expect(writes[0].method).toBe("PATCH");
+  expect(await writes[0].json()).toEqual({ enabled: false });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Actions for One" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: "Enable Coordinator" }),
+  );
+  await screen.findByRole("link", { name: /canonical-lead.*Coordinator/ });
+  await waitFor(() =>
+    expect(screen.getByLabelText("Current route").textContent).toBe(
+      "/threads/canonical-lead",
+    ),
+  );
+  expect(writes).toHaveLength(2);
+  expect(await writes[1].json()).toEqual({ enabled: true });
+  // A different browser changes the backend mode; navigation does not own it.
+  leadEnabled = false;
+  await act(() => queryClient.invalidateQueries({ queryKey: ["projects"] }));
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: /canonical-lead/ })).toBeNull(),
+  );
+  expect(writes).toHaveLength(2);
+});
+
+it("keeps the server's Lead mode when an update fails", async () => {
+  sidekickEnabled = true;
+  leadThread = thread("canonical-lead");
+  failSave = true;
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  await screen.findByRole("link", { name: /canonical-lead.*Coordinator/ });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Actions for One" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: "Disable Coordinator" }),
+  );
+  await screen.findByText("Lead update failed");
+  expect(
+    screen.getByRole("link", { name: /canonical-lead.*Coordinator/ }),
+  ).toBeTruthy();
+  expect(writes).toHaveLength(1);
+});
+
+it("keeps workers collapsed on direct navigation and pages them separately from ordinary Running and Recent", async () => {
+  sidekickEnabled = true;
+  leadThread = thread("canonical-lead");
+  workerThreads = Array.from({ length: 7 }, (_, index) => ({
+    ...thread(`worker-${index + 1}`),
+    lead_thread_id: "canonical-lead",
+  }));
+  workerThreads[0].root_activity.state = "running";
+  activeThreads = [
+    { ...thread("ordinary-running"), root_activity: { state: "running" } },
+    workerThreads[0],
+  ];
+  mount("/threads/worker-7");
+  await screen.findByRole("link", { name: /canonical-lead/ });
+  await screen.findByRole("link", { name: /ordinary-running/ });
+  expect(screen.getByText("Running · 1")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /worker-/ })).toBeNull();
+  expect(
+    activity.filter((url) => url.searchParams.has("lead_thread_id")),
+  ).toHaveLength(0);
+  expect(
+    activity
+      .find((url) => url.searchParams.get("project_id") === "project-one")
+      ?.searchParams.get("independent_only"),
+  ).toBe("true");
+  const route = screen.getByLabelText("Current route");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Expand Coordinator workers" }),
+  );
+  await screen.findByRole("link", { name: /worker-1/ });
+  expect(screen.getAllByRole("link", { name: /worker-1/ })).toHaveLength(1);
+  expect(screen.getByRole("link", { name: "worker-7" })).toBeTruthy();
+  expect(route.textContent).toBe("/threads/worker-7");
+  const request = activity.find((url) =>
+    url.searchParams.has("lead_thread_id"),
+  )!;
+  expect(request.searchParams.get("lead_thread_id")).toBe("canonical-lead");
+  expect(request.searchParams.get("limit")).toBe("5");
+  fireEvent.click(screen.getByRole("button", { name: "More workers" }));
+  await screen.findByRole("link", { name: "worker-6" });
+  fireEvent.click(screen.getByRole("link", { name: /canonical-lead/ }));
+  expect(route.textContent).toBe("/threads/canonical-lead");
+  expect(
+    screen
+      .getByRole("button", { name: "Collapse Coordinator workers" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Collapse Coordinator workers" }),
+  );
+  expect(screen.queryByRole("link", { name: /worker-/ })).toBeNull();
+  expect(screen.getByRole("link", { name: /ordinary-running/ })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Recent 1" })).toBeTruthy();
+  expect(writes).toHaveLength(0);
+});
+
+it("shows worker fetch failures without claiming empty and retries inside the disclosure", async () => {
+  sidekickEnabled = true;
+  leadThread = thread("canonical-lead");
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "One" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Expand Coordinator workers" }),
+  );
+  await screen.findByText("No workers yet");
+  failMore = true;
+  await act(() => queryClient.invalidateQueries({ queryKey: ["threads"] }));
+  await screen.findByText("Workers unavailable");
+  expect(screen.queryByText("No workers yet")).toBeNull();
+  failMore = false;
+  const workers = screen.getByLabelText("Coordinator workers");
+  fireEvent.click(within(workers).getByRole("button", { name: "Retry" }));
+  await screen.findByText("No workers yet");
+});
+
+it("finds workers through ordinary global search without expanding the Lead", async () => {
+  leadThread = thread("canonical-lead");
+  workerThreads = [
+    { ...thread("search-worker"), lead_thread_id: "canonical-lead" },
+  ];
+  mount();
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "worker" },
+  });
+  await screen.findByRole("link", { name: "search-worker" });
+  expect(screen.getByText("One · Coordinator worker")).toBeTruthy();
+  const request = activity.find(
+    (url) => url.searchParams.get("query") === "worker",
+  )!;
+  expect(request.searchParams.has("lead_thread_id")).toBe(false);
+  expect(request.searchParams.get("independent_only")).toBe("false");
 });

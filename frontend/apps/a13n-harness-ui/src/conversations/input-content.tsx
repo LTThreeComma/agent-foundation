@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "a13n-ui";
+import { Link } from "react-router";
+import { ArrowUpRight, Chats } from "@phosphor-icons/react";
 import { CopyMessage } from "./copy-message";
 import type { Schema } from "../transport/client";
 import { useTransport } from "../transport/context";
@@ -18,6 +20,24 @@ export type InputPart = {
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function threadMessage(metadata: InputPart["metadata"]) {
+  const ui = metadata?.harness_ui;
+  const source = object(ui) ? ui.thread_message : undefined;
+  if (
+    !object(source) ||
+    typeof source.source_thread_id !== "string" ||
+    !source.source_thread_id.trim()
+  )
+    return undefined;
+  return {
+    id: source.source_thread_id,
+    title:
+      typeof source.source_thread_title === "string"
+        ? source.source_thread_title.trim()
+        : "",
+  };
+}
+
 export function inputAttachment(metadata: InputPart["metadata"]) {
   const ui = metadata?.harness_ui;
   const attachment = object(ui) ? ui.attachment : undefined;
@@ -259,52 +279,90 @@ export function InputContent({
   threadId?: string;
   renderText: (text: string) => ReactNode;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const visible = parts.filter((part) => part.metadata?.display !== false);
   const seen = new Set<string>();
   const copyText = inputCopyText(parts);
+  const source = visible
+    .map((part) => threadMessage(part.metadata))
+    .find(Boolean);
   return (
     <div className={styles.userMessage}>
       <header>
-        User
+        {source ? (
+          <Link
+            className={styles.threadSource}
+            to={`/threads/${encodeURIComponent(source.id)}`}
+            title={source.title ? `${source.title} · ${source.id}` : source.id}
+            aria-label={`From thread ${source.title || source.id}`}
+          >
+            <Chats size={16} aria-hidden="true" />
+            <span className={styles.threadSourceLabel}>From thread</span>
+            <span className={styles.threadSourceName}>
+              {source.title || source.id}
+            </span>
+            <ArrowUpRight size={12} aria-hidden="true" />
+          </Link>
+        ) : (
+          "User"
+        )}
         {status && (
           <span role="status" className={styles.inputStatus}>
             {status}
           </span>
         )}
       </header>
-      {visible.map((part, index) => {
-        const attachment = inputAttachment(part.metadata);
-        if (attachment && threadId) {
-          const identity = composerIdentity(part) ?? attachment.attachment_id;
-          if (seen.has(identity)) return null;
-          seen.add(identity);
-          const related = visible.filter(
-            (item) =>
-              (composerIdentity(item) ??
-                inputAttachment(item.metadata)?.attachment_id) === identity,
-          );
-          return (
-            <Attachment
-              key={`${threadId}:${identity}`}
-              threadId={threadId}
-              attachment={attachment}
-              related={related}
-            />
-          );
-        }
-        if (composerIdentity(part) && part.kind !== "media")
-          return (
-            <span key={index} className={styles.inputText}>
-              {part.text || ""}
-            </span>
-          );
-        return part.kind === "media" ? (
-          <Media key={index} part={part} />
-        ) : (
-          <div key={index}>{renderText(part.text || "")}</div>
-        );
-      })}
-      {copyText.trim() && <CopyMessage text={copyText} />}
+      {source && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className={styles.threadMessageToggle}
+          aria-label="Thread message details"
+          aria-expanded={expanded}
+          title={expanded ? "Hide details" : "Show details"}
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? "Hide details" : "…"}
+        </Button>
+      )}
+      {(!source || expanded) && (
+        <>
+          {visible.map((part, index) => {
+            const attachment = inputAttachment(part.metadata);
+            if (attachment && threadId) {
+              const identity =
+                composerIdentity(part) ?? attachment.attachment_id;
+              if (seen.has(identity)) return null;
+              seen.add(identity);
+              const related = visible.filter(
+                (item) =>
+                  (composerIdentity(item) ??
+                    inputAttachment(item.metadata)?.attachment_id) === identity,
+              );
+              return (
+                <Attachment
+                  key={`${threadId}:${identity}`}
+                  threadId={threadId}
+                  attachment={attachment}
+                  related={related}
+                />
+              );
+            }
+            if (composerIdentity(part) && part.kind !== "media")
+              return (
+                <span key={index} className={styles.inputText}>
+                  {part.text || ""}
+                </span>
+              );
+            return part.kind === "media" ? (
+              <Media key={index} part={part} />
+            ) : (
+              <div key={index}>{renderText(part.text || "")}</div>
+            );
+          })}
+          {copyText.trim() && <CopyMessage text={copyText} />}
+        </>
+      )}
     </div>
   );
 }

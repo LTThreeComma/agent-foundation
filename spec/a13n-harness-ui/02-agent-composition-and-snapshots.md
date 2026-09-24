@@ -6,6 +6,8 @@ An Harness UI Agent is a file-defined reusable Agent configuration. A runnable A
 
 Agent resources and Thread selections remain mutable between Runs. The App captures one immutable resolved Run composition before execution, then continues the existing `HarnessState` with that composition. Changing an Agent, Plugin, MCP server, Capability selection, or subagent roster affects later captures and never mutates an active Run.
 
+Root admission captures `is_project_lead` from the canonical Project binding and nullable `lead_thread_id` from the durable worker mapping into each immutable Run composition. These identities do not depend on Sidekick or Coordinator mode: disabling automatic coordination does not remove ownership or scope. Missing historical values mean false and null respectively; child compositions inherit neither role. Coordinator and managed-worker instructions are injected on every applicable WebUI root Run, including follow-up messages and resumed execution, rather than only the first input. Changing browser presentation does not change the captured role.
+
 ## Models
 
 One file under `models/` defines a reusable Model resource:
@@ -44,6 +46,14 @@ Model resources may include native `HarnessModelCharacteristics` under `model_ch
 For the `runtime_context` capability, an omitted `context_window_tokens` is resolved from the effective Model's characteristics at capture time. An explicitly configured value remains authoritative. Native handoff reminders and compaction retain their own derivation and explicit-policy semantics.
 
 Root composition resolves the Model using the [Thread default precedence](04-projects-threads-and-environments.md#sticky-thread-configuration): explicit Run Model, saved Thread default, then selected Agent Model. The App accepts detached per-operation `RunModelOverrides` for a selected Model ID, reasoning effort, and generic `service_tier` (`auto`, `default`, `flex`, or `priority`). Omitted reasoning and service-tier overrides inherit the Model resource settings verbatim. Explicit thinking values use the shared model-aware control resolver described below; explicit service-tier values replace the generic field through the native Model integration. An explicit service-tier override also removes the selected provider's native tier field from the per-Run copy so native precedence cannot defeat an explicit tier selection. Without that override, native fields remain intact and retain upstream precedence. These values are copied before scheduling and applied while resolving the root graph, before inherited Markdown children are constructed. They do not mutate files, Thread configuration, previous compositions, or explicitly selected auxiliary/child models. Invalid selections fail without fallback. The [CLI contract](07-interactive-cli.md#agent-selection-and-reasoning) owns interactive precedence and resume behavior.
+
+### Reasoning Mode Controls
+
+A nullable per-operation `reasoning_mode` selects `standard` or `pro`; null inherits the selected Model resource. It is independent of thinking effort, reasoning summaries, and Fast. The shared typed selection and application path carry these controls together without merging their provider-specific rules. Existing flat request fields remain compatible; controls are not sticky Thread configuration.
+
+Explicit mode choices require a Responses transport (`openai`, `openai-responses`, or `openai-codex`) and the installed SDK profile's reasoning-mode support. They write only `openai_reasoning_mode` in the detached settings copy. Any `extra_body.reasoning` rejects the choice, because the native SDK replaces the whole reasoning object even when the custom value only contains a sibling such as summary. Default inheritance preserves opaque authored settings even on an unsupported connection; it does not validate or rewrite them.
+
+The selector descriptor reports support, a reason, and the authored state: `standard`, `pro`, `default` (absent/null provider default), or `custom` (unrecognized or conflicting configuration). Default is not Standard. Unsupported native mode settings are custom, not a claim that the transport sends them. Inspection derives captured mode from immutable settings, never from the current Model file or next-Run draft. Inherited Markdown children follow the parent; independent child and auxiliary Models keep their own settings. These are requested settings, not account entitlement, billing, or latency guarantees.
 
 ### Fast Request Controls
 

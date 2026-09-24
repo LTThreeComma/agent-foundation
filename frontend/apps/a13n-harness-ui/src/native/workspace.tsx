@@ -24,7 +24,12 @@ import {
   LinkSimple,
 } from "@phosphor-icons/react";
 import { ApiError, result, type Schema } from "../transport/client";
-import { useProjects, useStatus, useTransport } from "../transport/context";
+import {
+  useProjects,
+  useSelectors,
+  useStatus,
+  useTransport,
+} from "../transport/context";
 import { ErrorNotice, TextField } from "../shell/ui";
 import {
   FileBuffers,
@@ -38,6 +43,8 @@ import { FileView } from "./file-view";
 import { Changes, DiffView, type DiffSelection } from "./changes";
 import styles from "./native.module.css";
 import { TerminalPanel, type TerminalRequest } from "./terminal";
+import { TerminalAction } from "./terminal-action";
+import { terminalShortcut, terminalShortcutLabels } from "./terminal-shortcuts";
 import { usePanelSize } from "./panel-size";
 import { ReturnToChat } from "./capture";
 import { useThread } from "../conversations/queries";
@@ -45,6 +52,7 @@ import { ComposerDrafts } from "../conversations/composer";
 import { conversationTitle } from "../conversations/local-input";
 import { nativeLink, pageLink } from "../shell/page-links";
 import { OpenHostFile } from "../conversations/tool-call";
+import { LeadMark } from "../conversations/lead-icon";
 
 export function NativeWorkspace({
   children,
@@ -61,6 +69,7 @@ export function NativeWorkspace({
 }) {
   const { client } = useTransport();
   const projects = useProjects();
+  const selectors = useSelectors();
   const status = useStatus();
   const queries = useQueryClient();
   const buffers = useContext(FileBuffers);
@@ -390,6 +399,36 @@ export function NativeWorkspace({
     setFocusedArea("terminal");
     if (window.matchMedia("(max-width: 999px)").matches) setPane(null);
   };
+  const toggleTerminal = () => {
+    cancelOpening();
+    setTerminalOpen(!terminalOpen);
+    if (!terminalOpen) {
+      setFocusedArea("terminal");
+      if (window.matchMedia("(max-width: 999px)").matches) setPane(null);
+    } else focusCenter();
+    setTerminalOpened(true);
+    refresh();
+  };
+  useEffect(() => {
+    if (!isWorkspace || projectLoading || !status.data?.features?.host_terminal)
+      return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || document.querySelector('[role="dialog"]'))
+        return;
+      const action = terminalShortcut(event);
+      if (action !== "toggle" && action !== "create") return;
+      const cwd = localRoots.includes(root) ? root : projectRoot;
+      if (action === "create" && (!projectId || !cwd)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (action === "create") openTerminal(cwd);
+      else toggleTerminal();
+    };
+    // Capture before xterm or an editor can translate this into input.
+    window.addEventListener("keydown", keydown, true);
+    return () => window.removeEventListener("keydown", keydown, true);
+  });
   const title = threadId
     ? conversationTitle(
         thread.data?.thread,
@@ -473,6 +512,12 @@ export function NativeWorkspace({
       >
         <header className={styles.workToolbar}>
           {navigation}
+          {threadId &&
+            selectors.data?.sidekick_enabled === true &&
+            projects.data?.some(
+              (project) =>
+                project.lead_thread_id === threadId && project.lead_enabled,
+            ) && <LeadMark />}
           <h1 className={styles.workspaceTitle}>
             {threadId
               ? conversationTitle(
@@ -514,28 +559,16 @@ export function NativeWorkspace({
                 </Button>
               )}
               {status.data?.features?.host_terminal && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="Terminal"
-                  aria-label="Terminal"
+                <TerminalAction
+                  label="Terminal"
+                  shortcut={terminalShortcutLabels().toggle}
                   aria-pressed={terminalOpen}
-                  onClick={() => {
-                    cancelOpening();
-                    setTerminalOpen(!terminalOpen);
-                    if (!terminalOpen) {
-                      setFocusedArea("terminal");
-                      if (window.matchMedia("(max-width: 999px)").matches)
-                        setPane(null);
-                    } else focusCenter();
-                    setTerminalOpened(true);
-                    refresh();
-                  }}
+                  onClick={toggleTerminal}
                 >
                   <TerminalWindow
                     weight={terminalOpen ? "duotone" : "regular"}
                   />
-                </Button>
+                </TerminalAction>
               )}
             </div>
           )}

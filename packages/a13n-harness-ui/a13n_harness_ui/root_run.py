@@ -105,6 +105,7 @@ class RootRunCoordinator:
         touch_thread: Callable[[str], Awaitable[None]] | None = None,
         interaction_timeouts: bool = False,
         notify: Callable[[str, RootOperationNotice], None] | None = None,
+        on_settled: Callable[[str | None, RootOperationView], Awaitable[None]] | None = None,
         restart_coordinator: GracefulRestart | None = None,
     ) -> None:
         if terminal_retention < 1:
@@ -115,6 +116,7 @@ class RootRunCoordinator:
         self._touch_thread = touch_thread
         self._summary_hub = summary_hub
         self._notify = notify
+        self._on_settled = on_settled
         self._lock = Lock()
         self._operations: dict[str, _RootOperation] = {}
         self._active_by_thread: dict[str, str] = {}
@@ -209,12 +211,12 @@ class RootRunCoordinator:
 
     @asynccontextmanager
     async def require_inactive(self, thread_id: str) -> AsyncGenerator[None]:
-        """Serialize an archive transition against root admission for one Thread."""
+        """Serialize an idle-only mutation against root admission for one Thread."""
 
         async with self._lock:
             if thread_id in self._active_by_thread:
                 raise RunCoordinationError(
-                    "An active root Thread cannot be archived.",
+                    "Wait for the active root operation to finish before changing this Thread.",
                     code="thread_run_active",
                 )
             yield
@@ -638,6 +640,13 @@ class RootRunCoordinator:
             except Exception:
                 notice = None
             await self._publish_change(operation, notice=notice)
+            if self._on_settled is not None and self._accepting:
+                try:
+                    await self._on_settled(admission.published.value.project_id, _view(operation))
+                except Exception:
+                    get_logger(__name__).warning(
+                        "Could not deliver root operation notification: %s", operation.receipt.receipt_id, exc_info=True
+                    )
 
     def _start_interaction(self, operation: _RootOperation, outcome: RootRunOutcome) -> None:
         """Arm once, under the admission lock, after successful continuation selection."""

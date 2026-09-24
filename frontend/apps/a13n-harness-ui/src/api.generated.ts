@@ -1017,6 +1017,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/threads/{thread_id}/clear-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clear Context */
+        post: operations["clear_context_api_threads__thread_id__clear_context_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/threads/{thread_id}/context-usage": {
         parameters: {
             query?: never;
@@ -1119,6 +1136,24 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/lead": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ensure Project Lead */
+        post: operations["ensure_project_lead_api_projects__project_id__lead_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Set Project Lead Enabled */
+        patch: operations["set_project_lead_enabled_api_projects__project_id__lead_patch"];
         trace?: never;
     };
     "/api/threads/{thread_id}/decisions": {
@@ -1793,6 +1828,8 @@ export interface components {
             thinking_summary?: string | null;
             /** @default default */
             fast?: components["schemas"]["FastState"];
+            /** @default default */
+            reasoning_mode?: components["schemas"]["ReasoningModeState"];
         };
         /** CapturedConfiguration */
         CapturedConfiguration: {
@@ -3215,6 +3252,7 @@ export interface components {
             known_capabilities: boolean;
             /** Supports Service Tier */
             supports_service_tier: boolean;
+            reasoning_mode: components["schemas"]["ReasoningModeControl"];
             /**
              * Native Tools
              * @default []
@@ -3259,6 +3297,7 @@ export interface components {
             route: string;
             thinking?: components["schemas"]["ThinkingControl"] | null;
             fast?: components["schemas"]["FastControl"] | null;
+            reasoning_mode?: components["schemas"]["ReasoningModeControl"] | null;
             /**
              * Media Capabilities
              * @default []
@@ -3569,6 +3608,11 @@ export interface components {
             current: components["schemas"]["ThreadConfiguration"];
             replacement: components["schemas"]["ThreadConfiguration"];
         };
+        /** ProjectLeadUpdate */
+        ProjectLeadUpdate: {
+            /** Enabled */
+            enabled: boolean;
+        };
         /** ProjectPage */
         ProjectPage: {
             /**
@@ -3591,6 +3635,13 @@ export interface components {
             roots: string[];
             /** Last Active At */
             last_active_at?: string | null;
+            /** Lead Thread Id */
+            lead_thread_id?: string | null;
+            /**
+             * Lead Enabled
+             * @default false
+             */
+            lead_enabled?: boolean;
             defaults?: components["schemas"]["ProjectDefaults"];
         };
         /**
@@ -3642,6 +3693,16 @@ export interface components {
              */
             multi_select?: boolean;
         };
+        /** ReasoningModeControl */
+        ReasoningModeControl: {
+            /** Supported */
+            supported: boolean;
+            state: components["schemas"]["ReasoningModeState"];
+            /** Reason */
+            reason?: string | null;
+        };
+        /** @enum {string} */
+        ReasoningModeState: "standard" | "pro" | "default" | "custom";
         /**
          * RequiredAction
          * @enum {string}
@@ -4565,7 +4626,7 @@ export interface components {
              * Available Actions
              * @default []
              */
-            available_actions?: ("run" | "respond" | "wait" | "steer" | "cancel" | "archive")[];
+            available_actions?: ("run" | "respond" | "wait" | "steer" | "cancel" | "archive" | "clear_context")[];
         };
         /** ThreadPage */
         ThreadPage: {
@@ -4578,6 +4639,11 @@ export interface components {
         };
         /** ThreadSelectorCatalog */
         ThreadSelectorCatalog: {
+            /**
+             * Sidekick Enabled
+             * @default false
+             */
+            sidekick_enabled?: boolean;
             /** Media Understanding */
             media_understanding?: {
                 [key: string]: string;
@@ -4607,6 +4673,11 @@ export interface components {
         ThreadSummary: {
             /** Thread Id */
             thread_id: string;
+            /**
+             * Lead Thread Id
+             * @default null
+             */
+            lead_thread_id?: string | null;
             /**
              * Parent Thread Id
              * @default null
@@ -5534,6 +5605,10 @@ export interface components {
             model_id: string;
             /** Base Url */
             base_url?: string | null;
+            /** Settings */
+            settings?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
         };
         /**
          * ModelCapability
@@ -5549,13 +5624,13 @@ export interface components {
             model_id: string;
             /** Base Url */
             base_url?: string | null;
-            authentication?: components["schemas"]["ModelAuthentication"] | null;
-            /** Preset */
-            preset?: string | null;
             /** Settings */
             settings?: {
                 [key: string]: components["schemas"]["JsonValue"];
             } | null;
+            authentication?: components["schemas"]["ModelAuthentication"] | null;
+            /** Preset */
+            preset?: string | null;
             /** Model Configuration */
             model_configuration?: {
                 [key: string]: components["schemas"]["JsonValue"];
@@ -5692,6 +5767,11 @@ export interface components {
             /** Expected Version */
             expected_version: number;
         };
+        /** ThreadContextClear */
+        ThreadContextClear: {
+            /** Expected Continuation Id */
+            expected_continuation_id: string;
+        };
         /** ProjectDefaultsApply */
         ProjectDefaultsApply: {
             /** Expected Version */
@@ -5800,6 +5880,8 @@ export interface components {
             /** Attachment Id */
             attachment_id: string;
         };
+        /** @enum {string} */
+        ReasoningMode: "standard" | "pro";
         /** SkillReference */
         SkillReference: {
             /** Catalog Id */
@@ -5811,6 +5893,10 @@ export interface components {
         };
         /** SubmitRequest */
         SubmitRequest: {
+            thinking?: components["schemas"]["ThinkingSelection"] | null;
+            /** Fast */
+            fast?: boolean | null;
+            reasoning_mode?: components["schemas"]["ReasoningMode"] | null;
             /**
              * Prompt
              * @default
@@ -5839,9 +5925,6 @@ export interface components {
             environment?: components["schemas"]["EnvironmentSelectionPatch"] | null;
             /** Model Id */
             model_id?: string | null;
-            thinking?: components["schemas"]["ThinkingSelection"] | null;
-            /** Fast */
-            fast?: boolean | null;
         };
         /** RootSteerRequest */
         RootSteerRequest: {
@@ -7986,6 +8069,41 @@ export interface operations {
             };
         };
     };
+    clear_context_api_threads__thread_id__clear_context_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                thread_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThreadContextClear"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     context_usage_api_threads__thread_id__context_usage_get: {
         parameters: {
             query?: never;
@@ -8233,6 +8351,72 @@ export interface operations {
             };
         };
     };
+    ensure_project_lead_api_projects__project_id__lead_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_project_lead_enabled_api_projects__project_id__lead_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectLeadUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     decision_batch_api_threads__thread_id__decisions_get: {
         parameters: {
             query?: {
@@ -8378,6 +8562,8 @@ export interface operations {
                 include_archived?: boolean;
                 archived_only?: boolean;
                 include_active?: boolean;
+                lead_thread_id?: string | null;
+                independent_only?: boolean;
                 cursor?: string | null;
                 limit?: number;
             };

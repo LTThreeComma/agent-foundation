@@ -15,7 +15,7 @@ from a13n_harness_ui.model_runtime import HarnessUiModelResolver
 from a13n_harness_ui.surfaces import RootControlResult, RootOperationStatus
 from a13n_harness_ui.thread_capability import ThreadCollaborationCapability, ThreadToolController
 from anyio import Event, fail_after
-from pydantic_ai.messages import ToolReturnPart
+from pydantic_ai.messages import TextContent, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from .test_app import _CompletedReconstructor, _settings, _write_configuration
@@ -44,6 +44,7 @@ def configuration(tmp_path: Path) -> Path:
 
 def controller(app) -> ThreadToolController:
     return ThreadToolController(
+        threads=app._store.threads,
         projections=app._projections,
         root_runs=app._root_runs,
         create_thread=app.create_thread,
@@ -96,7 +97,9 @@ async def test_create_selects_project_defaults_without_copying_source_tools(
         assert (await app.wait_root_operation(result["receipt"]["receipt_id"])).status is RootOperationStatus.completed
         project = await tools.get_project("project-other")
         assert project["project"]["roots"] == [str(tmp_path / "other")]
-        listed = await tools.list_threads(query=None, cursor=None, limit=20, project_id="project-main")
+        listed = await tools.list_threads(
+            source_thread_id=source.thread_id, query=None, cursor=None, limit=20, project_id="project-main"
+        )
         assert all(item["configuration"]["project_id"] == "project-main" for item in listed["threads"])
         with pytest.raises(ThreadError):
             await tools.create_thread(
@@ -129,6 +132,7 @@ async def test_rejected_message_never_starts_a_replacement_run(tmp_path: Path, m
     root = configuration(tmp_path)
     async with open_harness_ui_app(_settings(tmp_path / "data"), configuration_path=root) as app:
         target = await app.create_thread()
+        source = await app.create_thread(title="Requester")
         calls = []
 
         async def active(thread_id):
@@ -145,7 +149,7 @@ async def test_rejected_message_never_starts_a_replacement_run(tmp_path: Path, m
         monkeypatch.setattr(app._root_runs, "steer", steer)
         monkeypatch.setattr(app._root_runs, "submit_prompt", submit)
         result = await controller(app).send_thread_message(
-            source_thread_id="thread-origin", thread_id=target.thread_id, message="Report"
+            source_thread_id=source.thread_id, thread_id=target.thread_id, message="Report"
         )
         assert result == {
             "ok": False,
@@ -154,7 +158,20 @@ async def test_rejected_message_never_starts_a_replacement_run(tmp_path: Path, m
             "accepted": False,
             "enqueue_id": None,
         }
-        assert calls == [("receipt-captured", "Message from Thread thread-origin:\n\nReport")]
+        assert len(calls) == 1
+        receipt_id, parts = calls[0]
+        assert receipt_id == "receipt-captured"
+        assert parts == (
+            TextContent(f"Message from Thread {source.thread_id}:", metadata={"display": False}),
+            TextContent(
+                "Report",
+                metadata={
+                    "harness_ui": {
+                        "thread_message": {"source_thread_id": source.thread_id, "source_thread_title": "Requester"}
+                    }
+                },
+            ),
+        )
 
 
 async def test_message_tools_reject_self_and_empty_input_before_admission() -> None:
@@ -169,7 +186,10 @@ async def test_message_tools_reject_self_and_empty_input_before_admission() -> N
 async def test_real_model_tools_discover_delegate_cross_project_and_report_to_idle_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = configuration(tmp_path)  # Sidekick is disabled: all collaboration tools still work.
+    root = configuration(tmp_path)
+    document = yaml.safe_load(root.read_text())
+    document["webui"] = {"sidekick": None}  # Opting out does not remove generic collaboration tools.
+    root.write_text(yaml.safe_dump(document))
     origin_id = ""
     origin_idle, reported = Event(), Event()
     steps: dict[str, int] = {}
@@ -240,7 +260,7 @@ async def test_real_model_tools_discover_delegate_cross_project_and_report_to_id
     monkeypatch.setattr(HarnessUiModelResolver, "__call__", resolve)
     settings = _settings(tmp_path / "data").model_copy(update={"pricing_auto_update": False})
     async with open_harness_ui_app(settings, configuration_path=root, host_mode="webui", instrumentation=None) as app:
-        origin = await app.create_thread()
+        origin = await app.create_thread(title="Release review")
         origin_id = origin.thread_id
         receipt = await app.submit_thread(thread_id=origin_id, prompt="Delegate independent work")
         with fail_after(15):
@@ -269,6 +289,29 @@ async def test_real_model_tools_discover_delegate_cross_project_and_report_to_id
         transcript = await app.get_thread_transcript(thread_id=origin_id)
         assert "Message from Thread" in transcript.model_dump_json()
         assert "Integrated worker findings" in transcript.model_dump_json()
+        for target, sender, text, template in (
+            (worker.thread_id, origin_id, "Investigate", "Task from Thread"),
+            (origin_id, worker.thread_id, "worker findings", "Message from Thread"),
+        ):
+            history = await app.get_thread_transcript(thread_id=target)
+            parts = [part for entry in history.entries for part in entry.parts]
+            context = next(part for part in parts if (part.text or "").startswith(template))
+            assert context.metadata.display is False
+            body = next(part for part in parts if part.text == text)
+            attribution = body.metadata.model_dump()["harness_ui"]["thread_message"]
+            assert attribution["source_thread_id"] == sender
+            assert attribution["source_thread_title"] == ("Release review" if sender == origin_id else "Investigate")
+            assert body.metadata.display is True
+        assert (await app.get_thread(worker.thread_id)).thread.excerpt.first_input == "Investigate"
+    # Provenance and visibility survive re-opening the stored conversation.
+    async with open_harness_ui_app(settings, configuration_path=root, host_mode="webui", instrumentation=None) as app:
+        history = await app.get_thread_transcript(thread_id=worker.thread_id)
+        parts = [part for entry in history.entries for part in entry.parts]
+        body = next(part for part in parts if part.text == "Investigate")
+        assert body.metadata.model_dump()["harness_ui"]["thread_message"]["source_thread_id"] == origin_id
+        assert (
+            next(part for part in parts if (part.text or "").startswith("Task from Thread")).metadata.display is False
+        )
     assert all("Sidekick is enabled" not in text for text in instructions)
 
 
@@ -287,6 +330,7 @@ async def test_invalid_sidekick_configuration_is_rejected(tmp_path: Path, sideki
 @pytest.mark.parametrize(
     "sidekick, expected_agent, expected_model",
     [
+        (None, "agent-assistant", "model-primary"),
         ({}, "agent-assistant", "model-primary"),
         ({"agent": "agent-worker"}, "agent-worker", "model-secondary"),
         ({"model": "model-secondary"}, "agent-assistant", "model-secondary"),
@@ -298,8 +342,10 @@ async def test_host_applies_sidekick_defaults_to_creation_and_later_turns(
 ) -> None:
     root = configuration(tmp_path)
     document = yaml.safe_load(root.read_text())
-    document["webui"] = {"sidekick": sidekick}
-    root.write_text(yaml.safe_dump(document))
+    if sidekick is not None:
+        document["webui"] = {"sidekick": sidekick}
+        root.write_text(yaml.safe_dump(document))
+    sidekick = sidekick or {}
     instructions = []
 
     async def resolve(self, context, model_id):
@@ -332,6 +378,8 @@ async def test_host_applies_sidekick_defaults_to_creation_and_later_turns(
         assert "Host applies the captured Sidekick defaults" in instructions[0]
         reference = await app._root_runs.composition_reference(first.receipt_id)
         composition = await app._store.objects.read_model(reference, ResolvedRunComposition)
+        historical = ResolvedRunComposition.model_validate_json(composition.model_dump_json(exclude={"webui_sidekick"}))
+        assert historical.webui_sidekick is None  # Missing fields in old captures must not enable Sidekick.
         if "model" in sidekick:
             assert f"model_id={sidekick['model']!r}" in instructions[0]
         result = await controller(app).create_thread(
@@ -349,7 +397,9 @@ async def test_host_applies_sidekick_defaults_to_creation_and_later_turns(
         saved = (await app.get_thread(result["thread_id"])).thread.configuration
         assert saved.default_model_id == sidekick.get("model")
         # Host defaults are persistent; explicit overrides are still per-operation.
-        again = await controller(app).run_thread(thread_id=result["thread_id"], prompt="Follow-up")
+        again = await controller(app).run_thread(
+            source_thread_id=source.thread_id, thread_id=result["thread_id"], prompt="Follow-up"
+        )
         assert (await app.wait_root_operation(again["receipt_id"])).status is RootOperationStatus.completed
         following = await app.inspect_operation_configuration(again["receipt_id"])
         assert following.agent.model_id == expected_model
@@ -360,13 +410,16 @@ async def test_host_applies_sidekick_defaults_to_creation_and_later_turns(
         assert (await app.wait_root_operation(receipt)).status is RootOperationStatus.completed
         assert (await app.inspect_operation_configuration(receipt)).agent.model_id == expected_model
         inspected = await controller(app).get_thread(
-            thread_id=result["thread_id"], history_cursor=None, history_limit=1
+            source_thread_id=source.thread_id, thread_id=result["thread_id"], history_cursor=None, history_limit=1
         )
         assert inspected["configuration"]["next_model_id"] == expected_model
         assert inspected["configuration"]["captured"]["agent"]["model_id"] == expected_model
         override = "model-secondary" if expected_model == "model-primary" else "model-primary"
         explicit = await controller(app).run_thread(
-            thread_id=result["thread_id"], prompt="One-off override", model_id=override
+            source_thread_id=source.thread_id,
+            thread_id=result["thread_id"],
+            prompt="One-off override",
+            model_id=override,
         )
         assert (await app.wait_root_operation(explicit["receipt_id"])).status is RootOperationStatus.completed
         assert (await app.inspect_operation_configuration(explicit["receipt_id"])).agent.model_id == override
@@ -406,11 +459,15 @@ async def test_host_applies_sidekick_defaults_to_creation_and_later_turns(
         assert (await app.inspect_operation_configuration(receipt)).agent.model_id == "model-primary"
 
 
-async def test_terminal_does_not_receive_sidekick_instructions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+async def test_terminal_does_not_receive_sidekick_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
     root = configuration(tmp_path)
-    document = yaml.safe_load(root.read_text())
-    document["webui"] = {"sidekick": {"model": "model-secondary"}}
-    root.write_text(yaml.safe_dump(document))
+    if configured:
+        document = yaml.safe_load(root.read_text())
+        document["webui"] = {"sidekick": {"model": "model-secondary"}}
+        root.write_text(yaml.safe_dump(document))
     seen = []
 
     async def resolve(self, context, model_id):
@@ -429,10 +486,15 @@ async def test_terminal_does_not_receive_sidekick_instructions(tmp_path: Path, m
     assert "list_agents" not in {tool.name for tool in seen[0].function_tools}
 
 
+@pytest.mark.parametrize("project_lead", [False, True])
 async def test_worker_can_ask_requester_receive_answer_and_report_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_lead: bool
 ) -> None:
     root = configuration(tmp_path)
+    if project_lead:
+        document = yaml.safe_load(root.read_text())
+        document["webui"] = {"sidekick": {"agent": "agent-worker", "model": "model-secondary"}}
+        root.write_text(yaml.safe_dump(document))
     requester_id = ""
     worker_id = ""
     worker_idle, requester_idle = Event(), Event()
@@ -451,6 +513,14 @@ async def test_worker_can_ask_requester_receive_answer_and_report_results(
                     if isinstance(part, ToolReturnPart):
                         returned[part.tool_call_id] = part.content
             if thread_id == requester_id:
+                if project_lead:
+                    assert "You are this Project's Coordinator" in info.instructions
+                    assert "At the start of each Run" in info.instructions
+                    assert "get_thread(thread_id=...)" in info.instructions
+                    assert "compact coordination note" in info.instructions
+                    assert "Before summarize, reconcile tasks and notes" in info.instructions
+                    assert "no background polling" in info.instructions
+                    assert "Create a separate Thread only" not in info.instructions
                 if step == 0:
                     assert "Which format should I use?" in str(messages)
                     await worker_idle.wait()
@@ -460,6 +530,10 @@ async def test_worker_can_ask_requester_receive_answer_and_report_results(
                     return
             else:
                 worker_id = thread_id
+                if project_lead:
+                    assert self._recipes[model_id].model_id == "model-secondary"
+                    assert "You are this Project's Coordinator" not in info.instructions
+                    assert "requester is the Coordinator" in str(messages)
                 if step == 0:
                     assert "Requesting Project: project-main" in str(messages)
                     assert f"send_thread_message(thread_id={requester_id!r}" in str(messages)
@@ -484,10 +558,19 @@ async def test_worker_can_ask_requester_receive_answer_and_report_results(
     monkeypatch.setattr(HarnessUiModelResolver, "__call__", resolve)
     settings = _settings(tmp_path / "data").model_copy(update={"pricing_auto_update": False})
     async with open_harness_ui_app(settings, configuration_path=root, host_mode="webui", instrumentation=None) as app:
-        requester_id = (await app.create_thread()).thread_id
+        # Explicit question/report protocol is independent of best-effort lifecycle notices.
+        monkeypatch.setattr(app._root_runs, "_on_settled", None)
+        requester_id = (
+            await app.set_project_lead_enabled("project-main", True) if project_lead else await app.create_thread()
+        ).thread_id
+        admission = await app._root_runs._executor.capture(thread_id=requester_id, prompt="Coordinate")
         with fail_after(15):
             worker = await controller(app).create_thread(
-                source_thread_id=requester_id, prompt="Prepare a report", title=None, agent_id=None
+                source_thread_id=requester_id,
+                prompt="Prepare a report",
+                title=None,
+                agent_id=None,
+                source_composition=admission.published.value,
             )
             assert (
                 await app.wait_root_operation(worker["receipt"]["receipt_id"])
@@ -515,7 +598,13 @@ async def test_requester_identity_uses_run_capture_not_future_thread_selections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_id: str | None
 ) -> None:
     root = configuration(tmp_path)
-    captured = SimpleNamespace(project_id=project_id, project_roots=("/captured/root",), webui_sidekick=None)
+    captured = SimpleNamespace(
+        project_id=project_id,
+        project_roots=("/captured/root",),
+        webui_sidekick=None,
+        is_project_lead=False,
+        lead_thread_id=None,
+    )
     async with open_harness_ui_app(_settings(tmp_path / "data"), configuration_path=root) as app:
         source = await app.create_thread()
         prompts = []
@@ -535,5 +624,79 @@ async def test_requester_identity_uses_run_capture_not_future_thread_selections(
         assert "/captured/root" in instructions
         result = await capability.create_thread(context, prompt="Independent work")
         assert result["ok"] is False and result["thread_id"] != source.thread_id
-        assert f"Requesting Project: {project_id or 'No Project'}" in prompts[0]
-        assert "Requesting Project: project-main" not in prompts[0]
+        context, body = prompts[0]
+        assert context.metadata == {"display": False}
+        assert f"Requesting Project: {project_id or 'No Project'}" in context.content
+        assert "Requesting Project: project-main" not in context.content
+        assert body.content == "Independent work"
+        assert body.metadata["harness_ui"]["thread_message"]["source_thread_id"] == source.thread_id
+
+
+@pytest.mark.parametrize("delivery", ["run", "send", "steer"])
+async def test_follow_up_input_preserves_attribution_through_execution_and_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivery: str
+) -> None:
+    root = configuration(tmp_path)
+    started, release = Event(), Event()
+
+    async def resolve(self, context, model_id):
+        async def model(messages, info):
+            if "Focus here" in str(messages):
+                assert "Message from Thread" in str(messages)
+                yield "Applied the feedback"
+            else:
+                yield "Working"
+                started.set()
+                await release.wait()
+
+        return FunctionModel(stream_function=model)
+
+    monkeypatch.setattr(HarnessUiModelResolver, "__call__", resolve)
+    settings = _settings(tmp_path / "data").model_copy(update={"pricing_auto_update": False})
+    async with open_harness_ui_app(settings, configuration_path=root, host_mode="webui", instrumentation=None) as app:
+        source = await app.create_thread(title="Review source")
+        target = await app.create_thread()
+        tools = controller(app)
+        with fail_after(15):
+            if delivery == "run":
+                receipt = await tools.run_thread(
+                    source_thread_id=source.thread_id, thread_id=target.thread_id, prompt="Focus here"
+                )
+                receipt_id = receipt["receipt_id"]
+            else:
+                receipt = await app.submit_thread(thread_id=target.thread_id, prompt="Start work")
+                receipt_id = receipt.receipt_id
+                await started.wait()
+                send = tools.send_thread_message if delivery == "send" else tools.steer_thread
+                result = await send(source_thread_id=source.thread_id, thread_id=target.thread_id, message="Focus here")
+                assert result["accepted"] is True
+                assert result["receipt_id"] == receipt_id
+                release.set()
+            operation = await app.wait_root_operation(receipt_id)
+            assert operation.status is RootOperationStatus.completed, operation.model_dump_json()
+        history = await app.get_thread_transcript(thread_id=target.thread_id)
+        parts = [part for entry in history.entries for part in entry.parts]
+        context = next(part for part in parts if (part.text or "").startswith("Message from Thread"))
+        assert context.metadata.display is False
+        body = next(part for part in parts if part.text == "Focus here")
+        assert body.metadata.model_dump()["harness_ui"]["thread_message"] == {
+            "source_thread_id": source.thread_id,
+            "source_thread_title": "Review source",
+        }
+        assert body.metadata.display is True
+        assert any(part.text == "Applied the feedback" for part in parts)
+
+
+@pytest.mark.parametrize("action", ["run", "steer"])
+async def test_hidden_context_does_not_admit_empty_cross_thread_input(tmp_path: Path, action: str) -> None:
+    root = configuration(tmp_path)
+    async with open_harness_ui_app(_settings(tmp_path / "data"), configuration_path=root) as app:
+        source = await app.create_thread()
+        target = await app.create_thread()
+        tools = controller(app)
+        with pytest.raises(ThreadError, match="non-empty"):
+            if action == "run":
+                await tools.run_thread(source_thread_id=source.thread_id, thread_id=target.thread_id, prompt=" \n")
+            else:
+                await tools.steer_thread(source_thread_id=source.thread_id, thread_id=target.thread_id, message=" \n")
+        assert await app._root_runs.active(target.thread_id) is None

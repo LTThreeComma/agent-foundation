@@ -85,6 +85,8 @@ class _ThreadCursor(SurfaceModel):
     project_ids: tuple[str, ...] | None = None
     project_ids_digest: str | None = None
     projectless: bool = False
+    lead_thread_id: str | None = None
+    independent_only: bool = False
     sort: Literal["updated", "activity", "touched"] = "updated"
     include_archived: bool
     archived_only: bool = False
@@ -109,6 +111,7 @@ class _InputCursor(SurfaceModel):
 
 
 class ThreadInspection(SurfaceModel):
+    context_empty: bool = False
     run_composition: ObjectRef | None = None
     latest_request_tokens: int | None = None
     notes: NotePage = Field(default_factory=NotePage)
@@ -153,6 +156,8 @@ class ThreadProjectionService:
         archived_only: bool = False,
         project_ids: tuple[str, ...] | None = None,
         projectless: bool = False,
+        lead_thread_id: str | None = None,
+        independent_only: bool = False,
         sort: Literal["updated", "activity", "touched"] = "updated",
         active_only: bool | None = None,
         active_thread_ids: tuple[str, ...] = (),
@@ -160,6 +165,8 @@ class ThreadProjectionService:
         limit: int = 20,
     ) -> ThreadPage:
         normalized_query = _normalize_query(query)
+        if lead_thread_id is not None and independent_only:
+            raise ThreadError("Choose workers or independent Threads, not both.", code="thread_page_invalid")
         if sum((project_id is not None, project_ids is not None, projectless)) > 1:
             raise ThreadError("Choose only one Project filter.", code="thread_page_invalid")
         if project_ids is not None:
@@ -183,6 +190,8 @@ class ThreadProjectionService:
                     else decoded.project_ids != project_ids
                 )
                 or decoded.projectless != projectless
+                or decoded.lead_thread_id != lead_thread_id
+                or decoded.independent_only != independent_only
                 or decoded.sort != sort
                 or decoded.active_only != active_only
             ):
@@ -195,6 +204,8 @@ class ThreadProjectionService:
             archived_only=archived_only,
             project_ids=project_ids,
             projectless=projectless,
+            lead_thread_id=lead_thread_id,
+            independent_only=independent_only,
             sort=sort,
             thread_ids=active_thread_ids if active_only is True else None,
             exclude_thread_ids=active_thread_ids if active_only is False else (),
@@ -205,7 +216,10 @@ class ThreadProjectionService:
         activities: Mapping[str, RootActivityView] = {}
         if visible and self._root_activities is not None:
             activities = await self._root_activities(tuple(item.thread_id for item in visible))
-        summaries = tuple([await self._summary(item, activity=activities.get(item.thread_id)) for item in visible])
+        owners = await self._store.threads.worker_leads(tuple(item.thread_id for item in visible))
+        summaries = tuple(
+            [await self._summary(item, activity=activities.get(item.thread_id), owners=owners) for item in visible]
+        )
         next_cursor = None
         if len(stored) > limit:
             last = visible[-1]
@@ -224,6 +238,8 @@ class ThreadProjectionService:
                     # A filter can cover many unavailable Projects; keep its cursor bounded.
                     project_ids_digest=project_ids_digest,
                     projectless=projectless,
+                    lead_thread_id=lead_thread_id,
+                    independent_only=independent_only,
                     sort=sort,
                     thread_id=last.thread_id,
                 )
@@ -238,8 +254,11 @@ class ThreadProjectionService:
             thread_ids=tuple(set(thread_ids)), include_archived=True, limit=100
         )
         activities = {} if self._root_activities is None else await self._root_activities(thread_ids)
+        owners = await self._store.threads.worker_leads(thread_ids)
         return ThreadPage(
-            threads=tuple([await self._summary(item, activity=activities.get(item.thread_id)) for item in stored]),
+            threads=tuple(
+                [await self._summary(item, activity=activities.get(item.thread_id), owners=owners) for item in stored]
+            ),
             total=total,
         )
 
@@ -252,12 +271,14 @@ class ThreadProjectionService:
             continuation_id = thread.continuation.logical_digest
             if thread.read_model is not None:
                 requests = _deferred_requests(thread.read_model.deferred_requests)
-        actions: list[Literal["run", "respond", "wait", "steer", "cancel", "archive"]] = []
+        actions: list[Literal["run", "respond", "wait", "steer", "cancel", "archive", "clear_context"]] = []
         if summary.root_activity.state is RootActivityState.inactive:
             if not thread.archived:
                 if thread.continuation is None or thread.read_model is not None:
                     actions.append("respond" if requests else "run")
                 actions.append("archive")
+                if thread.parent_thread_id is None and thread.continuation is not None:
+                    actions.append("clear_context")
         else:
             actions.extend(summary.root_activity.available_actions)
         return ThreadDetail(
@@ -436,6 +457,7 @@ class ThreadProjectionService:
                 code="configuration_not_accepted",
             )
         recency = await self._store.threads.project_recency()
+        leads = await self._store.threads.project_leads()
         return tuple(
             ProjectSummary(
                 project_id=project.id,
@@ -443,6 +465,8 @@ class ThreadProjectionService:
                 position=project.position,
                 roots=tuple(root.path for root in project.roots),
                 last_active_at=recency.get(project.id),
+                lead_thread_id=leads[project.id].thread_id if project.id in leads else None,
+                lead_enabled=leads[project.id].enabled if project.id in leads else False,
                 defaults=project.defaults,
             )
             for project in sorted(source.projects.values(), key=lambda item: (item.position, item.id))
@@ -459,7 +483,10 @@ class ThreadProjectionService:
         thread: Thread,
         *,
         activity: RootActivityView | None = None,
+        owners: Mapping[str, str] | None = None,
     ) -> ThreadSummary:
+        if owners is None:
+            owners = await self._store.threads.worker_leads((thread.thread_id,))
         if activity is None:
             activity = _ROOT_INACTIVE
             if thread.parent_thread_id is None and self._root_activity is not None:
@@ -471,6 +498,7 @@ class ThreadProjectionService:
             goal = goal.model_copy(update={"status": "suspended" if pending else "unverified_stop"})
         return ThreadSummary(
             thread_id=thread.thread_id,
+            lead_thread_id=owners.get(thread.thread_id),
             parent_thread_id=thread.parent_thread_id,
             created_at=thread.created_at,
             updated_at=thread.updated_at,
@@ -498,7 +526,7 @@ class ThreadProjectionService:
         composition = await self._store.objects.read_model(inspection.run_composition, ResolvedRunComposition)
         latest = inspection.latest_request_tokens
         observed = await self._store.usage.latest_root_request(thread_id=thread_id)
-        if observed is not None:
+        if observed is not None and not inspection.context_empty:
             latest = observed.request_usage.input_tokens + observed.request_usage.output_tokens
         model = composition.root.model
         from a13n_harness_ui.model_thinking import summarize_thinking
@@ -624,6 +652,7 @@ def build_thread_inspection(thread: Thread, stored: StoredContinuation | StoredT
         working = WorkingState.model_validate(entry.data)
         tasks, notes = project_working_state(working, continuation_id)
     metadata = ThreadInspection(
+        context_empty=not state.message_history,
         run_composition=stored.run_composition if isinstance(stored, StoredContinuation) else None,
         latest_request_tokens=next(
             (

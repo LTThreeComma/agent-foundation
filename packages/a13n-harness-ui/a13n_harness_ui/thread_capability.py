@@ -8,10 +8,13 @@ from typing import Any, Literal, Protocol, cast
 
 from a13n_harness.context import AgentContext
 from a13n_harness.errors import DefinitionError
+from a13n_harness.input import RunInputValue
 from a13n_harness.tools import HarnessTool, HarnessToolMetadata, ToolOutputPolicy
+from a13n_logging import get_logger
 from pydantic import Field
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import TextContent
 from pydantic_ai.toolsets import FunctionToolset
 
 from a13n_harness_ui.composition import CompositionAcceptanceService, ResolvedRunComposition
@@ -19,7 +22,8 @@ from a13n_harness_ui.configuration.discovery import ResourceKind, resource_page
 from a13n_harness_ui.configuration_inspection import ThreadConfigurationInspection
 from a13n_harness_ui.errors import ConfigurationError, HarnessUiError, ThreadError
 from a13n_harness_ui.root_run import RootRunCoordinator
-from a13n_harness_ui.surfaces import NewThreadDefaults, RunModelOverrides, ThreadSummary
+from a13n_harness_ui.storage.repositories import ThreadRepository
+from a13n_harness_ui.surfaces import NewThreadDefaults, RootOperationView, RunModelOverrides, ThreadSummary
 from a13n_harness_ui.thread_projection import ThreadProjectionService
 
 _THREAD_CAPABILITY_ID = "a13n.harness-ui.thread-collaboration"
@@ -32,6 +36,7 @@ class ThreadCreator(Protocol):
         *,
         defaults: NewThreadDefaults,
         title: str | None = None,
+        lead_thread_id: str | None = None,
     ) -> ThreadSummary: ...
 
 
@@ -42,12 +47,14 @@ class ThreadToolController:
         self,
         *,
         projections: ThreadProjectionService,
+        threads: ThreadRepository,
         root_runs: RootRunCoordinator,
         create_thread: ThreadCreator,
         configurations: CompositionAcceptanceService,
         inspect_configuration: Callable[[str], Awaitable[ThreadConfigurationInspection]] | None = None,
     ) -> None:
         self._projections = projections
+        self._threads = threads
         self._root_runs = root_runs
         self._create_thread = create_thread
         self._configurations = configurations
@@ -79,24 +86,33 @@ class ThreadToolController:
     async def list_threads(
         self,
         *,
+        source_thread_id: str,
         query: str | None,
         cursor: str | None,
         limit: int,
         project_id: str | None = None,
         include_archived: bool = False,
     ) -> dict[str, Any]:
+        lead_id = source_thread_id if await self._threads.is_project_lead(source_thread_id) else None
         page = await self._projections.list_threads(
-            query=query, cursor=cursor, limit=limit, project_id=project_id, include_archived=include_archived
+            query=query,
+            cursor=cursor,
+            limit=limit,
+            project_id=project_id,
+            include_archived=include_archived,
+            lead_thread_id=lead_id,
         )
         return page.model_dump(mode="json")
 
     async def get_thread(
         self,
         *,
+        source_thread_id: str,
         thread_id: str,
         history_cursor: str | None,
         history_limit: int,
     ) -> dict[str, Any]:
+        await self._require_target(source_thread_id, thread_id)
         detail = await self._projections.detail(thread_id)
         transcript = await self._projections.transcript(
             thread_id=thread_id,
@@ -112,10 +128,16 @@ class ThreadToolController:
             result["configuration"] = inspection.model_dump(mode="json")
         return result
 
-    async def run_thread(self, *, thread_id: str, prompt: str, model_id: str | None = None) -> dict[str, Any]:
+    async def run_thread(
+        self, *, source_thread_id: str, thread_id: str, prompt: str, model_id: str | None = None
+    ) -> dict[str, Any]:
+        if not prompt.strip():
+            raise ThreadError("A non-empty prompt is required.", code="thread_prompt_empty")
+        await self._require_target(source_thread_id, thread_id)
+        source = await self._projections.detail(source_thread_id)
         receipt = await self._root_runs.submit_prompt(
             thread_id=thread_id,
-            prompt=prompt,
+            prompt=_thread_input(source.thread, prompt),
             model_overrides=RunModelOverrides(model_id=model_id) if model_id is not None else None,
             touch=True,
         )
@@ -135,6 +157,16 @@ class ThreadToolController:
         model_overrides = RunModelOverrides(model_id=model_id) if model_id is not None else None
         source = await self._projections.detail(source_thread_id)
         configuration = source.thread.configuration
+        is_lead = await self._threads.is_project_lead(source_thread_id)
+        if source.thread.lead_thread_id is not None:
+            raise ThreadError(
+                "Ask your Coordinator to create another worker; use subagents for bounded work within your task.",
+                code="project_lead_worker_creation_scoped",
+            )
+        if is_lead and project_id not in ("current", configuration.project_id):
+            raise ThreadError(
+                "A Coordinator creates workers only in its own Project.", code="project_lead_worker_project_locked"
+            )
         sidekick = source_composition.webui_sidekick if source_composition is not None else None
         if sidekick is not None and agent_id is None:
             assert source_composition is not None
@@ -165,56 +197,118 @@ class ThreadToolController:
                 agent_id=agent_id,
                 default_model_id=default_model_id,
             )
-        created = await self._create_thread(defaults=defaults, title=title)
+        created = await self._create_thread(
+            defaults=defaults, title=title, lead_thread_id=source_thread_id if is_lead else None
+        )
         requester_project = (
             source_composition.project_id if source_composition is not None else configuration.project_id
         )
-        prompt = (
+        context = (
             f"Task from Thread {source_thread_id}. Requesting Project: {requester_project or 'No Project'}.\n"
             "This is an independent root Thread, not a delegated child. "
             f"For clarification, decisions or blockers, use send_thread_message(thread_id={source_thread_id!r}, "
             "message=...) to ask the requester. The requester can reply with the same tool targeting your Thread. "
             "When finished, use that tool to report your findings, changes, validation and remaining issues to the requester. "
             "Sending a message does not wait for an answer; do not invent a reply. "
-            "Do not send acknowledgement-only replies or delegate the same task back to its requester.\n\n"
-            f"{prompt}"
+            "Do not send acknowledgement-only replies or delegate the same task back to its requester."
         )
+        if is_lead:
+            context += (
+                " The requester is the Coordinator coordinating this work. "
+                "Use ordinary send_thread_message messages for coordination questions, not ask_user_question. "
+                "If its answer is required, explain the blocker and finish this turn; its reply can start another Run. "
+                "Existing tool approvals still apply; ordinary messages cannot grant a denied approval."
+            )
         try:
             receipt = await self._root_runs.submit_prompt(
-                thread_id=created.thread_id, prompt=prompt, model_overrides=model_overrides, touch=True
+                thread_id=created.thread_id,
+                prompt=_thread_input(source.thread, prompt, context=context),
+                model_overrides=model_overrides,
+                touch=True,
             )
         except HarnessUiError as exc:
             # Creation and run admission are separate durable effects. Never hide the created identity.
             return {**_failure(exc, "thread_run_failed"), "thread_id": created.thread_id}
         return {"ok": True, "thread_id": created.thread_id, "receipt": receipt.model_dump(mode="json")}
 
+    async def notify_project_lead(self, project_id: str | None, operation: RootOperationView) -> None:
+        """Notify only the explicit owner of a managed worker, without retries or a queue."""
+        source = await self._configurations.current()
+        if project_id is None or source is None or source.document.webui.sidekick is None:
+            return
+        lead_id = (await self._threads.worker_leads((operation.receipt.thread_id,))).get(operation.receipt.thread_id)
+        if lead_id is None:
+            return
+        project = next((item for item in await self._projections.projects() if item.lead_thread_id == lead_id), None)
+        if (
+            project is None
+            or not project.lead_enabled
+            or project.lead_thread_id is None
+            or project.lead_thread_id == operation.receipt.thread_id
+        ):
+            return
+        message = (
+            f"Host notification: Thread {operation.receipt.thread_id} ended a root operation "
+            f"in Project {project_id}. Receipt: {operation.receipt.receipt_id}. "
+            f"Run: {operation.run_id or 'not started'}. Status: {operation.status.value}. "
+            "Use get_thread to inspect its saved results and reconcile your tasks and notes. "
+            "This lifecycle notice is separate from any worker report; an ended operation does not prove "
+            "the task succeeded. Do not send an acknowledgement or repeat an already integrated report."
+        )
+        result = await self._run_or_steer(
+            thread_id=project.lead_thread_id,
+            prompt=[TextContent(message, metadata={"display": False})],
+        )
+        if not result["ok"]:
+            get_logger(__name__).info(
+                "Coordinator did not accept terminal notification: %s", operation.receipt.receipt_id
+            )
+
+    async def _require_target(self, source_thread_id: str, thread_id: str) -> None:
+        if source_thread_id == thread_id or not await self._threads.is_project_lead(source_thread_id):
+            return
+        owner = (await self._threads.worker_leads((thread_id,))).get(thread_id)
+        if owner != source_thread_id:
+            raise ThreadError(
+                "A Coordinator can access only itself and its own workers. Use list_threads to find them.",
+                code="project_lead_thread_scoped",
+            )
+
     async def send_thread_message(self, *, source_thread_id: str, thread_id: str, message: str) -> dict[str, Any]:
+        await self._require_target(source_thread_id, thread_id)
+        source = await self._projections.detail(source_thread_id)
+        return await self._run_or_steer(thread_id=thread_id, prompt=_thread_input(source.thread, message))
+
+    async def _run_or_steer(self, *, thread_id: str, prompt: RunInputValue) -> dict[str, Any]:
         detail = await self._projections.detail(thread_id)
         if detail.thread.parent_thread_id is not None:
             raise ThreadError("Child Threads use parent-scoped delegation controls.", code="child_thread_scoped")
         if detail.thread.archived:
             raise ThreadError("An archived Thread cannot receive messages.", code="thread_archived")
-        message = f"Message from Thread {source_thread_id}:\n\n{message}"
         operation = await self._root_runs.active(thread_id)
         if operation is not None:
             # Resolve once. A rejected steer never falls through into a different operation.
-            result = await self._root_runs.steer(receipt_id=operation.receipt.receipt_id, message=message)
+            result = await self._root_runs.steer(receipt_id=operation.receipt.receipt_id, message=prompt)
             return {"ok": result.accepted, "mode": "steer", **result.model_dump(mode="json")}
         if detail.deferred_requests:
             raise ThreadError(
                 "Resolve this Thread's pending decisions before sending a message.", code="thread_deferred_pending"
             )
         # Admission serializes concurrent sends. If another operation wins, report its conflict without retrying.
-        receipt = await self._root_runs.submit_prompt(thread_id=thread_id, prompt=message)
+        receipt = await self._root_runs.submit_prompt(thread_id=thread_id, prompt=prompt)
         return {"ok": True, "mode": "run", "receipt": receipt.model_dump(mode="json")}
 
-    async def steer_thread(self, *, thread_id: str, message: str) -> dict[str, Any]:
+    async def steer_thread(self, *, source_thread_id: str, thread_id: str, message: str) -> dict[str, Any]:
+        if not message.strip():
+            raise ThreadError("A non-empty message is required.", code="thread_message_empty")
+        await self._require_target(source_thread_id, thread_id)
         operation = await self._root_runs.active(thread_id)
         if operation is None:
             return {"accepted": False, "receipt_id": None, "enqueue_id": None}
+        source = await self._projections.detail(source_thread_id)
         result = await self._root_runs.steer(
             receipt_id=operation.receipt.receipt_id,
-            message=message,
+            message=_thread_input(source.thread, message),
         )
         return result.model_dump(mode="json")
 
@@ -255,15 +349,83 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
             "A positive result means acceptance only, not processing or saved delivery. A rejected or uncertain send "
             "must be reconciled, not blindly retried. Do not create acknowledgement loops or delegate a task back to its requester."
         )
-        if self.composition is not None and (sidekick := self.composition.webui_sidekick) is not None:
+        is_lead = self.composition is not None and self.composition.is_project_lead
+        if is_lead:
+            instructions += (
+                "\nYou are this Project's Coordinator: an ordinary root Thread that helps the user plan work, "
+                "coordinate your explicitly owned worker Threads, and integrate verified results. "
+                "Project membership is not worker ownership. Your Thread tools are scoped to yourself and your "
+                "workers, including while automatic coordination is disabled. Old conversations and ordinary "
+                "Sidekicks remain independent; never adopt, steer, or continue them. "
+                "create_thread atomically creates an owned root in your Project; do not supply another Project. "
+                "Workers remain directly accessible to the user. Reconcile any user changes before assigning more work. "
+                "Keep the user's objective and authorization in view. At the start of each Run, recover relevant "
+                "open work from the continuation summary and projected tasks and notes; use note_get for omitted "
+                "notes when available. Before planning new work or reporting progress, use get_thread(thread_id=...) "
+                "to check the known workers' current status and saved results. Use list_threads to rediscover "
+                "your durable worker set; it cannot list external conversations. Reuse existing workers rather "
+                "than creating duplicates. An inactive worker "
+                "is not necessarily successful: inspect its outcome, blockers, and validation before marking work done. "
+                "When notes tools are available, maintain a compact coordination note with each delegated objective, "
+                "worker Thread ID, last verified status, blocker, and next action. Treat it as an index, not live truth; "
+                "refresh stale observations with get_thread. Use task tools when available to track meaningful "
+                "deliverables and reconcile their status after verification, without copying whole worker transcripts. "
+                "Before summarize, reconcile tasks and notes. Use the summary for the user's objective, decisions, "
+                "verified outcomes, unresolved work, and immediate next step; do not duplicate the separately "
+                "projected notes and tasks. Never assume an unsaved plan will survive a handoff. "
+                "Answer workers through send_thread_message, using their source Thread IDs. "
+                "Ask ordinary coordination questions in text, not ask_user_question. When waiting for an answer, "
+                "state what is blocked and finish the turn; an incoming message can start another Run. "
+                "While Coordinator and Sidekick are enabled, the Host attempts to run or steer this Thread "
+                "when one of your owned workers ends an operation, including failure, cancellation "
+                "or suspension. These lifecycle notices are separate from worker reports. On receipt, inspect "
+                "the worker's saved results and reconcile tasks and notes; do not acknowledge the notice or "
+                "repeat an already integrated report. There is no background polling, durable notification queue, "
+                "retry or guaranteed delivery. Check progress at meaningful points while executing. "
+                "If only waiting remains, record the pending work and end the turn. A Host notification, "
+                "worker report or new user message may start another Run; do not promise a guaranteed wake-up. "
+                "Do not claim a worker finished from an admission receipt. "
+                "Existing tool approvals and pending-decision restrictions still apply; messages do not override denial. "
+                "Stopping this Thread does not stop other Threads."
+            )
+        if self.composition is not None and self.composition.lead_thread_id is not None:
+            instructions += (
+                f"\nYou are a managed worker of Coordinator {self.composition.lead_thread_id}. "
+                "This durable ownership is distinct from subagent execution: you remain an independent root "
+                "conversation with your own history, configuration and user interaction. Work within the assigned "
+                "objective and authorization; direct user messages do not change your owner. "
+                f"Use send_thread_message(thread_id={self.composition.lead_thread_id!r}, message=...) "
+                "for coordination questions, blockers and verified results. Use get_thread() to inspect your "
+                "own saved outcome; lead_thread_id remains your return address after a restart or handoff. "
+                "For ordinary coordination, do not use ask_user_question: ask the Coordinator and finish the turn "
+                "if its answer is required. Never pretend a message was processed merely because accepted. "
+                "Existing human approvals still apply and cannot be granted by a Coordinator message. "
+                "Do not create another root or pass the same task back. Ask the Coordinator to split independent work; "
+                "use declared subagents for bounded work you integrate yourself. "
+                "Report substantive findings, changes, validation and remaining issues once; do not send "
+                "acknowledgement-only replies. The Host separately attempts an end-of-operation notice to "
+                "your Coordinator when coordination is enabled. That notice is not your report and neither path "
+                "guarantees processing or a wake-up. Do not poll or repeatedly send the same report."
+            )
+        if (
+            self.composition is not None
+            and self.composition.lead_thread_id is None
+            and (sidekick := self.composition.webui_sidekick) is not None
+        ):
             agent_id = sidekick.agent or self.composition.root.source_id
             model_selection = f", model_id={sidekick.model!r}" if sidekick.model is not None else ""
             instructions += (
-                "\nSidekick is enabled. Use subagents for parallel research, exploration, and other bounded tasks "
+                "\nSidekick is enabled. Create independent worker Threads for bounded parts of the user's "
+                "authorized Project work when useful. Use subagents for short, scoped work you will integrate "
+                "in this Run. For independent work, use "
+                if is_lead
+                else "\nSidekick is enabled. Use subagents for parallel research, exploration, and other bounded tasks "
                 "whose results you will integrate into the current conversation. If no suitable subagent is available, "
                 "keep that work in the current Thread rather than creating a Sidekick as a fallback. "
                 "Create a separate Thread only for coordination work that needs human attention, decisions, or "
                 "follow-up in its own conversation. For that work, use "
+            )
+            instructions += (
                 "create_thread(prompt=...). The Host applies the captured Sidekick defaults "
                 f"(Agent {agent_id!r}{model_selection}) when arguments are omitted. "
                 "Its configured Model becomes the new Thread's default for later turns. "
@@ -323,13 +485,22 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
         project_id: str | None = None,
         include_archived: bool = False,
     ) -> dict[str, Any]:
-        """List root Threads across this App, optionally filtered by an exact Project ID."""
+        """List root conversations; for a Coordinator, list only its owned workers.
+
+        Optional Project/search/archive filters narrow this scope, never expand it. Older
+        independent Threads are not workers. Use get_thread() without an ID to inspect yourself.
+        """
         self._require_context(ctx)
         try:
             return {
                 "ok": True,
                 **await self.controller.list_threads(
-                    query=query, cursor=cursor, limit=limit, project_id=project_id, include_archived=include_archived
+                    source_thread_id=self.source_thread_id,
+                    query=query,
+                    cursor=cursor,
+                    limit=limit,
+                    project_id=project_id,
+                    include_archived=include_archived,
                 ),
             }
         except (HarnessUiError, ValueError) as exc:
@@ -342,13 +513,19 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
         history_cursor: str | None = None,
         history_limit: int = Field(default=50, ge=1, le=100),
     ) -> dict[str, Any]:
-        """Inspect status and saved history; omit thread_id to inspect your own Project and selections."""
+        """Inspect saved history and current status; omit thread_id to inspect yourself.
+
+        Coordinators can inspect only themselves and their owned workers. The returned
+        lead_thread_id identifies worker ownership, not subagent execution lineage.
+        Inactive status is not proof that a task succeeded; read the saved outcome.
+        """
         self._require_context(ctx)
         thread_id = thread_id or self.source_thread_id
         try:
             result = {
                 "ok": True,
                 **await self.controller.get_thread(
+                    source_thread_id=self.source_thread_id,
                     thread_id=thread_id,
                     history_cursor=history_cursor,
                     history_limit=history_limit,
@@ -360,6 +537,8 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
                     "project_roots": list(self.composition.project_roots),
                     "agent_id": self.composition.root.source_id,
                     "model_id": self.composition.root.model.model_id,
+                    "is_project_lead": self.composition.is_project_lead,
+                    "lead_thread_id": self.composition.lead_thread_id,
                     "generation_digest": self.composition.generation_digest,
                 }
             return result
@@ -381,7 +560,9 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
                 "A Thread cannot recursively run itself from its active root invocation.",
             )
         try:
-            receipt = await self.controller.run_thread(thread_id=thread_id, prompt=prompt, model_id=model_id)
+            receipt = await self.controller.run_thread(
+                source_thread_id=self.source_thread_id, thread_id=thread_id, prompt=prompt, model_id=model_id
+            )
             return {"ok": True, "receipt": receipt}
         except (HarnessUiError, ValueError) as exc:
             return _failure(exc, "thread_run_failed")
@@ -403,6 +584,11 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
         Explicit agent_id wins. model_id overrides the first Run only, never the saved default.
         Without Sidekick, unchanged Project/Agent inherits this Thread's selections; explicit selections
         use normal Project/Agent defaults. Discover IDs using list_projects, list_agents and list_models.
+
+        For a Coordinator, creation atomically assigns the new root to that Coordinator and must
+        stay in its Project. Ordinary Sidekicks remain independent and receive no automatic
+        lifecycle notification. Managed workers cannot create more roots: ask their Coordinator
+        for another worker or use a declared subagent for bounded work.
 
         The returned receipt is not completion. Use get_thread to inspect progress.
         If admission fails after creation, the returned thread_id remains valid; do not create a duplicate.
@@ -436,7 +622,9 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
                 "A Thread cannot steer itself from its active root invocation.",
             )
         try:
-            result = await self.controller.steer_thread(thread_id=thread_id, message=message)
+            result = await self.controller.steer_thread(
+                source_thread_id=self.source_thread_id, thread_id=thread_id, message=message
+            )
             return {"ok": result["accepted"], **result}
         except HarnessUiError as exc:
             return _failure(exc, "thread_steer_failed")
@@ -519,6 +707,24 @@ class ThreadCollaborationCapability(AbstractCapability[AgentContext]):
                 "Harness UI Thread tools cannot cross root Run scope.",
                 code="capability_scope_invalid",
             )
+
+
+def _thread_input(source: ThreadSummary, text: str, *, context: str | None = None) -> tuple[TextContent, TextContent]:
+    """Keep model context separate from the attributed, surface-visible message."""
+    return (
+        TextContent(context or f"Message from Thread {source.thread_id}:", metadata={"display": False}),
+        TextContent(
+            text,
+            metadata={
+                "harness_ui": {
+                    "thread_message": {
+                        "source_thread_id": source.thread_id,
+                        "source_thread_title": source.title or source.excerpt.first_input or None,
+                    }
+                }
+            },
+        ),
+    )
 
 
 def _tool(

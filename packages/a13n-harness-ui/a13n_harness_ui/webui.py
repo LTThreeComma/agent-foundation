@@ -89,7 +89,7 @@ from a13n_harness_ui.model_authoring import (
     ModelRecipeRequest,
 )
 from a13n_harness_ui.model_catalog import ModelCatalogSnapshot
-from a13n_harness_ui.model_thinking import ThinkingSelection
+from a13n_harness_ui.model_controls import ModelControlSelection
 from a13n_harness_ui.output_comment_models import (
     CommentEdit,
     CommentPage,
@@ -136,6 +136,7 @@ from a13n_harness_ui.surfaces import (
     ThreadActivityView,
     ThreadConfigurationMutationInput,
     ThreadConfigurationResolution,
+    ThreadContextClear,
     ThreadDetail,
     ThreadFocusSnapshot,
     ThreadLookup,
@@ -183,6 +184,10 @@ class ListenerStatus(SurfaceModel):
     access: Literal["api_key", "dangerous_bypass"]
 
 
+class ProjectLeadUpdate(SurfaceModel):
+    enabled: bool
+
+
 class CreateThreadRequest(SurfaceModel):
     thread_id: str | None = Field(default=None, pattern=r"^thread[-_][0-9a-f]{32}$")
     defaults: NewThreadDefaults | None = None
@@ -228,12 +233,10 @@ class SteerRequest(SurfaceModel):
     prompt: str = Field(min_length=1, max_length=256 * 1024)
 
 
-class SubmitRequest(PromptRequest):
+class SubmitRequest(PromptRequest, ModelControlSelection):
     mode: Literal["normal", "goal"] = "normal"
     environment: EnvironmentSelectionPatch | None = None
     model_id: str | None = Field(default=None, min_length=1, max_length=128)
-    thinking: ThinkingSelection | None = None
-    fast: bool | None = None
 
 
 class RootSteerRequest(PromptRequest):
@@ -1229,6 +1232,15 @@ def create_webui(
     ) -> SavedChildOutputPage:
         return await app().saved_child_outputs(thread_id, execution_id, cursor=cursor, limit=limit)
 
+    @server.post(
+        "/api/threads/{thread_id}/clear-context", response_model=ThreadDetail, openapi_extra=_body(ThreadContextClear)
+    )
+    async def clear_context(thread_id: str, request: Request) -> ThreadDetail:
+        command = await _document(request, ThreadContextClear)
+        return await app().clear_thread_context(
+            thread_id=thread_id, expected_continuation_id=command.expected_continuation_id
+        )
+
     @server.get("/api/threads/{thread_id}/context-usage", response_model=ContextUsageView)
     async def context_usage(thread_id: str) -> ContextUsageView:
         return await app().context_usage(thread_id)
@@ -1291,6 +1303,14 @@ def create_webui(
     async def projects() -> tuple[ProjectSummary, ...]:
         return await app().projects()
 
+    @server.patch("/api/projects/{project_id}/lead", response_model=ThreadSummary)
+    async def set_project_lead_enabled(project_id: str, body: ProjectLeadUpdate) -> ThreadSummary:
+        return await app().set_project_lead_enabled(project_id, body.enabled)
+
+    @server.post("/api/projects/{project_id}/lead", response_model=ThreadSummary)
+    async def ensure_project_lead(project_id: str) -> ThreadSummary:
+        return await app().ensure_project_lead(project_id)
+
     @server.get("/api/threads/{thread_id}/decisions", response_model=DecisionBatchView | None)
     async def decision_batch(
         thread_id: str, expected_continuation_id: Annotated[str | None, Query(max_length=80)] = None
@@ -1321,6 +1341,8 @@ def create_webui(
         include_archived: bool = False,
         archived_only: bool = False,
         include_active: bool = False,
+        lead_thread_id: Annotated[str | None, Query(max_length=80)] = None,
+        independent_only: bool = False,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> ThreadActivityPage:
@@ -1331,6 +1353,8 @@ def create_webui(
             include_archived=include_archived,
             archived_only=archived_only,
             include_active=include_active,
+            lead_thread_id=lead_thread_id,
+            independent_only=independent_only,
             cursor=cursor,
             limit=limit,
         )
@@ -1525,9 +1549,7 @@ def create_webui(
                 mode=document.mode,
                 attachment_ids=document.attachment_ids,
                 environment=document.environment,
-                model_overrides=RunModelOverrides(
-                    model_id=document.model_id, thinking=document.thinking, fast=document.fast
-                ),
+                model_overrides=RunModelOverrides(model_id=document.model_id, **document.controls().model_dump()),
                 skill_references=document.skill_references,
                 input_surface="webui",
             )

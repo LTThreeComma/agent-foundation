@@ -812,6 +812,8 @@ class HarnessUiApp:
         include_archived: bool = False,
         archived_only: bool = False,
         include_active: bool = False,
+        lead_thread_id: str | None = None,
+        independent_only: bool = False,
         cursor: str | None = None,
         limit: int = 20,
     ) -> ThreadActivityPage:
@@ -823,6 +825,8 @@ class HarnessUiApp:
                 include_archived=include_archived,
                 archived_only=archived_only,
                 include_active=include_active,
+                lead_thread_id=lead_thread_id,
+                independent_only=independent_only,
                 cursor=cursor,
                 limit=limit,
             )
@@ -998,6 +1002,7 @@ class HarnessUiApp:
         defaults: NewThreadDefaults | RootThreadDefaults | None = None,
         title: str | None = None,
         thread_id: str | None = None,
+        lead_thread_id: str | None = None,
     ) -> ThreadSummary:
         async with self._operation():
             selected = (
@@ -1005,7 +1010,25 @@ class HarnessUiApp:
                 if isinstance(defaults, NewThreadDefaults)
                 else defaults
             )
-            thread = await self._threads.create(defaults=selected, title=title, thread_id=thread_id)
+            thread = await self._threads.create(
+                defaults=selected, title=title, thread_id=thread_id, lead_thread_id=lead_thread_id
+            )
+            await self._summary_hub.publish(kind="thread", thread_id=thread.thread_id)
+            return await self._projections.get_thread(thread.thread_id)
+
+    async def set_project_lead_enabled(self, project_id: str, enabled: bool) -> ThreadSummary:
+        """Persist Project coordination independently of browser navigation."""
+        async with self._operation():
+            thread = await self._threads.set_project_lead_enabled(project_id, enabled)
+            await self._summary_hub.publish(kind="project")
+            await self._summary_hub.publish(kind="thread", thread_id=thread.thread_id)
+            return await self._projections.get_thread(thread.thread_id)
+
+    async def ensure_project_lead(self, project_id: str) -> ThreadSummary:
+        """Resolve the canonical Lead identity without admitting a Run."""
+        async with self._operation():
+            thread = await self._threads.ensure_project_lead(project_id)
+            await self._summary_hub.publish(kind="project")
             await self._summary_hub.publish(kind="thread", thread_id=thread.thread_id)
             return await self._projections.get_thread(thread.thread_id)
 
@@ -1341,6 +1364,17 @@ class HarnessUiApp:
             await self._store.threads.touch(thread_id)
             await self._summary_hub.publish(kind="thread", thread_id=thread_id)
             return await self._projections.get_thread(thread_id)
+
+    async def clear_thread_context(self, *, thread_id: str, expected_continuation_id: str) -> ThreadDetail:
+        """Clear saved Agent context without running a model or deleting the transcript."""
+        async with self._operation():
+            async with self._root_runs.require_inactive(thread_id):
+                await self._threads.clear_context(
+                    thread_id=thread_id, expected_continuation_id=expected_continuation_id
+                )
+            await self._summary_hub.publish(kind="thread", thread_id=thread_id)
+            await self._summary_hub.publish(kind="thread_work", thread_id=thread_id, work_sections=("tasks", "notes"))
+            return await self._projections.detail(thread_id)
 
     async def update_thread_metadata(
         self,
@@ -2675,6 +2709,9 @@ async def open_harness_ui_app(
                 root_executor,
                 restart_coordinator=restart_coordinator,
                 notify=web_push.enqueue if web_push is not None else None,
+                on_settled=(lambda project_id, operation: thread_tools.notify_project_lead(project_id, operation))
+                if host_mode == "webui"
+                else None,
                 summary_hub=summary_hub,
                 observation=observation,
                 touch_thread=store.threads.touch,
@@ -2749,6 +2786,7 @@ async def open_harness_ui_app(
             )
             if host_mode == "webui":
                 thread_tools = ThreadToolController(
+                    threads=store.threads,
                     projections=projections,
                     root_runs=root_runs,
                     create_thread=app.create_thread,

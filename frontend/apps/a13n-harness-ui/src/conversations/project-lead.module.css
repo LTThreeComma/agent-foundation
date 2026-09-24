@@ -1,0 +1,66 @@
+.icon {
+  color: #4b6f9a;
+  flex-shrink: 0;
+}
+:global(.dark) .icon {
+  color: #92b5e2;
+}
+.intro {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+.intro h2 {
+  margin: 0;
+}
+.intro p {
+  max-width: 400px;
+  margin: 0;
+  line-height: 1.65;
+}
+.mark {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+.entry {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 8px;
+  font-weight: 500;
+}
+.entry > span {
+  flex: 1;
+  text-align: start;
+}
+
+.heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+.toggle {
+  flex-shrink: 0;
+  margin-top: 4px;
+  color: var(--a13n-secondary);
+}
+.toggle svg {
+  transition: transform 120ms ease;
+}
+.expandedChevron {
+  transform: rotate(90deg);
+}
+.conversation {
+  flex: 1;
+  min-width: 0;
+}
+.workers {
+  margin-left: 48px;
+  padding-bottom: 8px;
+}
+.workers > small {
+  display: block;
+  padding: 6px 10px;
+  color: var(--a13n-secondary);
+}

@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as Y from "yjs";
@@ -37,6 +38,11 @@ function MessageStream() {
 }
 
 beforeEach(() => {
+  // jsdom has no Web Animations implementation used by the modal viewport.
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -683,8 +689,9 @@ it.each(["send", "steer"] as const)(
   "submits captured skill references for %s and preserves later edits",
   async (action) => {
     const draft = new ThreadDraft();
-    draft.thinking = false;
-    draft.fast = false;
+    draft.controls.thinking = false;
+    draft.controls.fast = false;
+    draft.controls.reasoning_mode = "standard";
     draft.environment = {
       environment_profile_id: "environment-sandbox",
       local_roots: ["/work/selected"],
@@ -729,8 +736,9 @@ it.each(["send", "steer"] as const)(
       undefined,
       undefined,
       async () => {
-        draft.thinking = "high";
-        draft.fast = true;
+        draft.controls.thinking = "high";
+        draft.controls.fast = true;
+        draft.controls.reasoning_mode = "pro";
         draft.environment = {
           environment_profile_id: "environment-native",
           local_roots: [],
@@ -756,6 +764,10 @@ it.each(["send", "steer"] as const)(
     else expect(POST.mock.calls[0][1].body).not.toHaveProperty("thinking");
     if (action === "send") expect(POST.mock.calls[0][1].body.fast).toBe(false);
     else expect(POST.mock.calls[0][1].body).not.toHaveProperty("fast");
+    if (action === "send")
+      expect(POST.mock.calls[0][1].body.reasoning_mode).toBe("standard");
+    else
+      expect(POST.mock.calls[0][1].body).not.toHaveProperty("reasoning_mode");
     if (action === "send")
       expect(POST.mock.calls[0][1].body.environment).toEqual({
         environment_profile_id: "environment-sandbox",
@@ -801,7 +813,7 @@ it("does not submit after navigation cancels a pending skill catalog read", asyn
 
 it("retries with an ordinary continuation without consuming the shared draft or attachments", async () => {
   const draft = new ThreadDraft();
-  draft.thinking = "low";
+  draft.controls.thinking = "low";
   draft.doc.getText("text").insert(0, "Keep my next question");
   draft.addAttachment("attachment-kept");
   const before = values(draft.doc);
@@ -1159,3 +1171,67 @@ it.each(["accepted", "rejected", "unknown"] as const)(
     peer.doc.destroy();
   },
 );
+
+it("keeps unsent input and blocks Send while clearing context", async () => {
+  const draft = new ThreadDraft();
+  vi.spyOn(draft, "connect").mockReturnValue({
+    presence: () => {},
+    close: () => {},
+  });
+  draft.doc.getText("text").insert(0, "Keep my draft");
+  draft.receive({
+    draft_id: "draft-one",
+    participant_id: "person",
+    participants: {},
+    update_base64: encode(Y.encodeStateAsUpdate(draft.doc)),
+  });
+  let finish!: (response: object) => void;
+  const POST = vi.fn(
+    () =>
+      new Promise<object>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const query = new QueryClient();
+  const view = render(
+    <QueryClientProvider client={query}>
+      <TransportContext value={{ client: { POST } } as unknown as Transport}>
+        <ComposerDrafts value={new Map([["thread-one", draft]])}>
+          <Composer
+            threadId="thread-one"
+            activity={{ state: "inactive" }}
+            continuationId={"a".repeat(64)}
+            canRun
+            canClearContext
+            profile={{ display_name: "Alice", color: "#000000" }}
+            unauthorized={() => {}}
+            reconcile={() => {}}
+          />
+        </ComposerDrafts>
+      </TransportContext>
+    </QueryClientProvider>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Clear context" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Clear context",
+    }),
+  );
+  await waitFor(() => expect(POST).toHaveBeenCalledOnce());
+  const send = view.container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Send"]',
+  )!;
+  expect(send.disabled).toBe(true);
+  fireEvent.click(send);
+  fireEvent.keyDown(view.container.querySelector('[role="textbox"]')!, {
+    key: "Enter",
+  });
+  expect(POST).toHaveBeenCalledOnce();
+  await act(async () => finish({ data: { continuation_id: "b".repeat(64) } }));
+  await screen.findByText(/Context cleared\. Your next message starts fresh/);
+  expect(values(draft.doc).prompt).toBe("Keep my draft");
+  expect(send.disabled).toBe(false);
+  expect(POST).toHaveBeenCalledOnce();
+  view.unmount();
+  query.clear();
+});

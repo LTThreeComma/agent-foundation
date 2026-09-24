@@ -11,7 +11,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button, ModalFrame } from "a13n-ui";
 import { ArrowDown } from "@phosphor-icons/react";
 import { result, type Schema } from "../transport/client";
-import { useSelectors, useTransport } from "../transport/context";
+import { useProjects, useSelectors, useTransport } from "../transport/context";
+import leadStyles from "./project-lead.module.css";
 import { ErrorNotice, TextField } from "../shell/ui";
 import type { Profile } from "../shell/presence";
 import { readPreference, writePreference } from "../shell/preferences";
@@ -59,13 +60,19 @@ function Conversation({
   const transport = useTransport();
   const queries = useQueryClient();
   const detail = useThread(threadId);
+  const projects = useProjects();
+  const selectors = useSelectors();
+  const isLead =
+    selectors.data?.sidekick_enabled === true &&
+    projects.data?.some(
+      (project) => project.lead_thread_id === threadId && project.lead_enabled,
+    );
   const results = useResults();
   const tracker = results.tracker;
   useEffect(() => {
     if (detail.data)
       void tracker?.follow(detail.data.thread, detail.dataUpdatedAt);
   }, [detail.data, detail.dataUpdatedAt, tracker]);
-  const selectors = useSelectors();
   const agentSelection = useMutation({
     mutationFn: async (agentId: string) => {
       if (!detail.data)
@@ -81,8 +88,7 @@ function Conversation({
       );
     },
     onSuccess: (updated) => {
-      draft.thinking = null;
-      draft.fast = null;
+      draft.controls = {};
       draft.notify();
       queries.setQueryData<Schema<"ThreadDetail">>(
         ["thread", threadId, "detail"],
@@ -688,6 +694,8 @@ function Conversation({
                 threadId={threadId}
                 receipt={receipt}
                 display={display}
+                continuationId={detail.data?.continuation_id}
+                completedContinuationId={thread?.completion?.continuation_id}
                 retry={
                   thread?.archived
                     ? undefined
@@ -730,12 +738,26 @@ function Conversation({
                 !showLive &&
                 !history.isPending &&
                 !history.error && (
-                  <div className={styles.empty}>
-                    <h2>Start something together.</h2>
-                    <p>
-                      Write a prompt below. People on this conversation can edit
-                      the same input.
-                    </p>
+                  <div
+                    className={`${styles.empty} ${isLead ? leadStyles.intro : ""}`}
+                  >
+                    {isLead ? (
+                      <>
+                        <h2>What are we working on?</h2>
+                        <p>
+                          Share a goal. I’ll help plan the work and bring
+                          results back here.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <h2>Start something together.</h2>
+                        <p>
+                          Write a prompt below. People on this conversation can
+                          edit the same input.
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
             </div>
@@ -789,6 +811,12 @@ function Conversation({
               !detail.isError &&
               (detail.data?.available_actions?.includes("run") ?? false)
             }
+            continuationId={detail.data?.continuation_id}
+            canClearContext={
+              !detail.isError &&
+              (detail.data?.available_actions?.includes("clear_context") ??
+                false)
+            }
             unavailableReason={
               agentSelection.isPending
                 ? "Updating conversation settings…"
@@ -821,14 +849,9 @@ function Conversation({
                 agentId={thread?.configuration.agent_source.id ?? ""}
                 defaultModelId={thread?.configuration.default_model_id}
                 modelId={draft.modelId}
-                thinking={draft.thinking}
-                fast={draft.fast}
-                onFastChange={(value) => {
-                  draft.fast = value;
-                  draft.notify();
-                }}
-                onThinkingChange={(value) => {
-                  draft.thinking = value;
+                controls={draft.controls}
+                onControlsChange={(value) => {
+                  draft.controls = value;
                   draft.notify();
                 }}
                 disabled={
@@ -841,8 +864,7 @@ function Conversation({
                 onAgentChange={(value) => agentSelection.mutate(value)}
                 onModelChange={(value) => {
                   draft.modelId = value;
-                  draft.thinking = null;
-                  draft.fast = null;
+                  draft.controls = {};
                   draft.notify();
                 }}
               />

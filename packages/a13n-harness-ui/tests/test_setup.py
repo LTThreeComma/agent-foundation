@@ -13,7 +13,7 @@ from a13n_harness_ui.model_authoring import ModelRecipeRequest, prepare_model
 def _selection(tmp_path: Path, **changes: object) -> SetupSelection:
     return SetupSelection.model_validate(
         {
-            "model": prepare_model(ModelRecipeRequest(connection="codex", model_id="gpt-5.6-sol")),
+            "model": prepare_model(ModelRecipeRequest(connection="codex", model_id="gpt-6-sol")),
             "default_agent": "agent-codex",
             "project": "project-local",
             "project_path": str(tmp_path),
@@ -35,6 +35,7 @@ async def test_setup_previews_without_publication_and_seeds_selected_connection(
     assert not path.parent.exists()
     root = yaml.safe_load(preview.files[path.name])
     assert root["schema_version"] == "1"
+    assert root["webui"] == {"sidekick": {}}
     assert root["tools"] == {
         "enable_ask_user_question": True,
         "interaction_timeout_seconds": 120,
@@ -48,6 +49,8 @@ async def test_setup_previews_without_publication_and_seeds_selected_connection(
     assert source.document.defaults.agent == "agent-codex"
     assert yaml.safe_load(path.read_text())["tools"] == root["tools"]
     assert source.document.tools.enable_codeact is True
+    assert yaml.safe_load(path.read_text())["webui"] == {"sidekick": {}}
+    assert source.document.webui.sidekick is not None
     assert len(source.agents) == 1
     assert source.projects["project-local"].name == tmp_path.name
     assert yaml.safe_load(preview.files["projects/project-local.yaml"])["name"] == tmp_path.name
@@ -66,7 +69,7 @@ async def test_setup_writes_native_codex_service_tier(tmp_path: Path, tier: str 
             if operation == "add_model"
             else {"new_agent_id": "agent-second", "new_agent_name": "Second Agent"}
         )
-    recipe = prepare_model(ModelRecipeRequest(connection="codex", model_id="gpt-5.6-sol"))
+    recipe = prepare_model(ModelRecipeRequest(connection="codex", model_id="gpt-6-sol"))
     settings = dict(recipe.settings)
     if tier is None:
         settings.pop("openai_service_tier")
@@ -113,6 +116,25 @@ async def test_setup_materializes_missing_tool_defaults_and_preserves_authored_v
     assert yaml.safe_load(path.read_text())["tools"] == authored_tools
     assert (await publish_setup(path, selection, validate_candidate=_validate())).completed
     assert yaml.safe_load(path.read_text())["tools"] == expected
+    assert (await preview_setup(path, selection, validate_candidate=_validate())).files[path.name] == path.read_text()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "webui",
+    [{}, {"sidekick": None}, {"sidekick": {}}, {"sidekick": {"agent": "agent-codex", "model": "model-codex"}}],
+)
+async def test_setup_materializes_sidekick_and_preserves_explicit_choices(tmp_path: Path, webui: dict) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"schema_version": "1", "webui": webui}))
+    original = path.read_bytes()
+    expected = {"sidekick": {}, **webui}
+    selection = _selection(tmp_path)
+    preview = await preview_setup(path, selection, validate_candidate=_validate())
+    assert yaml.safe_load(preview.files[path.name])["webui"] == expected
+    assert path.read_bytes() == original
+    assert (await publish_setup(path, selection, validate_candidate=_validate())).completed
+    assert yaml.safe_load(path.read_text())["webui"] == expected
     assert (await preview_setup(path, selection, validate_candidate=_validate())).files[path.name] == path.read_text()
 
 
@@ -544,7 +566,7 @@ async def test_codex_setup_routes_shell_review_to_luna_and_applies_default_actio
             assert batch.requests[0].kind == "approval"
         else:
             assert batch is None
-    assert set(resolved) == {"gpt-5.6-luna", "gpt-5.6-sol"}
+    assert set(resolved) == {"gpt-5.6-luna", "gpt-6-sol"}
     assert reviewed == ["low"]
     assert marker.exists() is (review_outcome == "error")
 
