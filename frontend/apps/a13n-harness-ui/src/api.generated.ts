@@ -5986,6 +5986,8 @@ export interface components {
              * @default false
              */
             coordinator?: boolean;
+            /** Coordinator Thread Id */
+            coordinator_thread_id?: string | null;
             /** Thread Id */
             thread_id?: string | null;
             defaults?: components["schemas"]["NewThreadDefaults"] | null;

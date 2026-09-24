@@ -239,6 +239,21 @@ export function ThreadRow({
             <DotsThree />
           </MenuTrigger>
           <MenuPopup align="start" side="right">
+            {row.thread.role === "coordinator" && (
+              <MenuItem
+                disabled={row.thread.archived}
+                onClick={() =>
+                  navigate(
+                    newConversationPath(
+                      row.thread.configuration.project_id,
+                      row.thread.thread_id,
+                    ),
+                  )
+                }
+              >
+                <ChatCircle /> New worker
+              </MenuItem>
+            )}
             {canStar && (
               <MenuItem disabled={star.isPending} onClick={toggleStar}>
                 <Star weight={row.thread.starred ? "fill" : "regular"} />

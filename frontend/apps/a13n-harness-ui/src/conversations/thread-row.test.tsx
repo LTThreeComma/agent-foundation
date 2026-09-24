@@ -63,12 +63,18 @@ afterEach(() => {
 });
 function Location() {
   const location = useLocation();
-  return <output aria-label="Location">{location.pathname}</output>;
+  return (
+    <>
+      <output aria-label="Location">{location.pathname}</output>
+      <output aria-label="Search">{location.search}</output>
+    </>
+  );
 }
 function mount({
   archived = false,
   running = false,
   selected = true,
+  coordinator = false,
   starred = false,
   worker = false,
 } = {}) {
@@ -76,9 +82,9 @@ function mount({
     thread: {
       thread_id: "thread-one",
       title: "Example",
+      role: coordinator ? "coordinator" : worker ? "worker" : "ordinary",
       archived,
       starred,
-      role: worker ? "worker" : "ordinary",
       metadata_version: 3,
       configuration: { project_id: "project-one" },
       root_activity: { state: running ? "running" : "inactive" },
@@ -256,4 +262,19 @@ it("does not offer stars for coordinator workers", async () => {
   expect(
     screen.queryByRole("menuitem", { name: "Star conversation" }),
   ).toBeNull();
+});
+
+it("opens a worker draft from a running Coordinator without sending it a message", async () => {
+  mount({ coordinator: true, running: true });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Actions for Example" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: "New worker" }),
+  );
+  expect(screen.getByLabelText("Location").textContent).toBe("/new");
+  expect(screen.getByLabelText("Search").textContent).toBe(
+    "?project=project-one&coordinator=thread-one",
+  );
+  expect(requests).toHaveLength(0);
 });
