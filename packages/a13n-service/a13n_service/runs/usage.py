@@ -114,12 +114,12 @@ def price_snapshot(model: ResolvedModel) -> dict[str, JsonValue] | None:
 class UsageBuffer:
     """One attempt's usage records not yet ingested, once each across usage events and the final result.
 
-    Model records carry the identity and price of the resolved model serving their upstream model; `served`
-    is filled when the attempt opens its models, before any call.
+    A model record carries the identity and price of the model its call selected: `calls` maps the call IDs the
+    call check admitted to their models.
     """
 
-    def __init__(self, served: Mapping[tuple[str, str], ResolvedModel]):
-        self.served = served
+    def __init__(self, calls: Mapping[str, ResolvedModel]):
+        self.calls = calls
         self.seen: set[str] = set()
         self._pending: list[UsageReport] = []
 
@@ -134,7 +134,7 @@ class UsageBuffer:
             self.seen.add(record.record_id)
             if isinstance(record, ModelUsageRecord):
                 # A charge is recorded even if its model cannot be told: unattributed, with an unknown price.
-                model = self.served.get((record.provider_name or "", record.model_name or ""))
+                model = self.calls.get(record.call_id) if record.call_id is not None else None
                 model_id, price = (model.id, price_snapshot(model)) if model is not None else (None, None)
                 self._pending.append(UsageReport(record, model_id, price))
             else:

@@ -52,7 +52,7 @@ async def completion(request: Request):
     messages = body.get("messages", [])
     app.state.request_count += 1
     app.state.last_message_roles = tuple(message.get("role") for message in messages[-256:])
-    prompt = "\n".join(str(message.get("content", "")) for message in messages if message.get("role") == "user")
+    prompt = "\n".join(text_of(message) for message in messages if message.get("role") == "user")
     if "[fail]" in prompt:
         return JSONResponse(
             {"error": {"message": "Intentional local model failure", "type": "invalid_request_error"}}, status_code=400
@@ -64,7 +64,7 @@ async def completion(request: Request):
     )
     tool_call = (
         planned_tool(body, prompt)
-        if tool_result is None or any(flag in prompt for flag in ("[structured-invalid]", "[delegate]"))
+        if tool_result is None or any(flag in prompt for flag in ("[structured-invalid]", "[delegate]", "[workspace]"))
         else None
     )
     tool_calls = tool_call if isinstance(tool_call, list) else [tool_call] if tool_call is not None else []
@@ -183,6 +183,8 @@ def planned_tool(body: dict, prompt: str) -> dict | list[dict] | None:
         ),
     )
     tools = [item["function"] for item in body.get("tools", [])]
+    if "[workspace]" in prompt:
+        return workspace_step(body, tools)
     waiting = re.search(r"\[service-wait:(question|client|approval|mixed)\]", prompt)
     if waiting:
         kind = waiting[1]
@@ -271,6 +273,33 @@ def planned_tool(body: dict, prompt: str) -> dict | list[dict] | None:
                 output["function"]["arguments"] = "{malformed-json"
             return output
     return None
+
+
+def workspace_step(body: dict, tools: list[dict]) -> dict | None:
+    """`[workspace]`: read the first listed skill, write a note, then run a command, one call per model request."""
+    messages = body.get("messages", [])
+    marked = max(index for index, message in enumerate(messages) if "[workspace]" in text_of(message))
+    made = sum(len(message.get("tool_calls") or []) for message in messages[marked:])
+    instructions = "\n".join(text_of(message) for message in messages if message.get("role") == "system")
+    skill = re.search(r"<path>([^<]+)</path>", instructions)
+    note = "notes/review.md"
+    steps = [
+        *([("view", {"file_path": skill[1] + "/SKILL.md"})] if skill else []),
+        ("write", {"file_path": f"/workspace/{note}", "content": "# Fictional review\n\n- Navigation\n- Keyboard\n"}),
+        ("shell_exec", {"command": f"wc -l {note} && head -n 1 {note}", "cwd": "/workspace"}),
+    ]
+    if made >= len(steps):
+        return None
+    name, arguments = steps[made]
+    return call(name, arguments) if any(tool["name"] == name for tool in tools) else None
+
+
+def text_of(message: dict) -> str:
+    """A message's text: its content is a string, or a list of typed parts."""
+    content = message.get("content") or ""
+    if isinstance(content, str):
+        return content
+    return "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
 
 
 def call(name: str, arguments: dict) -> dict:

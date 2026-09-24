@@ -2033,17 +2033,17 @@
         "type": "object"
       },
       "CatalogModel": {
-        "description": "A model the provider type is known to serve, with the values creating it from the catalogue uses.",
+        "description": "A catalog model, with the characteristics and pricing a model created from it starts with.",
         "properties": {
           "characteristics": {
             "$ref": "#/components/schemas/HarnessModelCharacteristics-Output"
           },
-          "key": {
-            "title": "Key",
+          "identity": {
+            "title": "Identity",
             "type": "string"
           },
-          "model_name": {
-            "title": "Model Name",
+          "name": {
+            "title": "Name",
             "type": "string"
           },
           "pricing": {
@@ -2056,31 +2056,7 @@
               }
             ]
           },
-          "source_url": {
-            "title": "Source Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "model_name",
-          "characteristics",
-          "pricing",
-          "source_url"
-        ],
-        "title": "CatalogModel",
-        "type": "object"
-      },
-      "CatalogPage": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/CatalogModel"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "next_cursor": {
+          "pricing_warning": {
             "anyOf": [
               {
                 "type": "string"
@@ -2089,14 +2065,55 @@
                 "type": "null"
               }
             ],
-            "title": "Next Cursor"
+            "title": "Pricing Warning"
+          },
+          "provider_name": {
+            "title": "Provider Name",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/CatalogRef"
+          },
+          "release_date": {
+            "format": "date",
+            "title": "Release Date",
+            "type": "string"
           }
         },
         "required": [
-          "items",
-          "next_cursor"
+          "ref",
+          "identity",
+          "name",
+          "provider_name",
+          "release_date",
+          "characteristics",
+          "pricing",
+          "pricing_warning"
         ],
-        "title": "CatalogPage",
+        "title": "CatalogModel",
+        "type": "object"
+      },
+      "CatalogRef": {
+        "additionalProperties": false,
+        "description": "A models.dev channel and the model ID it lists there.",
+        "properties": {
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,127}$",
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ],
+        "title": "CatalogRef",
         "type": "object"
       },
       "Certainty": {
@@ -3068,42 +3085,6 @@
         "title": "DeliveryPage",
         "type": "object"
       },
-      "DeviceRegistration": {
-        "additionalProperties": false,
-        "description": "A connect-only device of an `http_envd` provider.",
-        "properties": {
-          "device_id": {
-            "pattern": "^[!-~]{1,128}$",
-            "title": "Device Id",
-            "type": "string"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "provider_id": {
-            "maxLength": 72,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[a-z0-9]{16,64}$",
-            "title": "Provider Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider_id",
-          "device_id"
-        ],
-        "title": "DeviceRegistration",
-        "type": "object"
-      },
       "EmailChangeConfirm": {
         "additionalProperties": false,
         "properties": {
@@ -3380,7 +3361,7 @@
       },
       "EnvironmentFailure": {
         "additionalProperties": false,
-        "description": "The last error of the outstanding operation, or what refuses use of an otherwise ready instance.\n\n`unknown` means the call may have taken effect: only the same operation may continue. `permanent` failures\nrefuse new mounts and acceptance until the cause is fixed or the instance is deleted.",
+        "description": "The last error of the outstanding operation or, on a ready instance, of its last renewal.\n\n`unknown` means the call may have taken effect: only the same operation may continue. `permanent` failures\nrefuse new mounts and acceptance until the cause is fixed or the instance is deleted; `environment_lost` means\nthe provider no longer has the sandbox.",
         "properties": {
           "at": {
             "format": "date-time",
@@ -3485,17 +3466,50 @@
       },
       "EnvironmentUpdate": {
         "additionalProperties": false,
+        "description": "Fields left out stay unchanged. Only an external target has an endpoint and token; a new endpoint comes with\nits token, so a stored token never reaches an endpoint it was not entered for.",
         "properties": {
+          "endpoint": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
           "name": {
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
           }
         },
-        "required": [
-          "name"
-        ],
         "title": "EnvironmentUpdate",
         "type": "object"
       },
@@ -3520,6 +3534,17 @@
               }
             ],
             "title": "Device Id"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
           },
           "failure": {
             "anyOf": [
@@ -3590,8 +3615,15 @@
             "title": "Owner Principal Id"
           },
           "provider_id": {
-            "title": "Provider Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
           },
           "status": {
             "title": "Status",
@@ -3629,6 +3661,7 @@
           "provider_id",
           "template_id",
           "device_id",
+          "endpoint",
           "owner_principal_id",
           "name",
           "status",
@@ -3712,6 +3745,45 @@
           "error"
         ],
         "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "ExternalTargetCreate": {
+        "additionalProperties": false,
+        "description": "An envd daemon someone runs, registered by its endpoint and the token it accepts.",
+        "properties": {
+          "endpoint": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "endpoint",
+          "token"
+        ],
+        "title": "ExternalTargetCreate",
         "type": "object"
       },
       "Failure": {
@@ -5043,6 +5115,16 @@
       },
       "Model": {
         "properties": {
+          "catalog_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "config": {
             "$ref": "#/components/schemas/ModelConfig-Output"
           },
@@ -5128,6 +5210,7 @@
           "description",
           "config",
           "pricing",
+          "catalog_ref",
           "enabled",
           "version",
           "created_by_id",
@@ -5143,10 +5226,38 @@
         "enum": [
           "image_understanding",
           "video_understanding",
-          "audio_understanding"
+          "audio_understanding",
+          "document_understanding"
         ],
         "title": "ModelCapability",
         "type": "string"
+      },
+      "ModelCatalog": {
+        "description": "`ready` is fresh, `stale` the last catalog after a failed refresh, `unavailable` none fetched yet.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogModel"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "status"
+        ],
+        "title": "ModelCatalog",
+        "type": "object"
       },
       "ModelConfig-Input": {
         "additionalProperties": false,
@@ -5281,28 +5392,18 @@
       "ModelCreate": {
         "additionalProperties": false,
         "properties": {
-          "catalog_key": {
+          "catalog_ref": {
             "anyOf": [
               {
-                "maxLength": 512,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Catalog Key"
-          },
-          "config": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ModelConfig-Input"
+                "$ref": "#/components/schemas/CatalogRef"
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "config": {
+            "$ref": "#/components/schemas/ModelConfig-Input"
           },
           "description": {
             "default": "",
@@ -5360,7 +5461,8 @@
           "workspace_id",
           "provider_id",
           "key",
-          "name"
+          "name",
+          "config"
         ],
         "title": "ModelCreate",
         "type": "object"
@@ -5648,6 +5750,16 @@
       "ModelUpdate": {
         "additionalProperties": false,
         "properties": {
+          "catalog_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "config": {
             "anyOf": [
               {
@@ -7073,6 +7185,20 @@
           "authentication": {
             "$ref": "#/components/schemas/Authentication"
           },
+          "catalog_providers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Providers"
+          },
           "configuration_schema": {
             "additionalProperties": {
               "$ref": "#/components/schemas/JsonValue"
@@ -7214,17 +7340,6 @@
               }
             ],
             "title": "Supports Destroy"
-          },
-          "supports_managed": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Supports Managed"
           },
           "supports_stop": {
             "anyOf": [
@@ -12231,6 +12346,39 @@
         ]
       }
     },
+    "/api/v1/model-catalog": {
+      "get": {
+        "description": "The models.dev models the registered model provider types serve, for any signed-in principal.",
+        "operationId": "get_model_catalog_api_v1_model_catalog_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelCatalog"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "loginSession": []
+          }
+        ],
+        "summary": "Get Model Catalog",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/organizations": {
       "get": {
         "operationId": "list_organizations_api_v1_organizations_get",
@@ -14277,61 +14425,6 @@
         "summary": "Update Provider",
         "tags": [
           "providers"
-        ]
-      }
-    },
-    "/api/v1/organizations/{organization_id}/model-providers/{provider_id}/catalog": {
-      "get": {
-        "operationId": "list_catalog_api_v1_organizations__organization_id__model_providers__provider_id__catalog_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "organization_id",
-            "required": true,
-            "schema": {
-              "title": "Organization Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "provider_id",
-            "required": true,
-            "schema": {
-              "title": "Provider Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CatalogPage"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "$ref": "#/components/responses/Error"
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "apiKey": []
-          },
-          {
-            "loginSession": []
-          }
-        ],
-        "summary": "List Catalog",
-        "tags": [
-          "models"
         ]
       }
     },
@@ -18959,7 +19052,7 @@
         ]
       },
       "post": {
-        "description": "Reserve a managed sandbox from a template (`creating`), or register a connect-only device (`ready`).",
+        "description": "Reserve a managed sandbox from a template (`creating`), or register an external envd target (`ready`).",
         "operationId": "create_environment_api_v1_workspaces__workspace_id__environments_post",
         "parameters": [
           {
@@ -18981,7 +19074,7 @@
                     "$ref": "#/components/schemas/ManagedEnvironmentCreate"
                   },
                   {
-                    "$ref": "#/components/schemas/DeviceRegistration"
+                    "$ref": "#/components/schemas/ExternalTargetCreate"
                   }
                 ],
                 "title": "Body"
@@ -19151,7 +19244,7 @@
         ]
       },
       "patch": {
-        "operationId": "rename_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch",
+        "operationId": "update_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch",
         "parameters": [
           {
             "in": "path",
@@ -19228,7 +19321,7 @@
             "loginSession": []
           }
         ],
-        "summary": "Rename Environment",
+        "summary": "Update Environment",
         "tags": [
           "environments"
         ]

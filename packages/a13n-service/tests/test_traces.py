@@ -176,7 +176,7 @@ async def started_attempt(service: SimpleNamespace) -> tuple[str, str]:
             "provider_id": provider["id"],
             "key": "gpt",
             "name": "GPT",
-            "catalog_key": "openai:gpt-5.5",
+            "config": {"model_name": "gpt-5.5", "model_api": "openai.responses"},
         },
     )
     agent = await post(

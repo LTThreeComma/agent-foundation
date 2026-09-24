@@ -85,7 +85,7 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Build the native Docker execution image
         run: make image-docker-environment
-      - name: Run every journey; an unavailable dependency fails it
+      - name: Run every journey but the opt-in hosted ones; an unavailable dependency fails it
         run: make live-test LIVE_TEST_ARGS="--require-all --junitxml=test-results/live.xml"
       - name: Report collected, executed and skipped journeys
         if: always()

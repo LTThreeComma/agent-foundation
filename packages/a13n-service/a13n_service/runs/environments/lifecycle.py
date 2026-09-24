@@ -7,6 +7,9 @@ never overwrites a newer operation. An expired claim lets the next dispatcher co
 Harness lifecycle calls reconcile the instance they are bound to (preparation looks the instance up before
 creating one; stop and destroy observe its actual state), so continuing never issues conflicting work. Errors
 stay on the phase with the same operation ID, and maintenance revisits it at its fixed interval.
+
+Reaching `ready` schedules the first renewal of a sandbox whose type expires it unless renewed (`renewal`), and
+beginning any operation ends renewal.
 """
 
 import hmac
@@ -36,11 +39,12 @@ from a13n_service.infra.ids import new_object_id
 from a13n_service.resources.environment_templates.service import read_template, resolve_template
 from a13n_service.resources.providers.service import ResolvedProvider, read_provider, resolve_provider
 from a13n_service.resources.providers.tables import EnvironmentProviderRow
-from a13n_service.runs.environments.adapters import Target, close, construct, provider_identity
+from a13n_service.runs.environments.adapters import Target, close, construct, credential_version, provider_identity
 from a13n_service.runs.environments.schemas import Certainty, EnvironmentFailure, Handle
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.tables import RunRow
+from a13n_service.settings import PUBLISH_SECONDS
 from a13n_service.tenancy.authorize import Principal, WorkspaceScope
 
 type Phase = Literal["creating", "starting", "stopping", "deleting"]
@@ -52,8 +56,6 @@ _PHASES: dict[str, Phase] = {
 }
 PHASES = frozenset(_PHASES)
 _REACHES: dict[str, str] = {"creating": "ready", "starting": "ready", "stopping": "stopped", "deleting": "deleted"}
-# A claim outlives its call deadline by this much, so its dispatcher can still publish what it observed.
-_PUBLISH_SECONDS = 10
 # Refusals that repeating the same call cannot overcome; they refuse new mounts until the cause is fixed.
 PERMANENT = frozenset(
     {
@@ -95,12 +97,26 @@ async def begin(session: AsyncSession, environment: EnvironmentRow, phase: Phase
     environment.operation_started_at = await now(session)
     environment.operation_deadline = None
     environment.lease_owner = environment.lease_token_hash = environment.lease_expires_at = None
-    environment.failure = None
+    environment.failure = environment.renew_at = environment.expires_at = None
 
 
 def supports(definition: EnvironmentProviderDefinition, phase: Literal["stopping", "deleting"]) -> bool:
     """Whether the type can take its instances through `phase`; an instance begun in any other would stick in it."""
     return definition.supports_stop if phase == "stopping" else definition.supports_destroy
+
+
+def unusable(environment: EnvironmentRow) -> bool:
+    """Whether a permanent failure refuses every new use of the instance until its cause is fixed or it is
+    deleted."""
+    return environment.failure is not None and environment.failure["permanent"]
+
+
+def require_usable_state(environment: EnvironmentRow) -> None:
+    """Refuse a new use, or a stop that would clear the failure, while a permanent failure makes the instance
+    unusable; the refusal names the failure."""
+    if unusable(environment):
+        assert environment.failure is not None
+        raise conflict("environment", environment.id, environment.failure["code"])
 
 
 def settled(environment: EnvironmentRow) -> bool:
@@ -182,6 +198,9 @@ class Operation:
     # An earlier dispatch may have taken effect, so failing before this one dispatches settles nothing.
     unresolved: bool
     seconds: float
+    # The provider credential's version now, and whether it changed since that credential last reached the instance.
+    credential_version: str | None
+    credential_changed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +209,33 @@ class Outcome:
     fault: Fault | None = None
 
 
-def _record(environment: EnvironmentRow, fault: Fault, at: datetime, *, unresolved: bool) -> None:
+# The provider no longer has the instance: nothing can bring it back, and it is never silently recreated.
+LOST = Fault(
+    "environment_lost",
+    "The sandbox no longer exists at its provider; delete this environment and use a new one",
+    "known",
+    permanent=True,
+)
+# The provider no longer shows the instance, but a credential written since it last did may belong to another account.
+UNSEEN = Fault(
+    "provider_credential_changed",
+    "The provider's credential changed since it last reached this sandbox, and the new one does not see it",
+    "known",
+)
+
+
+def lost(credential_changed: bool) -> Fault:
+    """What a provider that no longer shows the instance proves: that it is lost, unless its credential changed."""
+    return UNSEEN if credential_changed else LOST
+
+
+def reached_with(handle: Handle, provider: ResolvedProvider) -> tuple[str | None, bool]:
+    """The provider credential's version, and whether it changed since a credential last reached the instance."""
+    version = credential_version(provider)
+    return version, handle.credential_version not in {None, version}
+
+
+def record_failure(environment: EnvironmentRow, fault: Fault, at: datetime, *, unresolved: bool) -> None:
     certainty: Certainty = "unknown" if unresolved and fault.certainty == "not_dispatched" else fault.certainty
     environment.failure = EnvironmentFailure(
         code=fault.code,
@@ -241,20 +286,22 @@ async def claim(runtime: Runtime, environment_id: str, *, owner: str) -> Operati
         current = await now(session)
         if environment.lease_expires_at is not None and environment.lease_expires_at > current:
             return None
+        assert environment.provider_id is not None, "only managed instances have operations"
         failure = environment.failure or {}
         unresolved = environment.lease_owner is not None or failure.get("certainty") == "unknown"
         # Maintenance acts for no principal and must still stop and destroy instances of a disabled provider.
         provider = await read_provider(session, EnvironmentProviderRow, environment.provider_id)
         if (fault := await _refusal(session, runtime, environment, provider)) is not None:
             environment.lease_owner = environment.lease_token_hash = environment.lease_expires_at = None
-            _record(environment, fault, current, unresolved=unresolved)
+            record_failure(environment, fault, current, unresolved=unresolved)
             return None
         token = secrets.token_urlsafe(32)
         environment.lease_owner, environment.lease_token_hash = owner, secret_hash(token)
         deadline = current + timedelta(seconds=seconds)
         environment.operation_deadline = deadline
-        environment.lease_expires_at = deadline + timedelta(seconds=_PUBLISH_SECONDS)
+        environment.lease_expires_at = deadline + timedelta(seconds=PUBLISH_SECONDS)
         handle = Handle.model_validate(environment.handle)
+        version, changed = reached_with(handle, provider)
         return Operation(
             environment_id=environment.id,
             phase=phase,
@@ -264,6 +311,8 @@ async def claim(runtime: Runtime, environment_id: str, *, owner: str) -> Operati
             target=Target(environment.id, provider, handle.recipe, handle.state),
             unresolved=unresolved,
             seconds=seconds,
+            credential_version=version,
+            credential_changed=changed,
         )
 
 
@@ -288,14 +337,11 @@ async def _call(adapter: Environment, phase: Phase) -> EnvironmentState | None:
     return adapter.dump_state()
 
 
-def _fault(error: Exception, *, dispatched: bool) -> Fault:
+def fault_of(error: Exception, *, dispatched: bool) -> Fault:
     if isinstance(error, EnvironmentProviderError):
         certainty = _CERTAINTY[error.certainty]
         permanent = certainty != "unknown" and error.category in PERMANENT
         return Fault(error.code, error.safe_projection().message, certainty, permanent)
-    if isinstance(error, _InstanceLost):
-        message = "The instance no longer exists; replace it with a new environment"
-        return Fault("environment_unavailable", message, "known", permanent=True)
     if isinstance(error, ServiceError):
         return Fault("environment_provider_unavailable", error.message, "not_dispatched", permanent=True)
     certainty: Certainty = "unknown" if dispatched else "not_dispatched"
@@ -311,17 +357,16 @@ async def perform(runtime: Runtime, operation: Operation) -> Outcome:
     dispatched = False
     try:
         with anyio.fail_after(operation.seconds):
-            adapter = await construct(
-                runtime,
-                operation.target,
-                operation_id=operation.operation_id,
-                allow_create=operation.phase in {"creating", "starting"},
-            )
+            # Lifecycle calls act as the instance's owner, so an adapter finds it by the environment ID even before
+            # its state was recorded; only preparation ever creates one, and stop and destroy never prepare.
+            adapter = await construct(runtime, operation.target, operation_id=operation.operation_id, allow_create=True)
             dispatched = True
             return Outcome(await _call(adapter, operation.phase))
+    except _InstanceLost:
+        return Outcome(adapter.dump_state() if adapter is not None else None, lost(operation.credential_changed))
     except Exception as error:
         # A known target stays recorded even when a later step failed, so the next dispatcher can recover it.
-        return Outcome(adapter.dump_state() if adapter is not None else None, _fault(error, dispatched=dispatched))
+        return Outcome(adapter.dump_state() if adapter is not None else None, fault_of(error, dispatched=dispatched))
     finally:
         if adapter is not None:
             await close(adapter)
@@ -346,7 +391,7 @@ async def publish(runtime: Runtime, operation: Operation, outcome: Outcome) -> N
         if outcome.fault is not None:
             if outcome.state is not None:
                 environment.handle = handle.model_copy(update={"state": outcome.state}).model_dump(mode="json")
-            _record(environment, outcome.fault, current, unresolved=operation.unresolved)
+            record_failure(environment, outcome.fault, current, unresolved=operation.unresolved)
             return
         reached = _REACHES[operation.phase]
         environment.status = reached
@@ -355,9 +400,13 @@ async def publish(runtime: Runtime, operation: Operation, outcome: Outcome) -> N
         if reached == "deleted":
             environment.handle = None
         else:
-            environment.handle = handle.model_copy(update={"state": outcome.state}).model_dump(mode="json")
+            update = {"state": outcome.state, "credential_version": operation.credential_version}
+            environment.handle = handle.model_copy(update=update).model_dump(mode="json")
         if reached == "ready":
             environment.last_used_at = current
+            assert environment.provider_identity is not None, "the first claim froze it"
+            if runtime.registry.get("environment", environment.provider_identity["type"]).requires_keepalive:
+                environment.renew_at = current
         record(
             session,
             WorkspaceScope(environment.organization_id, environment.workspace_id),
@@ -379,7 +428,7 @@ async def advance(runtime: Runtime, environment_id: str, *, owner: str) -> None:
     except BaseException:
         # Interrupted mid-call: the effect is unknown until the next dispatcher reconciles the same operation.
         interrupted = Fault("environment_operation_interrupted", "The dispatcher stopped mid-call", "unknown")
-        with anyio.CancelScope(shield=True), anyio.move_on_after(_PUBLISH_SECONDS):
+        with anyio.CancelScope(shield=True), anyio.move_on_after(PUBLISH_SECONDS):
             await publish(runtime, operation, Outcome(None, interrupted))
         raise
     await publish(runtime, operation, outcome)

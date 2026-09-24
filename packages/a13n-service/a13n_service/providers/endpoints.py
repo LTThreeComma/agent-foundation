@@ -1,4 +1,5 @@
-"""The endpoints environment accounts name that Service processes dial themselves.
+"""The environment endpoints tenants name that Service processes dial themselves: a remote Docker engine an
+account names, and an external envd target.
 
 The outbound endpoint policy checks each before it is dialed. An account that names none reaches only a backend
 the operator chose.
@@ -6,9 +7,12 @@ the operator chose.
 
 from urllib.parse import urlsplit
 
+from a13n_harness.providers.endpoint_policy import EndpointPolicy, EndpointPolicyError
 from a13n_harness.providers.environment.docker.provider import DockerConnectionConfiguration
-from a13n_harness.providers.environment.remote_envd.configuration import HttpEnvdConnectionConfiguration
+from a13n_harness.providers.environment.errors import EnvironmentProviderErrorCategory, provider_error
 from pydantic import BaseModel
+
+from a13n_service.infra.outbound import allowed_addresses
 
 # A remote Docker engine's scheme, and the one its API is spoken over.
 _REMOTE_ENGINE = {"tcp": "http", "https": "https"}
@@ -36,9 +40,20 @@ def engine_endpoint(docker_host: str) -> str:
 
 
 def dialed_endpoint(configuration: BaseModel) -> str | None:
-    """The URL an account names: an HTTP envd device, or a Docker engine other than the operator's."""
-    if isinstance(configuration, HttpEnvdConnectionConfiguration):
-        return configuration.endpoint
+    """The URL an account names: a Docker engine other than the operator's."""
     if isinstance(configuration, DockerConnectionConfiguration) and "docker_host" in configuration.model_fields_set:
         return engine_endpoint(configuration.docker_host)
     return None
+
+
+async def check_endpoint(type_: str, endpoint: str, policy: EndpointPolicy) -> None:
+    """Refuse, before any dial, an endpoint the operator's policy denies. The host is resolved once for the check:
+    a name that does not resolve now is unavailable, not denied, since resolution failures are transient."""
+    try:
+        _, hostname, port = policy.validate_syntax(endpoint)
+        try:
+            await allowed_addresses(policy, hostname, port)
+        except OSError:
+            raise provider_error(type_, "provider_unavailable", EnvironmentProviderErrorCategory.UNAVAILABLE) from None
+    except EndpointPolicyError:
+        raise provider_error(type_, "provider_endpoint_denied", EnvironmentProviderErrorCategory.DENIED) from None

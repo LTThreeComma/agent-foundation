@@ -285,6 +285,13 @@
           "title": "Operation Seconds",
           "type": "number"
         },
+        "renewal_seconds": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Renewal Seconds",
+          "type": "number"
+        },
         "wait_seconds": {
           "default": 300,
           "exclusiveMinimum": 0,
@@ -1058,7 +1065,7 @@
           "type": "integer"
         },
         "stream_length": {
-          "default": 2048,
+          "default": 10000,
           "maximum": 100000,
           "minimum": 16,
           "title": "Stream Length",
@@ -1070,6 +1077,20 @@
           "minimum": 1,
           "title": "Stream Ttl",
           "type": "integer"
+        },
+        "stream_coalesce_seconds": {
+          "default": 0.1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Stream Coalesce Seconds",
+          "type": "number"
+        },
+        "stream_trim_seconds": {
+          "default": 10,
+          "maximum": 600,
+          "minimum": 0,
+          "title": "Stream Trim Seconds",
+          "type": "number"
         },
         "child_depth": {
           "default": 4,

@@ -251,7 +251,9 @@ async def test_interleaved_auxiliary_calls_keep_owner_and_dispatch_identity():
                 parts=[TextPart(name)], model_name=name, usage=RequestUsage(input_tokens=1, output_tokens=1)
             )
 
-        return AgentMediaUnderstandingProvider(models={"image": FunctionModel(analyze, model_name=name)})
+        return AgentMediaUnderstandingProvider(
+            models={"image": FunctionModel(analyze, model_name=name)}, model_ids={"image": f"host-{name}"}
+        )
 
     providers = (media("media-a"), media("media-b"))
 
@@ -292,7 +294,8 @@ async def test_interleaved_auxiliary_calls_keep_owner_and_dispatch_identity():
     assert len(records) == 2 and len(calls) == 4
     for record in records:
         call = calls[record.call_id]
-        assert call.model_name == record.model_name
+        # Each call carries the ID its host selected the model by.
+        assert (call.model_name, call.model_id) == (record.model_name, f"host-{record.model_name}")
         assert call.harness_run_id == record.run_id
         assert call.agent_instance_id == record.agent_instance_id
         assert call.tool_call_id == record.tool_call_id == "media-tool"
@@ -423,6 +426,8 @@ async def test_builtin_reviewer_checks_before_dispatch_and_reuses_receipt_identi
         assert len(review_checks) == len(receipts) == len(reviewer_calls) == 1
         assert receipts[0].usage_id == review_checks[0].call_id
         assert review_checks[0].tool_id == "fixture.write" and review_checks[0].tool_call_id == "effect-1"
+        # The review call carries the model ID its configuration selects.
+        assert review_checks[0].model_id == "test:review"
 
 
 @pytest.mark.parametrize("second_outcome", ["completed", "invalid", "cancelled"])
@@ -566,25 +571,30 @@ async def test_compaction_dispatch_is_correlated_and_cannot_soften_host_veto(den
             ModelResponse(parts=[TextPart("answer")], usage=RequestUsage(input_tokens=2100)),
         )
     )
+    model = FunctionModel(stream_function=provider)
+
+    async def resolve(context, model_id):
+        return model
+
+    # The Host selects the model by ID, and the compaction request keeps that selection.
     executable = HarnessBuilder().build(
         AgentDefinition(
-            agent=AgentSpec(),
+            agent=AgentSpec(model="host:model"),
             output_type=str,
-            model=FunctionModel(stream_function=provider),
             capabilities=(CompactionCapability(CompactionPolicy(trigger_tokens=2000)),),
         )
     )
+    bindings = RunBindings.embedded(model_call_check=checks, model_resolver=resolve)
     if deny:
         with pytest.raises(RunError, match="model-call check"):
-            await executable.run("new", previous_state=previous, bindings=RunBindings.embedded(model_call_check=checks))
+            await executable.run("new", previous_state=previous, bindings=bindings)
         assert len(checks.calls) == 1
         assert providers == []
         return
-    result = await executable.run(
-        "new", previous_state=previous, bindings=RunBindings.embedded(model_call_check=checks)
-    )
+    result = await executable.run("new", previous_state=previous, bindings=bindings)
     assert result.output_or_raise() == "done"
     assert len(checks.calls) == len(providers) == 2
+    assert [call.model_id for call in checks.calls] == ["host:model", "host:model"]
     assert len({call.model_run_id for call in checks.calls}) == 2
     assert len({call.call_id for call in checks.calls}) == 2
     assert [record.call_id for record in result.usage_records] == [call.call_id for call in checks.calls]

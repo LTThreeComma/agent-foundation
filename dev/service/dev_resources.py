@@ -148,7 +148,8 @@ def apply_to(checkout: Checkout, path: Path = DEFAULT_FILE) -> str | None:
 
 def apply(api: Api, resources: Resources, applied: Applied) -> Counter[str]:
     """Create or update every entry whose credential is filled; returns how many of each kind are in place."""
-    workspace = api.items("/api/v1/workspaces")[0]
+    # By key: the seeded state holds several workspaces, listed in ID order.
+    workspace = api.get("/api/v1/workspaces/default")
     org, ws = f"/api/v1/organizations/{workspace['organization_id']}", f"/api/v1/workspaces/{workspace['id']}"
     counts: Counter[str] = Counter()
     model_apis = {item["type"]: item["model_apis"] for item in api.items("/api/v1/provider-types/model")}

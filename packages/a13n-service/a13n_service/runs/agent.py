@@ -4,6 +4,10 @@
 models outside any session, and `build` composes the definition without I/O. A definition is built per
 attempt, so its capabilities hold state for one Harness run only.
 
+The definition selects every model by its model ID, which `model_resolver` resolves to the opened model, so
+each model call names the model it calls: the call check admits it, and its usage is attributed and priced, as
+that model, whatever upstream model name it shares with another.
+
 Everything bound to the attempt stays the worker's: boundaries, connections, environments, web backends,
 skill content, secrets, asset publishing, the async subagent operator and the run bindings. `build` asks the
 worker for them once per agent of the inline graph.
@@ -26,10 +30,10 @@ from a13n_harness import (
     HarnessModelCharacteristics,
     ModelRecoveryPolicy,
     RunBindings,
+    RunModelResolver,
     SubagentDefinition,
 )
 from a13n_harness.capabilities import (
-    AgentToolReviewer,
     CompactionCapability,
     SubagentCapability,
     SubagentOperator,
@@ -38,7 +42,7 @@ from a13n_harness.capabilities import (
 from a13n_harness.capabilities.web import WebCapability
 from a13n_harness.environment import DynamicEnvironmentCapability
 from a13n_harness.plugin_factories import HarnessPluginFactoryCatalog, HarnessPluginFactoryContext
-from a13n_harness.pricing import ModelPricingEntry, PricingCatalog
+from a13n_harness.token_pricing import TokenPricingCapability
 from a13n_harness.tools.client import ClientToolsCapability, ClientToolsSpec
 from a13n_harness.tools.permissions import ToolPermissionsCapability
 from a13n_harness.toolsets.file_media import AgentMediaUnderstandingProvider, NativeInputMediaKind
@@ -46,11 +50,11 @@ from a13n_logging import get_logger
 from pydantic import JsonValue
 from pydantic_ai.agent.abstract import AgentRetries
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.models import Model
+from pydantic_ai.models import Model, ModelResolutionContext
 from pydantic_ai.settings import ModelSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from a13n_service.infra.errors import ServiceError, conflict
+from a13n_service.infra.errors import ServiceError
 from a13n_service.resources.agents import definition, toolsets
 from a13n_service.resources.agents.schemas import AgentConfig, AgentOverride, SubagentSelection, apply_override
 from a13n_service.resources.agents.service import SelectedRevision
@@ -193,18 +197,13 @@ async def open_models(stack: AsyncExitStack, runtime: Runtime, agent: ResolvedAg
     return opened
 
 
-def served(agent: ResolvedAgent, models: Mapping[str, Model]) -> dict[tuple[str, str], ResolvedModel]:
-    """The resolved model serving each upstream model of the graph, by (provider system, model name).
+def model_resolver(models: Mapping[str, Model]) -> RunModelResolver:
+    """The run's resolution of the model IDs the definition selects, to the models `open_models` opened."""
 
-    Model calls and their usage records name only the upstream model, so two models of one graph must not
-    share it: their calls could not be priced and admitted as the right model.
-    """
-    index: dict[tuple[str, str], ResolvedModel] = {}
-    for model in agent.models():
-        native = models[model.id]
-        if index.setdefault((native.system, native.model_name), model).id != model.id:
-            raise conflict("model", model.id, "upstream_model_ambiguous")
-    return index
+    async def resolve(context: ModelResolutionContext[AgentContext], model_id: str) -> Model:
+        return models[model_id]
+
+    return resolve
 
 
 type HostCapabilities = Callable[[ResolvedAgent], Sequence[AbstractCapability[AgentContext]]]
@@ -214,7 +213,6 @@ type Operators = Callable[[ResolvedAgent], SubagentOperator]
 
 def build(
     agent: ResolvedAgent,
-    models: Mapping[str, Model],
     *,
     capabilities: HostCapabilities,
     child_bindings: ChildBindings | None = None,
@@ -222,16 +220,18 @@ def build(
     plugins: HarnessPluginFactoryCatalog,
     instrumentation: HarnessInstrumentation | None,
 ) -> ExecutableAgent[Any]:
-    """The executable agent, over `models` from `open_models` and the worker's attempt-bound parts.
+    """The executable agent over the worker's attempt-bound parts; its run resolves models by `model_resolver`.
 
     `capabilities` returns the worker's capabilities for one agent of the inline graph, the root included.
     `child_bindings` derives an inline child's run bindings from those the Harness gives it, for what the
     child binds of its own, such as web backends and media understanding. `operators` returns the operator
     through which one async agent of the graph starts child runs over its own edges.
     """
-    host = _Host(models, capabilities, child_bindings, operators, plugins)
+    root = _Host(capabilities, child_bindings, operators, plugins).compose(agent)
+    # Each call is priced by its selected model's own pricing; inline subagents inherit the root's policy.
+    prices = TokenPricingCapability({model.id: model.pricing for model in agent.models() if model.pricing is not None})
     return HarnessBuilder(instrumentation=instrumentation, configured_plugins_enabled=False).build(
-        host.compose(agent), pricing_catalog=_pricing(agent)
+        root.with_updates(capabilities=(*root.capabilities, prices))
     )
 
 
@@ -240,12 +240,12 @@ def media_understanding(agent: ResolvedAgent, models: Mapping[str, Model]) -> Ag
     return AgentMediaUnderstandingProvider(
         models={kind: models[model.id] for kind, model in agent.media.items()},
         model_settings={kind: _settings(model, {}) for kind, model in agent.media.items()},
+        model_ids={kind: model.id for kind, model in agent.media.items()},
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _Host:
-    models: Mapping[str, Model]
     capabilities: HostCapabilities
     child_bindings: ChildBindings | None
     operators: Operators | None
@@ -276,6 +276,7 @@ class _Host:
             )
         return AgentDefinition(
             agent=AgentSpec(
+                model=agent.model.id,
                 instructions=config.instructions or None,
                 model_settings=cast(dict[str, Any], _settings(agent.model, config.model.settings)) or None,
                 retries=None if config.retries is None else AgentRetries(**config.retries.model_dump()),
@@ -284,7 +285,6 @@ class _Host:
             output_type=definition.output_type(config.output_spec),
             # The revision identifies the definition, so a child run can be matched to the edge that spawned it.
             definition_id=agent.revision_id,
-            model=self.models[agent.model.id],
             capabilities=tuple(features),
             plugins=tuple(
                 self.plugins.create_plugin(
@@ -309,10 +309,8 @@ class _Host:
         review = reviewer.model_copy(
             update={"model_settings": _settings(agent.reviewer, reviewer.model_settings or {})}
         )
-        # The reviewer model is already open, so nothing resolves `review.model` by ID.
-        return ToolPermissionsCapability(
-            permissions, review=review, reviewer=AgentToolReviewer(self.models[agent.reviewer.id], review)
-        )
+        # The run's model resolver resolves `review.model`, the reviewer's model ID.
+        return ToolPermissionsCapability(permissions, review=review)
 
     def _subagent(self, name: str, subagent: ResolvedSubagent) -> SubagentDefinition:
         edge, child = subagent.selection, subagent.agent
@@ -354,15 +352,3 @@ def _characteristics(agent: ResolvedAgent) -> HarnessModelCharacteristics:
         proactive_context_management_threshold=policy.proactive_context_management_threshold,
         compact_threshold=policy.compact_threshold,
     )
-
-
-def _pricing(agent: ResolvedAgent) -> PricingCatalog:
-    """The prices of every model the agent's graph calls, keyed by provider-qualified upstream model."""
-    entries: dict[str, ModelPricingEntry] = {}
-    for model in agent.models():
-        if model.pricing is None:
-            continue
-        if entries.setdefault(model.pricing.key, model.pricing) != model.pricing:
-            # The Harness prices calls by upstream model, so it cannot tell these models apart.
-            raise conflict("model", model.id, "pricing_ambiguous")
-    return PricingCatalog(entries)

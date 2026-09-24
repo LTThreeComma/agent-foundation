@@ -6,7 +6,7 @@ Desired mount edits are thread operations under the thread `If-Match`, and affec
 new thread or fork takes its initial mounts through the same checks before its first acceptance.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +15,7 @@ from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError, conflict, not_found
 from a13n_service.infra.http import require_match
-from a13n_service.runs.environments.lifecycle import lock_reservations, reserve
+from a13n_service.runs.environments.lifecycle import lock_reservations, require_usable_state, reserve
 from a13n_service.runs.environments.schemas import MAX_MOUNTS, MountCreate, MountPage, MountView
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
 from a13n_service.runs.schemas import EnvironmentMount
@@ -26,6 +26,16 @@ from a13n_service.tenancy.authorize import Principal, WorkspaceScope
 
 # The primary sandbox's mount name: an agent with an environment template gets one reserved at acceptance.
 PRIMARY = "workspace"
+
+
+def has_primary(mounts: Sequence[Mapping[str, object]]) -> bool:
+    """Whether a run's frozen mount set includes the primary sandbox."""
+    return any(mount["name"] == PRIMARY for mount in mounts)
+
+
+async def thread_has_primary(session: AsyncSession, thread: ThreadRow) -> bool:
+    """Whether the thread's desired mounts include the primary sandbox."""
+    return await session.get(ThreadEnvironmentRow, (thread.id, PRIMARY)) is not None
 
 
 async def desired_mounts(session: AsyncSession, thread_id: str) -> list[ThreadEnvironmentRow]:
@@ -72,8 +82,7 @@ def require_usable(environment: EnvironmentRow, principal_id: str) -> None:
         raise ServiceError("forbidden", "Private environments are usable only by their owner", {"id": environment.id})
     if environment.status in {"deleting", "deleted"}:
         raise conflict("environment", environment.id, f"environment_{environment.status}")
-    if environment.failure is not None and environment.failure["permanent"]:
-        raise conflict("environment", environment.id, environment.failure["code"])
+    require_usable_state(environment)
 
 
 async def lock_environments(
@@ -139,7 +148,7 @@ async def reserve_primary(
 
     The caller holds the thread lock. The instance is created later, from the template current at that time.
     """
-    if await session.get(ThreadEnvironmentRow, (thread.id, PRIMARY)) is not None:
+    if await thread_has_primary(session, thread):
         return
     scope = WorkspaceScope(thread.organization_id, thread.workspace_id)
     environment = await reserve(session, principal, scope, template_id, limit=limit)

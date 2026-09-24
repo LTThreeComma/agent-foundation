@@ -68,6 +68,7 @@ def test_a_distribution_section_cannot_shadow_a_core_section() -> None:
         ({"worker": {"drain_seconds": 20}}, "worker.drain_seconds"),
         ({"objects": {"upload_bytes": 4194304}}, "objects.upload_bytes"),
         ({"control": {"inbox_bytes": 1048576}}, "worker.output_bytes"),
+        ({"environments": {"scan_seconds": 30, "renewal_seconds": 60}}, r"environments.scan_seconds \+ 2"),
     ],
 )
 def test_bounds_must_nest(values: dict, refused: str) -> None:

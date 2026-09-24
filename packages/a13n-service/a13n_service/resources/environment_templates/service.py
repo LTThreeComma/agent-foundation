@@ -1,6 +1,6 @@
 """Live environment templates: what a managed sandbox is created from, and the idle policy it follows.
 
-A template names a managed-capable provider usable in its workspace and a recipe that provider type validates.
+A template names a provider usable in its workspace and a recipe that provider type validates.
 Creating one, or changing its provider or recipe, directs that provider's backend, so it needs `write` on the
 provider; the idle policy alone needs only to read it. An instance keeps the recipe current at its first
 dispatch, which its provider state is bound to; the idle policy is read live. A disabled template refuses new
@@ -46,15 +46,13 @@ async def _validated_config(
     *,
     current: EnvironmentTemplateRow | None,
 ) -> dict[str, JsonValue]:
-    """The config to store: the recipe normalized by the provider type, which must support managed environments.
+    """The config to store: the recipe normalized by the provider type.
 
     Unless the provider and normalized recipe stay those of the `current` template, the caller must write the
     provider.
     """
     provider = await resolve_provider(session, actor, EnvironmentProviderRow, scope, provider_id, verb="read")
     definition = registry.get("environment", provider.type)
-    if not definition.supports_managed:
-        raise invalid("provider_id", f"{provider.type} is connect-only and cannot back a template")
     try:
         recipe = definition.environment_model.model_validate(config.recipe)
     except ValidationError as error:

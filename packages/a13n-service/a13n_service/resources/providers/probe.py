@@ -22,7 +22,6 @@ from a13n_harness.providers.environment.docker.provider import DOCKER, DockerCon
 from a13n_harness.providers.environment.docker.runtime import DockerSDKEngine
 from a13n_harness.providers.environment.errors import EnvironmentProviderError, EnvironmentProviderErrorCategory
 from a13n_harness.providers.environment.errors import provider_error as environment_error
-from a13n_harness.providers.environment.remote_envd.http import HTTP_ENVD
 from a13n_harness.providers.model.definition import ModelProviderDefinition, ProviderOperationError
 from anyio import fail_after, to_thread
 from pydantic import JsonValue
@@ -34,7 +33,7 @@ from a13n_service.providers.registry import ProviderKind, Registry
 type ProbeStatus = Literal["succeeded", "failed", "unsupported"]
 
 # The environment types whose account a read alone can check.
-_ENVIRONMENT_PROBES = frozenset({DOCKER.type, HTTP_ENVD.type})
+_ENVIRONMENT_PROBES = frozenset({DOCKER.type})
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,18 +88,6 @@ async def _ping_engine(
             raise _engine_unavailable()
 
 
-async def _identify_daemon(
-    definition: EnvironmentProviderDefinition, config: Mapping[str, JsonValue], credential: JsonValue
-) -> None:
-    """HTTP envd: the daemon at the endpoint accepts the credential and states its identity; no session opens."""
-    configuration = definition.configuration_model.model_validate(config)
-    acquire = definition.runtime_factory
-    assert acquire is not None, "HTTP envd acquires one device connection per account"
-    secret = definition.parse_credential(configuration, credential)
-    async with await acquire(configuration=configuration, credential=secret) as runtime:
-        await runtime.describe(expected_device_id=None)
-
-
 def supports_probe(definition: ProviderDefinition) -> bool:
     if isinstance(definition, ModelProviderDefinition):
         return definition.supports_connection_probe
@@ -128,13 +115,8 @@ async def probe(
         with fail_after(timeout):
             if isinstance(definition, EnvironmentProviderDefinition):
                 await registry.check_environment_endpoint(type_, config, policy)
-                if type_ == DOCKER.type:
-                    endpoint = registry.environment_endpoint(type_, config)
-                    await _ping_engine(
-                        definition, config, endpoint, policy=policy, timeout=timeout, max_bytes=max_bytes
-                    )
-                else:
-                    await _identify_daemon(definition, config, credential)
+                endpoint = registry.environment_endpoint(type_, config)
+                await _ping_engine(definition, config, endpoint, policy=policy, timeout=timeout, max_bytes=max_bytes)
             else:
                 async with open_http(policy, timeout=timeout, max_bytes=max_bytes) as client:
                     if isinstance(definition, ModelProviderDefinition):

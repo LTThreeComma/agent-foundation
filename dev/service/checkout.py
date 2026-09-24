@@ -61,6 +61,11 @@ class Checkout:
         return self.state / "objects"
 
     @property
+    def environments(self) -> Path:
+        """The base directory of seeded `local` environment templates."""
+        return self.state / "environments"
+
+    @property
     def logs(self) -> Path:
         return self.state / "logs"
 
@@ -99,6 +104,8 @@ class Checkout:
             "encryption.keys": {"local": self._encryption_key()},
             # The scripted model and other local fixtures listen on loopback over plain HTTP.
             "providers": {"private_cidrs": ["127.0.0.0/8"], "require_https": False},
+            # Development only: `local` environments are directories on this host, with no isolation boundary.
+            "environments": {"allow_local": True},
             "telemetry": {"log_format": "pretty", **telemetry},
         }
 

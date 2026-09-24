@@ -1,5 +1,6 @@
 """Fixtures of the live journeys: session-wide stores and a fresh Service stack for every journey."""
 
+import re
 import signal
 from collections.abc import AsyncIterator, Generator, Iterator
 from contextlib import ExitStack, contextmanager
@@ -38,6 +39,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="Fail instead of skipping journeys whose external dependency is unavailable (CI)",
     )
+    parser.addoption(
+        "--hosted",
+        action="store_true",
+        help="Also run the journeys on hosted sandbox vendors, which need their accounts and create billable sandboxes",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "hosted(type): a journey on a hosted sandbox vendor, run only when asked for")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Hosted journeys run only when asked for: with `--hosted`, a `-m` expression naming the `hosted` marker, or a
+    `-k` expression naming the journey's vendor type; any other selection leaves them out."""
+    if config.getoption("--hosted") or re.search(r"\bhosted\b", config.getoption("markexpr") or ""):
+        return
+    named = set(re.findall(r"\w+", config.getoption("keyword") or ""))
+    left_out = [item for item in items if (marker := item.get_closest_marker("hosted")) and marker.args[0] not in named]
+    if left_out:
+        config.hook.pytest_deselected(items=left_out)
+        items[:] = [item for item in items if item not in left_out]
 
 
 @pytest.hookimpl(wrapper=True)

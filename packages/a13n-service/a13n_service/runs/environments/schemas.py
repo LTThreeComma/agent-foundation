@@ -4,9 +4,10 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from a13n_harness.providers.environment.models import EnvironmentState
-from pydantic import AfterValidator, BaseModel, ConfigDict, JsonValue, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, SecretStr, StringConstraints
 
 from a13n_service.infra.ids import ObjectId
+from a13n_service.providers import envd
 
 # Desired mounts one thread holds at most; a run freezes them, plus a primary sandbox its agent reserves.
 MAX_MOUNTS = 32
@@ -24,25 +25,35 @@ def _canonical_directory(value: str) -> str:
 
 WorkingDirectory = Annotated[str, AfterValidator(_canonical_directory)]
 EnvironmentName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-DeviceId = Annotated[str, StringConstraints(pattern=r"^[!-~]{1,128}$")]
+EnvdEndpoint = Annotated[str, Field(min_length=1, max_length=2048), AfterValidator(envd.normalized_endpoint)]
+
+
+def _envd_token(token: SecretStr) -> SecretStr:
+    envd.checked_token(token.get_secret_value())
+    return token
+
+
+EnvdToken = Annotated[SecretStr, Field(min_length=1, max_length=4096), AfterValidator(_envd_token)]
 
 type Certainty = Literal["not_dispatched", "known", "unknown"]
 
 
 class Handle(BaseModel):
-    """What reaches one instance: the recipe it was built from, which its provider state is bound to, and that
-    state. A registered device has an empty recipe; a stateless provider has no state."""
+    """What reaches one managed instance: the recipe it was built from, which its provider state is bound to, that
+    state, and the version of the provider credential that last reached it. A stateless provider has no state."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     recipe: dict[str, JsonValue]
     state: EnvironmentState | None = None
+    credential_version: str | None = None
 
 
 class EnvironmentFailure(BaseModel):
-    """The last error of the outstanding operation, or what refuses use of an otherwise ready instance.
+    """The last error of the outstanding operation or, on a ready instance, of its last renewal.
 
     `unknown` means the call may have taken effect: only the same operation may continue. `permanent` failures
-    refuse new mounts and acceptance until the cause is fixed or the instance is deleted.
+    refuse new mounts and acceptance until the cause is fixed or the instance is deleted; `environment_lost` means
+    the provider no longer has the sandbox.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -59,11 +70,12 @@ class EnvironmentView(BaseModel):
     id: str
     organization_id: str
     workspace_id: str
-    provider_id: str
-    # NULL for a registered device.
+    # NULL for an external target.
+    provider_id: str | None
     template_id: str | None
-    # A registered device's native identity; NULL for a managed sandbox.
+    # An external target's native identity and the endpoint its daemon serves; NULL for a managed sandbox.
     device_id: str | None
+    endpoint: str | None
     owner_principal_id: str | None
     name: str
     status: str
@@ -91,18 +103,24 @@ class ManagedEnvironmentCreate(BaseModel):
     name: EnvironmentName | None = None
 
 
-class DeviceRegistration(BaseModel):
-    """A connect-only device of an `http_envd` provider."""
+class ExternalTargetCreate(BaseModel):
+    """An envd daemon someone runs, registered by its endpoint and the token it accepts."""
 
     model_config = ConfigDict(extra="forbid")
-    provider_id: ObjectId
-    device_id: DeviceId
+    endpoint: EnvdEndpoint
+    token: EnvdToken
+    # Defaults to the device ID the daemon states.
     name: EnvironmentName | None = None
 
 
 class EnvironmentUpdate(BaseModel):
+    """Fields left out stay unchanged. Only an external target has an endpoint and token; a new endpoint comes with
+    its token, so a stored token never reaches an endpoint it was not entered for."""
+
     model_config = ConfigDict(extra="forbid")
-    name: EnvironmentName
+    name: EnvironmentName | None = None
+    endpoint: EnvdEndpoint | None = None
+    token: EnvdToken | None = None
 
 
 class MountCreate(BaseModel):

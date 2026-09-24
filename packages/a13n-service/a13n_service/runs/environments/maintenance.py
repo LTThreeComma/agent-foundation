@@ -1,16 +1,19 @@
-"""`maintain_environments`: apply the current idle policies and continue every unfinished operation.
+"""Two sweeps: `maintain_environments` applies the current idle policies and continues every unfinished operation;
+`renew_environments` renews the ready sandboxes that end unless renewed.
 
-Each pass begins stop and delete operations for managed instances idle past their template's thresholds,
+Each maintenance pass begins stop and delete operations for managed instances idle past their template's thresholds,
 then dispatches a bounded batch of outstanding operations whose claim is free or expired. It revisits failed
-operations at its fixed interval with the same operation ID; it never invents a new one.
+operations at its fixed interval with the same operation ID; it never invents a new one. Renewal has its own sweep,
+so a slow lifecycle call never delays it.
 """
 
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Literal
 
 import anyio
 from a13n_logging import get_logger
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import Select, func, or_, select, text
 
 from a13n_service.infra.audit import record
 from a13n_service.infra.db import transaction
@@ -18,8 +21,10 @@ from a13n_service.infra.ids import new_object_id
 from a13n_service.infra.sweeps import Sweep
 from a13n_service.resources.environment_templates.service import idle_past
 from a13n_service.runs.environments.lifecycle import advance, begin, in_use, mounted, supports
+from a13n_service.runs.environments.renewal import renew
 from a13n_service.runs.environments.tables import OPERATIONS, EnvironmentRow
 from a13n_service.runs.runtime import Runtime
+from a13n_service.settings import PUBLISH_SECONDS
 from a13n_service.tenancy.authorize import WorkspaceScope
 
 logger = get_logger(__name__)
@@ -30,7 +35,18 @@ async def maintain_environments(runtime: Runtime, *, owner: str) -> None:
     batch = runtime.settings.environments.batch
     await _retire_idle(runtime, "deleting", batch)
     await _retire_idle(runtime, "stopping", batch)
-    await _dispatch(runtime, owner, batch)
+    due = select(EnvironmentRow.id).where(
+        # Literal, so the partial index on unfinished operations applies.
+        text(f"environments.status IN {OPERATIONS}"),
+        or_(EnvironmentRow.lease_expires_at.is_(None), EnvironmentRow.lease_expires_at < func.now()),
+    )
+    await _each(runtime, due.order_by(EnvironmentRow.updated_at), partial(advance, runtime, owner=owner))
+
+
+async def renew_environments(runtime: Runtime) -> None:
+    """One renewal pass: the due renewals, most urgent first."""
+    due = select(EnvironmentRow.id).where(EnvironmentRow.renew_at <= func.now()).order_by(EnvironmentRow.renew_at)
+    await _each(runtime, due, partial(renew, runtime))
 
 
 async def _retire_idle(runtime: Runtime, phase: Literal["stopping", "deleting"], batch: int) -> None:
@@ -41,6 +57,8 @@ async def _retire_idle(runtime: Runtime, phase: Literal["stopping", "deleting"],
         conditions = [
             EnvironmentRow.status == "ready",
             idle_past(EnvironmentRow.template_id, since, "stop_after_seconds"),
+            # Stopping would clear the permanent failure that refuses its use, such as a lost sandbox's.
+            or_(EnvironmentRow.failure.is_(None), ~EnvironmentRow.failure["permanent"].as_boolean()),
         ]
     else:
         conditions = [
@@ -80,31 +98,21 @@ async def _retire_idle(runtime: Runtime, phase: Literal["stopping", "deleting"],
             )
 
 
-async def _dispatch(runtime: Runtime, owner: str, batch: int) -> None:
+async def _each(runtime: Runtime, due: Select[tuple[str]], call: Callable[[str], Awaitable[None]]) -> None:
+    """Call `call` concurrently for at most `environments.batch` of the `due` instances; a failure is logged."""
     async with transaction(runtime.storage) as session:
-        due = (
-            await session.scalars(
-                select(EnvironmentRow.id)
-                .where(
-                    # Literal, so the partial index on unfinished operations applies.
-                    text(f"environments.status IN {OPERATIONS}"),
-                    or_(EnvironmentRow.lease_expires_at.is_(None), EnvironmentRow.lease_expires_at < func.now()),
-                )
-                .order_by(EnvironmentRow.updated_at)
-                .limit(batch)
-            )
-        ).all()
+        environment_ids = list(await session.scalars(due.limit(runtime.settings.environments.batch)))
     async with anyio.create_task_group() as group:
-        for environment_id in due:
-            group.start_soon(_advance, runtime, environment_id, owner)
+        for environment_id in environment_ids:
+            group.start_soon(_logged, call, environment_id)
 
 
-async def _advance(runtime: Runtime, environment_id: str, owner: str) -> None:
+async def _logged(call: Callable[[str], Awaitable[None]], environment_id: str) -> None:
     try:
-        await advance(runtime, environment_id, owner=owner)
+        await call(environment_id)
     except Exception as error:
         logger.warning(
-            "Environment operation dispatch failed",
+            "Environment maintenance call failed",
             extra={"environment_id": environment_id, "error_type": type(error).__name__},
         )
 
@@ -118,4 +126,15 @@ def maintenance_sweep(runtime: Runtime) -> Sweep:
         run=partial(maintain_environments, runtime, owner=owner),
         # Two claims' worth: the dispatched calls are bounded by their deadlines and publication.
         timeout=settings.operation_seconds * 2 + 30,
+    )
+
+
+def renewal_sweep(runtime: Runtime) -> Sweep:
+    settings = runtime.settings.environments
+    return Sweep(
+        name="renew_environments",
+        every=settings.scan_seconds,
+        run=partial(renew_environments, runtime),
+        # One claim's worth: the dispatched renewals are bounded by their deadline and publication.
+        timeout=settings.renewal_seconds + PUBLISH_SECONDS + 30,
     )

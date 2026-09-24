@@ -195,18 +195,35 @@ class Worker(Section):
     delivery_bytes: int = Field(default=262144, ge=1024, le=16777216)
     display_bytes: int = Field(default=8388608, ge=65536, le=67108864)
     output_bytes: int = Field(default=1048576, ge=1024, le=16777216)
-    stream_length: int = Field(default=2048, ge=16, le=100000)
+    # The thread stream's backstop cap. Coalesced text and reasoning append about ten entries a second, so one step
+    # streams for about a quarter of an hour before the cap removes its start; boundaries trim covered entries first.
+    stream_length: int = Field(default=10000, ge=16, le=100000)
     stream_ttl: int = Field(default=600, ge=1, le=86400)
+    # Consecutive text, reasoning or tool-argument fragments within this window become one stream event; 0 streams
+    # each fragment as it arrives.
+    stream_coalesce_seconds: float = Field(default=0.1, ge=0, le=1)
+    # How long entries a committed display covers stay in the stream, so a briefly disconnected reader resumes
+    # without a gap; 0 removes them at the boundary.
+    stream_trim_seconds: float = Field(default=10, ge=0, le=600)
     child_depth: int = Field(default=4, ge=0, le=16)
     child_count: int = Field(default=16, ge=0, le=256)
 
 
+# A claim outlives its call deadline by this much, so its dispatcher can still publish what it observed.
+PUBLISH_SECONDS = 10
+# How long one renewal keeps a hosted sandbox at least: the Harness keepalive horizon, which the Service's E2B
+# recipes cannot shorten. A renewal is due halfway to the expiry it reports.
+RENEWAL_HORIZON_SECONDS = 300
+
+
 class Environments(Section):
-    # Maintenance interval and batch; idle thresholds are template policy.
+    # Maintenance and renewal interval, and the batch of each; idle thresholds are template policy.
     scan_seconds: float = Field(default=5, gt=0, le=300)
     batch: int = Field(default=16, ge=1, le=1000)
     # The bound of one claimed provider lifecycle call.
     operation_seconds: float = Field(default=120, gt=0, le=3600)
+    # The bound of one renewal of a hosted sandbox, far shorter so that renewals come in time.
+    renewal_seconds: float = Field(default=20, gt=0, le=60)
     # How long an attempt waits for its mounted instances to become ready.
     wait_seconds: float = Field(default=300, gt=0, le=3600)
     # Managed instances one workspace holds at most, counting every one not deleted; reservations beyond it,
@@ -352,6 +369,14 @@ class Settings(Section):
             ("objects.upload_bytes", self.objects.upload_bytes, "server.request_bytes", self.server.request_bytes),
             # A child result, its output plus the envelope naming it, always fits the parent's empty inbox.
             ("worker.output_bytes", worker.output_bytes + 65536, "control.inbox_bytes", control.inbox_bytes),
+            # A renewal due halfway to a hosted sandbox's expiry finishes before it: the pass that just missed it may
+            # still be renewing others, then the next waits one interval, calls and publishes.
+            (
+                "environments.scan_seconds + 2 * environments.renewal_seconds",
+                self.environments.scan_seconds + 2 * self.environments.renewal_seconds + PUBLISH_SECONDS,
+                "half the renewal horizon",
+                RENEWAL_HORIZON_SECONDS / 2,
+            ),
         )
         for inner, inner_value, outer, outer_value in nested:
             if inner_value >= outer_value:

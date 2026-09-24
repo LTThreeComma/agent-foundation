@@ -1,5 +1,7 @@
 """Assets are created from staged uploads; retirement blocks new use and keeps content readable."""
 
+from collections.abc import Mapping
+
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -122,22 +124,28 @@ async def read_asset_content(
     return asset, await read(objects, reference)
 
 
-async def require_usable(session: AsyncSession, workspace_id: str, asset_ids: set[str]) -> None:
-    """New input may name only this workspace's unretired assets; retained history keeps retired ones readable."""
-    if not asset_ids:
+async def require_usable(session: AsyncSession, workspace_id: str, assets: Mapping[str, str]) -> None:
+    """New input may name only this workspace's unretired assets; retained history keeps retired ones readable.
+
+    `assets` maps the field that names each asset to its ID.
+    """
+    if not assets:
         return
     usable = set(
         (
             await session.scalars(
                 select(AssetRow.id).where(
-                    AssetRow.workspace_id == workspace_id, AssetRow.id.in_(asset_ids), AssetRow.retired_at.is_(None)
+                    AssetRow.workspace_id == workspace_id,
+                    AssetRow.id.in_(set(assets.values())),
+                    AssetRow.retired_at.is_(None),
                 )
             )
         ).all()
     )
-    for asset_id in sorted(asset_ids - usable):
-        raise ServiceError(
-            "invalid_argument",
-            "Asset is not usable in this workspace",
-            {"field": "asset_id", "reason": "not_usable", "kind": "asset", "id": asset_id},
-        )
+    for field, asset_id in assets.items():
+        if asset_id not in usable:
+            raise ServiceError(
+                "invalid_argument",
+                "Asset is not usable in this workspace",
+                {"field": field, "reason": "not_usable", "kind": "asset", "id": asset_id},
+            )

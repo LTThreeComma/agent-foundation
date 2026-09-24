@@ -27,8 +27,9 @@ class Refused(Exception):
 
 
 class CallCheck:
-    """`used` counts the run's model requests so far, including those earlier attempts recorded. `served` maps
-    each upstream model to the resolved model serving it; it is filled when the attempt opens its models."""
+    """`used` counts the run's model requests so far, including those earlier attempts recorded. `models` are
+    the models of the agent graph by ID, the ID each model call selects its model by; `calls` keeps the model of
+    each call admitted, by call ID, for its usage records."""
 
     def __init__(
         self,
@@ -36,11 +37,12 @@ class CallCheck:
         control: AttemptControl,
         context: CallContext,
         *,
-        served: Mapping[tuple[str, str], ResolvedModel],
+        models: Mapping[str, ResolvedModel],
         used: int,
         limit: int | None,
     ):
-        self.runtime, self.control, self.context, self.served = runtime, control, context, served
+        self.runtime, self.control, self.context, self.models = runtime, control, context, models
+        self.calls: dict[str, ResolvedModel] = {}
         self.used, self.limit = used, limit
         self.refusal: Outcome | None = None
         self.lease_missed = False
@@ -50,7 +52,11 @@ class CallCheck:
         if self.limit is not None and self.used >= self.limit:
             self.refuse(Outcome.failed("usage_limit_exceeded", f"The run used its {self.limit} model requests"))
         self.used += 1
-        model = self.served[(call.provider_name, call.model_name)]
+        # Every model of the graph is selected by its ID; a call that names none of them cannot be admitted.
+        model = self.models.get(call.model_id or "")
+        if model is None:
+            self.refuse(Outcome.failed("model_call_unknown", "A model call named no model of the agent"))
+        self.calls[call.call_id] = model
         await self._admit(
             replace(
                 self.context,

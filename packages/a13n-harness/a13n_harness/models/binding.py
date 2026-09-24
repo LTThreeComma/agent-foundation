@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
+from pydantic_ai.capabilities import AbstractCapability, ResolveModelId
 from pydantic_ai.models import Model, ModelResolutionContext
 from pydantic_ai.models.instrumented import InstrumentedModel
 
@@ -57,6 +58,17 @@ async def resolve_run_model(
             details={"model_id": model_id},
         )
     return model
+
+
+def selected_model(model: Model, model_id: str | None) -> tuple[Model | str, tuple[AbstractCapability[Any], ...]]:
+    """The `Agent` model and capabilities of an internal agent that calls `model`, selected by `model_id`.
+
+    Its requests then carry `model_id` as `ModelRequestContext.model_id`, and so as `ModelCall.model_id`, like
+    those of a run's own model resolved from an ID; without an ID the agent calls `model` directly.
+    """
+    if model_id is None:
+        return model, ()
+    return model_id, (ResolveModelId(lambda _context, _model_id: model),)
 
 
 __all__ = ["RunModelResolver"]

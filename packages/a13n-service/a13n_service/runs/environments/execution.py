@@ -20,6 +20,7 @@ from a13n_service.infra.errors import ServiceError, conflict, not_found
 from a13n_service.resources.providers.service import resolve_provider
 from a13n_service.resources.providers.tables import EnvironmentProviderRow
 from a13n_service.runs.attempts import Lease, lock_lease
+from a13n_service.runs.environments import external
 from a13n_service.runs.environments.adapters import Target, close, construct, provider_identity
 from a13n_service.runs.environments.lifecycle import advance, begin
 from a13n_service.runs.environments.mounts import PRIMARY, require_usable
@@ -93,6 +94,11 @@ async def _inspect(
         if environment is None:
             raise not_found("environment", environment_id)
         require_usable(environment, principal.id)
+        if environment.template_id is None:
+            # An external target is always ready; it is reached with its own endpoint and token.
+            environment.last_used_at = await now(session)
+            return Target(environment.id, external.account(environment), {}, None), False
+        assert environment.provider_id is not None, "a managed instance has a provider"
         scope = WorkspaceScope(environment.organization_id, environment.workspace_id)
         provider = await resolve_provider(
             session, principal, EnvironmentProviderRow, scope, environment.provider_id, authority=authority

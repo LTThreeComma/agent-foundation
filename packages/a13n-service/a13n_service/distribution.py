@@ -56,7 +56,7 @@ from a13n_service.resources.uploads.routes import router as uploads_router
 from a13n_service.runs.accept import ThreadAdvancer
 from a13n_service.runs.admission import AdmissionPolicy
 from a13n_service.runs.children import child_results
-from a13n_service.runs.environments.maintenance import maintenance_sweep
+from a13n_service.runs.environments.maintenance import maintenance_sweep, renewal_sweep
 from a13n_service.runs.environments.routes import router as environments_router
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
 from a13n_service.runs.routes import router as runs_router
@@ -289,6 +289,7 @@ OSS = Distribution(
         _expire_leases,
         _expire_credentials,
         maintenance_sweep,
+        renewal_sweep,
         _recover_connection_operations,
         _deliver_outbox,
         _purge_outbox,

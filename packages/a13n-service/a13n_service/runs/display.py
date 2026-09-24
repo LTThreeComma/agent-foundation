@@ -3,11 +3,14 @@
 Items keep the shape the Console renders: `{id, kind, state, first_stream_id, last_stream_id, started_at, ended_at,
 content}`. Stream IDs are `"{attempt}-{sequence}"` positions, so a committed item and a live delta of the same item order and deduplicate
 by comparing positions. The worker folds every AG-UI event it streams, so the display written at a checkpoint
-covers exactly the stream up to that checkpoint's position.
+covers exactly the stream up to that checkpoint's position. Each Harness observation is one item, except that the
+consecutive argument deltas of one streamed tool-call part share one.
 """
 
+import copy
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -46,6 +49,11 @@ _ACCUMULATED = {
     "REASONING_MESSAGE_CONTENT": "text",
     "TOOL_CALL_ARGS": "arguments",
 }
+# Events that append their `delta` to one message or tool call.
+FRAGMENTS = frozenset(_ACCUMULATED)
+# The observation the observer reports for each streamed delta of a model response part, a tool call's arguments
+# included: the stream protocol completes a tool call only at the part's end.
+_PART_DELTA = "a13n.pydantic_ai.part_delta"
 
 
 class StreamPosition(BaseModel):
@@ -109,6 +117,57 @@ def _size(item: Item) -> int:
     return len(item.model_dump_json())
 
 
+def _json_size(value: JsonValue) -> int:
+    return len(json.dumps(value, separators=(",", ":")))
+
+
+def _streamed_arguments(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The source delta of a streamed tool-call argument observation; None for any other event."""
+    if event["type"] != "CUSTOM" or event.get("name") != _PART_DELTA:
+        return None
+    delta = event["value"]["event"]["delta"]
+    arguments = delta.get("part_delta_kind") == "tool_call" and isinstance(delta.get("args_delta"), str)
+    return delta if arguments and not delta.get("tool_name_delta") else None
+
+
+def fragment(event: dict[str, Any]) -> tuple[object, str] | None:
+    """The stream a fragment event continues and the text it appends; None for any other event.
+
+    Text, reasoning and tool-call argument deltas continue their message or tool call, and a streamed tool-call
+    argument observation continues its model response part. Fragments of one stream differ only in their text and in
+    when, and at which source position, they occurred.
+    """
+    if event["type"] in FRAGMENTS:
+        return {name: value for name, value in event.items() if name not in ("delta", "timestamp")}, event["delta"]
+    if (delta := _streamed_arguments(event)) is None:
+        return None
+    value = event["value"]
+    source = {**value["event"], "delta": {**delta, "args_delta": None}}
+    return (event["name"], value["thread_id"], value["run_id"], source), delta["args_delta"]
+
+
+def extend(event: dict[str, Any], text: str) -> None:
+    """Append a later fragment's text to a fragment event."""
+    if event["type"] == "CUSTOM":
+        event["value"]["event"]["delta"]["args_delta"] += text
+    else:
+        event["delta"] += text
+
+
+@dataclass
+class _Arguments:
+    """A tool-call part's streamed arguments so far and the one observation item that holds them."""
+
+    stream: object
+    key: str
+    at: datetime
+    # The sequence of the last delta folded in: only the next event continues the item.
+    sequence: int
+    # The whole observation until its value outgrows the observation limit.
+    event: dict[str, Any] | None
+    size: int
+
+
 def item_id(run_id: str, kind: ItemKind, source_id: str) -> str:
     """Stable across attempts: a tool call retried after recovery updates the item already committed."""
     return "itm_" + hashlib.sha256(f"{run_id}\0{kind}\0{source_id}".encode()).hexdigest()[:32]
@@ -158,18 +217,26 @@ class DisplayFold:
         self.sequence = 0
         self.observer = HarnessAguiObserver(processor=_bound_payloads)
         self.assembler = CustomEventAssembler(max_bytes=max_bytes)
+        self.arguments: _Arguments | None = None
 
     @property
     def position(self) -> StreamPosition:
         return StreamPosition(attempt=self.attempt, sequence=self.sequence)
 
-    def observe(self, source: HarnessStreamEvent[Any]) -> list[Observed]:
+    def events(self, source: HarnessStreamEvent[Any]) -> list[dict[str, Any]]:
+        """The AG-UI events of one Harness event, as the JSON the stream carries."""
+        return [
+            event.model_dump(mode="json", by_alias=True, exclude_none=True) for event in self.observer.observe(source)
+        ]
+
+    def fold(self, events: list[dict[str, Any]], source: HarnessStreamEvent[Any] | None = None) -> list[Observed]:
+        """Give each event the next sequence and fold it. When `source` is a tool result the observer does not
+        present, its call's item fails and the last event reports it."""
         observed: list[Observed] = []
-        for event in self.observer.observe(source):
+        for payload in events:
             self.sequence += 1
-            payload = event.model_dump(mode="json", by_alias=True, exclude_none=True)
             observed.append(Observed(sequence=self.sequence, event=payload, item=self._fold(payload)))
-        if observed and (failed := _failed_tool_call(source)) is not None:
+        if observed and source is not None and (failed := _failed_tool_call(source)) is not None:
             ref = self._fail_tool_call(*failed, at=_occurred(observed[-1].event))
             if ref is not None:
                 observed[-1] = observed[-1].model_copy(update={"item": ref})
@@ -209,7 +276,9 @@ class DisplayFold:
         if event_type == "CUSTOM":
             return self._observation(payload)
         if event_type in _MESSAGE_KINDS:
-            kind, source_id = _MESSAGE_KINDS[event_type], payload["messageId"]
+            # An encrypted value names its reasoning message as the entity it belongs to.
+            source_id = payload["entityId"] if event_type == "REASONING_ENCRYPTED_VALUE" else payload["messageId"]
+            kind = _MESSAGE_KINDS[event_type]
         elif event_type in _TOOL_EVENTS:
             kind, source_id = "tool_call", payload["toolCallId"]
         else:
@@ -233,15 +302,37 @@ class DisplayFold:
         return "in_progress" if previous is None or previous.state == "interrupted" else previous.state
 
     def _observation(self, payload: dict[str, Any]) -> ItemRef | None:
+        if (streamed := fragment(payload)) is not None:
+            return self._arguments(payload, *streamed)
         assembled = self.assembler.accept(payload)
         if assembled is None:
             return None
         value: JsonValue = assembled.get("value")  # type: ignore[assignment]
-        if len(json.dumps(value, separators=(",", ":"))) > MAX_OBSERVATION_BYTES:
+        if _json_size(value) > MAX_OBSERVATION_BYTES:
             value = _OMITTED
         key = item_id(self.run_id, "observation", f"{self.attempt}:{self.sequence}")
         content: dict[str, JsonValue] = {"name": str(assembled.get("name")), "value": value}
         return self._put(key, "observation", "completed", content, at=_occurred(payload))
+
+    def _arguments(self, event: dict[str, Any], stream: object, text: str) -> ItemRef:
+        """Consecutive argument deltas of one tool-call part fold into one observation: the first delta's, with the
+        argument text of all of them and the first one's time."""
+        held = self.arguments
+        if held is not None and held.stream == stream and held.sequence == self.sequence - 1:
+            if held.event is not None:
+                extend(held.event, text)
+                # JSON escapes character by character, so the value grows by the escaped text alone.
+                held.size += _json_size(text) - 2
+        else:
+            event = copy.deepcopy(event)
+            key = item_id(self.run_id, "observation", f"{self.attempt}:{self.sequence}")
+            held = self.arguments = _Arguments(stream, key, _occurred(event), 0, event, _json_size(event["value"]))
+        held.sequence = self.sequence
+        if held.size > MAX_OBSERVATION_BYTES:
+            held.event = None
+        value = held.event["value"] if held.event is not None else _OMITTED
+        content: dict[str, JsonValue] = {"name": _PART_DELTA, "value": value}
+        return self._put(held.key, "observation", "completed", content, at=held.at)
 
     def _fail_tool_call(self, tool_call_id: str, message: str, *, at: datetime) -> ItemRef | None:
         key = item_id(self.run_id, "tool_call", tool_call_id)

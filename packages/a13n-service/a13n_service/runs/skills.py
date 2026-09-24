@@ -1,21 +1,20 @@
 """The agent's pinned skills, materialized into the run's primary environment for the Harness skill catalog.
 
 A pinned revision lives at `/workspace/.a13n/skills/{revision digest}`. Its package is read from the object
-store, verified against the digest its revision recorded, and written file by file; a completion marker beside
+store, verified against the digest its revision recorded, and placed file by file; a completion marker beside
 the directory is written last. An attempt, or another run sharing the environment, that finds the marker uses
-the files without reading the package again. Writers of one digest write the same bytes and each file is
-replaced atomically, so concurrent materializations converge.
+the files without reading the package again. Writers of one digest write the same bytes, so concurrent
+materializations converge.
 
 Skills need the primary environment: a run that selects skills without a primary mount fails in its plan.
 """
 
 import posixpath
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 from a13n_harness.capabilities import SkillCatalogItem, SkillManager, SkillsCapability, SkillsPolicy
 from a13n_harness.providers.environment.files import FileOperator
-from a13n_harness.providers.environment.models import EnvironmentError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,12 +23,12 @@ from a13n_service.resources.agents.schemas import SkillSelection
 from a13n_service.resources.skills.content import load_packages
 from a13n_service.resources.skills.schemas import SkillManifest
 from a13n_service.resources.skills.tables import SkillRevisionRow
-from a13n_service.runs.environments.mounts import PRIMARY
+from a13n_service.runs import placement
+from a13n_service.runs.environments.mounts import has_primary
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.tables import RunRow
 
-_ROOT = "/workspace/.a13n/skills"
-_CHUNK_BYTES = 64 * 1024
+_ROOT = f"{placement.ROOT}/skills"
 
 # Raises once the attempt no longer holds its lease; nothing is written after it fails.
 type LeaseProof = Callable[[], Awaitable[object]]
@@ -59,7 +58,7 @@ async def resolve_skills(
     """The run's pinned skill revisions, read in its short session; pins are frozen, so archived skills load."""
     if not selections:
         return ()
-    if all(mount["name"] != PRIMARY for mount in run.environment_mounts):
+    if not has_primary(run.environment_mounts):
         raise invalid("skills", "skills need the run's primary environment")
     revision_ids = [selection.revision_id for selection in selections]
     rows = await session.scalars(
@@ -105,7 +104,7 @@ class _PinnedSkills:
         )
 
     async def materialize(self, *, files: FileOperator) -> None:
-        missing = [skill for skill in self.skills if not await _exists(files, skill.marker)]
+        missing = [skill for skill in self.skills if await placement.stat(files, skill.marker) is None]
         if not missing:
             return
         await self.prove_lease()
@@ -117,19 +116,5 @@ class _PinnedSkills:
             for directory in sorted({posixpath.dirname(target) for target in paths.values()}):
                 await files.mkdir(directory, parents=True, exist_ok=True)
             for path, target in paths.items():
-                await files.write_bytes_stream(target, _chunks(package.files[path]), mode="upsert")
+                await placement.write(files, target, package.files[path])
             await files.write_text(skill.marker, skill.digest, mode="upsert")
-
-
-async def _exists(files: FileOperator, path: str) -> bool:
-    try:
-        return (await files.stat(path)).kind == "file"
-    except EnvironmentError as error:
-        if error.code == "environment_not_found":
-            return False
-        raise
-
-
-async def _chunks(content: bytes) -> AsyncIterator[bytes]:
-    for offset in range(0, len(content), _CHUNK_BYTES):
-        yield content[offset : offset + _CHUNK_BYTES]

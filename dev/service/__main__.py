@@ -162,7 +162,8 @@ def reset(checkout: Checkout, args: argparse.Namespace) -> None:
         if args.state == "seeded":
             _require_free(applications(checkout, console=False))
         stores.delete(checkout.instance)
-        shutil.rmtree(checkout.objects, ignore_errors=True)
+        for directory in (checkout.objects, checkout.environments):
+            shutil.rmtree(directory, ignore_errors=True)
         for path in (checkout.seed_report, checkout.state / "dev-resources.json"):
             path.unlink(missing_ok=True)
         _prepare(checkout, args.traces)
@@ -214,17 +215,18 @@ def _telemetry(checkout: Checkout, mode: str) -> Section:
 
 
 def _seed(checkout: Checkout) -> None:
-    from dev.service import seed
     from dev.service.api import Api
+    from dev.service.seed import seed, write_report
+    from dev.service.seed_verify import verify
 
     selected = applications(checkout, console=False)
     with lifecycle.running(checkout.root, selected, checkout.logs), Api(checkout.service_url) as api:
         api.login(ADMIN_EMAIL, ADMIN_PASSWORD)
-        seeded = seed.seed(api, checkout.model_url)
-        checks = seed.verify(api, seeded)
+        seeded = seed(api, checkout.model_url, checkout.environments)
+        checks = verify(api, seeded)
         if failed := [name for name, passed in checks if not passed]:
             raise RuntimeError("Seed verification failed: " + "; ".join(failed))
-        seed.write_report(checkout.seed_report, checkout.console_url, seeded, checks)
+        write_report(checkout.seed_report, checkout.console_url, seeded, checks)
         print(f"Seeded and verified: {checkout.seed_report}")
         _apply_private_resources(checkout)
 

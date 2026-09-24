@@ -43,6 +43,7 @@ from a13n_harness.tools.approval import (
 from a13n_harness.tools.identity import ToolPermissionMode, tool_identity
 from a13n_harness.tools.permissions import TOOL_PERMISSIONS_CAPABILITY_ID, ToolPermissionsCapability
 from a13n_harness.tools.policy import InvocationDecisionKind
+from a13n_harness.usage import _auxiliary_usage_scope
 
 _JSON = TypeAdapter(dict[str, JsonValue])
 _ANY = TypeAdapter(Any)
@@ -154,7 +155,8 @@ async def _review(
         with observe_operation("tool_review", capability_id=capability.id, operation_id=approval.tool_call_id) as span:
             span.set_attribute("a13n.tool.id", approval.tool_id)
             span.set_attribute("a13n.tool.call.id", approval.tool_call_id)
-            result = await capability.review(request, context=ctx.deps)
+            with _auxiliary_usage_scope(ctx, source="tool.review", tool_id=approval.tool_id):
+                result = await capability.review(request, context=ctx.deps)
             if result is not None:
                 observe_output(span, result.assessment.model_dump(mode="json"), status="completed")
     except ToolReviewError as exc:

@@ -1,11 +1,12 @@
 """Models as the API accepts and returns them; `ModelConfig` is what execution reads."""
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Literal
 
 from a13n_harness.pricing import ModelPricingEntry
 from a13n_harness.spec import HarnessModelCharacteristics
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from a13n_service.infra.ids import ObjectId
 
@@ -23,6 +24,14 @@ class ModelConfig(BaseModel):
     top_p: float | None = Field(default=None, gt=0, le=1)
 
 
+class CatalogRef(BaseModel):
+    """A models.dev channel and the model ID it lists there."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")
+    model: str = Field(min_length=1, max_length=256)
+
+
 class ModelCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # Required: a workspace ID, or explicit null to share the model with every workspace the provider serves.
@@ -31,17 +40,12 @@ class ModelCreate(BaseModel):
     key: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=2048)
-    # Manual: `config` and optional `pricing`. From the catalogue: `catalog_key`, which supplies both.
-    config: ModelConfig | None = None
+    config: ModelConfig
+    # Prices this model's own calls; the provider and model the entry names only record where it came from.
     pricing: ModelPricingEntry | None = None
-    catalog_key: str | None = Field(default=None, min_length=1, max_length=512)
+    # The catalog model the caller started from; recorded as given, never resolved.
+    catalog_ref: CatalogRef | None = None
     enabled: bool = True
-
-    @model_validator(mode="after")
-    def one_source(self) -> "ModelCreate":
-        if self.catalog_key is not None and (self.config is not None or self.pricing is not None):
-            raise ValueError("A catalogue model brings its own config and pricing")
-        return self
 
 
 class ModelUpdate(BaseModel):
@@ -49,8 +53,9 @@ class ModelUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=2048)
     config: ModelConfig | None = None
-    # Replaced whole when present; `null` removes it; omitted leaves it unchanged.
+    # `pricing` and `catalog_ref` are replaced whole when present; `null` removes them; omitted leaves them.
     pricing: ModelPricingEntry | None = None
+    catalog_ref: CatalogRef | None = None
     enabled: bool | None = None
 
 
@@ -65,6 +70,7 @@ class Model(BaseModel):
     description: str
     config: ModelConfig
     pricing: ModelPricingEntry | None
+    catalog_ref: CatalogRef | None
     enabled: bool
     version: int
     created_by_id: str
@@ -79,18 +85,25 @@ class ModelPage(BaseModel):
 
 
 class CatalogModel(BaseModel):
-    """A model the provider type is known to serve, with the values creating it from the catalogue uses."""
+    """A catalog model, with the characteristics and pricing a model created from it starts with."""
 
-    key: str
-    model_name: str
+    ref: CatalogRef
+    # Shared by the copies of one model on every channel, such as `anthropic/claude-opus-5`; `name` is its name.
+    identity: str
+    name: str
+    provider_name: str
+    release_date: date
     characteristics: HarnessModelCharacteristics
     pricing: ModelPricingEntry | None
-    source_url: str
+    # Why the catalog's prices are not offered, when it lists prices a `pricing` entry cannot express.
+    pricing_warning: str | None
 
 
-class CatalogPage(BaseModel):
+class ModelCatalog(BaseModel):
+    """`ready` is fresh, `stale` the last catalog after a failed refresh, `unavailable` none fetched yet."""
+
     items: list[CatalogModel]
-    next_cursor: str | None
+    status: Literal["ready", "stale", "unavailable"]
 
 
 MEDIA_KINDS: tuple[NativeInputMediaKind, ...] = ("image", "video", "audio")

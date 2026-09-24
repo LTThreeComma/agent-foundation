@@ -12,7 +12,7 @@ from a13n_harness import ModelCapability
 from a13n_harness.pricing import ModelPricingEntry
 from a13n_harness.providers.model.definition import ModelProviderDefinition
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
-from anyio import to_thread
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import Storage, assign, short_session, transaction, unique_key
@@ -20,19 +20,10 @@ from a13n_service.infra.errors import disabled, invalid
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
 from a13n_service.providers.registry import Registry
-from a13n_service.resources.models.catalog import known_model, known_models, serves
-from a13n_service.resources.models.schemas import (
-    CatalogModel,
-    CatalogPage,
-    Model,
-    ModelConfig,
-    ModelCreate,
-    ModelPage,
-    ModelUpdate,
-)
+from a13n_service.resources.models.schemas import Model, ModelConfig, ModelCreate, ModelPage, ModelUpdate
 from a13n_service.resources.models.tables import ModelRow
 from a13n_service.resources.providers.scope import list_rows, usable_row, writable_scope
-from a13n_service.resources.providers.service import ResolvedProvider, get_provider, resolve_provider
+from a13n_service.resources.providers.service import ResolvedProvider, resolve_provider
 from a13n_service.resources.providers.tables import ModelProviderRow
 from a13n_service.resources.rows import audit_row, find_row, given, record_update
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, Verb, WorkspaceScope
@@ -96,9 +87,6 @@ def require_understanding(model: ResolvedModel, kind: NativeInputMediaKind) -> N
 async def create_model(
     storage: Storage, actor: Principal, organization_id: str, body: ModelCreate, *, registry: Registry
 ) -> Model:
-    known = None if body.catalog_key is None else await to_thread.run_sync(known_model, body.catalog_key)
-    if body.catalog_key is not None and known is None:
-        raise invalid("catalog_key", "not a catalogue model")
     with unique_key(ModelRow.KIND, "uq_models_provider_id_key", body.key):
         async with transaction(storage) as session:
             scope = await writable_scope(session, actor, organization_id, body.workspace_id)
@@ -107,8 +95,7 @@ async def create_model(
                 raise invalid("workspace_id", "the provider is confined to another workspace")
             if not provider.enabled:
                 raise disabled(provider.KIND, provider.id)
-            config, pricing = _source(body, known, registry.get("model", provider.type))
-            _check_pricing(config, pricing)
+            _check_api(registry.get("model", provider.type), body.config)
             row = ModelRow(
                 id=new_object_id("mdl"),
                 organization_id=scope.organization_id,
@@ -117,8 +104,9 @@ async def create_model(
                 key=body.key,
                 name=body.name,
                 description=body.description,
-                config=config.model_dump(mode="json"),
-                pricing=None if pricing is None else pricing.model_dump(mode="json"),
+                config=body.config.model_dump(mode="json"),
+                pricing=_dump(body.pricing),
+                catalog_ref=_dump(body.catalog_ref),
                 enabled=body.enabled,
                 created_by_id=actor.id,
                 updated_by_id=actor.id,
@@ -168,45 +156,17 @@ async def update_model(
             provider = await _configured_provider(session, actor, organization_id, row.provider_id)
             _check_api(registry.get("model", provider.type), body.config)
             values["config"] = config
-        if "pricing" in body.model_fields_set:
-            values["pricing"] = None if body.pricing is None else body.pricing.model_dump(mode="json")
+        for field in ("pricing", "catalog_ref"):
+            if field in body.model_fields_set:
+                values[field] = _dump(getattr(body, field))
         changed = assign(row, values)
-        if {"config", "pricing"} & set(changed):
-            _check_pricing(ModelConfig.model_validate(row.config), _pricing(row))
         if record_update(session, actor, row, changed):
             await session.flush()
         return Model.model_validate(row)
 
 
-async def list_catalog(
-    storage: Storage, actor: Principal, organization_id: str, provider_id: str, *, registry: Registry
-) -> CatalogPage:
-    provider = await get_provider(storage, actor, ModelProviderRow, organization_id, provider_id)
-    definition = registry.get("model", provider.type)
-    return CatalogPage(items=await to_thread.run_sync(known_models, definition), next_cursor=None)
-
-
-def _source(
-    body: ModelCreate, known: CatalogModel | None, definition: ModelProviderDefinition
-) -> tuple[ModelConfig, ModelPricingEntry | None]:
-    """The configuration and pricing a new model starts with: the caller's, or the catalogue's."""
-    if known is not None:
-        if not serves(definition, known):
-            raise invalid("catalog_key", "the provider type does not serve this model")
-        # The definition's first calling API is the Harness default; `PATCH` can select another.
-        api = definition.supported_model_apis[0]
-        config = ModelConfig(model_name=known.model_name, model_api=api, characteristics=known.characteristics)
-        return config, known.pricing
-    if body.config is None:
-        raise invalid("config", "required unless catalog_key is given")
-    _check_api(definition, body.config)
-    return body.config, body.pricing
-
-
-def _check_pricing(config: ModelConfig, pricing: ModelPricingEntry | None) -> None:
-    # Execution looks a price up by the upstream model name, so a price naming another model never applies.
-    if pricing is not None and pricing.model != config.model_name:
-        raise invalid("pricing.model", f"must be the model's model_name {config.model_name}")
+def _dump(value: BaseModel | None) -> dict | None:
+    return None if value is None else value.model_dump(mode="json")
 
 
 def _pricing(row: ModelRow) -> ModelPricingEntry | None:

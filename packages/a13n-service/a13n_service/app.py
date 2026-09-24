@@ -34,6 +34,7 @@ from a13n_service.infra.telemetry import open_tracing
 from a13n_service.migrations.runner import heads, upgrade
 from a13n_service.providers.environments import offered
 from a13n_service.providers.registry import Registry
+from a13n_service.resources.models.catalog import ModelsDevCatalog, catalog_channels
 from a13n_service.runs.execute import execute
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.stream import ThreadHub
@@ -205,6 +206,11 @@ def build_app(
                 async with asyncio.timeout(config.server.readiness_timeout):
                     await check_schema(runtime.storage, expected)
                 if serves_api:
+                    catalog = ModelsDevCatalog(
+                        catalog_channels(runtime.registry.models.values()), runtime.endpoint_policy
+                    )
+                    app.state.model_catalog = catalog
+                    background.append(asyncio.create_task(catalog.run(), name="model-catalog"))
                     app.state.thread_hub = ThreadHub(runtime)
                     background.append(asyncio.create_task(app.state.thread_hub.run(), name="thread-hub"))
                     sweeps = [factory(runtime) for factory in distribution.sweeps]

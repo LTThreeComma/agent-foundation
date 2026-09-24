@@ -29,8 +29,11 @@ from a13n_harness import (
     HarnessStreamEvent,
     RunBindings,
     RunError,
+    RunModelResolver,
+    RunPreparationContext,
 )
 from a13n_harness.capabilities.steering import steering_input_ids
+from a13n_harness.environment.providers import BoundEnvironment
 from a13n_harness.identity import AgentIdentityRef, AgentInstanceContext
 from a13n_harness.providers.environment.errors import EnvironmentProviderError, EnvironmentProviderErrorCategory
 from a13n_logging import get_logger
@@ -43,11 +46,11 @@ from a13n_service.infra.db import short_session, transaction
 from a13n_service.infra.errors import ServiceError, conflict
 from a13n_service.infra.telemetry import attempt_observation
 from a13n_service.resources.agents.service import load_revision
-from a13n_service.resources.models.service import ResolvedModel
 from a13n_service.runs import agent, checkpoints, claim, deferred, inbox, inputs
 from a13n_service.runs.accept import delegation
 from a13n_service.runs.admission import CallContext
 from a13n_service.runs.agent import ResolvedAgent
+from a13n_service.runs.attachments import Recipient
 from a13n_service.runs.attempts import (
     AttemptControl,
     AuthorityRevoked,
@@ -59,9 +62,10 @@ from a13n_service.runs.attempts import (
 from a13n_service.runs.boundaries import Boundaries, SafeBoundary
 from a13n_service.runs.calls import CallCheck
 from a13n_service.runs.checkpoints import Committed, RunState
+from a13n_service.runs.coalesce import Coalescer
 from a13n_service.runs.display import Display, DisplayFold
 from a13n_service.runs.environments.execution import PreparedMount, open_mounts, prepare_mounts
-from a13n_service.runs.environments.mounts import PRIMARY
+from a13n_service.runs.environments.mounts import PRIMARY, has_primary
 from a13n_service.runs.host import HostPlan, open_host, resolve_host
 from a13n_service.runs.inputs import Offered
 from a13n_service.runs.resume import normalize
@@ -290,14 +294,14 @@ class _Attempt:
         self.fold = DisplayFold(lease.run_id, plan.display, attempt=lease.number, max_bytes=worker.display_bytes)
         # What an earlier attempt left unfinished continues only if this attempt streams it again.
         self.fold.interrupt()
-        # Which resolved model serves each upstream model; filled when the models open, before any call.
-        self.served: dict[tuple[str, str], ResolvedModel] = {}
-        self.usage = UsageBuffer(self.served)
         self.offers = _Offers(plan.assigned)
-        self.boundaries = Boundaries()
-        self.check = CallCheck(
-            runtime, control, self._call_context(), served=self.served, used=plan.used, limit=plan.limit
+        self.recipient = Recipient(
+            plan.agent.model.config.characteristics.capabilities, primary=has_primary(plan.run.environment_mounts)
         )
+        self.boundaries = Boundaries()
+        models = {model.id: model for model in plan.agent.models()}
+        self.check = CallCheck(runtime, control, self._call_context(), models=models, used=plan.used, limit=plan.limit)
+        self.usage = UsageBuffer(self.check.calls)
         self.yielding = False
 
     async def run(self) -> None:
@@ -326,18 +330,6 @@ class _Attempt:
     async def _stream(self) -> HarnessRunResult | None:
         """The Harness run's result, or None when the worker drained while the mounts were being prepared."""
         runtime, run = self.runtime, self.plan.run
-        accepted: list[inputs.AcceptedInput] = []
-        if self.plan.resume is not None:
-            accepted.append(inputs.DeferredInput(self.plan.resume))
-        for entry in self.plan.assigned:
-            accepted.append(inputs.MessageInput(tuple(await self._read(entry) or ())))
-        content: list[UserContent] = []
-        resume: DeferredToolResume | None = None
-        for item in accepted:
-            if isinstance(item, inputs.MessageInput):
-                content.extend(item.content)
-            else:
-                resume = item.resume
         prepared = await self._prepare_mounts()
         if prepared is None:
             return None
@@ -345,7 +337,6 @@ class _Attempt:
             environments = await stack.enter_async_context(open_mounts(runtime, prepared))
             root = self.plan.agent
             models = await agent.open_models(stack, runtime, root)
-            self.served.update(agent.served(root, models))
             host = await stack.enter_async_context(
                 open_host(
                     runtime,
@@ -360,7 +351,6 @@ class _Attempt:
             )
             executable = agent.build(
                 root,
-                models,
                 capabilities=lambda node: (
                     [self.boundaries, *host.capabilities(node)] if node is root else host.capabilities(node)
                 ),
@@ -374,13 +364,18 @@ class _Attempt:
                     runtime.redis, runtime.settings, thread_id=run.thread_id, run_id=run.id, attempt=self.lease.number
                 )
             )
+            output = await stack.enter_async_context(
+                Coalescer(self.fold, live, window=runtime.settings.worker.stream_coalesce_seconds)
+            )
             start = partial(
                 executable.stream,
-                content or None,
+                input_factory=self._assigned_input if self.plan.assigned else None,
                 previous_state=self.plan.state,
-                deferred_resume=resume,
+                deferred_resume=self.plan.resume,
                 tool_recovery="declared",
-                bindings=host.bindings(root, self._bindings(policies=host.policies())),
+                bindings=host.bindings(
+                    root, self._bindings(policies=host.policies(), resolver=agent.model_resolver(models))
+                ),
                 # The call check enforces the run's own request limit across attempts.
                 usage_limits=UsageLimits(request_limit=None),
             )
@@ -395,7 +390,7 @@ class _Attempt:
                 interrupt = asyncio.create_task(self._cancel_when_stopped(stream))
                 try:
                     async for item in stream:
-                        await self._observe(item, stream, live)
+                        await self._observe(item, stream, output)
                 finally:
                     interrupt.cancel()
         if stream.result is None:
@@ -430,23 +425,23 @@ class _Attempt:
                 raise
             raise _EnvironmentUnavailable(error.message) from error
 
-    async def _observe(self, item: HarnessStreamEvent, stream: HarnessRunStream, live: ThreadStream) -> None:
+    async def _observe(self, item: HarnessStreamEvent, stream: HarnessRunStream, output: Coalescer) -> None:
         event = item.event if isinstance(item, HarnessEvent) else None
         if isinstance(event, HarnessExtensionEvent) and event.kind == "usage":
             self.usage.report(event.payload)  # Every charge of the run, an inline child run's included.
         if item.run_id != stream.run_id:
             return  # Other output of an inline child run belongs to that child's own observation.
         if isinstance(event, SafeBoundary):
-            await self._boundary(event, stream, live)
+            await self._boundary(event, stream, output)
             return
-        for observed in self.fold.observe(item):
-            live.delta(observed)
+        output.observe(item)
 
-    async def _boundary(self, boundary: SafeBoundary, stream: HarnessRunStream, live: ThreadStream) -> None:
+    async def _boundary(self, boundary: SafeBoundary, stream: HarnessRunStream, output: Coalescer) -> None:
         if boundary.at == "model":
             self.offers.requested = True
+        output.flush()  # The checkpoint's display covers every event observed before the boundary.
         await self._commit(self.boundaries.take(boundary.token))
-        live.boundary(self.fold.sequence)
+        output.boundary()
         if boundary.at == "model" and self.control.handoff.is_set():
             # Yield where the request in flight is simply sent again; at a tool boundary recovery would have to
             # treat calls that never ran as unknown effects.
@@ -493,7 +488,7 @@ class _Attempt:
         self.offers.unsent.extend(Offered.of(entry) for entry in entries)
         while self.offers.unsent:
             entry = self.offers.unsent[0]
-            content = await self._read(entry)
+            content = await self._read(entry, stream.context.environment)
             if content is None:
                 self.offers.unsent.pop(0)
                 continue
@@ -505,12 +500,23 @@ class _Attempt:
                 return
             self.offers.open[entry.id] = self.offers.unsent.pop(0)
 
-    async def _read(self, entry: Offered) -> list[UserContent] | None:
-        """The entry's content, or None for a steer that cannot be read, whether offered at a boundary or again
-        by a recovered attempt: it fails alone and the run goes on without it. The run's own source entry is
-        what it runs on, so a refusal to read that one fails the run."""
+    async def _assigned_input(self, context: RunPreparationContext) -> tuple[UserContent, ...]:
+        """The Harness input factory: the assigned entries' content, read once the environments are ready, so the
+        files it refers to are placed first."""
+        parts: list[UserContent] = []
+        for entry in self.plan.assigned:
+            parts.extend(await self._read(entry, context.environment) or ())
+        if not parts:
+            # Each entry was a steer that failed alone; the next attempt continues without them.
+            raise ServiceError("unavailable", "No assigned input could be read", {"dependency": "input"})
+        return tuple(parts)
+
+    async def _read(self, entry: Offered, environment: BoundEnvironment) -> tuple[UserContent, ...] | None:
+        """The entry's content, its files placed in `environment`, or None for a steer that cannot be read,
+        whether offered at a boundary or again by a recovered attempt: it fails alone and the run goes on without
+        it. The run's own source entry is what it runs on, so a refusal to read that one fails the run."""
         try:
-            return await inputs.content(self.runtime, self.plan.principal, [entry])
+            return await inputs.content(self.runtime, self.plan.principal, self.recipient, environment, entry)
         except ServiceError as error:
             if error.code == "unavailable" or entry.id == self.plan.run.source_entry_id:
                 raise
@@ -613,7 +619,9 @@ class _Attempt:
         """The child runs one async agent of the graph starts through its own edges."""
         return ChildRuns(self.runtime, self.lease, self.control, node.subagents)
 
-    def _bindings(self, *, policies: tuple[AbstractCapability[AgentContext], ...]) -> RunBindings:
+    def _bindings(
+        self, *, policies: tuple[AbstractCapability[AgentContext], ...], resolver: RunModelResolver
+    ) -> RunBindings:
         run, lease = self.plan.run, self.lease
         return RunBindings(
             instance=AgentInstanceContext(
@@ -621,6 +629,7 @@ class _Attempt:
                 agent_instance_id=run.id,
                 host_refs={"run_id": run.id, "thread_id": run.thread_id, "attempt_id": lease.attempt_id},
             ),
+            model_resolver=resolver,
             model_call_check=self.check,
             capabilities=policies,
             observation=attempt_observation(

@@ -1,14 +1,15 @@
-"""One organization collection for shared and workspace models, and the catalogue a model provider offers."""
+"""One organization collection for shared and workspace models, and the model catalog they start from."""
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 
 from a13n_service.infra.http import IfMatch, PageLimit, tagged
 from a13n_service.resources.models import media, service
+from a13n_service.resources.models.catalog import ModelsDevCatalog
 from a13n_service.resources.models.schemas import (
-    CatalogPage,
     MediaDefaults,
     MediaUnderstandingSelection,
     Model,
+    ModelCatalog,
     ModelCreate,
     ModelPage,
     ModelUpdate,
@@ -16,12 +17,14 @@ from a13n_service.resources.models.schemas import (
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.tenancy.requests import Actor
 
-router = APIRouter(prefix="/api/v1/organizations/{organization_id}", tags=["models"])
+router = APIRouter(prefix="/api/v1", tags=["models"])
+_MODELS = "/organizations/{organization_id}/models"
+_MODEL = _MODELS + "/{model_id}"
 # The workspace's media-understanding defaults, which only its models may serve.
 workspace_router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}", tags=["models"])
 
 
-@router.post("/models", response_model=Model, status_code=201)
+@router.post(_MODELS, response_model=Model, status_code=201)
 async def create_model(
     response: Response, organization_id: str, body: ModelCreate, actor: Actor, runtime: CurrentRuntime
 ) -> Model:
@@ -30,7 +33,7 @@ async def create_model(
     return tagged(response, result)
 
 
-@router.get("/models", response_model=ModelPage)
+@router.get(_MODELS, response_model=ModelPage)
 async def list_models(
     organization_id: str,
     actor: Actor,
@@ -44,14 +47,14 @@ async def list_models(
     )
 
 
-@router.get("/models/{model_id}", response_model=Model)
+@router.get(_MODEL, response_model=Model)
 async def get_model(
     response: Response, organization_id: str, model_id: str, actor: Actor, runtime: CurrentRuntime
 ) -> Model:
     return tagged(response, await service.get_model(runtime.storage, actor, organization_id, model_id))
 
 
-@router.patch("/models/{model_id}", response_model=Model)
+@router.patch(_MODEL, response_model=Model)
 async def update_model(
     response: Response,
     organization_id: str,
@@ -68,9 +71,11 @@ async def update_model(
     return tagged(response, result)
 
 
-@router.get("/model-providers/{provider_id}/catalog", response_model=CatalogPage)
-async def list_catalog(organization_id: str, provider_id: str, actor: Actor, runtime: CurrentRuntime) -> CatalogPage:
-    return await service.list_catalog(runtime.storage, actor, organization_id, provider_id, registry=runtime.registry)
+@router.get("/model-catalog", response_model=ModelCatalog)
+async def get_model_catalog(request: Request, actor: Actor) -> ModelCatalog:
+    """The models.dev models the registered model provider types serve, for any signed-in principal."""
+    catalog: ModelsDevCatalog = request.app.state.model_catalog
+    return await catalog.read()
 
 
 @workspace_router.get("/media-understanding-defaults", response_model=MediaDefaults)

@@ -15,12 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from a13n_service.infra.db import now, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.ids import new_object_id
+from a13n_service.resources.agents.schemas import AgentConfig
 from a13n_service.resources.agents.service import select_revision, validate_override
 from a13n_service.runs import inbox
 from a13n_service.runs.admission import AcceptedIntent
-from a13n_service.runs.environments.mounts import freeze_mounts, reserve_primary
+from a13n_service.runs.attachments import require_readable
+from a13n_service.runs.environments.mounts import freeze_mounts, has_primary, reserve_primary
 from a13n_service.runs.runtime import Runtime
-from a13n_service.runs.schemas import Failure, Pending, Resume, RunOptions, Trigger
+from a13n_service.runs.schemas import Failure, MessagePayload, Pending, Resume, RunOptions, Trigger
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
 from a13n_service.runs.webhooks import notify_subscribers
 from a13n_service.tenancy.access import principal_for, require_active_workspace
@@ -158,6 +160,12 @@ async def delegation(session: AsyncSession, thread: ThreadRow, run_id: str) -> D
     return Delegation(root_run_id=run_id, depth=depth)
 
 
+def primary_template(thread: ThreadRow, config: AgentConfig) -> str | None:
+    """The template acceptance reserves a primary sandbox from when the thread mounts none: the agent's, except on
+    a child thread, whose environments the edge that delegates it decides when it is spawned."""
+    return None if thread.origin == "child" else config.default_environment_template_id
+
+
 async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, source: Source) -> RunRow:
     """Create the accepted run. The caller holds the thread lock and has checked eligibility.
 
@@ -183,14 +191,24 @@ async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, 
         )
         options = options.model_copy(update={"overrides": frozen})
     parent, lineage = await parent_of(session, thread)
-    # A child thread's environments are decided when it is spawned, by the edge that delegates it. An instance
-    # reserved here is a new row that a refusal discards with it; freezing checks the mounts are usable.
-    template_id = revision.config.default_environment_template_id
-    if template_id is not None and thread.origin != "child":
+    # An instance reserved here is a new row that a refusal discards with it; freezing checks the mounts are usable.
+    template_id = primary_template(thread, revision.config)
+    if template_id is not None:
         await reserve_primary(
             session, principal, thread, template_id=template_id, limit=runtime.settings.environments.managed_count
         )
     mounts = await freeze_mounts(session, thread, principal_id=source.principal_id)
+    if source.entry is not None and source.entry.kind == "message":
+        await require_readable(
+            session,
+            principal,
+            scope,
+            revision,
+            options.overrides,
+            MessagePayload.model_validate(source.entry.payload),
+            authority=source.authority,
+            primary=has_primary(mounts),
+        )
     run_id = new_object_id("run")
     if runtime.admission is not None:
         await runtime.admission.accept(

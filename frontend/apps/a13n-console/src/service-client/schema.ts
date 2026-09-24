@@ -204,6 +204,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/model-catalog": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Model Catalog
+     * @description The models.dev models the registered model provider types serve, for any signed-in principal.
+     */
+    get: operations["get_model_catalog_api_v1_model_catalog_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/organizations": {
     parameters: {
       query?: never;
@@ -532,23 +552,6 @@ export interface paths {
      * @description A `config` change must also replace or remove a stored credential: it never follows a new endpoint.
      */
     patch: operations["update_provider_api_v1_organizations__organization_id__model_providers__provider_id__patch"];
-    trace?: never;
-  };
-  "/api/v1/organizations/{organization_id}/model-providers/{provider_id}/catalog": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List Catalog */
-    get: operations["list_catalog_api_v1_organizations__organization_id__model_providers__provider_id__catalog_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
     trace?: never;
   };
   "/api/v1/organizations/{organization_id}/model-providers/{provider_id}/test": {
@@ -1421,7 +1424,7 @@ export interface paths {
     put?: never;
     /**
      * Create Environment
-     * @description Reserve a managed sandbox from a template (`creating`), or register a connect-only device (`ready`).
+     * @description Reserve a managed sandbox from a template (`creating`), or register an external envd target (`ready`).
      */
     post: operations["create_environment_api_v1_workspaces__workspace_id__environments_post"];
     delete?: never;
@@ -1445,8 +1448,8 @@ export interface paths {
     delete: operations["delete_environment_api_v1_workspaces__workspace_id__environments__environment_id__delete"];
     options?: never;
     head?: never;
-    /** Rename Environment */
-    patch: operations["rename_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch"];
+    /** Update Environment */
+    patch: operations["update_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch"];
     trace?: never;
   };
   "/api/v1/workspaces/{workspace_id}/environments/{environment_id}/stop": {
@@ -3213,24 +3216,35 @@ export interface components {
     };
     /**
      * CatalogModel
-     * @description A model the provider type is known to serve, with the values creating it from the catalogue uses.
+     * @description A catalog model, with the characteristics and pricing a model created from it starts with.
      */
     CatalogModel: {
       characteristics: components["schemas"]["HarnessModelCharacteristics-Output"];
-      /** Key */
-      key: string;
-      /** Model Name */
-      model_name: string;
+      /** Identity */
+      identity: string;
+      /** Name */
+      name: string;
       pricing: components["schemas"]["ModelPricingEntry-Output"] | null;
-      /** Source Url */
-      source_url: string;
+      /** Pricing Warning */
+      pricing_warning: string | null;
+      /** Provider Name */
+      provider_name: string;
+      ref: components["schemas"]["CatalogRef"];
+      /**
+       * Release Date
+       * Format: date
+       */
+      release_date: string;
     };
-    /** CatalogPage */
-    CatalogPage: {
-      /** Items */
-      items: components["schemas"]["CatalogModel"][];
-      /** Next Cursor */
-      next_cursor: string | null;
+    /**
+     * CatalogRef
+     * @description A models.dev channel and the model ID it lists there.
+     */
+    CatalogRef: {
+      /** Model */
+      model: string;
+      /** Provider */
+      provider: string;
     };
     /** @enum {string} */
     Certainty: "not_dispatched" | "known" | "unknown";
@@ -3565,18 +3579,6 @@ export interface components {
       /** Next Cursor */
       next_cursor: string | null;
     };
-    /**
-     * DeviceRegistration
-     * @description A connect-only device of an `http_envd` provider.
-     */
-    DeviceRegistration: {
-      /** Device Id */
-      device_id: string;
-      /** Name */
-      name?: string | null;
-      /** Provider Id */
-      provider_id: string;
-    };
     /** EmailChangeConfirm */
     EmailChangeConfirm: {
       /** Token */
@@ -3650,10 +3652,11 @@ export interface components {
     };
     /**
      * EnvironmentFailure
-     * @description The last error of the outstanding operation, or what refuses use of an otherwise ready instance.
+     * @description The last error of the outstanding operation or, on a ready instance, of its last renewal.
      *
      *     `unknown` means the call may have taken effect: only the same operation may continue. `permanent` failures
-     *     refuse new mounts and acceptance until the cause is fixed or the instance is deleted.
+     *     refuse new mounts and acceptance until the cause is fixed or the instance is deleted; `environment_lost` means
+     *     the provider no longer has the sandbox.
      */
     EnvironmentFailure: {
       /**
@@ -3687,10 +3690,18 @@ export interface components {
       /** Next Cursor */
       next_cursor: string | null;
     };
-    /** EnvironmentUpdate */
+    /**
+     * EnvironmentUpdate
+     * @description Fields left out stay unchanged. Only an external target has an endpoint and token; a new endpoint comes with
+     *     its token, so a stored token never reaches an endpoint it was not entered for.
+     */
     EnvironmentUpdate: {
+      /** Endpoint */
+      endpoint?: string | null;
       /** Name */
-      name: string;
+      name?: string | null;
+      /** Token */
+      token?: string | null;
     };
     /** EnvironmentView */
     EnvironmentView: {
@@ -3703,6 +3714,8 @@ export interface components {
       created_by_id: string;
       /** Device Id */
       device_id: string | null;
+      /** Endpoint */
+      endpoint: string | null;
       failure: components["schemas"]["EnvironmentFailure"] | null;
       /** Id */
       id: string;
@@ -3719,7 +3732,7 @@ export interface components {
       /** Owner Principal Id */
       owner_principal_id: string | null;
       /** Provider Id */
-      provider_id: string;
+      provider_id: string | null;
       /** Status */
       status: string;
       /** Template Id */
@@ -3769,6 +3782,21 @@ export interface components {
      */
     ErrorEnvelope: {
       error: components["schemas"]["ErrorBody"];
+    };
+    /**
+     * ExternalTargetCreate
+     * @description An envd daemon someone runs, registered by its endpoint and the token it accepts.
+     */
+    ExternalTargetCreate: {
+      /** Endpoint */
+      endpoint: string;
+      /** Name */
+      name?: string | null;
+      /**
+       * Token
+       * Format: password
+       */
+      token: string;
     };
     /** Failure */
     Failure: {
@@ -4237,6 +4265,7 @@ export interface components {
     };
     /** Model */
     Model: {
+      catalog_ref: components["schemas"]["CatalogRef"] | null;
       config: components["schemas"]["ModelConfig-Output"];
       /**
        * Created At
@@ -4278,7 +4307,23 @@ export interface components {
      * @enum {string}
      */
     ModelCapability:
-      "image_understanding" | "video_understanding" | "audio_understanding";
+      | "image_understanding"
+      | "video_understanding"
+      | "audio_understanding"
+      | "document_understanding";
+    /**
+     * ModelCatalog
+     * @description `ready` is fresh, `stale` the last catalog after a failed refresh, `unavailable` none fetched yet.
+     */
+    ModelCatalog: {
+      /** Items */
+      items: components["schemas"]["CatalogModel"][];
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "ready" | "stale" | "unavailable";
+    };
     /** ModelConfig */
     "ModelConfig-Input": {
       characteristics?: components["schemas"]["HarnessModelCharacteristics-Input"];
@@ -4309,9 +4354,8 @@ export interface components {
     };
     /** ModelCreate */
     ModelCreate: {
-      /** Catalog Key */
-      catalog_key?: string | null;
-      config?: components["schemas"]["ModelConfig-Input"] | null;
+      catalog_ref?: components["schemas"]["CatalogRef"] | null;
+      config: components["schemas"]["ModelConfig-Input"];
       /**
        * Description
        * @default
@@ -4414,6 +4458,7 @@ export interface components {
     };
     /** ModelUpdate */
     ModelUpdate: {
+      catalog_ref?: components["schemas"]["CatalogRef"] | null;
       config?: components["schemas"]["ModelConfig-Input"] | null;
       /** Description */
       description?: string | null;
@@ -4892,6 +4937,8 @@ export interface components {
     /** ProviderType */
     ProviderType: {
       authentication: components["schemas"]["Authentication"];
+      /** Catalog Providers */
+      catalog_providers?: string[] | null;
       /** Configuration Schema */
       configuration_schema: {
         [key: string]: components["schemas"]["JsonValue"];
@@ -4928,8 +4975,6 @@ export interface components {
       setup_url: string | null;
       /** Supports Destroy */
       supports_destroy?: boolean | null;
-      /** Supports Managed */
-      supports_managed?: boolean | null;
       /** Supports Stop */
       supports_stop?: boolean | null;
       /** Supports Test */
@@ -6685,6 +6730,27 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
+  get_model_catalog_api_v1_model_catalog_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ModelCatalog"];
+        };
+      };
+      default: components["responses"]["Error"];
+    };
+  };
   list_organizations_api_v1_organizations_get: {
     parameters: {
       query?: {
@@ -7507,31 +7573,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["Provider"];
-        };
-      };
-      400: components["responses"]["Error"];
-      default: components["responses"]["Error"];
-    };
-  };
-  list_catalog_api_v1_organizations__organization_id__model_providers__provider_id__catalog_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        organization_id: string;
-        provider_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["CatalogPage"];
         };
       };
       400: components["responses"]["Error"];
@@ -9412,7 +9453,7 @@ export interface operations {
       content: {
         "application/json":
           | components["schemas"]["ManagedEnvironmentCreate"]
-          | components["schemas"]["DeviceRegistration"];
+          | components["schemas"]["ExternalTargetCreate"];
       };
     };
     responses: {
@@ -9482,7 +9523,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  rename_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch: {
+  update_environment_api_v1_workspaces__workspace_id__environments__environment_id__patch: {
     parameters: {
       query?: never;
       header?: {

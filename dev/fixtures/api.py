@@ -7,6 +7,12 @@ from fastapi import APIRouter, Request, Response
 router = APIRouter()
 
 
+@router.post("/webhooks")
+async def webhook() -> Response:
+    """Accept every lifecycle webhook, so seeded subscriptions show delivered events."""
+    return Response(status_code=204)
+
+
 @router.post("/mcp")
 async def mcp(request: Request):
     body = await request.json()

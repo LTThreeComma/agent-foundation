@@ -75,17 +75,27 @@ def _entries(key: str, raw: Any) -> list[StreamEntry]:
 
 async def append(
     client: Redis, key: str, entries: list[dict[str, str]], *, max_length: int, ttl: int, timeout: float
-) -> bool:
-    """Append in one round trip under an approximate length cap; False means Redis dropped the entries."""
+) -> list[str]:
+    """Append in one round trip under an approximate length cap; the new entries' IDs, none when Redis dropped
+    them."""
     try:
         async with asyncio.timeout(timeout), client.pipeline(transaction=False) as pipe:
             for fields in entries:
                 pipe.xadd(key, fields, maxlen=max_length, approximate=True)  # type: ignore[arg-type]
             pipe.expire(key, ttl)
-            await pipe.execute()
-        return True
+            *ids, _ = await pipe.execute()
+        return ids
     except (RedisError, TimeoutError):
-        return False
+        return []
+
+
+async def trim(client: Redis, key: str, *, min_id: str, timeout: float) -> None:
+    """Remove the entries before `min_id`; after a failure the length cap and expiry remove them later."""
+    try:
+        async with asyncio.timeout(timeout):
+            await client.xtrim(key, minid=min_id, approximate=False)
+    except (RedisError, TimeoutError):
+        pass
 
 
 async def last_id(client: Redis, key: str) -> str:

@@ -15,6 +15,9 @@ from a13n_harness_ui.model_presets import known_model_capabilities
 from a13n_harness_ui.settings import HarnessUiSettings, StorageSettings
 
 IMAGE = frozenset({ModelCapability.IMAGE_UNDERSTANDING})
+MEDIA = frozenset(
+    {ModelCapability.IMAGE_UNDERSTANDING, ModelCapability.AUDIO_UNDERSTANDING, ModelCapability.VIDEO_UNDERSTANDING}
+)
 
 
 @pytest.mark.parametrize(
@@ -27,7 +30,7 @@ IMAGE = frozenset({ModelCapability.IMAGE_UNDERSTANDING})
         ("grok:grok-4.7", IMAGE),
         ("grok:grok-4.6", IMAGE),
         ("moonshotai:kimi-k2.5", IMAGE),
-        ("google:gemini-2.5-pro", frozenset(ModelCapability)),
+        ("google:gemini-2.5-pro", MEDIA),
         ("openrouter:google/gemini-2.5-pro", IMAGE),
         ("openrouter:anthropic/claude-sonnet-4.6", IMAGE),
         ("openrouter:openai/gpt-5.4", IMAGE),

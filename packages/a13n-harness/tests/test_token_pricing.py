@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from a13n_harness.pricing import ModelCostInput
+from a13n_harness.pricing import ModelCostInput, ModelPricingEntry
 from a13n_harness.token_pricing import TokenPricing, TokenPricingCapability
 from pydantic import ValidationError
 from pydantic_ai.usage import RequestUsage
@@ -54,6 +54,31 @@ def test_shared_policy_selects_child_prices_by_selection_not_response_alias():
     assert policy.quote(value("child", input_tokens=100000)).cost_usd == Decimal("0.9")
     assert policy.quote(value("unknown", input_tokens=100000)) is None
     assert policy.quote(value(None, input_tokens=100000)) is None
+
+
+def test_a_complete_entry_prices_the_selected_model_whatever_it_names():
+    entry = ModelPricingEntry.model_validate(
+        {
+            "provider": "minimax",
+            "model": "MiniMax-M3",
+            "rules": [
+                {
+                    "rule_id": "standard",
+                    "prices": [
+                        {"price_key": "input_mtok", "price": "1", "tiers": [{"start": 200000, "price": "2"}]},
+                        {"price_key": "input_audio_mtok", "price": "4"},
+                    ],
+                }
+            ],
+            "source": "models.dev",
+            "source_revision": "2026-05-01",
+        }
+    )
+    policy = TokenPricingCapability({"root": pricing(), "compatible": entry})
+    quote = policy.quote(value("compatible", input_tokens=300000, input_audio_tokens=100000))
+    # A tier prices the complete input, and audio input has its own price, unlike a token table.
+    assert quote is not None and (quote.cost_usd, quote.source, quote.rule_id) == (Decimal("0.8"), "custom", "standard")
+    assert quote.pricing_revision == policy.revision != TokenPricingCapability({"root": pricing()}).revision
 
 
 @pytest.mark.parametrize(

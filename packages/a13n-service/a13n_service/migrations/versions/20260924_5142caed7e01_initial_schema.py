@@ -1,6 +1,6 @@
 """initial schema
 
-Revision ID: d1a48acf01f7
+Revision ID: 5142caed7e01
 Revises:
 """
 
@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "d1a48acf01f7"
+revision = "5142caed7e01"
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -821,6 +821,7 @@ def upgrade() -> None:
         sa.Column("description", sa.String(), server_default="", nullable=False),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("pricing", postgresql.JSONB(none_as_null=True, astext_type=sa.Text()), nullable=True),
+        sa.Column("catalog_ref", postgresql.JSONB(none_as_null=True, astext_type=sa.Text()), nullable=True),
         sa.Column("enabled", sa.Boolean(), nullable=False),
         sa.Column("created_by_id", sa.String(length=72), nullable=False),
         sa.Column("updated_by_id", sa.String(length=72), nullable=False),
@@ -960,10 +961,12 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("provider_id", sa.String(), nullable=False),
+        sa.Column("provider_id", sa.String(), nullable=True),
         sa.Column("provider_identity", postgresql.JSONB(none_as_null=True, astext_type=sa.Text()), nullable=True),
         sa.Column("template_id", sa.String(), nullable=True),
         sa.Column("device_id", sa.String(), nullable=True),
+        sa.Column("endpoint", sa.String(), nullable=True),
+        sa.Column("token", postgresql.JSONB(none_as_null=True, astext_type=sa.Text()), nullable=True),
         sa.Column("owner_principal_id", sa.String(length=72), nullable=True),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
@@ -977,24 +980,33 @@ def upgrade() -> None:
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("failure", postgresql.JSONB(none_as_null=True, astext_type=sa.Text()), nullable=True),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("renew_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_by_id", sa.String(length=72), nullable=False),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
+            "(renew_at IS NULL AND expires_at IS NULL) OR (status = 'ready' AND template_id IS NOT NULL)",
+            name=op.f("ck_environments_renewal"),
+        ),
+        sa.CheckConstraint(
             "(status IN ('creating', 'starting', 'stopping', 'deleting')) = (operation_id IS NOT NULL)",
             name=op.f("ck_environments_operation"),
+        ),
+        sa.CheckConstraint(
+            "(token IS NOT NULL) = (template_id IS NULL AND status <> 'deleted')", name=op.f("ck_environments_token")
         ),
         sa.CheckConstraint(
             "status IN ('creating', 'starting', 'ready', 'stopping', 'stopped', 'deleting', 'deleted')",
             name=op.f("ck_environments_status"),
         ),
         sa.CheckConstraint(
-            "status NOT IN ('ready', 'starting', 'stopping', 'stopped') OR handle IS NOT NULL",
-            name=op.f("ck_environments_handle"),
+            "template_id IS NOT NULL OR status IN ('ready', 'deleted')", name=op.f("ck_environments_connect_only")
         ),
         sa.CheckConstraint(
-            "template_id IS NOT NULL OR status IN ('ready', 'deleted')", name=op.f("ck_environments_connect_only")
+            "template_id IS NULL OR status NOT IN ('ready', 'starting', 'stopping', 'stopped') OR handle IS NOT NULL",
+            name=op.f("ck_environments_handle"),
         ),
         sa.CheckConstraint(
             "(lease_owner IS NULL) = (lease_token_hash IS NULL) AND (lease_owner IS NULL) = (lease_expires_at IS NULL) AND (lease_owner IS NULL OR operation_id IS NOT NULL)",
@@ -1003,7 +1015,11 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(operation_id IS NULL) = (operation_started_at IS NULL)", name=op.f("ck_environments_operation_started")
         ),
-        sa.CheckConstraint("(template_id IS NULL) = (device_id IS NOT NULL)", name=op.f("ck_environments_device")),
+        sa.CheckConstraint(
+            "(template_id IS NULL) = (device_id IS NOT NULL) AND (template_id IS NULL) = (endpoint IS NOT NULL) AND (template_id IS NOT NULL OR (provider_identity IS NULL AND handle IS NULL))",
+            name=op.f("ck_environments_external"),
+        ),
+        sa.CheckConstraint("(template_id IS NULL) = (provider_id IS NULL)", name=op.f("ck_environments_managed")),
         sa.CheckConstraint(
             "operation_deadline IS NULL OR operation_id IS NOT NULL", name=op.f("ck_environments_operation_deadline")
         ),
@@ -1047,6 +1063,13 @@ def upgrade() -> None:
         ["updated_at"],
         unique=False,
         postgresql_where=sa.text("status IN ('creating', 'starting', 'stopping', 'deleting')"),
+    )
+    op.create_index(
+        "ix_environments_renewals",
+        "environments",
+        ["renew_at"],
+        unique=False,
+        postgresql_where=sa.text("renew_at IS NOT NULL"),
     )
     op.create_index(
         "uq_environments_operation",
@@ -1474,6 +1497,42 @@ def upgrade() -> None:
         use_alter=True,
     )
     op.create_foreign_key(
+        "fk_inbox_entries_assigned_run",
+        "inbox_entries",
+        "runs",
+        ["thread_id", "assigned_run_id"],
+        ["thread_id", "id"],
+        initially="DEFERRED",
+        deferrable=True,
+        use_alter=True,
+    )
+    op.create_foreign_key(
+        "fk_inbox_entries_child_run",
+        "inbox_entries",
+        "runs",
+        ["workspace_id", "child_run_id"],
+        ["workspace_id", "id"],
+        use_alter=True,
+    )
+    op.create_foreign_key(
+        "fk_inbox_entries_origin_run",
+        "inbox_entries",
+        "runs",
+        ["workspace_id", "origin_run_id"],
+        ["workspace_id", "id"],
+        use_alter=True,
+    )
+    op.create_foreign_key(
+        "fk_runs_current_attempt",
+        "runs",
+        "run_attempts",
+        ["id", "current_attempt_id"],
+        ["run_id", "id"],
+        initially="DEFERRED",
+        deferrable=True,
+        use_alter=True,
+    )
+    op.create_foreign_key(
         "fk_sessions_last_run",
         "sessions",
         "runs",
@@ -1487,6 +1546,26 @@ def upgrade() -> None:
         "skill_revisions",
         ["id", "default_revision_id"],
         ["skill_id", "id"],
+        initially="DEFERRED",
+        deferrable=True,
+        use_alter=True,
+    )
+    op.create_foreign_key(
+        "fk_threads_current_run_id",
+        "threads",
+        "runs",
+        ["id", "current_run_id"],
+        ["thread_id", "id"],
+        initially="DEFERRED",
+        deferrable=True,
+        use_alter=True,
+    )
+    op.create_foreign_key(
+        "fk_threads_head_run_id",
+        "threads",
+        "runs",
+        ["id", "head_run_id"],
+        ["thread_id", "id"],
         initially="DEFERRED",
         deferrable=True,
         use_alter=True,
@@ -1507,62 +1586,6 @@ def upgrade() -> None:
         "runs",
         ["workspace_id", "session_id", "origin_run_id"],
         ["workspace_id", "session_id", "id"],
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_threads_head_run_id",
-        "threads",
-        "runs",
-        ["id", "head_run_id"],
-        ["thread_id", "id"],
-        initially="DEFERRED",
-        deferrable=True,
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_threads_current_run_id",
-        "threads",
-        "runs",
-        ["id", "current_run_id"],
-        ["thread_id", "id"],
-        initially="DEFERRED",
-        deferrable=True,
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_inbox_entries_child_run",
-        "inbox_entries",
-        "runs",
-        ["workspace_id", "child_run_id"],
-        ["workspace_id", "id"],
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_inbox_entries_assigned_run",
-        "inbox_entries",
-        "runs",
-        ["thread_id", "assigned_run_id"],
-        ["thread_id", "id"],
-        initially="DEFERRED",
-        deferrable=True,
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_inbox_entries_origin_run",
-        "inbox_entries",
-        "runs",
-        ["workspace_id", "origin_run_id"],
-        ["workspace_id", "id"],
-        use_alter=True,
-    )
-    op.create_foreign_key(
-        "fk_runs_current_attempt",
-        "runs",
-        "run_attempts",
-        ["id", "current_attempt_id"],
-        ["run_id", "id"],
-        initially="DEFERRED",
-        deferrable=True,
         use_alter=True,
     )
     op.execute(
@@ -1888,7 +1911,7 @@ def upgrade() -> None:
     )
     op.execute(
         """
-    CREATE TRIGGER stamp_resource BEFORE UPDATE ON environments FOR EACH ROW EXECUTE FUNCTION stamp_resource()
+    CREATE TRIGGER stamp_resource BEFORE UPDATE ON environments FOR EACH ROW WHEN ((to_jsonb(OLD) - '{renew_at,expires_at}'::text[]) IS DISTINCT FROM (to_jsonb(NEW) - '{renew_at,expires_at}'::text[])) EXECUTE FUNCTION stamp_resource()
     """
     )
     op.execute(
@@ -2113,6 +2136,9 @@ def downgrade() -> None:
     op.drop_table("inbox_entries")
     op.drop_index(
         "uq_environments_operation", table_name="environments", postgresql_where=sa.text("operation_id IS NOT NULL")
+    )
+    op.drop_index(
+        "ix_environments_renewals", table_name="environments", postgresql_where=sa.text("renew_at IS NOT NULL")
     )
     op.drop_index(
         "ix_environments_operations",

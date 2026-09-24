@@ -31,6 +31,7 @@ class ModelRow(Stamped, Base):
     description: Mapped[str] = mapped_column(server_default="")
     config: Mapped[dict] = mapped_column(JSONB)
     pricing: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    catalog_ref: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     enabled: Mapped[bool] = mapped_column(default=True)
     created_by_id: Mapped[str] = mapped_column(ForeignKey("principals.id"))
     updated_by_id: Mapped[str] = mapped_column(ForeignKey("principals.id"))

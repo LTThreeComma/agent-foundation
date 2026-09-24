@@ -7,10 +7,10 @@ from fastapi import APIRouter, Query, Response
 from a13n_service.infra.http import IfMatch, PageLimit, etag, tagged
 from a13n_service.runs.environments import mounts, service
 from a13n_service.runs.environments.schemas import (
-    DeviceRegistration,
     EnvironmentPage,
     EnvironmentUpdate,
     EnvironmentView,
+    ExternalTargetCreate,
     ManagedEnvironmentCreate,
     MountCreate,
     MountPage,
@@ -42,15 +42,15 @@ async def create_environment(
     runtime: CurrentRuntime,
     response: Response,
     workspace_id: str,
-    body: ManagedEnvironmentCreate | DeviceRegistration,
+    body: ManagedEnvironmentCreate | ExternalTargetCreate,
     actor: Actor,
 ) -> EnvironmentView:
-    """Reserve a managed sandbox from a template (`creating`), or register a connect-only device (`ready`)."""
+    """Reserve a managed sandbox from a template (`creating`), or register an external envd target (`ready`)."""
     match body:
         case ManagedEnvironmentCreate():
             result = await service.reserve_environment(runtime, actor, workspace_id, body)
-        case DeviceRegistration():
-            result = await service.register_device(runtime, actor, workspace_id, body)
+        case ExternalTargetCreate():
+            result = await service.register_external(runtime, actor, workspace_id, body)
     return tagged(response, result)
 
 
@@ -63,7 +63,7 @@ async def get_environment(
 
 
 @router.patch("/environments/{environment_id}", response_model=EnvironmentView)
-async def rename_environment(
+async def update_environment(
     runtime: CurrentRuntime,
     response: Response,
     workspace_id: str,
@@ -72,9 +72,7 @@ async def rename_environment(
     actor: Actor,
     if_match: IfMatch = None,
 ) -> EnvironmentView:
-    result = await service.rename_environment(
-        runtime.storage, actor, workspace_id, environment_id, body, if_match=if_match
-    )
+    result = await service.update_environment(runtime, actor, workspace_id, environment_id, body, if_match=if_match)
     return tagged(response, result)
 
 

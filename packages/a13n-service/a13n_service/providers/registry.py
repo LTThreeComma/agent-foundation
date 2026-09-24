@@ -11,18 +11,14 @@ from typing import Literal, overload
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.connector.definition import ConnectorProviderDefinition
 from a13n_harness.providers.definition import ProviderDefinition
-from a13n_harness.providers.endpoint_policy import EndpointPolicy, EndpointPolicyError
+from a13n_harness.providers.endpoint_policy import EndpointPolicy
 from a13n_harness.providers.environment.definition import EnvironmentProviderDefinition
-from a13n_harness.providers.environment.errors import EnvironmentProviderErrorCategory, provider_error
-from a13n_harness.providers.environment.models import EnvironmentState
-from a13n_harness.providers.environment.remote_envd.configuration import RemoteEnvdStateData
 from a13n_harness.providers.model.definition import ModelProviderDefinition
 from a13n_harness.providers.web.definition import WebProviderDefinition
 from pydantic import JsonValue
 
 from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.outbound import allowed_addresses
-from a13n_service.providers.endpoints import dialed_endpoint
+from a13n_service.providers.endpoints import check_endpoint, dialed_endpoint
 from a13n_service.providers.model_settings import check_settings, settings_schema
 
 type ProviderKind = Literal["model", "environment", "connector", "web"]
@@ -111,15 +107,6 @@ class Registry:
             )
         return definition
 
-    def environment_device_state(self, type_: str, device_id: str) -> EnvironmentState:
-        """The state naming a registered device; every connect-only environment type offered is a remote envd."""
-        definition = self.get("environment", type_)
-        return EnvironmentState(
-            provider_key=definition.type,
-            state_version="1",
-            state=RemoteEnvdStateData(device_id=device_id).model_dump(),
-        )
-
     def check_model_settings(self, model_api: str, settings: Mapping[str, JsonValue], *, field: str) -> None:
         """Refuse settings the calling API does not accept, naming the most relevant failing path under `field`; an
         API no model type offers any more is an unavailable dependency, as an unregistered type is."""
@@ -131,26 +118,15 @@ class Registry:
         check_settings(schema, settings, field=field)
 
     def environment_endpoint(self, type_: str, config: Mapping[str, JsonValue]) -> str | None:
-        """The URL of the endpoint an environment account names that Service processes dial: an HTTP envd device
-        or a remote Docker engine; None when the account reaches only a backend the operator chose."""
+        """The URL of the endpoint an environment account names that Service processes dial, a remote Docker
+        engine; None when the account reaches only a backend the operator chose."""
         definition = self.get("environment", type_)
         return dialed_endpoint(definition.configuration_model.model_validate(config))
 
     async def check_environment_endpoint(
         self, type_: str, config: Mapping[str, JsonValue], policy: EndpointPolicy
     ) -> None:
-        """Refuse, before any dial, an environment account whose endpoint the operator's policy denies. A name that
-        does not resolve now is unavailable, not denied: resolution failures are transient."""
+        """Refuse, before any dial, an environment account whose endpoint the operator's policy denies."""
         endpoint = self.environment_endpoint(type_, config)
-        if endpoint is None:
-            return
-        try:
-            _, hostname, port = policy.validate_syntax(endpoint)
-            try:
-                await allowed_addresses(policy, hostname, port)
-            except OSError:
-                raise provider_error(
-                    type_, "provider_unavailable", EnvironmentProviderErrorCategory.UNAVAILABLE
-                ) from None
-        except EndpointPolicyError:
-            raise provider_error(type_, "provider_endpoint_denied", EnvironmentProviderErrorCategory.DENIED) from None
+        if endpoint is not None:
+            await check_endpoint(type_, endpoint, policy)

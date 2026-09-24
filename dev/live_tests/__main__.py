@@ -1,7 +1,8 @@
 """Run the Service live journeys: `python -m dev.live_tests [pytest arguments]`.
 
 The report lists every journey with its outcome and names each skipped journey with its reason. Pass
-`--require-all` to fail, instead of skip, a journey whose external dependency is unavailable.
+`--require-all` to fail, instead of skip, a journey whose external dependency is unavailable. Journeys on hosted
+sandbox vendors run only with `--hosted`, `-m hosted`, or a `-k` expression naming their vendor type.
 """
 
 import sys

@@ -549,7 +549,7 @@ def closed_port() -> int:
         return unused.getsockname()[1]
 
 
-async def test_environment_provider_tests_only_read_the_engine_or_daemon(  # type: ignore[no-untyped-def]
+async def test_environment_provider_tests_only_read_the_engine(  # type: ignore[no-untyped-def]
     service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def tested(body: dict) -> dict:
@@ -575,14 +575,9 @@ async def test_environment_provider_tests_only_read_the_engine_or_daemon(  # typ
     monkeypatch.setattr(anyio, "getaddrinfo", unresolved)
     transient = await tested({"type": "docker", "config": {"docker_host": "tcp://engine.test:2375"}})
     assert (transient["status"], transient["message"]) == ("failed", "provider_unavailable")
-
-    device = {"type": "http_envd", "credential": {"token": "device-token"}}
-    # Outside the operator's endpoint policy, the daemon is never dialed.
-    denied = await tested({**device, "config": {"endpoint": "https://10.1.2.3:8443"}})
+    # Outside the operator's endpoint policy, the engine is never dialed.
+    denied = await tested({"type": "docker", "config": {"docker_host": "tcp://10.1.2.3:2375"}})
     assert (denied["status"], denied["message"]) == ("failed", "provider_endpoint_denied")
-    absent = await tested({**device, "config": {"endpoint": f"https://127.0.0.1:{closed_port()}"}})
-    assert (absent["status"], absent["message"]) == ("failed", "provider_connection_failed")
-    assert "device-token" not in json.dumps([denied, absent])
 
 
 async def test_docker_accounts_name_only_remote_engines_the_endpoint_policy_allows(service) -> None:  # type: ignore[no-untyped-def]
@@ -726,7 +721,7 @@ async def test_provider_types_describe_each_registered_definition(service) -> No
     thinking = [value for option in responses["properties"]["thinking"]["anyOf"] for value in option.get("enum", [])]
     assert {"low", "high"} <= set(thinking)
     assert "default" not in responses["properties"]["max_tokens"]
-    assert openai["supports_managed"] is None and openai["operations"] is None
+    assert openai["supports_stop"] is None and openai["operations"] is None
 
     web = await types("web")
     assert web["tavily"]["operations"] == ["search", "scrape"] and web["brave"]["operations"] == ["search"]
@@ -734,12 +729,17 @@ async def test_provider_types_describe_each_registered_definition(service) -> No
     assert web["tavily"]["settings_schemas"] is None
 
     assert {name: item["supports_test"] for name, item in (await types("connector")).items()} == {"composio": True}
-    lifecycle = ("supports_managed", "supports_stop", "supports_destroy", "supports_test")
+    lifecycle = ("supports_stop", "supports_destroy", "supports_test")
     environments = await types("environment")
-    # A registered device is connect-only: templates cannot use it, and the Service never stops or destroys it.
+    # External envd targets are no provider type; Sprites cannot stop, and only a Docker account can be tested.
     assert {name: tuple(item[flag] for flag in lifecycle) for name, item in environments.items()} == {
-        "docker": (True, True, True, True),
-        "http_envd": (False, False, False, True),
+        "daytona": (True, True, False),
+        "docker": (True, True, True),
+        "e2b": (True, True, False),
+        "modal": (True, True, False),
+        "runloop": (True, True, False),
+        "sprites": (False, True, False),
+        "vercel": (True, True, False),
     }
     # The Docker forms state the operator's policy and the worker's limits.
     docker = environments["docker"]
@@ -857,11 +857,9 @@ async def test_the_database_keeps_provider_references_within_their_workspace(ser
                 organization_id=organization_id,
                 workspace_id=first,
                 provider_id=shared_environment,
-                device_id="laptop",
-                owner_principal_id=service.tenant.principal_id,
-                name="laptop",
-                status="ready",
-                handle={"recipe": {}, "state": None},
+                template_id=created["template"],
+                name="box",
+                status="deleted",
                 generation=0,
                 created_by_id=service.tenant.principal_id,
             )

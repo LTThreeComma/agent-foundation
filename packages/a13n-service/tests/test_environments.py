@@ -1,30 +1,14 @@
 """Environments: templates, desired mounts frozen at acceptance, the fenced lifecycle, maintenance and use."""
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
 from uuid import uuid4
 
 import httpx2
 import pytest
-from a13n_harness.providers.environment.definition import EnvironmentProviderDefinition
-from a13n_harness.providers.environment.errors import (
-    EnvironmentProviderErrorCategory,
-    EnvironmentProviderOutcomeCertainty,
-    provider_error,
-)
-from a13n_harness.providers.environment.management import Environment, EnvironmentProviderConfiguration
-from a13n_harness.providers.environment.models import (
-    EnvironmentAvailability,
-    EnvironmentDescriptor,
-    EnvironmentOperationFamily,
-    EnvironmentPermissionSet,
-    EnvironmentState,
-)
-from a13n_harness.providers.environment.operations import EnvironmentOperations
 from a13n_service.distribution import OSS
 from a13n_service.infra.db import transaction
 from a13n_service.providers.registry import Registry
@@ -32,6 +16,7 @@ from a13n_service.runs.attempts import Lease
 from a13n_service.runs.claim import claim as claim_run
 from a13n_service.runs.environments import lifecycle
 from a13n_service.runs.environments.execution import PreparedMount, open_mounts, prepare_mounts
+from a13n_service.runs.environments.external import seal
 from a13n_service.runs.environments.lifecycle import Fault, Outcome, advance, claim, perform, publish
 from a13n_service.runs.environments.maintenance import maintain_environments
 from a13n_service.runs.environments.schemas import MAX_MOUNTS
@@ -40,226 +25,30 @@ from a13n_service.runs.schemas import EnvironmentMount
 from a13n_service.runs.tables import RunRow, ThreadRow
 from a13n_service.tenancy.access import principal_for
 from a13n_service.tenancy.authorize import ExecutionAuthority, WorkspaceScope
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select, text, update
+from sqlalchemy import select, text
+
+from .environments_support import (
+    BACKEND,
+    FAKE,
+    act,
+    backdate,
+    environment,
+    follow_up,
+    interrupt,
+    new_thread,
+    reason,
+    reserve,
+    start,
+    unmount,
+    with_fake_providers,
+)
 
 pytestmark = pytest.mark.anyio
 
 
-class FakeRecipe(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    image: str = "base"
-
-
-@dataclass
-class Backend:
-    """The fake provider's world: instances by environment ID and every call that reached it."""
-
-    instances: dict[str, Literal["running", "stopped"]] = field(default_factory=dict)
-    # The operation ID of every preparation that reached the backend.
-    preparations: list[str] = field(default_factory=list)
-    # The next call takes effect, but its answer is lost on the way back.
-    lose_response: bool = False
-
-    def answer(self) -> None:
-        if self.lose_response:
-            self.lose_response = False
-            raise provider_error(
-                "fake",
-                "provider_response_lost",
-                EnvironmentProviderErrorCategory.UNAVAILABLE,
-                certainty=EnvironmentProviderOutcomeCertainty.UNKNOWN,
-            )
-
-
-BACKEND = Backend()
-DESCRIPTOR = EnvironmentDescriptor(
-    generation="g1",
-    working_directory="/work",
-    operation_families=frozenset(),
-    permissions=EnvironmentPermissionSet(operations=frozenset()),
-)
-
-
-class FakeEnvironment(Environment):
-    def __init__(self, environment_id: str, operation_id: str, *, allow_create: bool, state: EnvironmentState | None):
-        super().__init__(state)
-        self._id, self._operation, self._allow_create = environment_id, operation_id, allow_create
-
-    @property
-    def provider_key(self) -> str:
-        return "fake"
-
-    @property
-    def environment_id(self) -> str:
-        return self._id
-
-    @property
-    def descriptor(self) -> EnvironmentDescriptor:
-        return DESCRIPTOR
-
-    @property
-    def availability(self) -> EnvironmentAvailability:
-        return EnvironmentAvailability(status="available")
-
-    @property
-    def operations(self) -> EnvironmentOperations:
-        return EnvironmentOperations()
-
-    async def _prepare(self, *, mount_id: str) -> None:
-        BACKEND.preparations.append(self._operation)
-        if BACKEND.instances.get(self._id) != "running":
-            if not self._allow_create:
-                raise provider_error("fake", "provider_target_missing", EnvironmentProviderErrorCategory.MISSING)
-            BACKEND.instances[self._id] = "running"
-        self._cache_state(EnvironmentState(provider_key="fake", state_version="1", state={"instance": self._id}))
-        BACKEND.answer()
-
-    async def reconcile(self) -> Literal["running", "stopped", "absent"]:
-        return BACKEND.instances.get(self._id, "absent")
-
-    async def _stop(self) -> None:
-        BACKEND.instances[self._id] = "stopped"
-        BACKEND.answer()
-
-    async def _destroy(self) -> None:
-        BACKEND.instances.pop(self._id, None)
-        BACKEND.answer()
-
-    async def _ensure_ready(self, operations: frozenset[EnvironmentOperationFamily]) -> None:
-        return None
-
-    async def _close(self) -> None:
-        return None
-
-
-def _construct(
-    *, environment_id: str, state: EnvironmentState | None, operation_id: str, allow_create: bool, **_: object
-) -> Environment:
-    return FakeEnvironment(environment_id, operation_id, allow_create=allow_create, state=state)
-
-
-FAKE = EnvironmentProviderDefinition(
-    type="fake",
-    display_name="Fake",
-    configuration_model=EnvironmentProviderConfiguration,
-    environment_model=FakeRecipe,
-    construct=_construct,
-    describe_environment=lambda recipe: DESCRIPTOR,
-    supports_stop=True,
-    supports_destroy=True,
-)
-
-
 @pytest.fixture
 async def env(service) -> SimpleNamespace:  # type: ignore[no-untyped-def]
-    """`service` whose registry also offers the fake provider; tests drive maintenance themselves."""
-    for task in service.app.state.background:
-        if task.get_name() == "control-sweeps":
-            task.cancel()
-    service.runtime = replace(service.runtime, registry=Registry.of((*OSS.providers, FAKE)))
-    service.app.state.runtime = service.runtime
-    BACKEND.instances.clear()
-    BACKEND.preparations.clear()
-    BACKEND.lose_response = False
-    client = service.client
-    provider = await client.post(
-        f"{service.organization}/environment-providers", json={"workspace_id": None, "type": "fake", "name": "Fake"}
-    )
-    assert provider.status_code == 201, provider.text
-    template = await client.post(
-        f"{service.workspace}/environment-templates",
-        json={"key": "box", "name": "Box", "provider_id": provider.json()["id"]},
-    )
-    assert template.status_code == 201, template.text
-    # Runs are only accepted and prepared here, so the model is never called.
-    shared = {"workspace_id": None, "name": "Unused"}
-    config = {"base_url": "http://127.0.0.1:9/v1"}
-    model_provider = await client.post(
-        f"{service.organization}/model-providers",
-        json={**shared, "type": "openai", "config": config, "credential": {"api_key": "sk-unused"}},
-    )
-    config = {"model_name": "unused", "model_api": "openai.chat_completions"}
-    model = await client.post(
-        f"{service.organization}/models",
-        json={**shared, "provider_id": model_provider.json()["id"], "key": "unused", "config": config},
-    )
-    agent = await client.post(
-        f"{service.workspace}/agents",
-        json={
-            "key": "builder",
-            "name": "Builder",
-            "config": {
-                "model": {"model_id": model.json()["id"]},
-                "default_environment_template_id": template.json()["id"],
-            },
-        },
-    )
-    assert agent.status_code == 201, agent.text
-    service.provider, service.template, service.agent = provider.json(), template.json(), agent.json()
-    return service
-
-
-async def start(env: SimpleNamespace, text: str = "build it", **fields: object) -> dict:
-    """A new thread whose first run is accepted; the receipt carries the thread and the run."""
-    response = await new_thread(env, text, **fields)
-    assert response.status_code == 201, response.text
-    return response.json()
-
-
-async def new_thread(env: SimpleNamespace, text: str, **fields: object) -> httpx2.Response:
-    return await env.client.post(
-        f"{env.workspace}/threads",
-        json={"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": text}]}, **fields},
-        headers={"idempotency-key": uuid4().hex},
-    )
-
-
-async def reserve(env: SimpleNamespace, template_id: str, **fields: object) -> dict:
-    """A managed sandbox reserved from a template, in `creating` until maintenance creates it."""
-    response = await env.client.post(f"{env.workspace}/environments", json={"template_id": template_id, **fields})
-    assert response.status_code == 201, response.text
-    return response.json()
-
-
-async def environment(env: SimpleNamespace, environment_id: str) -> dict:
-    response = await env.client.get(f"{env.workspace}/environments/{environment_id}")
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-async def act(env: SimpleNamespace, method: str, path: str) -> tuple[int, dict]:
-    """An environment command under the environment's current ETag."""
-    current = await env.client.get(f"{env.workspace}/environments/{path.split('/')[0]}")
-    response = await env.client.request(
-        method, f"{env.workspace}/environments/{path}", headers={"if-match": current.headers["etag"]}
-    )
-    return response.status_code, response.json()
-
-
-def reason(body: dict) -> str:
-    return body["error"]["details"]["reason"]
-
-
-async def interrupt(env: SimpleNamespace, run_id: str) -> None:
-    response = await env.client.post(f"{env.workspace}/runs/{run_id}/interrupt")
-    assert response.status_code == 200 and response.json()["status"] == "cancelled", response.text
-
-
-async def backdate(env: SimpleNamespace, environment_id: str, **ago: timedelta) -> None:
-    """Move an instance's clocks into the past, as waiting would."""
-    values = {column: func.now() - delta for column, delta in ago.items()}
-    async with transaction(env.runtime.storage) as session:
-        await session.execute(update(EnvironmentRow).where(EnvironmentRow.id == environment_id).values(values))
-
-
-async def unmount(env: SimpleNamespace, thread_id: str) -> None:
-    """Remove the primary mount under the thread's current ETag."""
-    thread = await env.client.get(f"{env.workspace}/threads/{thread_id}")
-    removed = await env.client.delete(
-        f"{env.workspace}/threads/{thread_id}/environments/workspace", headers={"if-match": thread.headers["etag"]}
-    )
-    assert removed.status_code == 204, removed.text
+    return await with_fake_providers(service)
 
 
 async def test_templates_validate_their_provider_and_recipe(env) -> None:  # type: ignore[no-untyped-def]
@@ -428,11 +217,7 @@ async def test_stop_and_delete_wait_for_active_use_and_a_run_restarts_a_stopped_
     assert BACKEND.instances == {environment_id: "stopped"}
 
     # The next run's attempt starts the instance it mounts, then opens it without lifecycle authority.
-    follow = await env.client.post(
-        f"{env.workspace}/threads/{submitted['thread']['id']}/inbox",
-        json={"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": "again"}]}},
-        headers={"idempotency-key": uuid4().hex},
-    )
+    follow = await follow_up(env, submitted["thread"]["id"], "again")
     assert follow.status_code == 201, follow.text
     [lease] = await claim_run(env.runtime, worker_id="worker-test", worker_build="test", limit=1)
     mounts = await _prepare(env, lease)
@@ -741,25 +526,23 @@ async def test_authorization_and_private_devices(env) -> None:  # type: ignore[n
     )
     assert stop.status_code == 403
 
-    # A device registered by the administrator is private to them.
+    # An external target registered by the administrator is private to them.
     device = f"env_{uuid4().hex}"
     async with transaction(env.runtime.storage) as session:
-        session.add(
-            EnvironmentRow(
-                id=device,
-                organization_id=env.tenant.organization_id,
-                workspace_id=env.tenant.workspace_id,
-                provider_id=env.provider["id"],
-                provider_identity={"type": "fake", "backend": {}},
-                device_id="laptop",
-                owner_principal_id=env.tenant.principal_id,
-                name="laptop",
-                status="ready",
-                handle={"recipe": {}, "state": None},
-                generation=0,
-                created_by_id=env.tenant.principal_id,
-            )
+        target = EnvironmentRow(
+            id=device,
+            organization_id=env.tenant.organization_id,
+            workspace_id=env.tenant.workspace_id,
+            device_id="laptop",
+            endpoint="https://laptop.test",
+            owner_principal_id=env.tenant.principal_id,
+            name="laptop",
+            status="ready",
+            generation=0,
+            created_by_id=env.tenant.principal_id,
         )
+        target.token = seal(env.runtime.keys, target, "laptop-token")
+        session.add(target)
     assert (await environment(env, device))["device_id"] == "laptop"
     mounts = f"{env.workspace}/threads/{thread}/environments"
     version = (await client.get(mounts)).headers["etag"]
@@ -803,11 +586,6 @@ async def test_the_local_provider_keeps_one_directory_per_environment(env, tmp_p
         },
     )
     assert template.status_code == 201, template.text
-    # Devices are registered only for connect-only providers.
-    device = await client.post(
-        f"{env.workspace}/environments", json={"provider_id": provider.json()["id"], "device_id": "laptop"}
-    )
-    assert device.status_code == 400
 
     used = (await reserve(env, template.json()["id"], name="used"))["id"]
     unused = (await reserve(env, template.json()["id"], name="unused"))["id"]
@@ -821,24 +599,3 @@ async def test_the_local_provider_keeps_one_directory_per_environment(env, tmp_p
     assert (code, body["status"]) == (202, "deleting")
     await advance(env.runtime, used, owner="test")
     assert (await environment(env, used))["status"] == "deleted" and not (tmp_path / used).exists()
-
-
-async def test_a_device_endpoint_outside_the_operator_policy_is_never_dialed(service) -> None:  # type: ignore[no-untyped-def]
-    provider = await service.client.post(
-        f"{service.organization}/environment-providers",
-        json={
-            "workspace_id": None,
-            "type": "http_envd",
-            "name": "Devices",
-            "config": {"endpoint": "https://10.1.2.3:8443"},
-            "credential": {"token": "device-token"},
-        },
-    )
-    assert provider.status_code == 201, provider.text
-    device = await service.client.post(
-        f"{service.workspace}/environments", json={"provider_id": provider.json()["id"], "device_id": "laptop"}
-    )
-    # Registering again cannot succeed until the provider changes, so the refusal is no retryable 503.
-    assert device.status_code == 409, device.text
-    assert device.json()["error"]["details"]["reason"] == "provider_endpoint_denied"
-    assert (await service.client.get(f"{service.workspace}/environments")).json()["items"] == []

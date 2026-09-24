@@ -31,6 +31,29 @@ def test_the_live_suite_collects_every_journey_module():
     assert collected == {path.relative_to(ROOT).as_posix() for path in (ROOT / "dev/live_tests").glob("test_*.py")}
 
 
+def test_hosted_live_journeys_run_only_when_asked_for():
+    def collected(*arguments: str) -> set[str]:
+        command = [sys.executable, "-m", "dev.live_tests", "--collect-only", "-qq", *arguments]
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return {line.split("::")[1] for line in result.stdout.splitlines() if "::" in line}
+
+    default = collected()
+    assert "test_a_run_uses_its_environment_across_its_lifecycle[docker]" in default
+    assert not {journey for journey in default if "e2b" in journey or "modal" in journey}
+    assert "test_a_run_uses_its_environment_across_its_lifecycle[modal]" in collected("--hosted")
+    assert "test_a_run_uses_its_environment_across_its_lifecycle[modal]" in collected("-m", "hosted")
+    assert collected("-k", "e2b") == {
+        "test_a_run_uses_its_environment_across_its_lifecycle[e2b]",
+        "test_a_ready_e2b_sandbox_is_renewed_past_its_timeout",
+    }
+    # A selection that names no vendor type never pulls billable journeys in.
+    assert collected("-k", "environment") == {
+        "test_a_run_uses_its_environment_across_its_lifecycle[local]",
+        "test_a_run_uses_its_environment_across_its_lifecycle[docker]",
+    }
+
+
 def test_the_live_service_configurations_are_valid(tmp_path, monkeypatch):
     for name in [name for name in os.environ if name.startswith("A13N_")]:
         monkeypatch.delenv(name)

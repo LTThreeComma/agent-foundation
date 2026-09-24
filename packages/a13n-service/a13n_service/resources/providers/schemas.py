@@ -82,17 +82,16 @@ class ProviderType(BaseModel):
     setup_label: str | None
     supports_test: bool
     # Model types: the calling APIs a model may select, the default first, with their display names and native
-    # settings schemas.
+    # settings schemas; and the model catalog channels that list the type's own model IDs.
     model_apis: list[str] | None = None
     default_model_api: str | None = None
     model_api_labels: dict[str, str] | None = None
     settings_schemas: dict[str, dict[str, JsonValue]] | None = None
+    catalog_providers: list[str] | None = None
     # Web types: the tool operations they serve.
     operations: list[WebOperation] | None = None
-    # Environment types: the template schema; whether templates may use the type (a connect-only type serves
-    # registered devices only), and whether its instances can be stopped and destroyed.
+    # Environment types: the template schema, and whether its instances can be stopped and destroyed.
     environment_schema: dict[str, JsonValue] | None = None
-    supports_managed: bool | None = None
     supports_stop: bool | None = None
     supports_destroy: bool | None = None
 

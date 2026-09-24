@@ -36,7 +36,7 @@ from a13n_harness.tools import (
 )
 from a13n_harness.toolsets import AgentMediaUnderstandingProvider, CodeActPolicyToolset, CodeActToolPolicy
 from a13n_harness.toolsets.file_media import MediaUnderstandingRequest
-from a13n_harness.usage import ProviderUsageRecord
+from a13n_harness.usage import ModelUsageRecord
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.trace import StatusCode
@@ -437,8 +437,9 @@ async def test_instrumented_review_preserves_failure_policy_and_cancellation(fai
         if failure == "timeout":
             assert "Tool review timed out; the tool was not executed" in str(result.all_messages())
         if failure == "invalid":
+            # The review request that answered is the calling agent's model usage, as its own requests are.
             assert any(
-                isinstance(record, ProviderUsageRecord) and record.source == "tool.review"
+                isinstance(record, ModelUsageRecord) and record.source == "tool.review"
                 for record in result.usage_records
             )
     assert not executed

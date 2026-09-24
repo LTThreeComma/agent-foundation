@@ -30,6 +30,8 @@ from a13n_harness.capabilities import (
     ToolRiskLevel,
 )
 from a13n_harness.errors import RunError
+from a13n_harness.model_calls import ModelCall
+from a13n_harness.token_pricing import TokenPriceTier, TokenPricing, TokenPricingCapability, TokenRates
 from a13n_harness.tools import (
     HarnessTool,
     HarnessToolMetadata,
@@ -40,6 +42,7 @@ from a13n_harness.tools import (
     ToolPermissionsCapability,
 )
 from a13n_harness.usage import (
+    ModelUsageRecord,
     ProviderUsage,
     ProviderUsageRecord,
     UsageMeasure,
@@ -129,6 +132,7 @@ def _build(
     on_flagged: str = "approval_required",
     on_error: str = "approval_required",
     timeout_seconds: float = 120.0,
+    capabilities: tuple[Any, ...] = (),
 ):
     def shell_exec(
         command: str,
@@ -177,6 +181,7 @@ def _build(
                 ),
                 reviewer=reviewer,
             ),
+            *capabilities,
         ),
     )
 
@@ -485,6 +490,47 @@ async def test_below_threshold_dispatches_without_environment_values_and_attribu
     assert provider_record.source == "tool.review"
     assert provider_record.tool_id == "environment.shell_exec"
     assert provider_record.tool_call_id == "shell-call-1"
+
+
+async def test_default_reviewer_in_a_run_is_a_checked_priced_model_request_of_the_calling_agent() -> None:
+    """A gated review spends the review model like any request of the agent: the host's call check sees it under
+    the model ID its configuration selects, and it commits a model record the model-cost capability priced."""
+    checks: list[ModelCall] = []
+
+    class _Check:
+        async def check(self, call: ModelCall) -> None:
+            checks.append(call)
+
+    async def review_model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
+        del messages
+        yield {0: DeltaToolCall(name=info.output_tools[0].name, json_args='{"risk": "low"}')}
+
+    reviewer = AgentToolReviewer(
+        FunctionModel(stream_function=review_model), ToolReviewConfig(model="logical:review-model")
+    )
+    rates = TokenRates(input=Decimal(1), output=Decimal(2))
+    prices = TokenPricingCapability({"logical:review-model": TokenPricing(tiers=(TokenPriceTier(rates=rates),))})
+    executed: list[dict[str, Any]] = []
+    result = await _build(reviewer, executed, capabilities=(prices,)).run(
+        "go",
+        bindings=RunBindings.embedded(
+            model_call_check=_Check(),
+            capabilities=(InvocationPolicyCapability(evaluator=_Policy(InvocationPolicyDecision.allow())),),
+        ),
+    )
+
+    assert result.status == "completed" and len(executed) == 1
+    [call] = [call for call in checks if call.source == "tool.review"]
+    assert call.model_id == "logical:review-model"
+    [record] = [item for item in result.usage_records if item.source == "tool.review"]
+    assert isinstance(record, ModelUsageRecord)
+    assert (record.call_id, record.tool_id, record.tool_call_id) == (
+        call.call_id,
+        "environment.shell_exec",
+        "shell-call-1",
+    )
+    assert (record.pricing_status, record.cost_source) == ("applied", "custom")
+    assert record.request_usage.cost is not None and record.request_usage.cost > 0
 
 
 async def test_flagged_deny_outranks_policy_approval() -> None:

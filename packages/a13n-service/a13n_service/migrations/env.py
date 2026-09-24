@@ -36,7 +36,8 @@ def _deferred_foreign_keys(upgrade: ops.UpgradeOps) -> list[ops.CreateForeignKey
             # Identity, not equality: `==` on SQL elements builds an expression.
             op.columns = [item for item in op.columns if all(item is not constraint for constraint in alter)]
             deferred += [ops.CreateForeignKeyOp.from_constraint(constraint) for constraint in alter]
-    return deferred
+    # A table's constraints are a set; sorting keeps regenerated revisions stable.
+    return sorted(deferred, key=lambda op: (op.source_table, str(op.constraint_name)))
 
 
 def _complete_revision(migration: Any, revision: Any, directives: list[Any]) -> None:

@@ -2,6 +2,7 @@
 
 An instance's `status` names its outstanding lifecycle operation; `operation_id` and `generation` fence
 completions, and the `lease_*` columns are the claim of whoever is dispatching that operation right now.
+`renew_at` and `expires_at` schedule the renewal of a ready sandbox whose type ends it unless renewed.
 """
 
 from datetime import datetime
@@ -42,7 +43,8 @@ class EnvironmentRow(Stamped, Base):
         ),
         CheckConstraint(f"status IN {STATUSES}", name="status"),
         CheckConstraint(
-            "status NOT IN ('ready', 'starting', 'stopping', 'stopped') OR handle IS NOT NULL", name="handle"
+            "template_id IS NULL OR status NOT IN ('ready', 'starting', 'stopping', 'stopped') OR handle IS NOT NULL",
+            name="handle",
         ),
         # The status names the outstanding operation; no other state carries one.
         CheckConstraint(f"(status IN {OPERATIONS}) = (operation_id IS NOT NULL)", name="operation"),
@@ -53,9 +55,22 @@ class EnvironmentRow(Stamped, Base):
             " AND (lease_owner IS NULL OR operation_id IS NOT NULL)",
             name="lease",
         ),
-        # Registered devices are connect-only: never created, started, stopped or destroyed by the Service.
+        # External targets are connect-only: never created, started, stopped or destroyed by the Service.
         CheckConstraint("template_id IS NOT NULL OR status IN ('ready', 'deleted')", name="connect_only"),
-        CheckConstraint("(template_id IS NULL) = (device_id IS NOT NULL)", name="device"),
+        # Managed instances come from a template of a provider; external targets are only a device at an endpoint.
+        CheckConstraint("(template_id IS NULL) = (provider_id IS NULL)", name="managed"),
+        CheckConstraint(
+            "(template_id IS NULL) = (device_id IS NOT NULL) AND (template_id IS NULL) = (endpoint IS NOT NULL)"
+            " AND (template_id IS NOT NULL OR (provider_identity IS NULL AND handle IS NULL))",
+            name="external",
+        ),
+        # The tombstone of an external target drops its token.
+        CheckConstraint("(token IS NOT NULL) = (template_id IS NULL AND status <> 'deleted')", name="token"),
+        # Only a ready managed sandbox is renewed.
+        CheckConstraint(
+            "(renew_at IS NULL AND expires_at IS NULL) OR (status = 'ready' AND template_id IS NOT NULL)",
+            name="renewal",
+        ),
         Index(
             "uq_environments_operation", "operation_id", unique=True, postgresql_where=text("operation_id IS NOT NULL")
         ),
@@ -65,27 +80,36 @@ class EnvironmentRow(Stamped, Base):
             "last_used_at",
             postgresql_where=text("template_id IS NOT NULL AND status IN ('ready', 'stopped')"),
         ),
+        Index("ix_environments_renewals", "renew_at", postgresql_where=text("renew_at IS NOT NULL")),
         rules(
             identity_guarded("environments"),
             *provider_in_scope("environments", "provider_id", "environment_providers"),
+            # Renewals reschedule themselves every few minutes without changing what a client sees.
+            unversioned=("renew_at", "expires_at"),
         ),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
     workspace_id: Mapped[str]
-    provider_id: Mapped[str]
-    # The non-secret provider type and backend locator that give `handle` meaning, frozen before the first
-    # dispatch; NULL means no external operation was ever claimed for this instance.
+    # NULL only for external targets, which no provider account reaches.
+    provider_id: Mapped[str | None]
+    # The non-secret provider type and backend locator that give `handle` meaning, frozen before a managed instance's
+    # first dispatch and NULL until then; NULL for an external target.
     provider_identity: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    # NULL only for registered external devices, which are connect-only.
+    # NULL only for external targets, which are connect-only.
     template_id: Mapped[str | None]
-    # A registered device's native identity, which its handle state names; the tombstone keeps it.
+    # An external target's native device identity, which every connection expects; the tombstone keeps it.
     device_id: Mapped[str | None]
-    # Private devices belong to one principal; workspace-managed sandboxes have no owner.
+    # The HTTP(S) origin an external target's daemon serves, and its token: an encrypted, write-only envelope bound
+    # to this row and column.
+    endpoint: Mapped[str | None]
+    token: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # External targets belong to the principal that registered them; workspace-managed sandboxes have no owner.
     owner_principal_id: Mapped[str | None] = mapped_column(ForeignKey("principals.id"))
     name: Mapped[str]
     status: Mapped[str]
-    # The recipe the instance was built from and the provider's portable state for reaching it.
+    # The recipe a managed instance was built from, the provider's portable state for reaching it and the version of
+    # the credential that last did; NULL for an external target, which its endpoint and device ID reach.
     handle: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     generation: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     operation_id: Mapped[str | None]
@@ -97,6 +121,11 @@ class EnvironmentRow(Stamped, Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the next renewal of a ready sandbox whose type ends it unless renewed is due, NULL when none is; a renewal
+    # in progress pushes it past its own deadline, which is its claim. `expires_at` is the expiry the provider last
+    # reported.
+    renew_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_id: Mapped[str] = mapped_column(ForeignKey("principals.id"))
 
 

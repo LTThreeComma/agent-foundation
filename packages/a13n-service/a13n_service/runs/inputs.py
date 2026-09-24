@@ -1,43 +1,32 @@
 """Turning inbox entries into the content the model reads.
 
-Each part carries its entry ID in `TextContent` metadata, so display items of the user's input name the entry
-they came from. URL input is fetched here under the endpoint policy rather than by the model provider, so no
-provider ever fetches an address the operator did not allow.
+Each text the Service writes carries its entry ID in `TextContent` metadata, so display items of the user's input
+name the entry they came from. Assets and URL content reach the model as `attachments` decides, once the run's
+environments are ready to take the files it places. URL input is fetched here under the endpoint policy rather
+than by the model provider, so no provider ever fetches an address the operator did not allow.
 """
 
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Literal
+import posixpath
+from dataclasses import dataclass
+from urllib.parse import unquote, urlsplit
 
 import httpx2
-from a13n_harness import DeferredToolResume
+from a13n_harness.environment.providers import BoundEnvironment
+from a13n_harness.media_types import text_charset
 from a13n_harness.providers.endpoint_policy import EndpointPolicyError
 from pydantic import JsonValue
-from pydantic_ai.messages import BinaryContent, TextContent, UserContent
+from pydantic_ai.messages import TextContent, UserContent
 
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.outbound import open_http
-from a13n_service.resources.assets.service import read_asset_content
+from a13n_service.resources.assets.service import get_asset, read_asset_content
+from a13n_service.runs import attachments
+from a13n_service.runs.attachments import Attached, Recipient
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.schemas import AssetPart, JsonPart, MessagePayload, TextPart, UrlPart
 from a13n_service.runs.tables import InboxEntryRow
 from a13n_service.tenancy.authorize import Principal
-
-
-@dataclass(frozen=True, slots=True)
-class MessageInput:
-    content: tuple[UserContent, ...]
-    kind: Literal["message"] = field(default="message", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class DeferredInput:
-    resume: DeferredToolResume
-    kind: Literal["deferred"] = field(default="deferred", init=False)
-
-
-type AcceptedInput = MessageInput | DeferredInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +51,10 @@ def _text(entry: Offered, text: str) -> TextContent:
 _TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
-async def _fetch(runtime: Runtime, url: str, *, field: str) -> BinaryContent:
-    """The URL's content, fetched once. An address the policy refuses or a definitive answer fails the input at
-    `field`; a network error or a transient answer is `unavailable`, so a later attempt fetches it again."""
+async def _fetch(runtime: Runtime, url: str, *, field: str) -> tuple[str, bytes]:
+    """The URL's `Content-Type` and content, fetched once. An address the policy refuses or a definitive answer
+    fails the input at `field`; a network error or a transient answer is `unavailable`, so a later attempt fetches
+    it again."""
     providers = runtime.settings.providers
     try:
         async with open_http(
@@ -75,8 +65,7 @@ async def _fetch(runtime: Runtime, url: str, *, field: str) -> BinaryContent:
                 raise _unreachable({"status": response.status_code})
             if response.status_code != 200:
                 raise _unfetchable(field, "http_status", status=response.status_code)
-            media_type = response.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
-            return BinaryContent(await response.aread(), media_type=media_type or "application/octet-stream")
+            return response.headers.get("content-type", ""), await response.aread()
     except (httpx2.TimeoutException, httpx2.NetworkError) as error:
         raise _unreachable({"reason": type(error).__name__}) from None
     except EndpointPolicyError:
@@ -95,32 +84,74 @@ def _unreachable(details: dict[str, JsonValue]) -> ServiceError:
     return ServiceError("unavailable", "URL input could not be fetched", {"dependency": "url", **details})
 
 
-async def _message(runtime: Runtime, principal: Principal, entry: Offered) -> list[UserContent]:
-    content: list[UserContent] = []
+async def _asset(runtime: Runtime, principal: Principal, entry: Offered, asset_id: str, *, field: str) -> Attached:
+    """The asset as its metadata describes it; its content is read with the run principal's access when needed."""
+    asset = await get_asset(runtime.storage, principal, entry.workspace_id, asset_id)
+
+    async def read() -> bytes:
+        _, data = await read_asset_content(runtime.storage, runtime.objects, principal, entry.workspace_id, asset_id)
+        return data
+
+    return Attached(
+        asset.name,
+        asset.content_type,
+        asset.size,
+        field,
+        entry.id,
+        read,
+        digest=asset.digest,
+        identifier=asset.id,
+    )
+
+
+async def _url(runtime: Runtime, entry: Offered, url: str, *, field: str) -> Attached:
+    """The URL's content, named by the last segment of its path."""
+    content_type, data = await _fetch(runtime, url, field=field)
+
+    async def read() -> bytes:
+        return data
+
+    return Attached(
+        posixpath.basename(unquote(urlsplit(url).path)),
+        content_type.partition(";")[0].strip().lower() or "application/octet-stream",
+        len(data),
+        field,
+        entry.id,
+        read,
+        charset=text_charset(content_type),
+        truncatable=True,
+    )
+
+
+async def _message(
+    runtime: Runtime, principal: Principal, recipient: Recipient, environment: BoundEnvironment, entry: Offered
+) -> tuple[UserContent, ...]:
+    parts: list[UserContent] = []
     for index, part in enumerate(MessagePayload.model_validate(entry.payload).content):
         match part:
             case TextPart():
-                content.append(_text(entry, part.text))
+                parts.append(_text(entry, part.text))
             case JsonPart():
-                content.append(_text(entry, json.dumps(part.value, ensure_ascii=False)))
+                parts.append(_text(entry, json.dumps(part.value, ensure_ascii=False)))
             case AssetPart():
-                asset, data = await read_asset_content(
-                    runtime.storage, runtime.objects, principal, entry.workspace_id, part.asset_id
-                )
-                content.append(BinaryContent(data, media_type=asset.content_type, identifier=asset.id))
+                file = await _asset(runtime, principal, entry, part.asset_id, field=f"content.{index}.asset_id")
+                parts.append(await attachments.attach(recipient, environment, file))
             case UrlPart():
-                content.append(await _fetch(runtime, part.url, field=f"content.{index}.url"))
-    return content
+                file = await _url(runtime, entry, part.url, field=f"content.{index}.url")
+                parts.append(await attachments.attach(recipient, environment, file))
+    return tuple(parts)
 
 
-def _child_result(entry: Offered) -> list[UserContent]:
+def _child_result(entry: Offered) -> tuple[UserContent, ...]:
     # The parent learns that a child run it spawned has ended; its details stay readable through the tools.
-    return [_text(entry, "A delegated subagent run ended:\n" + json.dumps(entry.payload, ensure_ascii=False))]
+    return (_text(entry, "A delegated subagent run ended:\n" + json.dumps(entry.payload, ensure_ascii=False)),)
 
 
-async def content(runtime: Runtime, principal: Principal, entries: Sequence[Offered]) -> list[UserContent]:
-    """The model-visible content of entries, in order. Assets are read with the run principal's access."""
-    result: list[UserContent] = []
-    for entry in entries:
-        result.extend(await _message(runtime, principal, entry) if entry.kind == "message" else _child_result(entry))
-    return result
+async def content(
+    runtime: Runtime, principal: Principal, recipient: Recipient, environment: BoundEnvironment, entry: Offered
+) -> tuple[UserContent, ...]:
+    """The entry's model-visible content, its files placed in the run's primary `environment`. Assets are read with
+    the run principal's access."""
+    if entry.kind == "message":
+        return await _message(runtime, principal, recipient, environment, entry)
+    return _child_result(entry)

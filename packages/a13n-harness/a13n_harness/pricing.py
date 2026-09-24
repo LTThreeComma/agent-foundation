@@ -183,6 +183,26 @@ class ModelPricingEntry(BaseModel):
                 return rule
         return self.rules[0]
 
+    def quote(self, value: ModelCostInput, *, source: ModelCostQuoteSource, revision: str) -> ModelCostQuote:
+        """Price one request's usage under the rule active when it started."""
+        rule = self.select_rule(value.request_started_at)
+        prices: dict[str, Decimal | TieredPrices] = {}
+        for component in rule.prices:
+            if component.tiers:
+                prices[component.price_key] = TieredPrices(
+                    base=component.price,
+                    tiers=[Tier(start=tier.start, price=tier.price) for tier in component.tiers],
+                )
+            else:
+                prices[component.price_key] = component.price
+        calculation = ModelPrice(**prices).calc_price(value.usage)
+        return ModelCostQuote(
+            cost_usd=calculation["total_price"],
+            source=source,
+            pricing_revision=revision,
+            rule_id=rule.rule_id,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ModelCostInput:
@@ -366,23 +386,7 @@ class CatalogModelCostCapability(AbstractModelCostCapability):
         )
         if entry is None:
             return None
-        rule = entry.select_rule(value.request_started_at)
-        prices: dict[str, Decimal | TieredPrices] = {}
-        for component in rule.prices:
-            if component.tiers:
-                prices[component.price_key] = TieredPrices(
-                    base=component.price,
-                    tiers=[Tier(start=tier.start, price=tier.price) for tier in component.tiers],
-                )
-            else:
-                prices[component.price_key] = component.price
-        calculation = ModelPrice(**prices).calc_price(value.usage)
-        return ModelCostQuote(
-            cost_usd=calculation["total_price"],
-            source="catalog",
-            pricing_revision=self.catalog.revision,
-            rule_id=rule.rule_id,
-        )
+        return entry.quote(value, source="catalog", revision=self.catalog.revision)
 
 
 @dataclass(init=False)

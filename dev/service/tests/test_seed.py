@@ -10,10 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from dev.service import dev_resources, lifecycle, seed, stores
+from dev.service import dev_resources, lifecycle, stores
 from dev.service.api import Api
 from dev.service.applications import applications, create_administrator, migrate
 from dev.service.checkout import ADMIN_EMAIL, ADMIN_PASSWORD, Checkout
+from dev.service.seed import seed, write_report
+from dev.service.seed_verify import verify
 
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.timeout(300)
@@ -38,10 +40,10 @@ def instance(checkout_root: Path) -> Iterator[Checkout]:
 def test_seeded_state_verifies_and_private_resources_apply_once(instance: Checkout, tmp_path: Path) -> None:
     with Api(instance.service_url) as api:
         api.login(ADMIN_EMAIL, ADMIN_PASSWORD)
-        seeded = seed.seed(api, instance.model_url)
-        checks = seed.verify(api, seeded)
-        assert all(passed for _, passed in checks), checks
-        seed.write_report(instance.seed_report, instance.console_url, seeded, checks)
+        seeded = seed(api, instance.model_url, instance.environments)
+        checks = verify(api, seeded)
+        assert [name for name, passed in checks if not passed] == []
+        write_report(instance.seed_report, instance.console_url, seeded, checks)
 
         resources = tmp_path / "dev-resources.toml"
         resources.write_text(f"""version = 1
@@ -62,11 +64,12 @@ name = "Brave (blank)"
 credential = {{ api_key = "" }}
 """)
         resources.chmod(0o600)
-        org = seeded["organization"]
+        org = seeded.organization
 
         assert dev_resources.apply_to(instance, resources) == "1 model providers, 1 models"
         provider = next(item for item in api.items(f"{org}/model-providers") if item["name"] == "Private scripted")
-        assert provider["credential_configured"] and not api.items(f"{org}/web-providers")
+        assert provider["credential_configured"]
+        assert "Brave (blank)" not in {item["name"] for item in api.items(f"{org}/web-providers")}
         digests = (instance.state / "dev-resources.json").read_text()
         assert "sk-private-one" not in digests
 

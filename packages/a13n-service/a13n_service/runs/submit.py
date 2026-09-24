@@ -16,12 +16,13 @@ from a13n_service.resources.agents.service import select_revision, validate_over
 from a13n_service.resources.assets.service import require_usable
 from a13n_service.resources.connections.service import validate_caller_headers
 from a13n_service.runs import checkpoints
-from a13n_service.runs.accept import accept
-from a13n_service.runs.environments.mounts import mount_environments, shared_mounts
+from a13n_service.runs.accept import accept, primary_template
+from a13n_service.runs.attachments import asset_fields, require_readable
+from a13n_service.runs.environments.mounts import mount_environments, shared_mounts, thread_has_primary
 from a13n_service.runs.inbox import Request, append_message, check_replay, find_request
 from a13n_service.runs.runs import run_view
 from a13n_service.runs.runtime import Runtime
-from a13n_service.runs.schemas import AssetPart, EntryView, Fork, Message, NewThread, Submitted, ThreadView
+from a13n_service.runs.schemas import EntryView, Fork, Message, NewThread, Submitted, ThreadView
 from a13n_service.runs.sessions import find_session, new_session
 from a13n_service.runs.tables import InboxEntryRow, RunRow, SessionRow, ThreadRow
 from a13n_service.runs.threads import get_run, get_thread, new_thread, refresh_version, require_open
@@ -38,29 +39,35 @@ async def validate_message(
     runtime: Runtime,
     principal: Principal,
     scope: WorkspaceScope,
+    thread: ThreadRow,
     message: Message,
     *,
     authority: ExecutionAuthority,
 ) -> None:
     """Malformed or unauthorized input fails before anything is appended, and a pending edit before it applies.
 
-    Acceptance validates the overrides again when it freezes them, under the authority current then.
+    Each asset must reach the model of the run the message would start on `thread`, with the primary environment
+    the thread mounts or acceptance would reserve. Acceptance validates the overrides and the assets again when
+    it freezes the run, under the authority and mounts current then.
     """
     revision = await select_revision(session, scope.workspace_id, message.agent_id, message.agent_revision_id)
-    await require_usable(
-        session, scope.workspace_id, {part.asset_id for part in message.payload.content if isinstance(part, AssetPart)}
-    )
-    if message.options.overrides is not None:
-        await validate_override(
+    await require_usable(session, scope.workspace_id, asset_fields(message.payload))
+    overrides = message.options.overrides
+    if overrides is not None:
+        overrides = await validate_override(
             session,
             principal,
             scope,
             revision,
-            message.options.overrides,
+            overrides,
             authority=authority,
             registry=runtime.registry,
             plugins=runtime.plugins,
         )
+    primary = await thread_has_primary(session, thread) or primary_template(thread, revision.config) is not None
+    await require_readable(
+        session, principal, scope, revision, overrides, message.payload, authority=authority, primary=primary
+    )
 
 
 async def receipt(session: AsyncSession, thread: ThreadRow, entry: InboxEntryRow) -> Submitted:
@@ -119,7 +126,7 @@ async def submit_message(
         thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
         require_open(thread)
         authority = execution_authority(actor, scope)
-        await validate_message(session, runtime, actor, scope, message, authority=authority)
+        await validate_message(session, runtime, actor, scope, thread, message, authority=authority)
         entry = await append_message(
             session,
             thread,
@@ -141,7 +148,6 @@ async def create_thread(
 ) -> tuple[Submitted, bool]:
     async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, InboxEntryRow]:
         authority = execution_authority(actor, scope)
-        await validate_message(session, runtime, actor, scope, body, authority=authority)
         await validate_caller_headers(session, scope.workspace_id, body.mcp_headers)
         if body.session_id is not None:
             owner = await find_session(session, scope.workspace_id, body.session_id)
@@ -152,6 +158,7 @@ async def create_thread(
         session.add(thread)
         await session.flush()
         await mount_environments(session, thread, body.environments, principal_id=actor.id)
+        await validate_message(session, runtime, actor, scope, thread, body, authority=authority)
         entry = await append_message(
             session,
             thread,
@@ -181,7 +188,6 @@ async def fork(
             raise conflict("run", origin.id, f"run_{origin.status}")
         checkpoints.require_compatible(origin)
         authority = execution_authority(actor, scope)
-        await validate_message(session, runtime, actor, scope, body, authority=authority)
         owner = await session.get(SessionRow, origin.session_id)
         assert owner is not None
         thread = new_thread(
@@ -195,6 +201,7 @@ async def fork(
         await session.flush()
         shared = [] if body.fresh_environments else await shared_mounts(session, origin_thread)
         await mount_environments(session, thread, [*shared, *body.environments], principal_id=actor.id)
+        await validate_message(session, runtime, actor, scope, thread, body, authority=authority)
         entry = await append_message(
             session,
             thread,

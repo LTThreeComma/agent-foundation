@@ -25,10 +25,11 @@ from a13n_harness._tool_selectors import match_selector, validate_selector
 from a13n_harness.context import AgentContext
 from a13n_harness.errors import RunError
 from a13n_harness.model_calls import ModelCallCheckError, _check_model_call
+from a13n_harness.models.binding import selected_model
 from a13n_harness.models.structured_output import StructuredOutputAutoToolChoiceModel
 from a13n_harness.observation import _auxiliary_agent_capabilities
 from a13n_harness.tools.policy import InvocationDecisionKind
-from a13n_harness.usage import ProviderUsage, UsageMeasure
+from a13n_harness.usage import ProviderUsage, UsageMeasure, _auxiliary_model_usage_capability
 
 
 class ToolReviewRequest(BaseModel):
@@ -204,11 +205,16 @@ def _review_prompt() -> str:
 
 
 class _ReviewExecution(AbstractCapability[ToolReviewRequest]):
-    """One review's dispatch identity, native execution and usage settlement; never reused."""
+    """One review's dispatch identity, native execution and usage settlement; never reused.
+
+    Within a run's review gate, the review request is the calling agent's model usage, checked, recorded and priced
+    like its own requests; used on its own, the reviewer checks its request and returns receipts.
+    """
 
     def __init__(self, owner: AgentContext, model: Model) -> None:
         self._owner = owner
         self._model = model
+        self._accounting = _auxiliary_model_usage_capability()
         self._call_id: str | None = None
         self._usage = RunUsage()
 
@@ -226,7 +232,10 @@ class _ReviewExecution(AbstractCapability[ToolReviewRequest]):
                     deps=request,
                     usage=self._usage,
                     usage_limits=UsageLimits(request_limit=1),
-                    capabilities=(*_auxiliary_agent_capabilities(), self),
+                    capabilities=(
+                        *_auxiliary_agent_capabilities(),
+                        self if self._accounting is None else self._accounting,
+                    ),
                     event_stream_handler=_drain_review_events,
                 )
         except asyncio.CancelledError:
@@ -278,7 +287,7 @@ class _ReviewExecution(AbstractCapability[ToolReviewRequest]):
             )
             if value
         )
-        if not measures:
+        if not measures or self._accounting is not None:
             return ()
         if self._call_id is None:
             raise RunError("Reviewer usage has no dispatch identity.", code="usage_identity_missing")
@@ -301,8 +310,11 @@ class AgentToolReviewer:
         self._config = config.model_copy(deep=True)
         self._scored = not model.profile.get("supports_text_output", True)
         output_type = _ScoredToolReview if self._scored else ToolReviewAssessment
+        # `model` is what `config.model` selects, so each review call carries that ID.
+        selection, capabilities = selected_model(StructuredOutputAutoToolChoiceModel(model), config.model)
         self._agent: Agent[ToolReviewRequest, ToolReviewAssessment | _ScoredToolReview] = Agent(
-            StructuredOutputAutoToolChoiceModel(model),
+            selection,
+            capabilities=capabilities,
             deps_type=ToolReviewRequest,
             output_type=ToolOutput(
                 output_type,

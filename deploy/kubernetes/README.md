@@ -132,7 +132,7 @@ The cloud values run two Console replicas from a separate image repository; buil
 
 ## Agent execution environments
 
-The Chart creates no per-agent Pods, Docker daemon, privileged container or Docker socket mount. Register `http_envd` environments with protected credentials and network access from the Worker Pods. Running Envd targets or managing Kubernetes sandboxes is a separate deployment concern.
+The Chart creates no per-agent Pods, Docker daemon, privileged container or Docker socket mount. Hosted sandbox providers (E2B, Daytona, Modal, Vercel, Sprites, Runloop) need outbound access from the Worker Pods to their vendor APIs; external envd targets need network access from the Worker Pods to their endpoints. Running Envd targets or managing Kubernetes sandboxes is a separate deployment concern.
 
 ## Validation and operations
 

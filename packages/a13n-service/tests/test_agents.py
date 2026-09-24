@@ -19,6 +19,7 @@ from a13n_harness.plugin_factories import (
     HarnessPluginFactoryContext,
     HarnessPluginFactoryRegistration,
 )
+from a13n_harness.pricing import AbstractModelCostCapability
 from a13n_harness.tools.client import ClientToolsCapability
 from a13n_harness.tools.permissions import ToolPermissionsCapability
 from a13n_service.infra import cursors
@@ -61,7 +62,6 @@ from a13n_service.tenancy.authorize import (
     execution_authority,
 )
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
-from pydantic_ai.models.test import TestModel
 from sqlalchemy import select, update
 
 pytestmark = pytest.mark.anyio
@@ -283,10 +283,12 @@ def test_build_composes_the_definition_without_io() -> None:
         asked.append(agent.revision_id)
         return []
 
-    built = build(root, {MODEL: TestModel()}, capabilities=capabilities, plugins=PLUGINS, instrumentation=None)
+    built = build(root, capabilities=capabilities, plugins=PLUGINS, instrumentation=None)
     composed = built.definition
 
-    assert {type(capability) for capability in composed.capabilities} == {
+    # Each agent selects its model by ID, and its calls are priced by the model they select.
+    [prices] = [item for item in composed.capabilities if isinstance(item, AbstractModelCostCapability)]
+    assert {type(capability) for capability in composed.capabilities} - {type(prices)} == {
         DynamicEnvironmentCapability,
         ToolPermissionsCapability,
         CompactionCapability,
@@ -301,6 +303,7 @@ def test_build_composes_the_definition_without_io() -> None:
     assert [plugin.plugin_id for plugin in composed.plugins] == ["audit"]
     (subagent,) = composed.subagents
     assert (subagent.name, subagent.description, subagent.agent.definition_id) == ("helper", "Helps", HELPER_REVISION)
+    assert composed.model is None and composed.agent.model == subagent.agent.agent.model == MODEL
 
 
 async def create_model(service, **config: object) -> str:  # type: ignore[no-untyped-def]

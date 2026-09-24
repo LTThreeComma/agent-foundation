@@ -366,11 +366,11 @@ def _describe(registry: Registry, definition: ProviderDefinition) -> ProviderTyp
         described.default_model_api = apis[0]
         described.model_api_labels = {api: MODEL_APIS[api].display_name for api in apis}
         described.settings_schemas = {api: dict(registry.model_settings[api]) for api in apis}
+        described.catalog_providers = list(definition.catalog_providers)
     elif isinstance(definition, WebProviderDefinition):
         described.operations = list(web_operations(definition))
     elif isinstance(definition, EnvironmentProviderDefinition):
         described.environment_schema = definition.environment_model.model_json_schema()
-        described.supports_managed = definition.supports_managed
         described.supports_stop = definition.supports_stop
         described.supports_destroy = definition.supports_destroy
     return described

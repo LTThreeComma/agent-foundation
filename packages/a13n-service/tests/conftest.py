@@ -189,7 +189,8 @@ class ScriptedModel:
 
     Runs execute through the real provider adapter, HTTP client and endpoint policy. `requests` receives each
     request body as it arrives; a turn with a `gate` answers only once the test sets it. A turn scripted `to` a
-    marker answers only a request whose body contains it, so concurrent agents each get their own turns.
+    marker answers only a request whose body contains it, so concurrent agents each get their own turns. A reply
+    said in several pieces streams them as separate chunks, `interval` seconds apart.
     """
 
     def __init__(self) -> None:
@@ -201,8 +202,9 @@ class ScriptedModel:
         app.post("/v1/chat/completions")(self._complete)
         self.app = app
 
-    def say(self, text: str, *, gate: asyncio.Event | None = None, to: str | None = None) -> None:
-        self._script({"delta": {"content": text}, "finish": "stop", "gate": gate, "to": to})
+    def say(self, *pieces: str, gate: asyncio.Event | None = None, to: str | None = None, interval: float = 0) -> None:
+        deltas = [{"content": piece} for piece in pieces]
+        self._script({"deltas": deltas, "interval": interval, "finish": "stop", "gate": gate, "to": to})
 
     def call(
         self,
@@ -215,7 +217,7 @@ class ScriptedModel:
     ) -> None:
         function = {"name": name, "arguments": json.dumps(arguments)}
         delta = {"tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": function}]}
-        self._script({"delta": delta, "finish": "tool_calls", "gate": gate, "to": to})
+        self._script({"deltas": [delta], "interval": 0, "finish": "tool_calls", "gate": gate, "to": to})
 
     async def request(self) -> dict[str, Any]:
         return await asyncio.wait_for(self.requests.get(), timeout=10)
@@ -241,13 +243,20 @@ class ScriptedModel:
         if turn["gate"] is not None:
             await turn["gate"].wait()
         base = {"id": "chatcmpl-scripted", "object": "chat.completion.chunk", "created": 0, "model": "scripted"}
-        chunks = [
-            {**base, "choices": [{"index": 0, "delta": {"role": "assistant", **turn["delta"]}}]},
-            {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": turn["finish"]}]},
-            {**base, "choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}},
-        ]
-        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
-        return StreamingResponse(iter([body]), media_type="text/event-stream")
+        deltas = [{"role": "assistant", **turn["deltas"][0]}, *turn["deltas"][1:]]
+
+        async def stream() -> AsyncIterator[str]:
+            for index, delta in enumerate(deltas):
+                if index and turn["interval"]:
+                    await asyncio.sleep(turn["interval"])
+                yield f"data: {json.dumps({**base, 'choices': [{'index': 0, 'delta': delta}]})}\n\n"
+            ending = [
+                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": turn["finish"]}]},
+                {**base, "choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}},
+            ]
+            yield "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in ending) + "data: [DONE]\n\n"
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @asynccontextmanager

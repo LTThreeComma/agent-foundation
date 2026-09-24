@@ -204,7 +204,7 @@ def call_check(runtime: Any, tenant: Any) -> CallCheck:
         source="",
         provider_id=None,
     )
-    return CallCheck(runtime, AttemptControl(), context, served={}, used=0, limit=None)
+    return CallCheck(runtime, AttemptControl(), context, models={}, used=0, limit=None)
 
 
 async def test_a_refused_web_search_never_reaches_its_provider(runtime, tenant) -> None:  # type: ignore[no-untyped-def]

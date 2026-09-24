@@ -1,6 +1,7 @@
 """The thread stream: provisional live output of a thread's runs, carried by Redis and served as SSE.
 
-Workers append output deltas and a boundary marker after each checkpoint. Nothing here is durable or
+Workers append output deltas and a boundary marker after each checkpoint, and trim what the boundary's display
+covers once a short retention window passes: the stream carries the in-flight tail. Nothing here is durable or
 authoritative: display objects hold the durable view, and PostgreSQL decides who may read and which attempt is
 current. The gateway turns what it reads from both into data frames and three control frames, so a client can
 always fall back to the durable view:
@@ -25,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.redis import StreamEntry, append, last_id, read, read_entry, read_range
+from a13n_service.infra.redis import StreamEntry, append, last_id, read, read_entry, read_range, trim
 from a13n_service.runs.display import ItemRef, Observed
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.tables import AttemptRow, ThreadRow
@@ -111,7 +112,8 @@ def frames_schema() -> dict[str, Any]:
 
 
 class ThreadStream:
-    """One attempt's appends. A bounded buffer and a background writer keep Redis latency off execution."""
+    """One attempt's appends and the trims its boundaries allow. A bounded buffer and a background writer keep Redis
+    latency off execution."""
 
     def __init__(self, redis: Redis, settings: Settings, *, thread_id: str, run_id: str, attempt: int):
         self.redis, self.settings = redis, settings
@@ -151,21 +153,32 @@ class ThreadStream:
             pass  # Readers detect the missing sequence and fall back to committed items.
 
     async def _write(self) -> None:
-        worker = self.settings.worker
+        worker, timeout = self.settings.worker, self.settings.redis.timeout
         while True:
             entries = [await self.buffer.get()]
             while not self.buffer.empty() and len(entries) < READ_BATCH:
                 entries.append(self.buffer.get_nowait())
-            await append(
-                self.redis,
-                self.key,
-                entries,
-                max_length=worker.stream_length,
-                ttl=worker.stream_ttl,
-                timeout=self.settings.redis.timeout,
+            ids = await append(
+                self.redis, self.key, entries, max_length=worker.stream_length, ttl=worker.stream_ttl, timeout=timeout
             )
+            # Redis returns no IDs for entries it dropped; their boundary trims nothing.
+            boundaries = [entry_id for entry_id, fields in zip(ids, entries, strict=bool(ids)) if "boundary" in fields]
+            if boundaries:
+                retained = _retained_from(boundaries[-1], worker.stream_trim_seconds)
+                await trim(self.redis, self.key, min_id=retained, timeout=timeout)
             for _ in entries:
                 self.buffer.task_done()
+
+
+def _retained_from(boundary: str, window: float) -> str:
+    """The oldest entry a boundary keeps: itself, or the first one appended `window` seconds before it.
+
+    Redis assigns entry IDs from its own clock, so the boundary's ID dates the window without comparing clocks.
+    """
+    if window == 0:
+        return boundary
+    milliseconds, _, _ = boundary.partition("-")
+    return f"{int(milliseconds) - round(window * 1000)}-0"
 
 
 # Reading
@@ -377,6 +390,11 @@ class _View:
                 frames.append(_frame("reset", RunSignal(run_id=run_id)))
             self.snapshot = Snapshot(self.snapshot.version, run_id, attempt)
         if "boundary" in fields:
+            # A boundary past this connection's last sequence of the attempt covers deltas it never received: dropped
+            # by the writer or removed before it read them. After the gap's re-read, deltas continue from the boundary.
+            if self.sequences.get((run_id, attempt), 0) < sequence:
+                frames.append(_frame("gap", RunSignal(run_id=run_id)))
+            self.sequences[(run_id, attempt)] = sequence
             return [*frames, _frame("boundary", Boundary(run_id=run_id, attempt=attempt, sequence=sequence), entry.id)]
         expected = self.sequences.get((run_id, attempt), 0) + 1
         if sequence != expected:

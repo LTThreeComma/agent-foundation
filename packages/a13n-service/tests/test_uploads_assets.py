@@ -68,9 +68,14 @@ async def test_asset_lifecycle_from_upload_to_retirement(service) -> None:  # ty
     assert (await service.client.get(f"{item}/content")).content == b"hello"
     async with short_session(service.runtime.storage) as session:
         with pytest.raises(ServiceError) as refused:
-            await require_usable(session, service.tenant.workspace_id, {asset["id"]})
+            await require_usable(session, service.tenant.workspace_id, {"content.0.asset_id": asset["id"]})
         actions = set((await session.scalars(select(AuditEventRow.action))).all())
-    assert refused.value.details == {"field": "asset_id", "reason": "not_usable", "kind": "asset", "id": asset["id"]}
+    assert refused.value.details == {
+        "field": "content.0.asset_id",
+        "reason": "not_usable",
+        "kind": "asset",
+        "id": asset["id"],
+    }
     assert {"asset.create", "asset.retire"} <= actions
 
 
