@@ -81,7 +81,9 @@ from a13n_harness_ui.live import LiveCursor, LiveEvent, RootStreamEvent, Summary
 from a13n_harness_ui.model_accounts import AccountProjection, AccountStoreError, Provider
 from a13n_harness_ui.model_accounts.api_keys import ApiKeyInput, ApiKeyStatus
 from a13n_harness_ui.model_accounts.login import LoginRequest, LoginStatus
+from a13n_harness_ui.model_accounts.models import AccountCandidate, AccountSelection
 from a13n_harness_ui.model_authoring import (
+    ModelChoice,
     ModelChoices,
     ModelOptions,
     ModelOptionsRequest,
@@ -184,8 +186,8 @@ class ListenerStatus(SurfaceModel):
     access: Literal["api_key", "dangerous_bypass"]
 
 
-class ProjectLeadUpdate(SurfaceModel):
-    enabled: bool
+class CoordinatorUpdate(SurfaceModel):
+    auto_followup: bool
 
 
 class CreateThreadRequest(SurfaceModel):
@@ -1050,6 +1052,22 @@ def create_webui(
     async def account(provider: Provider) -> AccountProjection:
         return await app().inspect_model_account(provider)
 
+    @server.get("/api/auth/accounts/{provider}/sources", response_model=tuple[AccountCandidate, ...])
+    async def account_sources(provider: Provider) -> tuple[AccountCandidate, ...]:
+        return await app().model_account_candidates(provider)
+
+    @server.put(
+        "/api/auth/accounts/{provider}/selection",
+        response_model=AccountProjection,
+        openapi_extra=_body(AccountSelection),
+    )
+    async def select_account(provider: Provider, request: Request) -> AccountProjection:
+        return await app().select_model_account(provider, await _document(request, AccountSelection))
+
+    @server.post("/api/auth/accounts/{provider}/models", response_model=tuple[ModelChoice, ...])
+    async def discover_account_models(provider: Provider) -> tuple[ModelChoice, ...]:
+        return await app().discover_account_models(provider)
+
     @server.delete("/api/auth/accounts/{provider}", response_model=bool)
     async def logout_account(provider: Provider) -> bool:
         return await app().logout_model_account(provider)
@@ -1303,13 +1321,13 @@ def create_webui(
     async def projects() -> tuple[ProjectSummary, ...]:
         return await app().projects()
 
-    @server.patch("/api/projects/{project_id}/lead", response_model=ThreadSummary)
-    async def set_project_lead_enabled(project_id: str, body: ProjectLeadUpdate) -> ThreadSummary:
-        return await app().set_project_lead_enabled(project_id, body.enabled)
+    @server.patch("/api/threads/{thread_id}/coordinator", response_model=ThreadSummary)
+    async def set_auto_followup(thread_id: str, body: CoordinatorUpdate) -> ThreadSummary:
+        return await app().set_auto_followup(thread_id, body.auto_followup)
 
-    @server.post("/api/projects/{project_id}/lead", response_model=ThreadSummary)
-    async def ensure_project_lead(project_id: str) -> ThreadSummary:
-        return await app().ensure_project_lead(project_id)
+    @server.post("/api/threads/{thread_id}/coordinator", response_model=ThreadSummary)
+    async def promote_coordinator(thread_id: str) -> ThreadSummary:
+        return await app().promote_coordinator(thread_id)
 
     @server.get("/api/threads/{thread_id}/decisions", response_model=DecisionBatchView | None)
     async def decision_batch(
@@ -1341,7 +1359,7 @@ def create_webui(
         include_archived: bool = False,
         archived_only: bool = False,
         include_active: bool = False,
-        lead_thread_id: Annotated[str | None, Query(max_length=80)] = None,
+        coordinator_thread_id: Annotated[str | None, Query(max_length=80)] = None,
         independent_only: bool = False,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -1353,7 +1371,7 @@ def create_webui(
             include_archived=include_archived,
             archived_only=archived_only,
             include_active=include_active,
-            lead_thread_id=lead_thread_id,
+            coordinator_thread_id=coordinator_thread_id,
             independent_only=independent_only,
             cursor=cursor,
             limit=limit,

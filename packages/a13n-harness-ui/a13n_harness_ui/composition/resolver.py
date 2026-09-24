@@ -25,6 +25,7 @@ from a13n_harness_ui.configuration import (
     ApiKeyAuthentication,
     CanonicalSubagent,
     CodexSubscriptionAuthentication,
+    CopilotSubscriptionAuthentication,
     GrokSubscriptionAuthentication,
     LoadedHarnessUiConfiguration,
     ModelResource,
@@ -89,8 +90,8 @@ class ThreadCompositionSelection:
     default_model_id: str | None = None
     environment_bindings: tuple[EnvironmentBindingSelection, ...] = ()
     default_environment: str | None = None
-    is_project_lead: bool = False
-    lead_thread_id: str | None = None
+    role: Literal["ordinary", "coordinator", "worker"] = "ordinary"
+    coordinator_thread_id: str | None = None
 
 
 class AgentCompositionResolver:
@@ -214,8 +215,8 @@ class AgentCompositionResolver:
             thread_id=selection.thread_id,
             thread_configuration_version=selection.version,
             project_id=selection.project_id,
-            is_project_lead=selection.is_project_lead,
-            lead_thread_id=selection.lead_thread_id,
+            role=selection.role,
+            coordinator_thread_id=selection.coordinator_thread_id,
             project_roots=selection.local_roots,
             media_understanding={
                 kind: self._model_recipe(source.models[model_id])
@@ -847,6 +848,10 @@ def _validate_auth_route(item: ModelResource) -> None:
     if isinstance(authentication, CodexSubscriptionAuthentication) and prefix != "openai-codex":
         raise CompositionError(
             "Codex subscription authentication requires an openai-codex route.", code="model_auth_invalid"
+        )
+    if isinstance(authentication, CopilotSubscriptionAuthentication) and prefix != "github-copilot":
+        raise CompositionError(
+            "Copilot subscription authentication requires a github-copilot route.", code="model_auth_invalid"
         )
     if isinstance(authentication, GrokSubscriptionAuthentication) and prefix not in {"grok", "grok-build"}:
         raise CompositionError("Grok subscription authentication requires a Grok route.", code="model_auth_invalid")

@@ -22,11 +22,15 @@ Authentication and Host/Origin validation apply at the listener boundary. Use a 
 
 ## Coordinator
 
-`ThreadSummary.lead_thread_id` identifies a managed worker's canonical Coordinator, or null for an independent root. `GET /api/threads/activity` accepts `lead_thread_id` for workers of one Coordinator and `independent_only=true` to exclude canonical Coordinators and managed workers. These filters bind pagination cursors and apply to totals and active rows. Unfiltered search continues to include all roots. Ownership is created only by the Coordinator's shared collaboration tool, not by public HTTP Thread creation; human inspection and execution remain ordinary root operations.
+`ThreadSummary.role` is `ordinary`, `coordinator`, or `worker`. `coordinator_thread_id` identifies a worker's owner (otherwise null); `auto_followup` is the Coordinator's notification setting (otherwise null). Projects can contain multiple Coordinators and expose no singleton lead fields.
 
-`GET /api/projects` includes nullable `lead_thread_id` and persisted `lead_enabled`. `PATCH /api/projects/{project_id}/lead` with `{"enabled": true}` enables coordination, ensuring a Coordinator if absent; `false` disables an existing binding without deleting its conversation. Both return `ThreadSummary` without admitting a Run. Enabling requires Sidekick and a non-archived Coordinator. Updates are last-write-wins and publish Project invalidation for other clients. The user-facing name is Coordinator; existing `project_lead` fields and `/lead` routes retain their identifiers. Enabled WebUI coordination attempts to run or steer it only when one of its mapped workers ends an operation; this is best effort, not a delivery queue or retry guarantee. `POST /api/projects/{project_id}/lead` idempotently returns the Project's canonical Coordinator as a `ThreadSummary`, creating it only if needed. It accepts no body, allocates no Run, and performs no model call. Missing Projects and new creation with Sidekick disabled are rejected. Existing archived Coordinators are returned without restoration or replacement; use the ordinary expected-version metadata API to restore them. Their Project selection cannot be changed or cleared. `GET /api/selectors` includes `sidekick_enabled` for creation affordances.
+`POST /api/threads/{thread_id}/coordinator` promotes an existing ordinary project-bound root. It requires an accepted Project, an unarchived inactive Thread and no pending decisions. It is idempotent for an already eligible Coordinator, returns `ThreadSummary`, and starts no Run or Model call. Promotion keeps identity, history, title and settings. Workers and children cannot be promoted; there is no demotion or worker adoption API.
 
-After an uncertain ensure response, read Projects or explicitly ensure again; concurrent requests select one identity. Prompt admission remains a separate ordinary Thread submit and must not be automatically replayed.
+`PATCH /api/threads/{thread_id}/coordinator` with `{"auto_followup": false}` pauses that Coordinator's automatic lifecycle notifications; true enables them. Updates are last-write-wins and publish Thread invalidation. Sidekick configuration does not gate promotion or follow-up. Archived Coordinators retain their role and use the ordinary expected-version metadata API for restoration. Coordinators and workers cannot change or clear their Project.
+
+`GET /api/threads/activity` accepts `coordinator_thread_id` to select one owner's workers and `independent_only=true` to exclude workers while retaining ordinary roots and Coordinators. Filters bind cursors and apply before totals and active rows. Unfiltered human search includes all roots. Ownership is assigned only by the Coordinator's collaboration tool, never by public HTTP creation. Human inspection and execution keep the normal root APIs.
+
+The old Project `/lead` routes and fields are removed. Startup migration converts existing lead bindings and ownership once, preserving IDs and history; an old disabled binding becomes a Coordinator with automatic follow-up off. Other saved conversations remain ordinary roots.
 
 ## Run-only execution environment
 
@@ -249,89 +253,92 @@ Only one active root operation is allowed per Thread. A second submit is rejecte
 
 These are all schema-listed operations; the grouped table preserves method distinctions. Exact field schemas live in OpenAPI.
 
-| Method and route                                                    | Purpose                                                                |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `GET /api/status`                                                   | Listener/API/App status                                                |
-| `GET /api/presence`                                                 | Current per-tab directory and optional same-page membership            |
-| `POST /api/threads/{thread_id}/comments`                            | Publish or reconcile one immutable saved-output comment                |
-| `GET /api/threads/{thread_id}/comments`                             | Cursor-page comments under the root Thread, optionally by exact target |
-| `GET /api/threads/{thread_id}/comments/{comment_id}`                | Read a scoped committed publication                                    |
-| `POST /api/threads/{thread_id}/saved-output`                        | Bounded selected or comment-retained original assistant text           |
-| `GET /api/threads/{thread_id}/children/{execution_id}/saved-output` | Parent-scoped saved child text blocks with typed targets               |
-| `GET /api/catalog`                                                  | Discovered implementation references, not configured selectors         |
-| `GET /api/agents/{agent_id}/tool-proxy`                             | Static Agent-default source grouping                                   |
-| `GET /api/auth/accounts/{provider}`                                 | Credential-free compatible account inspection                          |
-| `DELETE /api/auth/accounts/{provider}`                              | Logout the compatible account, not cancel login                        |
-| `POST /api/threads/configuration-preview`                           | Creation selections with per-axis provenance                           |
-| `GET /api/threads/{thread_id}/configuration`                        | Sticky next choices versus actual captured composition                 |
-| `GET /api/operations/{receipt_id}/configuration`                    | Exact receipt's captured selection, or null before capture             |
-| `GET /api/threads/{thread_id}/context-usage`                        | Last reported request footprint, not accumulated usage                 |
-| `GET /api/threads/{thread_id}/usage`                                | Durable observed root/descendant usage                                 |
-| `GET /api/threads/{thread_id}/notes`                                | Bounded notes for the selected continuation                            |
-| `GET /api/host/files`                                               | Bounded native directory page                                          |
-| `GET /api/host/files/metadata`                                      | Native entry metadata, without following the final symlink             |
-| `GET /api/host/files/text`                                          | Complete editable UTF-8 or explicit binary/large presentation          |
-| `PUT /api/host/files/text`                                          | Create or save text with an observed revision                          |
-| `GET /api/host/files/content`                                       | Bounded attachment-only native download                                |
-| `PUT /api/host/files/content`                                       | Bounded raw upload with create/replace preconditions                   |
-| `POST /api/host/files/directories`                                  | Create one native directory                                            |
-| `POST /api/host/files/move`                                         | Rename/move one observed entry to an absent destination                |
-| `POST /api/host/files/delete`                                       | Deliberate nonrecursive or bounded recursive deletion                  |
-| `POST /api/threads/{thread_id}/host-file-captures`                  | Capture reviewed file bytes or lines as Thread input                   |
-| `GET /api/host/git/repository`                                      | Discover the actual repository/worktree for a native path              |
-| `GET /api/host/git/status`                                          | Read paged index/worktree status, optionally including ignored entries |
-| `GET /api/host/git/diff`                                            | Read one staged, unstaged, or untracked comparison                     |
-| `POST /api/threads/{thread_id}/host-git-captures`                   | Capture reviewed patch bytes or lines as Thread input                  |
-| `GET /api/host/terminals`                                           | List App-owned native terminals                                        |
-| `POST /api/host/terminals`                                          | Create a native interactive PTY                                        |
-| `GET /api/host/terminals/{terminal_id}`                             | Inspect session, output bounds and control                             |
-| `DELETE /api/host/terminals/{terminal_id}`                          | Close shared session and remove its live identity                      |
-| `GET /api/setup`                                                    | Current setup view                                                     |
-| `POST /api/setup/preview`                                           | Preview a setup selection                                              |
-| `POST /api/setup/apply`                                             | Apply a setup selection                                                |
-| `POST /api/environments/preflight`                                  | Preflight native/sandbox profile for a project path                    |
-| `GET /api/auth/keys`                                                | Safe model-provider key metadata                                       |
-| `PUT /api/auth/keys`                                                | Store provider credentials                                             |
-| `DELETE /api/auth/keys/{reference}`                                 | Remove a provider key reference                                        |
-| `POST /api/auth/logins`                                             | Start provider login                                                   |
-| `GET /api/auth/logins/{session_id}`                                 | Read provider login progress                                           |
-| `DELETE /api/auth/logins/{session_id}`                              | Cancel/remove the selected login session                               |
-| `GET /api/configuration/sources`                                    | Accepted source metadata                                               |
-| `GET /api/configuration/sources/{relative_path}`                    | Accepted source content where available                                |
-| `PUT /api/configuration/sources/{relative_path}`                    | Validate and publish source replacement                                |
-| `DELETE /api/configuration/sources/{relative_path}`                 | Validate and remove a non-root source                                  |
-| `POST /api/configuration/validate`                                  | Validate source replacement without publication                        |
-| `POST /api/threads/preview`                                         | Resolve new Thread selections without creating one                     |
-| `PATCH /api/threads/{thread_id}/configuration`                      | Versioned exact configuration change                                   |
-| `GET /api/threads/{thread_id}/project-defaults`                     | Preview the selected Project's configured defaults                     |
-| `POST /api/threads/{thread_id}/project-defaults`                    | Apply reviewed defaults with version/digest checks                     |
-| `GET /api/threads/{thread_id}/project-environments`                 | Preview complete Project environment replacement                       |
-| `POST /api/threads/{thread_id}/project-environments`                | Apply only the four reviewed environment axes                          |
-| `GET /api/projects`                                                 | Available Projects and creation defaults                               |
-| `GET /api/selectors`                                                | Configuration selection options                                        |
-| `GET /api/threads`                                                  | Query/page Threads                                                     |
-| `GET /api/threads/activity`                                         | Navigation activity and pending summaries                              |
-| `POST /api/threads/lookup`                                          | Bounded root summaries by identity, including saved completion markers |
-| `GET /api/threads/{thread_id}/tasks`                                | Selected Working State task projection                                 |
-| `GET /api/threads/{thread_id}/children`                             | Parent-scoped child listing or exact query                             |
-| `GET /api/threads/{thread_id}/children/wait`                        | Bounded child wait or poll                                             |
-| `GET /api/threads/{thread_id}/children/{execution_id}/review`       | Bounded child inspection                                               |
-| `POST /api/threads/{thread_id}/children/{execution_id}/steer`       | Enqueue child steering text                                            |
-| `POST /api/threads/{thread_id}/children/{execution_id}/cancel`      | Request child cancellation                                             |
-| `POST /api/threads`                                                 | Create using optional defaults/title                                   |
-| `GET /api/threads/{thread_id}`                                      | Detail, continuation, available actions                                |
-| `GET /api/threads/{thread_id}/transcript`                           | Bounded retained transcript                                            |
-| `PATCH /api/threads/{thread_id}/metadata`                           | Versioned title/archive change                                         |
-| `POST /api/threads/{thread_id}/attachments`                         | Stage raw bytes with a filename                                        |
-| `GET /api/threads/{thread_id}/attachments/{attachment_id}`          | Download a scoped attachment                                           |
-| `GET /api/threads/{thread_id}/attachments/{attachment_id}/metadata` | Inspect its name, size, media type and immutable capture source        |
-| `POST /api/threads/{thread_id}/submit`                              | Submit ordinary prompt and attachment IDs                              |
-| `GET /api/threads/{thread_id}/decisions`                            | Exact pending-decision projection                                      |
-| `POST /api/threads/{thread_id}/decisions`                           | Respond to the complete pending set                                    |
-| `GET /api/operations/{receipt_id}`                                  | Query exact process-local operation                                    |
-| `POST /api/operations/{receipt_id}/steer`                           | Add steering text                                                      |
-| `POST /api/operations/{receipt_id}/cancel`                          | Request cancellation                                                   |
-| `WS /api/realtime/connect`                                          | Multiplexed summary and focused observation channels                   |
+| Method and route                                                    | Purpose                                                                 |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `GET /api/status`                                                   | Listener/API/App status                                                 |
+| `GET /api/presence`                                                 | Current per-tab directory and optional same-page membership             |
+| `POST /api/threads/{thread_id}/comments`                            | Publish or reconcile one immutable saved-output comment                 |
+| `GET /api/threads/{thread_id}/comments`                             | Cursor-page comments under the root Thread, optionally by exact target  |
+| `GET /api/threads/{thread_id}/comments/{comment_id}`                | Read a scoped committed publication                                     |
+| `POST /api/threads/{thread_id}/saved-output`                        | Bounded selected or comment-retained original assistant text            |
+| `GET /api/threads/{thread_id}/children/{execution_id}/saved-output` | Parent-scoped saved child text blocks with typed targets                |
+| `GET /api/catalog`                                                  | Discovered implementation references, not configured selectors          |
+| `GET /api/agents/{agent_id}/tool-proxy`                             | Static Agent-default source grouping                                    |
+| `GET /api/auth/accounts/{provider}`                                 | Credential-free account/source inspection (`codex`, `grok`, `copilot`)  |
+| `GET /api/auth/accounts/{provider}/sources`                         | Supported saved account/source choices; currently Copilot               |
+| `PUT /api/auth/accounts/{provider}/selection`                       | Explicit `{source, account_id}` selection; no client-supplied file path |
+| `POST /api/auth/accounts/{provider}/models`                         | Explicit Copilot authenticated catalog; Chat Completions IDs only       |
+| `DELETE /api/auth/accounts/{provider}`                              | Logout the compatible account, not cancel login                         |
+| `POST /api/threads/configuration-preview`                           | Creation selections with per-axis provenance                            |
+| `GET /api/threads/{thread_id}/configuration`                        | Sticky next choices versus actual captured composition                  |
+| `GET /api/operations/{receipt_id}/configuration`                    | Exact receipt's captured selection, or null before capture              |
+| `GET /api/threads/{thread_id}/context-usage`                        | Last reported request footprint, not accumulated usage                  |
+| `GET /api/threads/{thread_id}/usage`                                | Durable observed root/descendant usage                                  |
+| `GET /api/threads/{thread_id}/notes`                                | Bounded notes for the selected continuation                             |
+| `GET /api/host/files`                                               | Bounded native directory page                                           |
+| `GET /api/host/files/metadata`                                      | Native entry metadata, without following the final symlink              |
+| `GET /api/host/files/text`                                          | Complete editable UTF-8 or explicit binary/large presentation           |
+| `PUT /api/host/files/text`                                          | Create or save text with an observed revision                           |
+| `GET /api/host/files/content`                                       | Bounded attachment-only native download                                 |
+| `PUT /api/host/files/content`                                       | Bounded raw upload with create/replace preconditions                    |
+| `POST /api/host/files/directories`                                  | Create one native directory                                             |
+| `POST /api/host/files/move`                                         | Rename/move one observed entry to an absent destination                 |
+| `POST /api/host/files/delete`                                       | Deliberate nonrecursive or bounded recursive deletion                   |
+| `POST /api/threads/{thread_id}/host-file-captures`                  | Capture reviewed file bytes or lines as Thread input                    |
+| `GET /api/host/git/repository`                                      | Discover the actual repository/worktree for a native path               |
+| `GET /api/host/git/status`                                          | Read paged index/worktree status, optionally including ignored entries  |
+| `GET /api/host/git/diff`                                            | Read one staged, unstaged, or untracked comparison                      |
+| `POST /api/threads/{thread_id}/host-git-captures`                   | Capture reviewed patch bytes or lines as Thread input                   |
+| `GET /api/host/terminals`                                           | List App-owned native terminals                                         |
+| `POST /api/host/terminals`                                          | Create a native interactive PTY                                         |
+| `GET /api/host/terminals/{terminal_id}`                             | Inspect session, output bounds and control                              |
+| `DELETE /api/host/terminals/{terminal_id}`                          | Close shared session and remove its live identity                       |
+| `GET /api/setup`                                                    | Current setup view                                                      |
+| `POST /api/setup/preview`                                           | Preview a setup selection                                               |
+| `POST /api/setup/apply`                                             | Apply a setup selection                                                 |
+| `POST /api/environments/preflight`                                  | Preflight native/sandbox profile for a project path                     |
+| `GET /api/auth/keys`                                                | Safe model-provider key metadata                                        |
+| `PUT /api/auth/keys`                                                | Store provider credentials                                              |
+| `DELETE /api/auth/keys/{reference}`                                 | Remove a provider key reference                                         |
+| `POST /api/auth/logins`                                             | Start provider login                                                    |
+| `GET /api/auth/logins/{session_id}`                                 | Read provider login progress                                            |
+| `DELETE /api/auth/logins/{session_id}`                              | Cancel/remove the selected login session                                |
+| `GET /api/configuration/sources`                                    | Accepted source metadata                                                |
+| `GET /api/configuration/sources/{relative_path}`                    | Accepted source content where available                                 |
+| `PUT /api/configuration/sources/{relative_path}`                    | Validate and publish source replacement                                 |
+| `DELETE /api/configuration/sources/{relative_path}`                 | Validate and remove a non-root source                                   |
+| `POST /api/configuration/validate`                                  | Validate source replacement without publication                         |
+| `POST /api/threads/preview`                                         | Resolve new Thread selections without creating one                      |
+| `PATCH /api/threads/{thread_id}/configuration`                      | Versioned exact configuration change                                    |
+| `GET /api/threads/{thread_id}/project-defaults`                     | Preview the selected Project's configured defaults                      |
+| `POST /api/threads/{thread_id}/project-defaults`                    | Apply reviewed defaults with version/digest checks                      |
+| `GET /api/threads/{thread_id}/project-environments`                 | Preview complete Project environment replacement                        |
+| `POST /api/threads/{thread_id}/project-environments`                | Apply only the four reviewed environment axes                           |
+| `GET /api/projects`                                                 | Available Projects and creation defaults                                |
+| `GET /api/selectors`                                                | Configuration selection options                                         |
+| `GET /api/threads`                                                  | Query/page Threads                                                      |
+| `GET /api/threads/activity`                                         | Navigation activity and pending summaries                               |
+| `POST /api/threads/lookup`                                          | Bounded root summaries by identity, including saved completion markers  |
+| `GET /api/threads/{thread_id}/tasks`                                | Selected Working State task projection                                  |
+| `GET /api/threads/{thread_id}/children`                             | Parent-scoped child listing or exact query                              |
+| `GET /api/threads/{thread_id}/children/wait`                        | Bounded child wait or poll                                              |
+| `GET /api/threads/{thread_id}/children/{execution_id}/review`       | Bounded child inspection                                                |
+| `POST /api/threads/{thread_id}/children/{execution_id}/steer`       | Enqueue child steering text                                             |
+| `POST /api/threads/{thread_id}/children/{execution_id}/cancel`      | Request child cancellation                                              |
+| `POST /api/threads`                                                 | Create using optional defaults/title                                    |
+| `GET /api/threads/{thread_id}`                                      | Detail, continuation, available actions                                 |
+| `GET /api/threads/{thread_id}/transcript`                           | Bounded retained transcript                                             |
+| `PATCH /api/threads/{thread_id}/metadata`                           | Versioned title/archive change                                          |
+| `POST /api/threads/{thread_id}/attachments`                         | Stage raw bytes with a filename                                         |
+| `GET /api/threads/{thread_id}/attachments/{attachment_id}`          | Download a scoped attachment                                            |
+| `GET /api/threads/{thread_id}/attachments/{attachment_id}/metadata` | Inspect its name, size, media type and immutable capture source         |
+| `POST /api/threads/{thread_id}/submit`                              | Submit ordinary prompt and attachment IDs                               |
+| `GET /api/threads/{thread_id}/decisions`                            | Exact pending-decision projection                                       |
+| `POST /api/threads/{thread_id}/decisions`                           | Respond to the complete pending set                                     |
+| `GET /api/operations/{receipt_id}`                                  | Query exact process-local operation                                     |
+| `POST /api/operations/{receipt_id}/steer`                           | Add steering text                                                       |
+| `POST /api/operations/{receipt_id}/cancel`                          | Request cancellation                                                    |
+| `WS /api/realtime/connect`                                          | Multiplexed summary and focused observation channels                    |
 
 `GET /api/openapi.json`, `/healthz`, `/readyz`, and static navigation/assets are additional non-schema-listed boundaries. Serving an application shell at a recognized browser route does not implement that screen. `features.host_files` is true only when the App was opened with native sharing enabled. `features.host_git` is true when sharing is enabled and a Git executable is discoverable. `features.host_terminal` reports native POSIX terminal availability. `features.shared_drafts` reports the in-memory shared composer protocol. `features.page_presence` and `features.output_comments` report transient page awareness and durable saved-output comments, independently of native sharing. These backend features do not imply browser panels exist.
 
