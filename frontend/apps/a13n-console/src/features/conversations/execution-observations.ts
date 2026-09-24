@@ -30,6 +30,8 @@ export function applyExecutionObservation(
   )
     return current;
   const source = isObject(value) ? (value.event ?? value) : value;
+  const streamed = streamedArguments(name, value);
+  if (streamed) return foldArguments(current, entry, streamed, source);
   const payload = isObject(source)
     ? isObject(source.payload)
       ? source.payload
@@ -303,6 +305,79 @@ export function applyExecutionObservation(
   }
   // Preserve custom observations without inventing an execution action or count.
   return observe(next, entry, type || name, source);
+}
+
+const PART_DELTA = "a13n.pydantic_ai.part_delta";
+
+/**
+ * A tool call's streamed argument delta, which the stream protocol reports as
+ * a `part_delta` observation: the stream it continues and the text it appends.
+ * Deltas of one stream differ only in that text and in when, and at which
+ * source position, they occurred.
+ */
+function streamedArguments(name: string, value: unknown) {
+  if (name !== PART_DELTA || !isObject(value) || !isObject(value.event))
+    return null;
+  const { delta } = value.event;
+  if (
+    !isObject(delta) ||
+    delta.part_delta_kind !== "tool_call" ||
+    typeof delta.args_delta !== "string" ||
+    delta.tool_name_delta
+  )
+    return null;
+  return {
+    stream: JSON.stringify([
+      value.thread_id,
+      value.run_id,
+      { ...value.event, delta: { ...delta, args_delta: null } },
+    ]),
+    text: delta.args_delta,
+  };
+}
+
+function follows(cursor: string, previous: string) {
+  const [attempt, sequence] = cursor.split("-").map(Number);
+  const [lastAttempt, lastSequence] = previous.split("-").map(Number);
+  return attempt === lastAttempt && sequence === lastSequence! + 1;
+}
+
+/**
+ * Consecutive argument deltas of one stream extend one observation, as the
+ * committed display folds them, so a live tool call shows one growing entry.
+ */
+function foldArguments(
+  current: Execution,
+  entry: RunEvent,
+  fragment: { stream: string; text: string },
+  source: unknown,
+): Execution {
+  const open = current.streamedArguments,
+    last = current.observations.at(-1),
+    held = { stream: fragment.stream, cursor: entry.cursor };
+  if (
+    open?.stream !== fragment.stream ||
+    !follows(entry.cursor, open.cursor) ||
+    !isObject(last?.detail) ||
+    !isObject(last.detail.delta)
+  )
+    return {
+      ...observe(current, entry, PART_DELTA, source),
+      streamedArguments: held,
+    };
+  const { delta } = last.detail;
+  const detail = {
+    ...last.detail,
+    delta: {
+      ...delta,
+      args_delta: `${String(delta.args_delta)}${fragment.text}`,
+    },
+  };
+  return {
+    ...current,
+    observations: [...current.observations.slice(0, -1), { ...last, detail }],
+    streamedArguments: held,
+  };
 }
 
 function text(value: unknown): string | null {

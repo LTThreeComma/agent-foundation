@@ -124,13 +124,8 @@ export function modelApi(
           { params: { path: { organization_id, provider_id } } },
         )
         .then(data),
-    catalog: (provider_id: string, signal: AbortSignal) =>
-      client.http
-        .GET(
-          "/api/v1/organizations/{organization_id}/model-providers/{provider_id}/catalog",
-          { params: { path: { organization_id, provider_id } }, signal },
-        )
-        .then(data),
+    catalog: (signal: AbortSignal) =>
+      client.http.GET("/api/v1/model-catalog", { signal }).then(data),
     model: (model_id: string, signal: AbortSignal) =>
       client.http
         .GET("/api/v1/organizations/{organization_id}/models/{model_id}", {

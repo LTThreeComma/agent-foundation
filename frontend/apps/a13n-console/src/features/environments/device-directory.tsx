@@ -1,7 +1,7 @@
 import { FormField, Input } from "a13n-ui";
 import { useTranslation } from "react-i18next";
 
-/** The working directory a mount uses on a registered device. */
+/** The working directory a mount uses on an external target. */
 export function DeviceDirectory({
   value,
   onChange,

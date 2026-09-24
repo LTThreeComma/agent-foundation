@@ -13,7 +13,7 @@ import { FormActions } from "../../shared/forms";
 import { ProviderIcon, ResourceEditorButton } from "../../shared/identity";
 import { connectStepDescription, connectStepTitle } from "./add-provider";
 import { type ModelScope } from "./api";
-import { CatalogPicker, catalogRef } from "./catalog-picker";
+import { CatalogPicker } from "./catalog-picker";
 import {
   CatalogNotice,
   ModelFields,
@@ -125,8 +125,10 @@ export function AddModel({
             ) : (
               <CatalogPicker
                 entries={model.catalog.data?.items ?? []}
+                channels={model.channels}
+                allowCompatible={model.selectedProvider?.type === "openai"}
                 providerName={model.definition?.display_name}
-                value={model.draft.catalog_key}
+                value={model.draft.catalog_ref}
                 onSelect={(entry) => {
                   model.chooseCatalog(entry);
                   setStep("details");
@@ -196,16 +198,14 @@ function stepHeading(
       description: t("Pick one from the catalog, or add a model by its ID."),
     };
   const chosen =
-    model.selectedEntry?.model_name ||
-    model.draft.name ||
-    model.draft.model_name;
+    model.selectedEntry?.name || model.draft.name || model.draft.model_name;
   return {
     title: (
       <BrandTitle
         mark={
           <ModelIcon
             upstream={model.draft.model_name}
-            catalogRef={model.selectedEntry && catalogRef(model.selectedEntry)}
+            catalogRef={model.draft.catalog_ref}
             provider={model.selectedProvider?.type}
             size={20}
           />

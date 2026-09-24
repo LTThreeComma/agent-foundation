@@ -102,7 +102,7 @@ it("reads the standard rule's token prices into threshold rows", () => {
   expect(priceTable(null)).toBeNull();
 });
 
-it("saves an edited table for the model without dropping prices the editor does not show", () => {
+it("saves an edited table under the entry it was read from without dropping prices the editor does not show", () => {
   const table = priceTable(catalogPrice)!;
   table.tiers[0].rates.output_mtok = "30";
   expect(
@@ -112,7 +112,7 @@ it("saves an edited table for the model without dropping prices the editor does 
     }),
   ).toEqual({
     provider: "anthropic",
-    model: "gateway-opus",
+    model: "claude-opus-5",
     context_window: 1000000,
     source: "console",
     source_revision: "manual",

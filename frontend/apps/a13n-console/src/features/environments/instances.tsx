@@ -32,7 +32,6 @@ import {
 } from "./api";
 import instanceStyles from "./environments.module.css";
 import { EnvironmentPanel } from "./instance-details";
-import { useEnvironmentTypes } from "./providers";
 
 /** The environments that exist right now, with their lifecycle state. */
 export function EnvironmentInstances() {
@@ -120,7 +119,11 @@ export function EnvironmentInstances() {
               {
                 label: t("Provider"),
                 render: (item) => {
-                  const provider = providerById.get(item.provider_id);
+                  // An external target is reached at its own endpoint.
+                  if (item.endpoint) return <span>{item.endpoint}</span>;
+                  const provider = item.provider_id
+                    ? providerById.get(item.provider_id)
+                    : undefined;
                   if (!provider)
                     return providers.isPending &&
                       providers.fetchStatus !== "idle" ? (
@@ -210,10 +213,9 @@ function CreateEnvironment() {
 
 function EnvironmentForm({ close }: { close: () => void }) {
   const client = useClient(),
-    { workspace, organization } = useWorkspace(),
+    { workspace } = useWorkspace(),
     cache = useQueryClient(),
     { t } = useTranslation();
-  const scope = { kind: "workspace", id: workspace.id } as const;
   const templates = useQuery({
     queryKey: ["environment-template-options", workspace.id],
     queryFn: ({ signal }) =>
@@ -221,23 +223,11 @@ function EnvironmentForm({ close }: { close: () => void }) {
         environmentTemplates(client, workspace.id, signal, cursor),
       ),
   });
-  const providers = useQuery({
-    queryKey: ["environment-provider-options", "workspace", workspace.id],
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        environmentApi(client, organization.id, scope).providers(
-          signal,
-          cursor,
-        ),
-      ),
-  });
-  const types = useEnvironmentTypes();
   const [kind, setKind] = useState("managed"),
     [name, setName] = useState(""),
     [templateId, setTemplateId] = useState(""),
-    [providerId, setProviderId] = useState(""),
-    [deviceId, setDeviceId] = useState("");
-  const provider = providers.data?.find((item) => item.id === providerId);
+    [endpoint, setEndpoint] = useState(""),
+    [token, setToken] = useState("");
   const save = useMutation({
     mutationFn: () => {
       const named = name.trim() ? { name: name.trim() } : {};
@@ -248,10 +238,9 @@ function EnvironmentForm({ close }: { close: () => void }) {
           ...named,
         });
       }
-      if (!provider) throw new Error(t("Select an environment provider."));
-      const body: Schema["DeviceRegistration"] = {
-        provider_id: providerId,
-        device_id: deviceId.trim(),
+      const body: Schema["ExternalTargetCreate"] = {
+        endpoint: endpoint.trim(),
+        token,
         ...named,
       };
       return client.http
@@ -274,26 +263,6 @@ function EnvironmentForm({ close }: { close: () => void }) {
         label: item.name,
         description: item.description ?? undefined,
         badge: t("Version {{version}}", { version: item.version }),
-      })) ?? [];
-  // An external target is a registered device of a connect-only provider.
-  const providerOptions =
-    providers.data
-      ?.filter(
-        (item) =>
-          item.enabled &&
-          types.data?.items.some(
-            (definition) =>
-              definition.type === item.type &&
-              definition.supports_managed === false,
-          ),
-      )
-      .map((item) => ({
-        value: item.id,
-        label: item.name,
-        icon: <ProviderIcon type={item.type} />,
-        description:
-          types.data?.items.find((definition) => definition.type === item.type)
-            ?.display_name ?? undefined,
       })) ?? [];
   return (
     <form
@@ -343,7 +312,7 @@ function EnvironmentForm({ close }: { close: () => void }) {
           ]}
         />
       </FormField>
-      <ErrorNotice error={templates.error ?? providers.error ?? types.error} />
+      <ErrorNotice error={templates.error} />
       {kind === "managed" ? (
         <FormField label={t("Template")}>
           <SearchPicker
@@ -357,26 +326,31 @@ function EnvironmentForm({ close }: { close: () => void }) {
         </FormField>
       ) : (
         <>
-          <FormField label={t("Provider")}>
-            <SearchPicker
-              label={t("Provider")}
-              placeholder={t("Select provider")}
-              emptyMessage={t("No matching providers")}
-              value={providerId}
-              onValueChange={setProviderId}
-              groups={[{ label: t("Providers"), options: providerOptions }]}
-            />
-          </FormField>
           <FormField
-            label={t("Device ID")}
+            label={t("Endpoint URL")}
             description={t(
-              "Use the device_id configured in envd. The provider owns the connection; each Run chooses its directory.",
+              "The origin the envd daemon serves, such as https://build-box.example.com:8443. Plain HTTP is accepted only for a loopback address.",
             )}
           >
             <Input
               required
-              value={deviceId}
-              onChange={(event) => setDeviceId(event.target.value)}
+              type="url"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
+            />
+          </FormField>
+          <FormField
+            label={t("Token")}
+            description={t(
+              "The token the daemon accepts. It is stored encrypted and never shown again.",
+            )}
+          >
+            <Input
+              required
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
             />
           </FormField>
         </>

@@ -100,25 +100,21 @@ beforeEach(() => {
               {
                 type: "e2b",
                 environment_schema: e2bSchema,
-                supports_managed: true,
                 supports_stop: true,
                 supports_destroy: true,
               },
               {
                 type: "direct_local",
                 environment_schema: localSchema,
-                supports_managed: true,
                 supports_stop: false,
                 supports_destroy: false,
               },
               {
                 type: "docker",
                 environment_schema: dockerSchema,
-                supports_managed: true,
                 supports_stop: true,
                 supports_destroy: true,
               },
-              { type: "http_envd", supports_managed: false },
             ]
           : [
               { id: "eprov_e2b", type: "e2b", name: "E2B", enabled: true },
@@ -135,9 +131,9 @@ beforeEach(() => {
                 enabled: true,
               },
               {
-                id: "eprov_http",
-                type: "http_envd",
-                name: "External",
+                id: "eprov_retired",
+                type: "retired",
+                name: "Retired",
                 enabled: true,
               },
             ],
@@ -217,10 +213,10 @@ it("creates an E2B template configuration from ordinary fields without a schema-
   );
 });
 
-it("offers only providers that back managed templates and the idle policy their type supports", async () => {
+it("offers only providers of an offered type and the idle policy their type supports", async () => {
   const user = userEvent.setup();
   await screen.findByRole("button", { name: /^E2B/ });
-  expect(screen.queryByRole("button", { name: /^External/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Retired/ })).toBeNull();
   await selectProvider(user, "Local");
   await user.click(screen.getByRole("button", { name: "Lifecycle" }));
   const stop = screen.getByRole("spinbutton", {

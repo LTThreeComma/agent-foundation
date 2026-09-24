@@ -22,14 +22,9 @@ vi.mock("../../shared/page", () => ({
 }));
 
 const collections: Record<string, unknown[]> = {
-  "/api/v1/provider-types/{kind}": [
-    { type: "http_envd", display_name: "HTTP envd", supports_managed: false },
-    { type: "docker", display_name: "Docker", supports_managed: true },
-  ],
   "/api/v1/organizations/{organization_id}/environment-providers": [
-    { id: "eprov_device", name: "My connection", type: "http_envd" },
-    { id: "eprov_docker", name: "Docker host", type: "docker" },
-  ].map((provider) => ({ ...provider, enabled: true })),
+    { id: "eprov_docker", name: "Docker host", type: "docker", enabled: true },
+  ],
   "/api/v1/workspaces/{workspace_id}/environment-templates": [
     {
       id: "envtpl_python",
@@ -90,32 +85,31 @@ it("allocates a managed environment from an enabled template", async () => {
   cache.clear();
 });
 
-it("registers an http_envd device with a typed Device identity rather than raw state", async () => {
+it("registers an external target by its endpoint and token, with no provider to pick", async () => {
   const { cache, user } = await openCreate();
   await user.click(screen.getByRole("combobox", { name: "Ownership" }));
   await user.click(
     await screen.findByRole("option", { name: /^External target/ }),
   );
-  await user.click(screen.getByRole("combobox", { name: "Provider" }));
-  const device = await screen.findByRole("option", { name: /My connection/ });
-  expect(screen.queryByRole("option", { name: /Docker host/ })).toBeNull();
-  await user.click(device);
-  expect(
-    screen.queryByRole("textbox", {
-      name: "Connection configuration (JSON)",
-    }),
-  ).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "Provider" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "Template" })).toBeNull();
   await user.type(
-    screen.getByRole("textbox", { name: "Device ID" }),
-    "my-laptop",
+    screen.getByLabelText("Endpoint URL"),
+    " https://laptop.example.com:8443 ",
   );
+  const token = screen.getByLabelText("Token") as HTMLInputElement;
+  expect(token.type).toBe("password");
+  await user.type(token, "daemon-token");
   await user.click(screen.getByRole("button", { name: "Create environment" }));
   await waitFor(() => expect(http.POST).toHaveBeenCalledOnce());
   expect(http.POST.mock.calls[0]).toEqual([
     "/api/v1/workspaces/{workspace_id}/environments",
     expect.objectContaining({
       params: { path: { workspace_id: "ws_test" } },
-      body: { provider_id: "eprov_device", device_id: "my-laptop" },
+      body: {
+        endpoint: "https://laptop.example.com:8443",
+        token: "daemon-token",
+      },
     }),
   ]);
   cache.clear();

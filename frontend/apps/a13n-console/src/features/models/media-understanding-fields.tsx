@@ -24,7 +24,7 @@ export type MediaSelection = Schema["MediaUnderstandingSelection"];
 /** What a picker needs to show a Model as itself, wherever it was loaded. */
 export type ModelIdentity = Pick<
   Schema["Model"],
-  "id" | "key" | "name" | "provider_id"
+  "id" | "key" | "name" | "provider_id" | "catalog_ref"
 > & { config: Pick<Schema["Model"]["config"], "model_name"> };
 
 /**
@@ -123,7 +123,13 @@ export function modelOption(model: ModelIdentity, provider?: string) {
     value: model.id,
     label: model.name,
     description: [model.key, provider].filter(Boolean).join(" · "),
-    icon: <ModelIcon upstream={model.config.model_name} size={20} />,
+    icon: (
+      <ModelIcon
+        upstream={model.config.model_name}
+        catalogRef={model.catalog_ref}
+        size={20}
+      />
+    ),
     keywords: [model.key, model.config.model_name],
   };
 }
@@ -327,6 +333,7 @@ export function MediaUnderstandingFields({
                                 icon: stale ? (
                                   <ModelIcon
                                     upstream={stale.config.model_name}
+                                    catalogRef={stale.catalog_ref}
                                     size={20}
                                   />
                                 ) : (

@@ -7,6 +7,7 @@ const inputCapabilities = [
   ["image_understanding", "Images"],
   ["audio_understanding", "Audio"],
   ["video_understanding", "Video"],
+  ["document_understanding", "PDF documents"],
 ] as const;
 
 /** Characteristics as read back, in the shape a model accepts: capabilities it knows only. */

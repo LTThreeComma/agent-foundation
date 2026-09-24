@@ -21,7 +21,7 @@ import { IconTile } from "../../shared/identity";
 import sharedStyles from "../../shared/shared.module.css";
 import { ManageProvidersLink } from "../providers";
 import { modelApi, type ModelScope } from "./api";
-import { CatalogPicker, catalogRef } from "./catalog-picker";
+import { CatalogPicker, catalogRefKey } from "./catalog-picker";
 import { ModelIcon } from "./model-icon";
 import { ModelInformation, characteristicsInput } from "./model-information";
 import { suggestedKey } from "./model-options";
@@ -39,23 +39,12 @@ type Draft = {
   key: string;
   description: string;
   model_name: string;
-  /** The catalogue entry the draft was seeded from; saved models keep none. */
-  catalog_key: string | null;
+  catalog_ref: Schema["CatalogRef"] | null;
   model_api: string;
   characteristics: Schema["HarnessModelCharacteristics-Input"];
   pricing: PriceTable | null;
   enabled: boolean;
 };
-
-/** The draft fields a catalogue entry supplies, as the Service fills them from its key. */
-function catalogFields(item: Schema["CatalogModel"], modelApi: string) {
-  return {
-    model_name: item.model_name,
-    model_api: modelApi,
-    characteristics: characteristicsInput(item.characteristics),
-    pricing: priceTable(item.pricing),
-  };
-}
 
 /** The request defaults a model's configuration carries, as Settings JSON. */
 function requestDefaults(config?: Schema["ModelConfig-Output"]) {
@@ -106,7 +95,7 @@ export function useModelDraft({
     key: original?.value.key ?? "",
     description: original?.value.description ?? "",
     model_name: original?.value.config.model_name ?? "",
-    catalog_key: null,
+    catalog_ref: original?.value.catalog_ref ?? null,
     model_api: original?.value.config.model_api ?? "",
     characteristics: characteristicsInput(
       original?.value.config.characteristics,
@@ -130,9 +119,9 @@ export function useModelDraft({
   });
   const definitions = useModelProviderDefinitions();
   const catalog = useQuery({
-    queryKey: ["model-catalog", provider],
-    enabled: active && !!provider,
-    queryFn: ({ signal }) => api.catalog(provider, signal),
+    queryKey: ["model-catalog"],
+    enabled: active,
+    queryFn: ({ signal }) => api.catalog(signal),
   });
   const selectedProvider = providers.data?.find((item) => item.id === provider);
   const definition = definitions.data?.items.find(
@@ -142,8 +131,11 @@ export function useModelDraft({
   const customEndpoint = Object.entries(selectedProvider?.config ?? {}).some(
     ([key, value]) => key.endsWith("base_url") && !!value,
   );
+  const channels = definition?.catalog_providers ?? [];
   const selectedEntry = catalog.data?.items.find(
-    (item) => item.key === draft.catalog_key,
+    (item) =>
+      draft.catalog_ref &&
+      catalogRefKey(item.ref) === catalogRefKey(draft.catalog_ref),
   );
   const dirty =
     JSON.stringify(draft) !== JSON.stringify(initial) ||
@@ -154,16 +146,27 @@ export function useModelDraft({
   /** Catalog values seed the draft; anything the reader typed wins. */
   function chooseCatalog(item: Schema["CatalogModel"] | null) {
     if (!item) {
-      change("catalog_key", null);
+      change("catalog_ref", null);
       return;
     }
-    setPricingBase(item.pricing);
+    const official = catalog.data?.items.find(
+      (entry) =>
+        entry.identity === item.identity &&
+        `${entry.ref.provider}/${entry.ref.model}` === item.identity,
+    );
+    const pricing = item.pricing ?? official?.pricing ?? null;
+    setPricingBase(pricing);
     setDraft((current) => ({
       ...current,
-      ...catalogFields(item, callingApi),
-      catalog_key: item.key,
-      name: current.name || item.model_name,
-      key: current.key || suggestedKey(item.model_name),
+      catalog_ref: item.ref,
+      model_name: channels.includes(item.ref.provider) ? item.ref.model : "",
+      model_api: channels.includes(item.ref.provider)
+        ? callingApi
+        : "openai.chat_completions",
+      name: current.name || item.name,
+      key: current.key || suggestedKey(item.ref.model),
+      characteristics: characteristicsInput(item.characteristics),
+      pricing: priceTable(pricing),
     }));
   }
   function chooseProvider(id: string, preferredApi = "") {
@@ -172,7 +175,7 @@ export function useModelDraft({
     setPricingBase(null);
     setDraft((current) => ({
       ...current,
-      catalog_key: null,
+      catalog_ref: null,
       model_name: "",
       model_api: preferredApi,
       characteristics: {},
@@ -207,46 +210,27 @@ export function useModelDraft({
       const pricing =
         JSON.stringify(draft.pricing) ===
         JSON.stringify(priceTable(pricingBase))
-          ? pricingBase && { ...pricingBase, model: identity.model }
+          ? pricingBase
           : priceEntry(draft.pricing, pricingBase, identity);
       const body = {
         name: draft.name,
         description: draft.description,
         enabled: draft.enabled,
+        config,
+        pricing,
+        catalog_ref: draft.catalog_ref,
       };
-      if (!original) {
-        // A catalogue key makes the Service fill the configuration and pricing
-        // and excludes our own, so only an unedited catalogue pick sends it.
-        const catalogued =
-          selectedEntry &&
-          !Object.keys(settings).length &&
-          JSON.stringify(
-            catalogFields(selectedEntry, definition?.default_model_api ?? ""),
-          ) ===
-            JSON.stringify({
-              model_name: config.model_name,
-              model_api: callingApi,
-              characteristics: draft.characteristics,
-              pricing: draft.pricing,
-            });
+      if (!original)
         return api.createModel({
           ...body,
           key: draft.key,
           provider_id: provider,
-          ...(catalogued
-            ? { catalog_key: selectedEntry.key }
-            : { config, pricing }),
         });
-      }
       if (!original.etag)
         throw new Error(
           t("Version information is unavailable. Reload this page."),
         );
-      return api.updateModel(original.value.id, original.etag, {
-        ...body,
-        config,
-        pricing,
-      });
+      return api.updateModel(original.value.id, original.etag, body);
     },
     onSuccess: (model) => {
       void cache.invalidateQueries();
@@ -263,6 +247,7 @@ export function useModelDraft({
     definition,
     selectedProvider,
     catalog,
+    channels,
     callingApi,
     customEndpoint,
     selectedEntry,
@@ -288,10 +273,17 @@ export function useModelDraft({
 /** Why the catalog may be incomplete, said once beside the model list. */
 export function CatalogNotice({ model }: { model: ModelDraft }) {
   const { t } = useTranslation();
-  if (model.catalog.error)
+  const { catalog } = model;
+  if (catalog.error || catalog.data?.status === "unavailable")
     return (
       <p className={styles.stepNote}>
         {t("Catalog unavailable. Enter a model ID to continue.")}
+      </p>
+    );
+  if (catalog.data?.status === "stale")
+    return (
+      <p className={styles.stepNote}>
+        {t("Showing the last available model catalog.")}
       </p>
     );
   return null;
@@ -309,24 +301,26 @@ export function ModelSelection({
   actions?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const { draft, selectedEntry, definition } = model;
+  const { draft, selectedEntry, definition, channels } = model;
+  const compatible =
+    !!selectedEntry && !channels.includes(selectedEntry.ref.provider);
   return (
     <div className={sharedStyles.stack}>
       <div className={styles.chosenRow}>
         <IconTile size={36} tone="elevated">
           <ModelIcon
             upstream={draft.model_name}
-            catalogRef={selectedEntry && catalogRef(selectedEntry)}
+            catalogRef={draft.catalog_ref}
             provider={model.selectedProvider?.type}
             size={20}
           />
         </IconTile>
         <span className={styles.chosenCopy}>
           <strong>
-            {selectedEntry?.model_name || draft.model_name || t("Custom model")}
+            {selectedEntry?.name || draft.model_name || t("Custom model")}
           </strong>
           <small>
-            {selectedEntry?.key ??
+            {selectedEntry?.identity ??
               model.selectedProvider?.name ??
               t("Custom model")}
           </small>
@@ -342,7 +336,9 @@ export function ModelSelection({
         <FormField
           label={t("Upstream model")}
           description={t(
-            "Sent to the provider. Change this for gateway aliases or deployment IDs.",
+            compatible
+              ? "Requires an OpenAI-compatible endpoint serving this model. Enter its upstream model ID."
+              : "Sent to the provider. Change this for gateway aliases or deployment IDs.",
           )}
         >
           <Input
@@ -414,13 +410,19 @@ export function ModelFields({ model }: { model: ModelDraft }) {
         value={draft.pricing}
         onChange={(pricing) => model.change("pricing", pricing)}
       />
-      {selectedEntry && draft.pricing && model.customEndpoint && (
-        <p className={styles.stepNote}>
-          {t(
-            "Catalog prices are references from the model provider. Your gateway may charge differently.",
-          )}
-        </p>
+      {selectedEntry?.pricing_warning && (
+        <p className={styles.stepNote}>{t(selectedEntry.pricing_warning)}</p>
       )}
+      {selectedEntry &&
+        draft.pricing &&
+        (model.customEndpoint ||
+          !model.channels.includes(selectedEntry.ref.provider)) && (
+          <p className={styles.stepNote}>
+            {t(
+              "Catalog prices are references from the model provider. Your gateway may charge differently.",
+            )}
+          </p>
+        )}
       <DisclosureSection
         title={t("Advanced")}
         summary={
@@ -490,8 +492,10 @@ export function EditModelForm({
         <CatalogNotice model={model} />
         <CatalogPicker
           entries={model.catalog.data?.items ?? []}
+          channels={model.channels}
+          allowCompatible={model.selectedProvider?.type === "openai"}
           providerName={model.definition?.display_name}
-          value={model.draft.catalog_key}
+          value={model.draft.catalog_ref}
           onSelect={(entry) => {
             model.chooseCatalog(entry);
             setChanging(false);

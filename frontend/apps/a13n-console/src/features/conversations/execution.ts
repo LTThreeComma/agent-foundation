@@ -103,6 +103,8 @@ export interface Execution {
   /** Context snapshots keyed by the model-request step they precede. */
   contextTokens: Record<string, number>;
   lastCursor?: string;
+  /** The tool-call argument stream the last observation holds, and the cursor of its latest delta. */
+  streamedArguments?: { stream: string; cursor: string };
 }
 
 export function emptyExecution(): Execution {

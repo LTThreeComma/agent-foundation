@@ -9,6 +9,7 @@ import {
   readDisplay,
   type Attempts,
 } from "./display";
+import { applyRun, emptyExecution, type RunFold } from "./execution";
 
 const attempt = (number: number): Schema["AttemptView"] => ({
   id: `att_${number}`,
@@ -255,4 +256,104 @@ it("recognizes the transport fragments of a large event", () => {
     ),
   ).toBe(true);
   expect(isFragment(delta({}))).toBe(false);
+});
+
+const PART_DELTA = "a13n.pydantic_ai.part_delta";
+const start = Date.parse("2026-09-20T10:00:03.000Z");
+
+/** A tool call's streamed argument delta, as the stream protocol reports it. */
+function argumentDelta(sequence: number, args: string, index = 1): ThreadDelta {
+  const timestamp = start + sequence;
+  return delta({
+    attempt: 1,
+    sequence,
+    event: {
+      type: "CUSTOM",
+      timestamp,
+      name: PART_DELTA,
+      value: {
+        thread_id: "thr_1",
+        run_id: "harness_1",
+        sequence,
+        occurred_at: new Date(timestamp).toISOString(),
+        event: {
+          index,
+          delta: {
+            tool_name_delta: null,
+            args_delta: args,
+            tool_call_id: null,
+            part_delta_kind: "tool_call",
+          },
+          event_kind: "part_delta",
+        },
+      },
+    },
+    item: { id: `obs_${sequence}`, kind: "observation", state: "completed" },
+  });
+}
+
+function observed(events: ReturnType<typeof deltaEvent>[]) {
+  const fold = events.reduce<RunFold>(applyRun, {
+    items: new Map(),
+    execution: emptyExecution(),
+  });
+  return fold.execution.observations.map(({ name, occurredAt, detail }) => ({
+    name,
+    occurredAt,
+    detail,
+  }));
+}
+
+it("folds a streamed tool call's argument deltas live as the committed display does", () => {
+  const attemptsOne: Attempts = new Map([[1, attempt(1)]]);
+  const pieces = Array.from({ length: 300 }, (_, index) => `${index},`);
+  const each = pieces.map((piece, index) =>
+    deltaEvent(argumentDelta(index + 1, piece), attemptsOne),
+  );
+  // The Service coalesced the same deltas into two stream events.
+  const merged = [
+    argumentDelta(1, pieces.slice(0, 200).join("")),
+    argumentDelta(2, pieces.slice(200).join("")),
+  ].map((entry) => deltaEvent(entry, attemptsOne));
+  const whole = argumentDelta(1, pieces.join("")).event;
+  const committed = displayEvents(
+    {
+      run: fixtureRun(),
+      position: "1-300",
+      complete: false,
+      dropped: 0,
+      items: [
+        item({
+          id: "obs_arguments",
+          kind: "observation",
+          first_stream_id: "1-1",
+          last_stream_id: "1-300",
+          started_at: new Date(start + 1).toISOString(),
+          ended_at: new Date(start + 1).toISOString(),
+          content: { name: PART_DELTA, value: whole.value },
+        }),
+      ],
+    },
+    attemptsOne,
+  );
+
+  expect(observed(each)).toEqual(observed(committed));
+  expect(observed(merged)).toEqual(observed(committed));
+  expect(observed(each)).toHaveLength(1);
+});
+
+it("keeps apart the argument deltas of other parts or separated by other events", () => {
+  const attemptsOne: Attempts = new Map([[1, attempt(1)]]);
+  const events = [
+    argumentDelta(1, "{"),
+    argumentDelta(2, "}", 2),
+    argumentDelta(4, "{"),
+    argumentDelta(5, "}"),
+  ].map((entry) => deltaEvent(entry, attemptsOne));
+
+  expect(observed(events).map((entry) => entry.detail)).toMatchObject([
+    { index: 1, delta: { args_delta: "{" } },
+    { index: 2, delta: { args_delta: "}" } },
+    { index: 1, delta: { args_delta: "{}" } },
+  ]);
 });

@@ -347,7 +347,7 @@ export function TemplateConfig({
   );
 }
 
-/** Managed-capable providers, as brand tiles. */
+/** Enabled providers of a type this deployment offers, as brand tiles. */
 function ProviderCatalog({
   providers,
   definitions,
@@ -360,14 +360,10 @@ function ProviderCatalog({
   onChoose: (id: string) => void;
 }) {
   const { t } = useTranslation();
-  const managed = (providers ?? []).filter(
+  const offered = (providers ?? []).filter(
     (provider) =>
       provider.enabled &&
-      definitions?.some(
-        (definition) =>
-          definition.type === provider.type &&
-          definition.supports_managed === true,
-      ),
+      definitions?.some((definition) => definition.type === provider.type),
   );
   return (
     <CatalogTiles
@@ -380,8 +376,8 @@ function ProviderCatalog({
         "Templates run on an environment provider. Add one under Providers to see it here.",
       )}
     >
-      {managed.length > 0
-        ? managed.map((provider) => {
+      {offered.length > 0
+        ? offered.map((provider) => {
             const kind = definitions?.find(
               (definition) => definition.type === provider.type,
             )?.display_name;

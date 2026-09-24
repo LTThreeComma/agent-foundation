@@ -8,6 +8,7 @@ import { EnvironmentDetails } from "./instance-details";
 const http = vi.hoisted(() => ({
   GET: vi.fn(),
   POST: vi.fn(),
+  PATCH: vi.fn(),
   DELETE: vi.fn(),
 }));
 const access = vi.hoisted(() => ({ can: vi.fn((_verb: string) => true) }));
@@ -47,6 +48,7 @@ const environment: Schema["EnvironmentView"] = {
   provider_id: "eprov_test",
   template_id: "envtpl_test",
   device_id: null,
+  endpoint: null,
   owner_principal_id: null,
   status: "ready",
   operation_id: null,
@@ -57,6 +59,16 @@ const environment: Schema["EnvironmentView"] = {
   created_by_id: "usr_test",
   created_at: "2026-09-18T00:00:00Z",
   updated_at: "2026-09-18T00:00:00Z",
+};
+/** An external target: a daemon at its own endpoint, owned by who registered it. */
+const external: Schema["EnvironmentView"] = {
+  ...environment,
+  name: "Work laptop",
+  provider_id: null,
+  template_id: null,
+  device_id: "work-laptop",
+  endpoint: "https://laptop.example.com:8443",
+  owner_principal_id: "usr_test",
 };
 const template = {
   id: "envtpl_test",
@@ -168,13 +180,12 @@ it.each([
 );
 
 it.each([
-  ["managed", "envtpl_test"],
-  ["external", null],
+  ["managed", environment],
+  ["external", external],
 ] as const)(
   "explains %s retention from the template's current idle policy",
-  async (ownership, templateId) => {
+  async (ownership, value) => {
     http.GET.mockClear();
-    const value = { ...environment, template_id: templateId };
     serve(() => value);
     const { cache, user } = open(value);
     await user.click(screen.getByRole("button", { name: "Details" }));
@@ -234,23 +245,104 @@ it.each([
   },
 );
 
-it("shows a registered device's ID and retires it without stop", async () => {
-  const device = {
-    ...environment,
-    template_id: null,
-    device_id: "work-laptop",
-  };
-  serve(() => device, providerType(false, false));
-  const { cache, user } = open(device);
+it("shows an external target's endpoint and device, and retires it without stop", async () => {
+  http.GET.mockClear();
+  serve(() => external, providerType(false, false));
+  const { cache, user } = open(external);
   await user.click(screen.getByRole("button", { name: "Details" }));
   expect(await screen.findByText("Device ID")).toBeTruthy();
   expect(screen.getByText("work-laptop")).toBeTruthy();
+  expect(screen.getByText("Endpoint")).toBeTruthy();
+  expect(screen.getByText("https://laptop.example.com:8443")).toBeTruthy();
+  expect(screen.queryByText("Provider")).toBeNull();
+  expect(
+    http.GET.mock.calls.some(([path]) =>
+      path.includes("environment-providers"),
+    ),
+  ).toBe(false);
   await user.click(
     await screen.findByRole("button", { name: "Environment actions" }),
   );
   await screen.findByRole("menu");
   expect(screen.queryByRole("menuitem", { name: "Stop target" })).toBeNull();
   expect(screen.getByRole("menuitem", { name: "Delete target" })).toBeTruthy();
+  cache.clear();
+});
+
+it.each([
+  ["a new token", "https://laptop.example.com:8443", {}],
+  [
+    "a new endpoint with its token",
+    "https://build-box.example.com",
+    { endpoint: "https://build-box.example.com" },
+  ],
+] as const)(
+  "updates an external target's connection with %s",
+  async (_change, endpoint, moved) => {
+    let current = external;
+    serve(() => current);
+    http.PATCH.mockReset().mockImplementation(async () => {
+      current = { ...current, endpoint, version: 2 };
+      return { data: current };
+    });
+    const { cache, user } = open(external);
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Update connection" }),
+    );
+    const save = screen.getByRole("button", { name: "Save connection" });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    const field = screen.getByLabelText("Endpoint URL");
+    await user.clear(field);
+    await user.type(field, endpoint);
+    await user.type(screen.getByLabelText("Token"), "rotated-token");
+    await user.click(save);
+    await waitFor(() => expect(http.PATCH).toHaveBeenCalledOnce());
+    expect(http.PATCH).toHaveBeenCalledWith(
+      "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
+      {
+        params: {
+          path: { workspace_id: "ws_test", environment_id: "env_test" },
+        },
+        headers: { "If-Match": '"env_test:1"' },
+        body: { token: "rotated-token", ...moved },
+      },
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Save connection" }),
+      ).toBeNull(),
+    );
+    expect(screen.queryByText("rotated-token")).toBeNull();
+    cache.clear();
+  },
+);
+
+it("shows why a lost sandbox cannot be used, and that deleting it is allowed while mounted", async () => {
+  const lost: Schema["EnvironmentView"] = {
+    ...environment,
+    failure: {
+      code: "environment_lost",
+      message:
+        "The sandbox no longer exists at its provider; delete this environment and use a new one",
+      certainty: "known",
+      permanent: true,
+      operation_id: null,
+      at: "2026-09-18T00:00:00Z",
+    },
+  };
+  serve(() => lost);
+  const { cache, user } = open(lost);
+  await user.click(screen.getByRole("button", { name: "Details" }));
+  expect(await screen.findByText(lost.failure!.message)).toBeTruthy();
+  expect(screen.getByText("Lifecycle command")).toBeTruthy();
+  expect(screen.queryByText("Command")).toBeNull();
+  await lifecycle(user, "Delete target");
+  expect(
+    await screen.findByText(
+      "The environment is retired and cannot be used again. A managed target is destroyed with its files; a registered device keeps running outside the Service. Environments in use by a run, or mounted by a conversation while still usable, cannot be deleted.",
+    ),
+  ).toBeTruthy();
   cache.clear();
 });
 

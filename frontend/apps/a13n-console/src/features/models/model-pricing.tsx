@@ -61,8 +61,9 @@ export function priceTable(entry: Entry | null): PriceTable | null {
 
 /**
  * The entry an edited table saves: the standard rule's token prices replaced,
- * every other price and rule the entry declares kept, the model it prices
- * named, and the Console named as the source of the prices.
+ * every other price and rule the entry declares kept, and the Console named as
+ * the source of the prices. The entry prices its own model's calls; the
+ * provider and model it names only record where the prices came from.
  */
 export function priceEntry(
   table: PriceTable | null,
@@ -93,7 +94,7 @@ export function priceEntry(
   };
   return {
     provider: base?.provider ?? identity.provider,
-    model: identity.model,
+    model: base?.model ?? identity.model,
     context_window: base?.context_window,
     source: "console",
     source_revision: "manual",

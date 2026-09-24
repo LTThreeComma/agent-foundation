@@ -17,6 +17,7 @@ import { CopyableId, ProviderIcon } from "../../shared/identity";
 import { Panel } from "../../shared/page";
 import { environmentQuery } from "./api";
 import styles from "./environments.module.css";
+import { EnvironmentConnectionEditor } from "./instance-connection";
 import { EnvironmentNameEditor } from "./instance-name";
 import { useEnvironmentTypes } from "./providers";
 
@@ -70,7 +71,9 @@ export function EnvironmentPanel({
     { can } = useWorkspace(),
     { t } = useTranslation(),
     [renaming, setRenaming] = useState(false),
-    [nameEditorKey, setNameEditorKey] = useState(0);
+    [nameEditorKey, setNameEditorKey] = useState(0),
+    [reconnecting, setReconnecting] = useState(false),
+    [connectionEditorKey, setConnectionEditorKey] = useState(0);
   const detail = useQuery({
     ...environmentQuery(client, environment.workspace_id, environment.id),
     enabled: open,
@@ -78,9 +81,10 @@ export function EnvironmentPanel({
     refetchInterval: (query) =>
       query.state.data?.value.operation_id ? 2000 : false,
   });
+  // An external target has no provider: it is reached at its own endpoint.
   const provider = useQuery({
     queryKey: ["environment-provider", environment.provider_id],
-    enabled: open && can("read"),
+    enabled: open && can("read") && !!environment.provider_id,
     queryFn: ({ signal }) =>
       client.http
         .GET(
@@ -89,7 +93,7 @@ export function EnvironmentPanel({
             params: {
               path: {
                 organization_id: environment.organization_id,
-                provider_id: environment.provider_id,
+                provider_id: environment.provider_id!,
               },
             },
             signal,
@@ -152,8 +156,8 @@ export function EnvironmentPanel({
   const capabilities = types.data?.items.find(
     (item) => item.type === provider.data?.type,
   );
-  // Registered devices are connect-only: the Service never stops them, and
-  // deleting one only retires it, so their provider type decides nothing.
+  // External targets are connect-only: the Service never stops them, and
+  // deleting one only retires it, so no provider type decides anything.
   const managed = !!value?.template_id;
   const supportsStop = managed && !!capabilities?.supports_stop;
   const supportsDestroy = !managed || !!capabilities?.supports_destroy;
@@ -208,7 +212,7 @@ export function EnvironmentPanel({
                   subject={environment.id}
                   title={t("Delete environment target")}
                   description={t(
-                    "The environment is retired and cannot be used again. A managed target is destroyed with its files; a registered device keeps running outside the Service. Environments mounted by a conversation or in use by a run cannot be deleted.",
+                    "The environment is retired and cannot be used again. A managed target is destroyed with its files; a registered device keeps running outside the Service. Environments in use by a run, or mounted by a conversation while still usable, cannot be deleted.",
                   )}
                   danger
                   triggerElement={
@@ -279,22 +283,55 @@ export function EnvironmentPanel({
                   <Fact label={t("Ownership")}>
                     {t(value.template_id ? "Managed" : "External")}
                   </Fact>
-                  <Fact label={t("Provider")}>
-                    {provider.data ? (
-                      <>
-                        <ProviderIcon type={provider.data.type} />
-                        <span>{provider.data.name}</span>
-                      </>
-                    ) : (
-                      <CopyableId value={value.provider_id} />
-                    )}
-                  </Fact>
+                  {value.endpoint ? (
+                    <Fact label={t("Endpoint")}>
+                      <CopyableId value={value.endpoint} />
+                      {can("write") &&
+                        value.status !== "deleted" &&
+                        !reconnecting && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setReconnecting(true)}
+                          >
+                            {t("Update connection")}
+                          </Button>
+                        )}
+                    </Fact>
+                  ) : (
+                    value.provider_id && (
+                      <Fact label={t("Provider")}>
+                        {provider.data ? (
+                          <>
+                            <ProviderIcon type={provider.data.type} />
+                            <span>{provider.data.name}</span>
+                          </>
+                        ) : (
+                          <CopyableId value={value.provider_id} />
+                        )}
+                      </Fact>
+                    )
+                  )}
                   {value.template_id && (
                     <Fact label={t("Template")}>
                       <CopyableId value={value.template_id} />
                     </Fact>
                   )}
                 </dl>
+                {reconnecting && can("write") && (
+                  <EnvironmentConnectionEditor
+                    key={connectionEditorKey}
+                    environment={value}
+                    etag={detail.data?.etag}
+                    onClose={() => setReconnecting(false)}
+                    reload={async () => {
+                      const result = await detail.refetch();
+                      if (result.isSuccess)
+                        setConnectionEditorKey((current) => current + 1);
+                    }}
+                  />
+                )}
               </section>
               <ErrorNotice error={template.error} />
               {(!managed || template.data) && (
@@ -303,16 +340,21 @@ export function EnvironmentPanel({
             </>
           )
         )}
-        {value?.operation_id && (
+        {(value?.operation_id || value?.failure) && (
           <section className={styles.factGroup} role="status">
             <h3>{t("Lifecycle command")}</h3>
             <dl className={styles.facts}>
               <Fact label={t("Status")}>
                 <StatePill state={value.failure ? "failed" : "pending"} />
               </Fact>
-              <Fact label={t("Command")}>
-                <CopyableId value={value.operation_id} />
-              </Fact>
+              {value.operation_id && (
+                <Fact label={t("Command")}>
+                  <CopyableId value={value.operation_id} />
+                </Fact>
+              )}
+              {value.failure && (
+                <Fact label={t("Error")}>{value.failure.message}</Fact>
+              )}
             </dl>
           </section>
         )}
@@ -330,7 +372,7 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** The template's current idle policy; a registered device has none. */
+/** The template's current idle policy; an external target has none. */
 function RetentionDetails({
   policy,
 }: {

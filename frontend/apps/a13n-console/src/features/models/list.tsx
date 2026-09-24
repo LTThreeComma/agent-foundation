@@ -251,6 +251,7 @@ export function Models({ scope }: { scope: ModelScope }) {
                     icon={
                       <ModelIcon
                         upstream={item.config.model_name}
+                        catalogRef={item.catalog_ref}
                         provider={providerById.get(item.provider_id)?.type}
                         size={20}
                       />
