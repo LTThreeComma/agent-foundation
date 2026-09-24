@@ -24,8 +24,11 @@ from a13n_harness.providers.environment.models import (
 )
 from a13n_harness.providers.environment.operations import EnvironmentOperations
 from a13n_service.distribution import OSS
+from a13n_service.infra.crypto import Envelope, SecretLocation
 from a13n_service.infra.db import transaction
 from a13n_service.providers.registry import Registry
+from a13n_service.runs.environments import external
+from a13n_service.runs.environments.adapters import Target
 from a13n_service.runs.environments.tables import EnvironmentRow
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy import func, update
@@ -296,3 +299,39 @@ async def unmount(env: SimpleNamespace, thread_id: str) -> None:
         f"{env.workspace}/threads/{thread_id}/environments/workspace", headers={"if-match": thread.headers["etag"]}
     )
     assert removed.status_code == 204, removed.text
+
+
+# External targets: the token test daemons accept, and requests against a registered target.
+EXTERNAL_TOKEN = "external-target-token"
+
+
+async def register(service: SimpleNamespace, endpoint: str, token: str = EXTERNAL_TOKEN) -> httpx2.Response:
+    return await service.client.post(f"{service.workspace}/environments", json={"endpoint": endpoint, "token": token})
+
+
+async def change(service: SimpleNamespace, environment_id: str, body: dict) -> httpx2.Response:
+    path = f"{service.workspace}/environments/{environment_id}"
+    current = await service.client.get(path)
+    return await service.client.patch(path, json=body, headers={"if-match": current.headers["etag"]})
+
+
+async def stored(service: SimpleNamespace, environment_id: str) -> EnvironmentRow:
+    async with transaction(service.runtime.storage) as session:
+        row = await session.get(EnvironmentRow, environment_id)
+    assert row is not None
+    return row
+
+
+async def target(service: SimpleNamespace, environment_id: str) -> Target:
+    row = await stored(service, environment_id)
+    return Target(row.id, external.account(row), {}, None)
+
+
+def revealed(service: SimpleNamespace, row: EnvironmentRow) -> bytes:
+    assert row.token is not None
+    location = SecretLocation(row.organization_id, "environments", "token", row.id)
+    return service.runtime.keys.reveal(Envelope.model_validate(row.token), location)
+
+
+def details(response: httpx2.Response) -> dict:
+    return response.json()["error"]["details"]

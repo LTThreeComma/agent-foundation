@@ -22,7 +22,8 @@ on:
       - "packages/a13n-service/a13n_service/providers/endpoints.py"
       - "packages/a13n-service/a13n_service/infra/crypto.py"
       - "packages/a13n-service/a13n_service/runs/environments/**"
-      - "packages/a13n-service/tests/test_environments_external.py"
+      - "packages/a13n-service/tests/test_environments_envd.py"
+      - "packages/a13n-service/tests/environments_support.py"
       - "examples/environment-provider/**"
       - "proto/a13n-envd/eip/**"
       - "pyproject.toml"
@@ -55,7 +56,8 @@ on:
       - "packages/a13n-service/a13n_service/providers/endpoints.py"
       - "packages/a13n-service/a13n_service/infra/crypto.py"
       - "packages/a13n-service/a13n_service/runs/environments/**"
-      - "packages/a13n-service/tests/test_environments_external.py"
+      - "packages/a13n-service/tests/test_environments_envd.py"
+      - "packages/a13n-service/tests/environments_support.py"
       - "examples/environment-provider/**"
       - "proto/a13n-envd/eip/**"
       - "pyproject.toml"
@@ -147,7 +149,8 @@ jobs:
               - 'packages/a13n-service/a13n_service/providers/endpoints.py'
               - 'packages/a13n-service/a13n_service/infra/crypto.py'
               - 'packages/a13n-service/a13n_service/runs/environments/**'
-              - 'packages/a13n-service/tests/test_environments_external.py'
+              - 'packages/a13n-service/tests/test_environments_envd.py'
+              - 'packages/a13n-service/tests/environments_support.py'
               - 'examples/environment-provider/**'
               - 'proto/a13n-envd/eip/**'
               - 'scripts/eip_codegen/**'

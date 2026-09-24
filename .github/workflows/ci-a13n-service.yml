@@ -138,6 +138,7 @@ jobs:
           --junitxml=test-results/service.xml
           -o faulthandler_timeout=120
           -o faulthandler_exit_on_timeout=true
+          --ignore=packages/a13n-service/tests/test_environments_envd.py
           packages/a13n-service/tests
 
       - name: Require Service execution without skips
