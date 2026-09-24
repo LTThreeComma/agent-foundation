@@ -130,6 +130,7 @@ require_https = false
 lease_seconds = {LEASE_SECONDS}
 scan_seconds = 0.2
 authority_seconds = 0.2
+renewal_timeout = 0.2
 drain_seconds = {DRAIN_SECONDS}
 [control]
 scan_seconds = 0.2

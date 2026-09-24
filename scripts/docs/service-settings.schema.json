@@ -1016,10 +1016,17 @@
           "type": "number"
         },
         "authority_seconds": {
-          "default": 1,
+          "default": 5,
           "exclusiveMinimum": 0,
           "maximum": 30,
           "title": "Authority Seconds",
+          "type": "number"
+        },
+        "renewal_timeout": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "maximum": 30,
+          "title": "Renewal Timeout",
           "type": "number"
         },
         "drain_seconds": {

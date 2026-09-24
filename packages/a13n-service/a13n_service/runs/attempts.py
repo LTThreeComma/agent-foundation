@@ -43,7 +43,7 @@ class AttemptControl:
     handoff: asyncio.Event = field(default_factory=asyncio.Event)
     # Event-loop time when the lease runs out unless renewed, measured before the claim or renewal was sent.
     deadline: float = math.inf
-    # Renewal is due every third of a lease; a lease with less left has missed a confirmed renewal.
+    # Stop dispatching with this much lease time left if no renewal has been confirmed.
     renewal_margin: float = 0.0
 
     def stop(self, outcome: Outcome) -> None:
@@ -131,17 +131,16 @@ async def prove(storage: Storage, lease: Lease) -> None:
         await lock_lease(session, lease)
 
 
-async def renew(storage: Storage, access: Access, lease: Lease, *, seconds: float | None) -> Outcome | None:
-    """Prove the lease and, with `seconds`, extend it from database time. Returns the outcome the run must stop
+async def renew(storage: Storage, access: Access, lease: Lease, *, seconds: float) -> Outcome | None:
+    """Prove the lease and extend it from database time. Returns the outcome the run must stop
     with: cancelled once an interrupt was requested, failed once its principal lost the authority to run it.
 
     An expired lease is never revived, even before the sweep closes it.
     """
     async with transaction(storage) as session:
         run, attempt, current = await lock_lease(session, lease)
-        if seconds is not None:
-            attempt.heartbeat_at = current
-            attempt.lease_expires_at = current + timedelta(seconds=seconds)
+        attempt.heartbeat_at = current
+        attempt.lease_expires_at = current + timedelta(seconds=seconds)
         if run.cancel_requested_at is not None:
             return Outcome.cancelled()
         try:

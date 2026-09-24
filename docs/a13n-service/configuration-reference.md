@@ -111,7 +111,8 @@ The complete machine-readable validation schema, including named enum/union defi
 | `worker.max_attempts`      | `A13N_WORKER__MAX_ATTEMPTS`      | integer        | minimum=1; maximum=20; default=3                 |
 | `worker.lease_seconds`     | `A13N_WORKER__LEASE_SECONDS`     | integer        | minimum=3; maximum=300; default=30               |
 | `worker.scan_seconds`      | `A13N_WORKER__SCAN_SECONDS`      | number         | maximum=30; exclusiveMinimum=0; default=1        |
-| `worker.authority_seconds` | `A13N_WORKER__AUTHORITY_SECONDS` | number         | maximum=30; exclusiveMinimum=0; default=1        |
+| `worker.authority_seconds` | `A13N_WORKER__AUTHORITY_SECONDS` | number         | maximum=30; exclusiveMinimum=0; default=5        |
+| `worker.renewal_timeout`   | `A13N_WORKER__RENEWAL_TIMEOUT`   | number         | maximum=30; exclusiveMinimum=0; default=1        |
 | `worker.drain_seconds`     | `A13N_WORKER__DRAIN_SECONDS`     | number         | maximum=300; exclusiveMinimum=0; default=10      |
 | `worker.delivery_count`    | `A13N_WORKER__DELIVERY_COUNT`    | integer        | minimum=1; maximum=128; default=8                |
 | `worker.delivery_bytes`    | `A13N_WORKER__DELIVERY_BYTES`    | integer        | minimum=1024; maximum=16777216; default=262144   |

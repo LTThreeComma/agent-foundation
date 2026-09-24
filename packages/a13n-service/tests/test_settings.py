@@ -63,7 +63,8 @@ def test_a_distribution_section_cannot_shadow_a_core_section() -> None:
     [
         ({"worker": {"scan_seconds": 2}}, "worker.scan_seconds"),
         ({"worker": {"lease_seconds": 3}}, "worker.authority_seconds"),
-        ({"worker": {"lease_seconds": 12}}, "objects.timeout"),
+        ({"worker": {"lease_seconds": 12, "authority_seconds": 1}}, "objects.timeout"),
+        ({"worker": {"renewal_timeout": 5}}, "worker.renewal_timeout"),
         ({"control": {"outbox_lease_seconds": 20}}, "control.webhook_timeout"),
         ({"worker": {"drain_seconds": 20}}, "worker.drain_seconds"),
         ({"objects": {"upload_bytes": 4194304}}, "objects.upload_bytes"),
@@ -76,4 +77,5 @@ def test_bounds_must_nest(values: dict, refused: str) -> None:
 
 
 def test_defaults_nest() -> None:
-    Settings()
+    worker = Settings().worker
+    assert (worker.lease_seconds, worker.authority_seconds, worker.renewal_timeout) == (30, 5, 1)

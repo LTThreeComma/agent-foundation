@@ -82,10 +82,16 @@ async def test_a_claim_failure_keeps_the_worker_and_its_running_attempts(runtime
 
 
 async def test_a_renewal_that_never_answers_stops_the_attempt(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    runtime = _with_worker(runtime, lease_seconds=3, authority_seconds=0.05, scan_seconds=5)
+    runtime = _with_worker(runtime, lease_seconds=3, authority_seconds=0.01, renewal_timeout=0.1, scan_seconds=5)
+    durations: list[float] = []
 
     async def hanging_renew(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
-        await asyncio.Event().wait()
+        loop = asyncio.get_running_loop()
+        sent = loop.time()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            durations.append(loop.time() - sent)
 
     unclaimed = [LEASE]
 
@@ -112,6 +118,49 @@ async def test_a_renewal_that_never_answers_stops_the_attempt(runtime, monkeypat
     loop.cancel()
     with pytest.raises(asyncio.CancelledError):
         await loop
+    assert len(durations) >= 2
+    assert min(durations) >= runtime.settings.worker.renewal_timeout * 0.9
+
+
+async def test_every_supervision_renews_but_only_confirmation_advances_the_deadline(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runtime = _with_worker(runtime, authority_seconds=0.01)
+    loop = asyncio.get_running_loop()
+    initial = loop.time() + 29
+    control = AttemptControl(deadline=initial, renewal_margin=10)
+    execution = asyncio.create_task(asyncio.Event().wait())
+    calls = 0
+    confirmed: float | None = None
+    dispatched: float | None = None
+
+    async def renewing(storage, access, lease, *, seconds) -> None:  # type: ignore[no-untyped-def]
+        nonlocal calls, confirmed, dispatched
+        calls += 1
+        assert seconds == 30  # Renew even while more than two thirds of the lease remain.
+        assert not execution.done()
+        if calls == 1:
+            dispatched = loop.time()
+            await asyncio.sleep(0.01)
+            assert control.deadline == initial  # An unconfirmed transaction grants no extra time.
+            return
+        if calls == 2:
+            assert dispatched is not None
+            confirmed = control.deadline
+            assert initial < confirmed <= dispatched + seconds
+            raise ConnectionError("database restarted")
+        assert control.deadline == confirmed  # A failed renewal keeps the last confirmed deadline.
+        raise LeaseLost()
+
+    monkeypatch.setattr(worker_module, "renew", renewing)
+    worker = Worker(runtime, execute)
+    try:
+        async with asyncio.timeout(5):
+            await worker._supervise(LEASE, control, execution)
+            with pytest.raises(asyncio.CancelledError):
+                await execution
+        assert calls == 3
+    finally:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
 
 
 async def test_no_call_is_sent_once_the_lease_missed_its_renewal(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
@@ -241,6 +290,9 @@ async def test_a_stale_attempt_changes_nothing_after_a_takeover(service, scripte
         await session.execute(
             update(AttemptRow).where(AttemptRow.run_id == run_id).values(lease_expires_at=AttemptRow.created_at)
         )
+    # Expiry alone fences the worker, even before the sweep or a takeover has run.
+    with pytest.raises(LeaseLost):
+        await renew(runtime.storage, runtime.access, stale, seconds=30)
     await expire_leases(runtime, batch=10)
     async with transaction(runtime.storage) as session:
         await session.execute(update(RunRow).where(RunRow.id == run_id).values(available_at=RunRow.created_at))

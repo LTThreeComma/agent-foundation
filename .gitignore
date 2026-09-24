@@ -12,6 +12,10 @@ tmp/
 # Machine-specific Service configuration, selected with SERVICE_CONFIG
 /dev/service/local.private.toml
 
+# Local live-test configuration, state, and reports
+/dev/live_tests/providers.local.toml
+/dev/live_tests/.state/
+
 # Python bytecode and native extensions
 __pycache__/
 *.py[cod]

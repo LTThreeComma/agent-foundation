@@ -100,9 +100,9 @@ class Worker:
             self.slot_released.set()
 
     async def _supervise(self, lease: Lease, control: AttemptControl, execution: asyncio.Task[None]) -> None:
-        """Renew every third of the lease; poll cancellation and the principal's authority every authority interval.
+        """Renew the lease and poll cancellation and the principal's authority every authority interval.
 
-        A renewal not confirmed within one authority interval has failed. Once the lease has missed its renewal,
+        A renewal not confirmed within its own timeout has failed. Once the lease has missed its renewal,
         stop the execution: another worker may take over once the lease expires, and a stale attempt must not
         keep dispatching.
         """
@@ -111,14 +111,13 @@ class Worker:
         while True:
             await asyncio.sleep(settings.authority_seconds)
             sent = loop.time()
-            extend = control.deadline - sent <= settings.lease_seconds * 2 / 3
             try:
-                async with asyncio.timeout(settings.authority_seconds):
+                async with asyncio.timeout(settings.renewal_timeout):
                     stop = await renew(
                         self.runtime.storage,
                         self.runtime.access,
                         lease,
-                        seconds=settings.lease_seconds if extend else None,
+                        seconds=settings.lease_seconds,
                     )
             except LeaseLost:
                 execution.cancel()
@@ -129,7 +128,6 @@ class Worker:
                     execution.cancel()
                     return
                 continue
-            if extend:
-                control.deadline = sent + settings.lease_seconds
+            control.deadline = sent + settings.lease_seconds
             if stop is not None:
                 control.stop(stop)

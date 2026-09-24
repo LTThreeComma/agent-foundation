@@ -188,7 +188,8 @@ class Worker(Section):
     max_attempts: int = Field(default=3, ge=1, le=20)
     lease_seconds: int = Field(default=30, ge=3, le=300)
     scan_seconds: float = Field(default=1, gt=0, le=30)
-    authority_seconds: float = Field(default=1, gt=0, le=30)
+    authority_seconds: float = Field(default=5, gt=0, le=30)
+    renewal_timeout: float = Field(default=1, gt=0, le=30)
     drain_seconds: float = Field(default=10, gt=0, le=300)
     # One boundary delivery batch of steers; the defaults await vertical-slice measurements.
     delivery_count: int = Field(default=8, ge=1, le=128)
@@ -331,7 +332,12 @@ class Settings(Section):
             ("worker.scan_seconds", worker.scan_seconds, "redis.timeout", self.redis.timeout),
             ("thread stream block (1 s)", 1, "redis.timeout", self.redis.timeout),
             # An attempt survives one failed renewal, and still has room to write an object before it expires.
-            ("worker.authority_seconds", 3 * worker.authority_seconds, "worker.lease_seconds", worker.lease_seconds),
+            (
+                "worker.authority_seconds + worker.renewal_timeout",
+                3 * (worker.authority_seconds + worker.renewal_timeout),
+                "worker.lease_seconds",
+                worker.lease_seconds,
+            ),
             ("objects.timeout", 3 * self.objects.timeout, "worker.lease_seconds", worker.lease_seconds),
             # A sender finishes and settles within its outbox claim.
             (
