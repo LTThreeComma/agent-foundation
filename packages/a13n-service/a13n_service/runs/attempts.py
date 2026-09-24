@@ -4,7 +4,7 @@ import asyncio
 import hmac
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -129,22 +129,3 @@ async def prove(storage: Storage, lease: Lease) -> None:
     """Raise `LeaseLost` unless the lease is still current, for work that must not continue without it."""
     async with transaction(storage) as session:
         await lock_lease(session, lease)
-
-
-async def renew(storage: Storage, access: Access, lease: Lease, *, seconds: float) -> Outcome | None:
-    """Prove the lease and extend it from database time. Returns the outcome the run must stop
-    with: cancelled once an interrupt was requested, failed once its principal lost the authority to run it.
-
-    An expired lease is never revived, even before the sweep closes it.
-    """
-    async with transaction(storage) as session:
-        run, attempt, current = await lock_lease(session, lease)
-        attempt.heartbeat_at = current
-        attempt.lease_expires_at = current + timedelta(seconds=seconds)
-        if run.cancel_requested_at is not None:
-            return Outcome.cancelled()
-        try:
-            await authorize_execution(session, access, run)
-        except AuthorityRevoked as revoked:
-            return revoked.outcome
-        return None

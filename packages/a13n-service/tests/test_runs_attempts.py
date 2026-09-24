@@ -1,7 +1,7 @@
 """Attempts: the worker loop, claims, lease renewal and takeover, checkpoint commits and usage ingestion."""
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import timedelta
 
@@ -11,156 +11,18 @@ from a13n_service.infra.db import transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.resources.models import service as models_service
 from a13n_service.runs import seal as seal_module
-from a13n_service.runs import worker as worker_module
-from a13n_service.runs.attempts import AttemptControl, Lease, LeaseLost, renew
+from a13n_service.runs.attempts import AttemptControl, LeaseLost
 from a13n_service.runs.checkpoints import FORMAT
 from a13n_service.runs.claim import claim
 from a13n_service.runs.execute import execute
-from a13n_service.runs.runtime import Runtime
+from a13n_service.runs.renewals import Renewal, renew
 from a13n_service.runs.schemas import Outcome
 from a13n_service.runs.seal import expire_leases, seal_attempt
 from a13n_service.runs.tables import AttemptRow, RunRow, UsageRecordRow
 from a13n_service.runs.usage import UsageBuffer, UsageReport, ingest_late
-from a13n_service.runs.worker import Worker
 from sqlalchemy import select, text, update
 
 pytestmark = pytest.mark.anyio
-
-LEASE = Lease(
-    run_id="run_test",
-    attempt_id="rat_test",
-    thread_id="thread_test",
-    organization_id="org_test",
-    workspace_id="ws_test",
-    number=1,
-    worker_id="worker-test",
-    token="token",
-)
-
-
-def _with_worker(runtime: Runtime, **worker: object) -> Runtime:
-    settings = runtime.settings
-    return replace(runtime, settings=settings.model_copy(update={"worker": settings.worker.model_copy(update=worker)}))
-
-
-async def _until(condition: Callable[[], bool]) -> None:
-    async with asyncio.timeout(10):
-        while not condition():
-            await asyncio.sleep(0.01)
-
-
-async def test_a_claim_failure_keeps_the_worker_and_its_running_attempts(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    # Renewal is not due within the test, so only the claim loop is exercised.
-    runtime = _with_worker(runtime, scan_seconds=0.01, authority_seconds=5)
-    claims = 0
-
-    async def flaky_claim(*args, **kwargs) -> list[Lease]:  # type: ignore[no-untyped-def]
-        nonlocal claims
-        claims += 1
-        if claims == 2:
-            raise ConnectionError("database restarted")
-        return [LEASE] if claims == 1 else []
-
-    started, finish = asyncio.Event(), asyncio.Event()
-
-    async def attempt(runtime, lease, control) -> None:  # type: ignore[no-untyped-def]
-        started.set()
-        await finish.wait()
-
-    monkeypatch.setattr(worker_module, "claim", flaky_claim)
-    worker = Worker(runtime, attempt)
-    loop = asyncio.create_task(worker.run())
-    await started.wait()
-    await _until(lambda: claims >= 4)
-    assert not loop.done() and LEASE.attempt_id in worker.running
-
-    finish.set()
-    await _until(lambda: not worker.running)
-    loop.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await loop
-
-
-async def test_a_renewal_that_never_answers_stops_the_attempt(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    runtime = _with_worker(runtime, lease_seconds=3, authority_seconds=0.01, renewal_timeout=0.1, scan_seconds=5)
-    durations: list[float] = []
-
-    async def hanging_renew(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
-        loop = asyncio.get_running_loop()
-        sent = loop.time()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            durations.append(loop.time() - sent)
-
-    unclaimed = [LEASE]
-
-    async def claim_once(*args, **kwargs) -> list[Lease]:  # type: ignore[no-untyped-def]
-        return [unclaimed.pop()] if unclaimed else []
-
-    stopped = asyncio.Event()
-
-    async def attempt(runtime, lease, control) -> None:  # type: ignore[no-untyped-def]
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            stopped.set()
-            raise
-
-    monkeypatch.setattr(worker_module, "claim", claim_once)
-    monkeypatch.setattr(worker_module, "renew", hanging_renew)
-    worker = Worker(runtime, attempt)
-    loop = asyncio.create_task(worker.run())
-    # The lease can no longer be renewed in time once a third of it is left: the attempt stops then.
-    async with asyncio.timeout(5):
-        await stopped.wait()
-    await _until(lambda: not worker.running)
-    loop.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await loop
-    assert len(durations) >= 2
-    assert min(durations) >= runtime.settings.worker.renewal_timeout * 0.9
-
-
-async def test_every_supervision_renews_but_only_confirmation_advances_the_deadline(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    runtime = _with_worker(runtime, authority_seconds=0.01)
-    loop = asyncio.get_running_loop()
-    initial = loop.time() + 29
-    control = AttemptControl(deadline=initial, renewal_margin=10)
-    execution = asyncio.create_task(asyncio.Event().wait())
-    calls = 0
-    confirmed: float | None = None
-    dispatched: float | None = None
-
-    async def renewing(storage, access, lease, *, seconds) -> None:  # type: ignore[no-untyped-def]
-        nonlocal calls, confirmed, dispatched
-        calls += 1
-        assert seconds == 30  # Renew even while more than two thirds of the lease remain.
-        assert not execution.done()
-        if calls == 1:
-            dispatched = loop.time()
-            await asyncio.sleep(0.01)
-            assert control.deadline == initial  # An unconfirmed transaction grants no extra time.
-            return
-        if calls == 2:
-            assert dispatched is not None
-            confirmed = control.deadline
-            assert initial < confirmed <= dispatched + seconds
-            raise ConnectionError("database restarted")
-        assert control.deadline == confirmed  # A failed renewal keeps the last confirmed deadline.
-        raise LeaseLost()
-
-    monkeypatch.setattr(worker_module, "renew", renewing)
-    worker = Worker(runtime, execute)
-    try:
-        async with asyncio.timeout(5):
-            await worker._supervise(LEASE, control, execution)
-            with pytest.raises(asyncio.CancelledError):
-                await execution
-        assert calls == 3
-    finally:
-        execution.cancel()
-        await asyncio.gather(execution, return_exceptions=True)
 
 
 async def test_no_call_is_sent_once_the_lease_missed_its_renewal(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
@@ -291,8 +153,7 @@ async def test_a_stale_attempt_changes_nothing_after_a_takeover(service, scripte
             update(AttemptRow).where(AttemptRow.run_id == run_id).values(lease_expires_at=AttemptRow.created_at)
         )
     # Expiry alone fences the worker, even before the sweep or a takeover has run.
-    with pytest.raises(LeaseLost):
-        await renew(runtime.storage, runtime.access, stale, seconds=30)
+    assert (await renew(runtime.storage, runtime.access, [stale], seconds=30))[stale.attempt_id].status == "lost"
     await expire_leases(runtime, batch=10)
     async with transaction(runtime.storage) as session:
         await session.execute(update(RunRow).where(RunRow.id == run_id).values(available_at=RunRow.created_at))
@@ -300,9 +161,10 @@ async def test_a_stale_attempt_changes_nothing_after_a_takeover(service, scripte
 
     with pytest.raises(LeaseLost):
         await seal_attempt(runtime, stale, Outcome.cancelled())
-    with pytest.raises(LeaseLost):
-        await renew(runtime.storage, runtime.access, stale, seconds=30)
-    assert await renew(runtime.storage, runtime.access, current, seconds=30) is None
+    assert (await renew(runtime.storage, runtime.access, [stale], seconds=30))[stale.attempt_id].status == "lost"
+    assert (await renew(runtime.storage, runtime.access, [current], seconds=30))[current.attempt_id] == Renewal(
+        "renewed"
+    )
     run = await runs_kit.get_run(service, run_id)
     assert run["status"] == "running" and run["attempts"] == 2
     attempts = (await service.client.get(f"{service.workspace}/runs/{run_id}/attempts")).json()["items"]

@@ -7,6 +7,7 @@ caller may see, and runs administrative changes with the `admin` check inside th
 
 import asyncio
 import re
+from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -156,13 +157,63 @@ async def principal_for(
     )
     if row is None or row.status != "active":
         raise unauthenticated()
+    home = await session.get_one(WorkspaceRow, row.home_workspace_id) if row.kind == "service_account" else None
+    grants = (await session.scalars(select(GrantRow).where(GrantRow.principal_id == row.id))).all()
+    return await _principal(access, row, home, grants, confinement)
+
+
+async def principals_for(
+    session: AsyncSession, access: Access, identities: Sequence[tuple[str, WorkspaceScope]]
+) -> dict[tuple[str, WorkspaceScope], Principal | ServiceError]:
+    """Current principals for one bounded authority refresh, once per identity and confinement.
+
+    Ordinary set reads share only this poll's facts. Refusals stay per identity; an unavailable grant source
+    fails the poll. Administrative checks still use `principal_for` with their own locking contract.
+    """
+    if not identities:
+        return {}
+    ids = {principal_id for principal_id, _ in identities}
+    rows = {
+        row.id: (row, home)
+        for row, home in await session.execute(
+            select(PrincipalRow, WorkspaceRow)
+            .outerjoin(WorkspaceRow, PrincipalRow.home_workspace_id == WorkspaceRow.id)
+            .where(PrincipalRow.id.in_(ids))
+        )
+    }
+    grants: dict[str, list[GrantRow]] = defaultdict(list)
+    for grant in await session.scalars(select(GrantRow).where(GrantRow.principal_id.in_(ids))):
+        grants[grant.principal_id].append(grant)
+    principals: dict[tuple[str, WorkspaceScope], Principal | ServiceError] = {}
+    for identity in dict.fromkeys(identities):
+        principal_id, scope = identity
+        row, home = rows.get(principal_id, (None, None))
+        try:
+            principals[identity] = await _principal(access, row, home, grants[principal_id], scope)
+        except ServiceError as error:
+            if error.code == "unavailable":
+                raise
+            principals[identity] = error
+    return principals
+
+
+async def _principal(
+    access: Access,
+    row: PrincipalRow | None,
+    home: WorkspaceRow | None,
+    grants: Sequence[GrantRow],
+    confinement: WorkspaceScope | None,
+) -> Principal:
+    """The shared status, confinement and grant-source rules over a caller's current observations."""
+    if row is None or row.status != "active":
+        raise unauthenticated()
     if row.kind == "service_account":
-        home = await session.get_one(WorkspaceRow, row.home_workspace_id)
+        if home is None:
+            raise unauthenticated()
         home_scope = WorkspaceScope(home.organization_id, home.id)
         if confinement not in {None, home_scope}:
             raise ServiceError("forbidden", "Service account cannot leave its home workspace")
         confinement = home_scope
-    grants = (await session.scalars(select(GrantRow).where(GrantRow.principal_id == row.id))).all()
     principal = Principal(
         row.id,
         "user" if row.kind == "user" else "service_account",

@@ -125,7 +125,7 @@ Other `providers` settings bound provider work: `model_timeout` (each read of on
 | `worker.slots`                                     | Attempts one worker process runs concurrently.                                                                                 |
 | `worker.max_attempts`                              | Attempts a run may be charged before it fails.                                                                                 |
 | `worker.lease_seconds`, `worker.authority_seconds` | The lease lasts 30 seconds by default; every check renews it and rechecks cancellation and access, every 5 seconds by default. |
-| `worker.renewal_timeout`                           | Timeout for each renewal transaction, independently of its interval; defaults to 1 second.                                     |
+| `worker.renewal_timeout`                           | Timeout for each group’s renewal transaction (at most 64 attempts), independently of its interval; defaults to 1 second.       |
 | `worker.drain_seconds`                             | How long a stopping worker waits for its attempts to hand off.                                                                 |
 | `worker.child_depth`, `worker.child_count`         | Depth and count bounds for subagent runs.                                                                                      |
 | `worker.stream_length`, `worker.stream_ttl`        | Retention of one thread's live stream in Redis.                                                                                |
