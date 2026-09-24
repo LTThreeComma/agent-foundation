@@ -131,3 +131,12 @@ async def test_plugin_result_subclass_history_is_normalized_and_validated(invali
         assert type(result) is HarnessRunResult
         assert result.output_or_raise() == "done"
         assert result.new_messages() == result.all_messages()
+
+
+def test_cleanup_error_notes_name_cause_types_only():
+    from a13n_harness import RunCleanupError
+
+    cause = SyntaxError("invalid syntax", ("fixture.py", 1, 1, "private_source_line"))
+    error = RunCleanupError("cleanup failed", outcome=None, causes=(cause, ValueError("private detail")))
+
+    assert error.__notes__ == ["Cleanup cause: SyntaxError", "Cleanup cause: ValueError"]
