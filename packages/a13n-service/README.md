@@ -10,3 +10,7 @@ a13n-service --config service.toml user disable --email someone@example.com
 ```
 
 Configuration is a TOML file (`--config` or `A13N_SETTINGS_FILE`) with `A13N_<SECTION>__<FIELD>` environment overrides; see the [configuration guide](../../docs/a13n-service/configuration.md). The package layout, import rules and behavior are specified in the [Service contract](../../spec/a13n-service/README.md); local development uses [`make dev`](../../dev/service/README.md).
+
+## Design cases
+
+- [MCP discovery concurrency](design/mcp-discovery-concurrency.md): a multi-connection startup case, bounded-concurrency proposal, and validation criteria for the Service rewrite. This is a proposal, not implemented behavior.
